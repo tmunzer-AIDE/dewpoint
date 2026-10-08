@@ -229,6 +229,12 @@ async def start_run(
             await runs.finish_run(
                 s, run.id, status="failed", ended_at=datetime.now(UTC), error_code=START_FAILED, error_message=str(e)
             )
+            await runs.settle_attempt(s, tenant_id, run.id, "refused")  # certainly never started
+        raise
+    except StartUncertainError:
+        async with sessionmaker() as s, s.begin():  # it may be executing, or land later: its evidence stays
+            await tenant_scope(s, tenant_id)
+            await runs.settle_attempt(s, tenant_id, run.id, "unproven")
         raise
     return run.id
 

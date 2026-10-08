@@ -54,6 +54,8 @@ def test_switch_dynamic_ports() -> None:
     assert codes(G().node("sw", "flow.switch@1", {"cases": dup}).build()) == ["node.dynamic_ports"]
     computed = {"$value": {"kind": "ref", "path": "trigger.cases"}}
     assert codes(G().node("sw", "flow.switch@1", {"cases": computed}).build()) == ["node.dynamic_ports"]
+    newline = [{"port": "high\n", "when": True}]  # `$` also matches before a final newline (review R3 of 3b-2)
+    assert codes(G().node("sw", "flow.switch@1", {"cases": newline}).build()) == ["node.dynamic_ports"]
 
 
 def test_nested_loop_regions() -> None:

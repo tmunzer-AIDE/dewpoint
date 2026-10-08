@@ -24,7 +24,22 @@ TEST_ROLES = [
     "dewpoint_worker",
     "dewpoint_admin",
     "dewpoint_auditor",
+    "dewpoint_retention",
 ]
+
+
+def _attest_tick_cutover(url: str) -> None:
+    """The suite's tick cutover, recorded before any key, as `keys tick-cutover --attest` would on a new deployment
+    (no migration records one: `tests/core/keys/test_tick_cutover.py`)."""
+    import asyncio
+
+    async def record() -> None:
+        engine = make_engine(url)
+        async with engine.begin() as c:
+            await c.execute(text("insert into tick_cutover (at) values (now()) on conflict do nothing"))
+        await engine.dispose()
+
+    asyncio.run(record())
 
 
 @pytest.fixture(scope="session")
@@ -33,6 +48,7 @@ def pg_url() -> str:
         url = pg.get_connection_url()
         env = {**os.environ, "DEWPOINT_DATABASE_URL": url}
         subprocess.run(["uv", "run", "alembic", "upgrade", "head"], cwd=BACKEND, env=env, check=True)
+        _attest_tick_cutover(url)
         yield url
 
 
@@ -99,6 +115,13 @@ async def ingress_sessionmaker(pg_url: str, _test_users: None) -> AsyncIterator[
 
 
 @pytest.fixture(scope="session")
+async def retention_sessionmaker(pg_url: str, _test_users: None) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    eng = make_engine(_url_for(pg_url, "dewpoint_retention"))
+    yield make_sessionmaker(eng)
+    await eng.dispose()
+
+
+@pytest.fixture(scope="session")
 async def auditor_sessionmaker(pg_url: str, _test_users: None) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     eng = make_engine(_url_for(pg_url, "dewpoint_auditor"))
     yield make_sessionmaker(eng)
@@ -107,13 +130,15 @@ async def auditor_sessionmaker(pg_url: str, _test_users: None) -> AsyncIterator[
 
 @pytest.fixture(autouse=True)
 async def clean_db(owner_sessionmaker: async_sessionmaker[AsyncSession]) -> AsyncIterator[None]:
+    """Every table emptied after each test, but what migrating an empty database records: its revision and its tick
+    cutover (migration 0039), which a test changing restores."""
     yield
     async with owner_sessionmaker() as s, s.begin():
         tables = (
             await s.execute(
                 text(
                     "select string_agg(format('%I', tablename), ',') from pg_tables "
-                    "where schemaname='public' and tablename <> 'alembic_version'"
+                    "where schemaname='public' and tablename not in ('alembic_version', 'tick_cutover')"
                 )
             )
         ).scalar_one()

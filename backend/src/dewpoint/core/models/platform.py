@@ -2,7 +2,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, SmallInteger, String, Text, func
+from sqlalchemy import Boolean, DateTime, Integer, SmallInteger, String, Text, func
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -46,3 +46,22 @@ class DispatcherReport(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     reported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     details: Mapped[dict[str, object]] = mapped_column(JSONB, default=dict)
+
+
+class TickCutover(Base):
+    """The tick cutover (the owner's M3 ruling): after it, no dispatcher seals a schedule tick's payload under a
+    tenant's key. Recorded once, by migration 0039 in a database without tenants, else by `keys tick-cutover` after the
+    last dispatcher from before stopped; a tenant's key made before it never retires."""
+
+    __tablename__ = "tick_cutover"
+    id: Mapped[int] = mapped_column(SmallInteger, primary_key=True, default=1)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class RunDurationLimit(Base):
+    """A maximum run duration the dispatcher has set deadlines with (engine 2b spec §6.4): the longest is the payload
+    floor's."""
+
+    __tablename__ = "run_duration_limits"
+    days: Mapped[int] = mapped_column(Integer, primary_key=True)
+    first_recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

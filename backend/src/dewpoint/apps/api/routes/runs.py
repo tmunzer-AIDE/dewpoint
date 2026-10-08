@@ -18,6 +18,7 @@ from dewpoint.core.crypto.keys import KeySource
 from dewpoint.core.http import TenantContext, get_db, require
 from dewpoint.core.models.requests import RunRequest
 from dewpoint.core.models.runs import Run, RunStep
+from dewpoint.core.retention import cutoff as retention
 from dewpoint.core.runs import service
 
 router = APIRouter(prefix="/api/v1", tags=["runs"])
@@ -125,7 +126,8 @@ async def list_runs(
     if (before is None) != (before_id is None):
         raise HTTPException(422, detail={"error": "invalid_cursor", "message": "Give before and before_id together."})
     cursor = (before, before_id) if before is not None and before_id is not None else None
-    items = await service.list_items(db, workflow_id=workflow_id, before=cursor, limit=limit)
+    at = await retention.cutoff(db, ctx.tenant_id)
+    items = await service.list_items(db, kept_after=at, workflow_id=workflow_id, before=cursor, limit=limit)
     return [_item(i) for i in items]
 
 
@@ -137,8 +139,12 @@ async def get_run(
     keys: KeySource = Depends(get_keys),
 ) -> dict[str, object]:
     """A run with its steps and sub-runs, or a request that hasn't started as itself; with its CSV record (engine 2b
-    spec §8.1), when it took a CSV: the mapping, the file's headers, the row count and the skipped rows."""
+    spec §8.1), when it took a CSV: the mapping, the file's headers, the row count and the skipped rows. A run whose
+    tree, or a request that, passed the retention cutoff isn't found (§10.1)."""
+    at = await retention.cutoff(db, ctx.tenant_id)
     request = await db.get(RunRequest, run_id)  # row-level security: the caller's tenant's only
+    if request is not None and not await retention.request_kept(db, at, request):
+        raise HTTPException(404, detail={"error": "not_found"})
     csv = None
     if request is not None:
         try:
@@ -148,7 +154,7 @@ async def get_run(
     if request is not None and request.status != "started":
         return {**_unstarted(request), "steps": [], "children": [], "csv": csv}
     run = await service.get_run(db, run_id)
-    if run is None or run.tenant_id != ctx.tenant_id:
+    if run is None or run.tenant_id != ctx.tenant_id or not await retention.run_kept(db, at, run):
         raise HTTPException(404, detail={"error": "not_found"})
     return {
         **_run(run),

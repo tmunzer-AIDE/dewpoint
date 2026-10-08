@@ -76,6 +76,17 @@ async def verify_anchors(
         rep = await verify_chain(s, sc)
         if not rep.ok:
             problems.append(f"{sc}: chain broken at seq {rep.first_bad_seq}")
+    # Every checkpoint recorded must be among the signed anchors (engine 2b spec §10.2): the database's own record of
+    # them could be rewritten. A pruned scope's chain starts from the one with no entry at or before it left
+    # (`verify_chain`, the fix-pass review's R8): anchored entries at or before that one are gone by design.
+    recorded = text("select scope, seq, hash from audit_checkpoints order by scope, seq")
+    checkpoints = [(scope, seq, bytes(h).hex()) for scope, seq, h in (await s.execute(recorded)).all()]
+    starts = text(
+        "select distinct on (c.scope) c.scope, c.seq from audit_checkpoints c where not exists "
+        "(select 1 from audit_log l where l.scope = c.scope and l.seq <= c.seq) order by c.scope, c.seq desc"
+    )
+    pruned_through: dict[str, int] = {scope: seq for scope, seq in (await s.execute(starts)).all()}
+    signed: set[tuple[str, int, str]] = set()
     anchored: dict[str, int] = {}
     for e in entries:
         scope, seq, hash_hex, at = str(e["scope"]), int(e["seq"]), str(e["hash"]), str(e["at"])  # type: ignore[call-overload]
@@ -84,15 +95,21 @@ async def verify_anchors(
         except (InvalidSignature, ValueError):
             problems.append(f"{scope}:{seq}: bad anchor signature")
             continue
+        signed.add((scope, seq, hash_hex))
         row = (
             await s.execute(text("select hash from audit_log where scope=:s and seq=:q"), {"s": scope, "q": seq})
         ).first()
+        if row is None and seq <= pruned_through.get(scope, 0):
+            continue  # pruned through its checkpoint
         if row is None:
             problems.append(f"{scope}:{seq}: anchored row missing")
         elif bytes(row[0]).hex() != hash_hex:
             problems.append(f"{scope}:{seq}: hash mismatch with external anchor")
         else:
             anchored[scope] = max(anchored.get(scope, 0), seq)
+    for scope, seq, hash_hex in checkpoints:
+        if (scope, seq, hash_hex) not in signed:
+            problems.append(f"{scope}:{seq}: checkpoint not among the external anchors")
     # audit_append stamps created_at with the database's clock, so "now" defaults to that clock, not this host's:
     # any skew between the two would move the window (a just-written row would dodge max_lag=0)
     old_rows = await s.execute(

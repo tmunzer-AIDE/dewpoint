@@ -20,6 +20,7 @@ TYPE_KEY_RE = re.compile(r"^(?=.{1,64}$)[a-z][a-z0-9_]{0,40}(\.[a-z][a-z0-9_]{0,
 SCOPE_KIND_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$")
 HEADER_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$")  # an RFC 9110 token
 HOST_RE = re.compile(r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$")
+PATH_RE = re.compile(r"^(/[A-Za-z0-9_~-][A-Za-z0-9._~-]{0,63}){1,16}$")  # segments of unreserved characters, no dots
 
 
 FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -78,6 +79,35 @@ class UrlField:
 
 
 @dataclass(frozen=True)
+class SecretUrl:
+    """The base URL is this secret field's value (plugins-3 D4's `url` auth: an incoming webhook's URL is its
+    credential), matched whole by `pattern`, which starts with `https://`, wherever the secret is read; requests go to
+    that URL exactly, with no path, query or header of the node's."""
+
+    field: str
+    pattern: str
+
+
+def url_pattern_problem(pattern: Any) -> str | None:
+    if not isinstance(pattern, str) or not pattern.startswith("https://"):
+        return "secret URL pattern must start with https://"
+    try:
+        re.compile(pattern)
+    except re.error:
+        return "secret URL pattern doesn't compile"
+    return None
+
+
+def secret_pattern_problem(pattern: Any) -> str | None:
+    """A scope's `secret_pattern`: one capture group, the part of the secret field the scope is keyed by."""
+    try:
+        groups = re.compile(pattern).groups if isinstance(pattern, str) else 0
+    except re.error:
+        groups = 0
+    return None if groups == 1 else "a secret pattern needs exactly one group"
+
+
+@dataclass(frozen=True)
 class RateScope:
     """A provider quota scope a request through the connection charges (plugins-3 D9). Its key is `kind`, then each
     named config field's value, then, for `secret`, a MAC of that secret field under the tenant's scope key, never
@@ -88,6 +118,18 @@ class RateScope:
     secret: str | None = None
     capacity: float = 50.0
     refill_per_s: float = 1.25
+    secret_pattern: str | None = None  # keyed by this group of the secret field, not all of it (a Chat space, D9)
+
+
+@dataclass(frozen=True)
+class StreamEndpoint:
+    """The websocket the runtime opens for a connection (plugins-3 D26): `wss://`, the host this config field's value
+    maps to, then `path`; the connection's auth header sent with the handshake; and the quota scopes opening a stream
+    charges, once a stream (a provider's limit on connections, not on messages). A node can't name another URL."""
+
+    host: HostMap
+    path: str
+    rate_scopes: tuple[RateScope, ...] = ()
 
 
 type Verify = Callable[[CallContext, Connection], Awaitable[VerifyResult]]
@@ -100,14 +142,15 @@ class ConnectionType:
     Config: type[BaseModel]
     Secret: type[BaseModel]
     auth: HeaderAuth | None = None
-    host: HostMap | UrlField | None = None
+    host: HostMap | UrlField | SecretUrl | None = None
     rate_scopes: tuple[RateScope, ...] = field(default=())
     verify: Verify | None = None
+    stream: StreamEndpoint | None = None
 
     def problems(self) -> list[str]:
         name = f"connection type {self.key!r}"
         out: list[str] = []
-        if not TYPE_KEY_RE.match(self.key):
+        if not TYPE_KEY_RE.fullmatch(self.key):
             out.append(f"{name}: key must be a lowercase identifier")
         if not isinstance(self.label, str) or not 0 < len(self.label) <= 100:
             out.append(f"{name}: label must be 1-100 characters")
@@ -120,9 +163,36 @@ class ConnectionType:
             if info.annotation is not SecretStr:
                 out.append(f"{name}: secret field {prop!r} must be a SecretStr")
         out += self._auth_problems(name, secret_fields)
-        out += self._host_problems(name, config_fields)
+        out += self._host_problems(name, config_fields, secret_fields)
         for scope in self.rate_scopes:
             out += self._scope_problems(name, scope, config_fields, secret_fields)
+        out += self._stream_problems(name, config_fields, secret_fields)
+        return out
+
+    def _stream_problems(self, name: str, config_fields: set[str], secret_fields: set[str]) -> list[str]:
+        if self.stream is None:
+            return []
+        where = f"{name}: stream"
+        host = self.stream.host
+        out: list[str] = []
+        if host.field not in config_fields:
+            out.append(f"{where} host field {host.field!r} isn't a config field")
+        else:
+            if not self.Config.model_fields[host.field].is_required():
+                out.append(f"{where} host field {host.field!r} must be required")
+            out += [f"{where} host {h!r} must be a host name" for h in host.hosts.values() if not HOST_RE.fullmatch(h)]
+            prop = self.Config.model_json_schema(mode="validation").get("properties", {}).get(host.field, {})
+            if sorted(map(str, prop.get("enum", []))) != sorted(host.hosts):
+                out.append(f"{where} host field {host.field!r} must allow exactly the host map's keys")
+        path = self.stream.path
+        if not isinstance(path, str) or not PATH_RE.fullmatch(path):
+            out.append(f"{where} path must be one or more /segments of unreserved characters")
+        for scope in self.stream.rate_scopes:
+            out += self._scope_problems(name, scope, config_fields, secret_fields)
+            out += [f"{name}: rate scope {scope.kind!r} names {n!r}, which must be required" for n in scope.config
+                    if n in self.Config.model_fields and not self.Config.model_fields[n].is_required()]  # fmt: skip
+            if scope.secret in self.Secret.model_fields and not self.Secret.model_fields[scope.secret].is_required():
+                out.append(f"{name}: rate scope {scope.kind!r} names {scope.secret!r}, which must be required")
         return out
 
     def _required_problems(self, name: str) -> list[str]:
@@ -132,6 +202,9 @@ class ConnectionType:
         secret = {f for f, info in self.Secret.model_fields.items() if info.is_required()}
         out: list[str] = []
         if self.host is not None and self.host.field in self.Config.model_fields and self.host.field not in config:
+            out.append(f"{name}: host field {self.host.field!r} must be required")
+        secret_host = isinstance(self.host, SecretUrl) and self.host.field in self.Secret.model_fields
+        if secret_host and self.host is not None and self.host.field not in secret:
             out.append(f"{name}: host field {self.host.field!r} must be required")
         if self.auth is not None:
             try:
@@ -151,7 +224,7 @@ class ConnectionType:
         if self.auth is None:
             return []
         out: list[str] = []
-        if not HEADER_RE.match(self.auth.header):
+        if not HEADER_RE.fullmatch(self.auth.header):
             out.append(f"{name}: auth header {self.auth.header!r} must be a header name")
         try:
             named = [n for _, n in template_parts(self.auth.template) if n is not None]
@@ -162,14 +235,19 @@ class ConnectionType:
             out.append(f"{name}: auth template must be one line")
         return out
 
-    def _host_problems(self, name: str, config_fields: set[str]) -> list[str]:
+    def _host_problems(self, name: str, config_fields: set[str], secret_fields: set[str]) -> list[str]:
         if self.host is None:
             return []
+        if isinstance(self.host, SecretUrl):
+            if self.host.field not in secret_fields:
+                return [f"{name}: host field {self.host.field!r} isn't a secret field"]
+            problem = url_pattern_problem(self.host.pattern)
+            return [f"{name}: {problem}"] if problem else []
         if self.host.field not in config_fields:
             return [f"{name}: host field {self.host.field!r} isn't a config field"]
         if isinstance(self.host, UrlField):
             return []
-        out = [f"{name}: host {h!r} must be a host name" for h in self.host.hosts.values() if not HOST_RE.match(h)]
+        out = [f"{name}: host {h!r} must be a host name" for h in self.host.hosts.values() if not HOST_RE.fullmatch(h)]
         prop = self.Config.model_json_schema(mode="validation").get("properties", {}).get(self.host.field, {})
         if sorted(map(str, prop.get("enum", []))) != sorted(self.host.hosts):
             out.append(f"{name}: host field {self.host.field!r} must allow exactly the host map's keys")
@@ -180,11 +258,17 @@ class ConnectionType:
     ) -> list[str]:
         where = f"{name}: rate scope {scope.kind!r}"
         out: list[str] = []
-        if not SCOPE_KIND_RE.match(scope.kind) or not scope.kind.startswith(f"{self.key}."):
+        if not SCOPE_KIND_RE.fullmatch(scope.kind) or not scope.kind.startswith(f"{self.key}."):
             out.append(f"{where} must start with '{self.key}.'")
         out += [f"{where} names {n!r}, not a config field" for n in scope.config if n not in config_fields]
         if scope.secret is not None and scope.secret not in secret_fields:
             out.append(f"{where} names {scope.secret!r}, not a secret field")
+        if scope.secret_pattern is not None:
+            if scope.secret is None:
+                out.append(f"{where}: a secret pattern needs its secret field")
+            problem = secret_pattern_problem(scope.secret_pattern)
+            if problem:
+                out.append(f"{where}: {problem}")
         budget = (scope.capacity, scope.refill_per_s)
         if not all(isinstance(v, int | float) and not isinstance(v, bool) and math.isfinite(v) and v > 0
                    for v in budget):  # fmt: skip
@@ -201,6 +285,8 @@ class ConnectionType:
             host = {"kind": "map", "field": self.host.field, "hosts": dict(self.host.hosts)}
         elif isinstance(self.host, UrlField):
             host = {"kind": "url_field", "field": self.host.field}
+        elif isinstance(self.host, SecretUrl):
+            host = {"kind": "secret_url", "field": self.host.field, "pattern": self.host.pattern}
         return {
             "key": self.key,
             "label": self.label,
@@ -212,15 +298,26 @@ class ConnectionType:
                 else None
             ),
             "host": host,
-            "rate_scopes": [
-                {
-                    "kind": s.kind,
-                    "config": list(s.config),
-                    "secret": s.secret,
-                    "capacity": float(s.capacity),
-                    "refill_per_s": float(s.refill_per_s),
-                }
-                for s in self.rate_scopes
-            ],  # fmt: skip
+            "rate_scopes": [_scope_manifest(s) for s in self.rate_scopes],
             "verify": self.verify is not None,
+        } | ({"stream": self._stream_manifest()} if self.stream is not None else {})
+
+    def _stream_manifest(self) -> dict[str, Any]:
+        assert self.stream is not None  # noqa: S101 - only when set
+        return {
+            "kind": "map",
+            "field": self.stream.host.field,
+            "hosts": dict(self.stream.host.hosts),
+            "path": self.stream.path,
+            "rate_scopes": [_scope_manifest(s) for s in self.stream.rate_scopes],
         }
+
+
+def _scope_manifest(s: RateScope) -> dict[str, Any]:
+    return {
+        "kind": s.kind,
+        "config": list(s.config),
+        "secret": s.secret,
+        "capacity": float(s.capacity),
+        "refill_per_s": float(s.refill_per_s),
+    } | ({"secret_pattern": s.secret_pattern} if s.secret_pattern is not None else {})

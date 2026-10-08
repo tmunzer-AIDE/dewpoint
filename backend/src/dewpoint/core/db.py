@@ -10,10 +10,15 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 UNAVAILABLE_STATES = ("08", "53", "57")
 
 
-def make_engine(url: str) -> AsyncEngine:
+POOL_SIZE, MAX_OVERFLOW = 5, 10  # a process's connections, at most their sum (SQLAlchemy's own defaults, made explicit)
+
+
+def make_engine(url: str, *, pool_size: int = POOL_SIZE, max_overflow: int = MAX_OVERFLOW) -> AsyncEngine:
     """An error's text never quotes a statement's parameters (a password's hash, a token, a tenant's data): it's
-    shown wherever the error is (a CLI's message, a test's report)."""
-    return create_async_engine(url, pool_pre_ping=True, hide_parameters=True)
+    shown wherever the error is (a CLI's message, a test's report). It opens at most `pool_size + max_overflow`
+    connections."""
+    return create_async_engine(url, pool_pre_ping=True, hide_parameters=True, pool_size=pool_size,
+                               max_overflow=max_overflow)  # fmt: skip
 
 
 def make_sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:

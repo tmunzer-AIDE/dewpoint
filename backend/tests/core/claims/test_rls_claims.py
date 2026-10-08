@@ -82,8 +82,12 @@ async def test_a_row_for_another_tenant_is_refused(owner_sessionmaker, worker_se
 
 # Who may do what. Admission claims a trigger and seeds the secret index in its caller's transaction: the API's (the
 # owner's ruling on 2b-2), the CLI's as dispatch; the worker claims during a run, grants, and resolves. Nobody updates
-# or deletes a claim: retention (2b-4) gets its own role.
+# or deletes a claim: retention (2b-4) gets its own role, and the key admin reads them to seal them again under the
+# active data-key version (2b-4's re-encryption), its only update the ciphertext column (tests/core/keys).
 ALLOWED = {
+    ("admin", "run_inputs"): {"select"},
+    ("admin", "step_outputs"): {"select"},
+    ("admin", "run_secret_index"): {"select"},
     ("api", "run_inputs"): {"select", "insert"},
     ("api", "run_secret_index"): {"select", "insert", "update"},
     ("dispatch", "run_inputs"): {"select", "insert"},

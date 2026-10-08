@@ -50,6 +50,8 @@ def respond(outcome: dict[str, Any]) -> Response:
             return _error(413, "too_large")
         case "malformed":
             return _error(400, "malformed")
+        case "key_retired":  # sealed to a keypair retired since: the retry is sealed to the newest
+            return _error(503, "key_retired", retry_after=1)
         case "event_id_reused":
             return _error(409, "event_id_reused")
         case "quota_exceeded":

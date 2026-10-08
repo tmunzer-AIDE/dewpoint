@@ -11,9 +11,19 @@ from jsonschema.exceptions import SchemaError
 from dewpoint.engine.canonical import sha256_hex
 from dewpoint.engine.registry.control import CONTROL_TYPES
 from dewpoint.engine.schema_refs import SCHEMA_LIST, SCHEMA_MAP, SCHEMA_ONE, ref_problems
-from dewpoint.sdk.connections import HEADER_RE, HOST_RE, SCOPE_KIND_RE, TYPE_KEY_RE, template_parts
+from dewpoint.sdk.connections import (
+    HEADER_RE,
+    HOST_RE,
+    PATH_RE,
+    SCOPE_KIND_RE,
+    TYPE_KEY_RE,
+    secret_pattern_problem,
+    template_parts,
+    url_pattern_problem,
+)
 from dewpoint.sdk.fields import OPTIONS, SENSITIVE
 from dewpoint.sdk.node import ICON_RE, MAX_RETRY_ATTEMPTS, PORT_RE, RESERVED_PORTS, TYPE_RE, NodeKind, SideEffect
+from dewpoint.sdk.triggers import trigger_problems
 from dewpoint.sdk.version import SDK_MAJOR
 
 _DISPLAY = frozenset({"title", "description", "icon"})  # manifest keys that may change within a version
@@ -202,7 +212,7 @@ def _options_problems(ref: str, n: Mapping[str, Any]) -> list[str]:
 def _node_problems(plugin: str, n: Mapping[str, Any], seen: set[str]) -> list[str]:
     t, v = n.get("type"), n.get("version")
     ref = f"{t}@{v}"
-    if not isinstance(t, str) or not TYPE_RE.match(t) or not t.startswith(f"{plugin}."):
+    if not isinstance(t, str) or not TYPE_RE.fullmatch(t) or not t.startswith(f"{plugin}."):
         return [f"{ref}: type must start with '{plugin}.'"]
     out: list[str] = []
     if isinstance(v, bool) or not isinstance(v, int) or v < 1:
@@ -222,7 +232,7 @@ def _node_problems(plugin: str, n: Mapping[str, Any], seen: set[str]) -> list[st
     if (
         not isinstance(ports, list)
         or len(set(map(str, ports))) != len(ports)
-        or any(not isinstance(p, str) or not PORT_RE.match(p) or p in RESERVED_PORTS for p in ports)
+        or any(not isinstance(p, str) or not PORT_RE.fullmatch(p) or p in RESERVED_PORTS for p in ports)
     ):
         out.append(f"{ref}: invalid ports")
     side_effect = n.get("side_effect")
@@ -236,7 +246,7 @@ def _node_problems(plugin: str, n: Mapping[str, Any], seen: set[str]) -> list[st
     if not _finite(timeout) or timeout <= 0:
         out.append(f"{ref}: timeout_s must be a positive number")
     icon = n.get("icon")
-    if "icon" in n and (not isinstance(icon, str) or not ICON_RE.match(icon)):
+    if "icon" in n and (not isinstance(icon, str) or not ICON_RE.fullmatch(icon)):
         out.append(f"{ref}: icon must name a first-party icon (lowercase letters, digits and dashes)")
     out += _options_problems(ref, n)
     return out
@@ -256,7 +266,7 @@ def _auth_problems(name: str, auth: Any, secret_fields: Mapping[str, Any]) -> li
         or set(auth) != {"kind", "header", "template"}
         or auth["kind"] != "header"
         or not isinstance(auth["header"], str)
-        or not HEADER_RE.match(auth["header"])
+        or not HEADER_RE.fullmatch(auth["header"])
         or not isinstance(template, str)
         or any(c in template for c in "\r\n\0")
     ):
@@ -268,36 +278,77 @@ def _auth_problems(name: str, auth: Any, secret_fields: Mapping[str, Any]) -> li
     return [f"{name}: auth template names {n!r}, not a secret field" for n in named if n not in secret_fields]
 
 
-def _host_problems(name: str, host: Any, config_fields: Mapping[str, Any]) -> list[str]:
+def _host_problems(
+    name: str,
+    host: Any,
+    config_fields: Mapping[str, Any],
+    label: str = "host",
+    secret_fields: Mapping[str, Any] | None = None,
+) -> list[str]:
     if host is None:
         return []
-    if not isinstance(host, Mapping) or host.get("kind") not in ("map", "url_field"):
-        return [f"{name}: host must be {{kind: map, field, hosts}} or {{kind: url_field, field}}"]
+    if not isinstance(host, Mapping) or host.get("kind") not in ("map", "url_field", "secret_url"):
+        return [f"{name}: host must be {{kind: map, field, hosts}}, {{kind: url_field, field}} or "
+                f"{{kind: secret_url, field, pattern}}"]  # fmt: skip
     field = host.get("field")
+    if host["kind"] == "secret_url":  # an incoming webhook's URL, its credential (plugins-3 D4's `url` auth)
+        if set(host) != {"kind", "field", "pattern"}:
+            return [f"{name}: a secret URL host must be {{kind: secret_url, field, pattern}}"]
+        if not isinstance(field, str) or field not in (secret_fields or {}):
+            return [f"{name}: host field {field!r} isn't a secret field"]
+        problem = url_pattern_problem(host["pattern"])
+        return [f"{name}: {problem}"] if problem else []
     if not isinstance(field, str) or field not in config_fields:
-        return [f"{name}: host field {field!r} isn't a config field"]
+        return [f"{name}: {label} field {field!r} isn't a config field"]
     if host["kind"] == "url_field":
         return [] if set(host) == {"kind", "field"} else [f"{name}: host has unknown keys"]
     hosts = host.get("hosts")
     if set(host) != {"kind", "field", "hosts"} or not isinstance(hosts, Mapping) or not hosts:
         return [f"{name}: a host map needs hosts"]
-    out = [f"{name}: host {h!r} must be a host name" for h in hosts.values() if not isinstance(h, str)
-           or not HOST_RE.match(h)]  # fmt: skip
+    out = [f"{name}: {label} {h!r} must be a host name" for h in hosts.values() if not isinstance(h, str)
+           or not HOST_RE.fullmatch(h)]  # fmt: skip
     prop = config_fields[field]
     enum = prop.get("enum") if isinstance(prop, Mapping) else None
     if not isinstance(enum, list) or sorted(map(str, enum)) != sorted(map(str, hosts)):
-        out.append(f"{name}: host field {field!r} must allow exactly the host map's keys")
+        out.append(f"{name}: {label} field {field!r} must allow exactly the host map's keys")
     return out
+
+
+STREAM_KEYS = frozenset({"kind", "field", "hosts", "path", "rate_scopes"})
+
+
+def _stream_problems(
+    name: str, key: str, stream: Any, config_fields: Mapping[str, Any], secret_fields: Mapping[str, Any]
+) -> list[str]:
+    """A connection type's websocket (plugins-3 D26): a host map, a fixed path, the scopes opening one charges."""
+    if not isinstance(stream, Mapping) or set(stream) != STREAM_KEYS or stream.get("kind") != "map":
+        return [f"{name}: stream must be {{kind: map, field, hosts, path, rate_scopes}}"]
+    host = {"kind": "map", "field": stream["field"], "hosts": stream["hosts"]}
+    out = _host_problems(name, host, config_fields, label="stream host")
+    path = stream["path"]
+    if not isinstance(path, str) or not PATH_RE.fullmatch(path):
+        out.append(f"{name}: stream path must be one or more /segments of unreserved characters")
+    scopes = stream["rate_scopes"]
+    if not isinstance(scopes, list):
+        out.append(f"{name}: stream rate_scopes must be a list")
+    else:
+        for scope in scopes:
+            out += _scope_problems(name, key, scope, config_fields, secret_fields)
+    return out
+
+
+SCOPE_KEYS = frozenset({"kind", "config", "secret", "capacity", "refill_per_s"})
 
 
 def _scope_problems(name: str, key: str, scope: Any, config_fields: Mapping[str, Any],
                     secret_fields: Mapping[str, Any]) -> list[str]:  # fmt: skip
-    if not isinstance(scope, Mapping) or set(scope) != {"kind", "config", "secret", "capacity", "refill_per_s"}:
-        return [f"{name}: a rate scope must be {{kind, config, secret, capacity, refill_per_s}}"]
+    if not isinstance(scope, Mapping) or set(scope) not in (SCOPE_KEYS, SCOPE_KEYS | {"secret_pattern"}):
+        return [f"{name}: a rate scope must be {{kind, config, secret, capacity, refill_per_s}}, and a "
+                f"secret_pattern only when set"]  # fmt: skip
     kind, config, secret = scope["kind"], scope["config"], scope["secret"]
     where = f"{name}: rate scope {kind!r}"
     out: list[str] = []
-    if not isinstance(kind, str) or not SCOPE_KIND_RE.match(kind) or not kind.startswith(f"{key}."):
+    if not isinstance(kind, str) or not SCOPE_KIND_RE.fullmatch(kind) or not kind.startswith(f"{key}."):
         out.append(f"{where} must start with '{key}.'")
     if not isinstance(config, list) or not all(isinstance(c, str) for c in config):
         out.append(f"{where}: config must list config fields")
@@ -307,6 +358,12 @@ def _scope_problems(name: str, key: str, scope: Any, config_fields: Mapping[str,
         out.append(f"{where} names {secret!r}, not a secret field")
     if not all(_finite(scope[k]) and scope[k] > 0 for k in ("capacity", "refill_per_s")):
         out.append(f"{where} needs a positive capacity and refill_per_s")
+    if "secret_pattern" in scope:
+        if secret is None:
+            out.append(f"{where}: a secret pattern needs its secret field")
+        problem = secret_pattern_problem(scope["secret_pattern"])
+        if problem:
+            out.append(f"{where}: {problem}")
     return out
 
 
@@ -321,9 +378,19 @@ def _required_problems(name: str, t: Mapping[str, Any]) -> list[str]:
     config_fields, secret_fields = _props(t.get("config_schema")), _props(t.get("secret_schema"))
     out: list[str] = []
     host, auth, scopes = t.get("host"), t.get("auth"), t.get("rate_scopes")
+    found = t.get("stream")
+    stream: Mapping[str, Any] = found if isinstance(found, Mapping) else {}
     field = host.get("field") if isinstance(host, Mapping) else None
     if field in config_fields and field not in config:
         out.append(f"{name}: host field {field!r} must be required")
+    secret_host = isinstance(host, Mapping) and host.get("kind") == "secret_url"
+    if secret_host and field in secret_fields and field not in secret:
+        out.append(f"{name}: host field {field!r} must be required")
+    stream_field = stream.get("field")
+    if stream_field in config_fields and stream_field not in config:
+        out.append(f"{name}: stream host field {stream_field!r} must be required")
+    more = stream.get("rate_scopes")
+    scopes = [*(scopes if isinstance(scopes, list) else []), *(more if isinstance(more, list) else [])]
     template = auth.get("template") if isinstance(auth, Mapping) else None
     if isinstance(template, str):
         try:
@@ -348,7 +415,11 @@ def _connection_type_problems(plugin: str, t: Any, seen: set[str]) -> list[str]:
     """The same rules the SDK applies to a ConnectionType (plugins-3 D11), for one received as data."""
     key = t.get("key") if isinstance(t, Mapping) else None
     name = f"connection type {key!r}"
-    if not isinstance(key, str) or not TYPE_KEY_RE.match(key) or (key != plugin and not key.startswith(f"{plugin}.")):
+    if (
+        not isinstance(key, str)
+        or not TYPE_KEY_RE.fullmatch(key)
+        or (key != plugin and not key.startswith(f"{plugin}."))
+    ):
         return [f"{name} must be named {plugin!r} or start with '{plugin}.'"]
     assert isinstance(t, Mapping)  # noqa: S101 - a key was read from it
     out: list[str] = []
@@ -356,6 +427,8 @@ def _connection_type_problems(plugin: str, t: Any, seen: set[str]) -> list[str]:
         out.append(f"duplicate connection type {key!r}")
     seen.add(key)
     expected = {"key", "label", "config_schema", "secret_schema", "auth", "host", "rate_scopes", "verify"}
+    if "stream" in t:  # only when set
+        expected.add("stream")
     if set(t) != expected:
         out.append(f"{name}: needs exactly {sorted(expected)}")
     label = t.get("label")
@@ -372,7 +445,7 @@ def _connection_type_problems(plugin: str, t: Any, seen: set[str]) -> list[str]:
         if not isinstance(sub, Mapping) or sub.get(SENSITIVE) is not True or sub.get("type") != "string":
             out.append(f"{name}: secret field {prop!r} must be an x-sensitive string")
     out += _auth_problems(name, t.get("auth"), secret_fields)
-    out += _host_problems(name, t.get("host"), config_fields)
+    out += _host_problems(name, t.get("host"), config_fields, secret_fields=secret_fields)
     scopes = t.get("rate_scopes")
     if not isinstance(scopes, list):
         out.append(f"{name}: rate_scopes must be a list")
@@ -381,7 +454,23 @@ def _connection_type_problems(plugin: str, t: Any, seen: set[str]) -> list[str]:
             out += _scope_problems(name, key, scope, config_fields, secret_fields)
     if not isinstance(t.get("verify"), bool):
         out.append(f"{name}: verify must be true or false")
+    if "stream" in t:
+        out += _stream_problems(name, key, t["stream"], config_fields, secret_fields)
     out += _required_problems(name, t)
+    return out
+
+
+def _trigger_problems(plugin: str, t: Any, seen: set[str]) -> list[str]:
+    """The SDK's rules for a trigger (plugins-3 D17), and the engine's for each topic's schema, which types a run's
+    trigger: local `$ref`s only."""
+    out = trigger_problems(plugin, t)
+    if out or not isinstance(t, Mapping):
+        return out
+    if t["key"] in seen:
+        out.append(f"duplicate trigger {t['key']!r}")
+    seen.add(t["key"])
+    for topic, schema in t["topics"].items():
+        out += _schema_problems(f"trigger {t['key']!r} topic {topic!r}", "schema", schema)
     return out
 
 
@@ -393,17 +482,26 @@ def validate_plugin_manifest(m: Mapping[str, Any]) -> list[str]:
     problems: list[str] = []
     if str(m.get("sdk_version", "")).split(".", 1)[0] != SDK_MAJOR:
         problems.append(f"{name}: built for SDK {m.get('sdk_version')!r}; this build provides SDK {SDK_MAJOR}.x")
-    nodes, kinds = m.get("nodes"), m.get("connection_types", [])
-    if not isinstance(nodes, list) or not isinstance(kinds, list) or ("connection_types" in m and not kinds):
-        return [*problems, f"{name}: nodes and connection_types must be lists (connection_types only when set)"]
-    if not nodes and not kinds:
-        return [*problems, f"{name}: declares nothing: no node and no connection type"]
+    nodes, kinds, triggers = m.get("nodes"), m.get("connection_types", []), m.get("triggers", [])
+    if (
+        not isinstance(nodes, list)
+        or not isinstance(kinds, list)
+        or not isinstance(triggers, list)
+        or ("connection_types" in m and not kinds)
+        or ("triggers" in m and not triggers)
+    ):
+        return [*problems, f"{name}: nodes, connection_types and triggers must be lists (the last two only when set)"]
+    if not nodes and not kinds and not triggers:
+        return [*problems, f"{name}: declares nothing: no node, connection type or trigger"]
     seen: set[str] = set()
     for n in nodes:
         problems += _node_problems(name, n if isinstance(n, Mapping) else {}, seen)
     seen_types: set[str] = set()
     for t in kinds:
         problems += _connection_type_problems(name, t, seen_types)
+    seen_triggers: set[str] = set()
+    for t in triggers:
+        problems += _trigger_problems(name, t, seen_triggers)
     if name == "flow":
         problems += [f"flow: missing control type {ref}" for ref in sorted(CONTROL_TYPES - seen)]
     return problems

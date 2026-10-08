@@ -12,7 +12,11 @@ from dewpoint.core.models.base import Base, Timestamps, UUIDPk
 
 class Connection(UUIDPk, Timestamps, Base):
     __tablename__ = "connections"
-    __table_args__ = (UniqueConstraint("tenant_id", "name"),)
+    # (tenant, id): what a plugin call's key names (0042, plugins-3a-2)
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name"),
+        UniqueConstraint("tenant_id", "id", name="connections_tenant_id_id"),
+    )
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"))
     type: Mapped[str] = mapped_column(String(64))
     name: Mapped[str] = mapped_column(String(100))

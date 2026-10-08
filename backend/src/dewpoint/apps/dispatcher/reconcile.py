@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """The reconciler (engine 2b spec §7.6): inside the dispatcher, one leader at a time, it settles what starts left
-uncertain, records the end of runs whose workflow closed without their end write, and releases leaked slots.
+uncertain, records the end of runs whose workflow closed without their end write, and releases leaked slots; it ends
+the sub-runs their root's close left running, once their own execution has closed (`reconcile_subruns`).
 
 It reads across tenants only through `reconcile_candidates()` (ids and a kind), then works tenant-scoped, one
 request per transaction, with no transaction open across a call to Temporal. It asks about each request at most once
@@ -38,6 +39,7 @@ GRACE = timedelta(seconds=30)  # longer than a start's own deadline (dispatch.ST
 RECHECK = timedelta(seconds=30)  # each request asked about at most once in this long
 ALERT_AFTER = timedelta(minutes=10)  # an uncertain start still unresolved this long after it was made: an error
 BATCH = 50  # requests per pass
+MISSING_MAX = timedelta(days=1)  # a sub-run whose history is gone waits twice its last gap each time, up to this
 TERMINATED_MESSAGE = "The run's workflow was terminated outside Dewpoint."
 FAILED_MESSAGE = "The run's workflow failed outside its own code (engine 2b spec §7.6)."
 LIVE = (WorkflowExecutionStatus.RUNNING, WorkflowExecutionStatus.CONTINUED_AS_NEW)  # its successor is starting
@@ -271,15 +273,16 @@ async def _slot(
     return "released"
 
 
-async def _missing_or_unanswered(client: Client, e: Exception, run_id: uuid.UUID, missing: str) -> None:
+async def _missing_or_unanswered(client: Client, e: Exception, run_id: uuid.UUID, missing: str) -> bool:
     """A started run's history Temporal no longer has (NOT_FOUND, from a namespace that answers) is an alert: no outcome
     is invented and no slot released from missing history alone; an operator recovers it (the owner's ruling). Any other
-    failure: unanswered this time."""
+    failure: unanswered this time. Whether it was missing."""
     if isinstance(e, RPCError) and e.status == RPCStatusCode.NOT_FOUND and await namespace_answers(client):
         log.error(missing, run_id=str(run_id))
-        return
+        return True
     error = e.status.name if isinstance(e, RPCError) else type(e).__name__
     log.warning("reconcile_unanswered", run_id=str(run_id), error=error)
+    return False
 
 
 async def _checked(s: AsyncSession, request_id: uuid.UUID) -> None:
@@ -292,3 +295,79 @@ async def _checked_alone(
     async with sessionmaker() as s, s.begin():
         await tenant_scope(s, tenant_id)
         await _checked(s, request_id)
+
+
+# --- sub-runs their root's end left running (the final review's M5) --------------------------------------------------
+
+
+async def reconcile_subruns(sessionmaker: async_sessionmaker[AsyncSession], client: Client) -> dict[str, int]:
+    """Sub-runs still `running` once their root has been ended for GRACE: a parent writes its children's ends, so these
+    are what a root's close left (a child it asked to cancel, or a parent gone before writing one). Each one's own
+    execution is described when it's due (`runs.next_check_at`), across tenants through `orphan_subruns()` (ids only):
+    again after RECHECK, or, its history gone, after twice its last gap, up to MISSING_MAX (fix-pass review R9)."""
+    async with sessionmaker() as s:
+        picked = (
+            await s.execute(
+                text("select tenant_id, run_id from orphan_subruns(:grace, :n)"), {"grace": GRACE, "n": BATCH}
+            )
+        ).all()
+    counts: Counter[str] = Counter()
+    for tenant_id, run_id in picked:
+        try:
+            happened = await _subrun(sessionmaker, client, tenant_id, run_id)
+        except Exception as e:  # a bug or an outage: left as it was, asked about again after RECHECK
+            log.error("reconcile_failed", tenant_id=str(tenant_id), run_id=str(run_id), kind="subrun",
+                      error=type(e).__name__)  # fmt: skip
+            counts["error"] += 1
+            await _subrun_checked_alone(sessionmaker, tenant_id, run_id)
+            continue
+        counts[happened] += 1
+    return dict(counts)
+
+
+async def _subrun(
+    sessionmaker: async_sessionmaker[AsyncSession], client: Client, tenant_id: uuid.UUID, run_id: uuid.UUID
+) -> str:
+    """Closed: the end Temporal reports, recorded unless the row ended meanwhile. Still live: left running. Its history
+    gone: an alert and no end, as for a root (the owner's ruling)."""
+    handle = client.get_workflow_handle(run_workflow_id(str(tenant_id), str(run_id)), result_type=RunResult)
+    try:
+        described = await handle.describe()
+    except Exception as e:
+        missing = await _missing_or_unanswered(client, e, run_id, "subrun_history_missing")
+        await _subrun_checked_alone(sessionmaker, tenant_id, run_id, backoff=missing)
+        return "unresolved"
+    if described.status is None or described.status in LIVE:
+        await _subrun_checked_alone(sessionmaker, tenant_id, run_id)
+        return "running"
+    ended = await _ended(handle, described.status, run_id)
+    async with sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant_id)
+        await runs.finish_run(
+            s, run_id, status=ended.status, ended_at=described.close_time or datetime.now(UTC),
+            error_code=ended.error_code, error_message=ended.error_message, iterations=ended.iterations,
+            if_running=True,
+        )  # fmt: skip
+        await _subrun_checked(s, run_id)
+    return "ended"
+
+
+_NEXT = text(
+    "update runs set checked_at = statement_timestamp(), next_check_at = statement_timestamp() + "
+    "least(greatest(cast(:recheck as interval), 2 * (statement_timestamp() - checked_at)), cast(:max as interval)) "
+    "where id = :i"
+)
+
+
+async def _subrun_checked(s: AsyncSession, run_id: uuid.UUID, *, backoff: bool = False) -> None:
+    """Asked about now; again after RECHECK, or with `backoff` after twice the last gap (RECHECK at first: greatest()
+    skips a null), up to MISSING_MAX."""
+    await s.execute(_NEXT, {"recheck": RECHECK, "max": MISSING_MAX if backoff else RECHECK, "i": run_id})
+
+
+async def _subrun_checked_alone(
+    sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, run_id: uuid.UUID, *, backoff: bool = False
+) -> None:
+    async with sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant_id)
+        await _subrun_checked(s, run_id, backoff=backoff)

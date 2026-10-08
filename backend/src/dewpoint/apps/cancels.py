@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from dewpoint.core.audit import service as audit
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.models.requests import RunRequest
+from dewpoint.core.tenancy import lifecycle
 
 USER_CANCELLED = "user_cancelled"
 
@@ -23,8 +24,9 @@ class RequestNotFoundError(Exception):
 
 async def cancel_request(s: AsyncSession, *, tenant_id: uuid.UUID, request_id: uuid.UUID, actor_id: uuid.UUID) -> str:
     """`cancelled` (it was queued), `requested` (recorded for the dispatcher), or `ended` (nothing left to cancel).
-    Raises RequestNotFoundError."""
+    Raises RequestNotFoundError, or TenantNotActiveError once an erasure started (it cancels what's left)."""
     await tenant_scope(s, tenant_id)
+    await lifecycle.require_active(s, tenant_id)
     request = (
         await s.execute(
             select(RunRequest)

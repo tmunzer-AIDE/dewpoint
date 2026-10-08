@@ -54,7 +54,8 @@ async def test_a_runs_row_from_an_earlier_attempt_is_reused(
         assert (await s.execute(text("select count(*) from runs"))).scalar_one() == 1
 
 
-@pytest.mark.parametrize("breaks", ["gate_off", "workers_not_ready", "no_slot", "tenant_erasing", "key_unusable"])
+@pytest.mark.parametrize("breaks", ["gate_off", "workers_not_ready", "no_slot", "tenant_erasing", "tenant_erased",
+                                    "key_unusable"])  # fmt: skip
 async def test_a_condition_that_doesnt_hold_leaves_the_request_queued_without_an_attempt(
     queued, owner_sessionmaker, dispatch_sessionmaker, api_settings, breaks
 ) -> None:
@@ -72,12 +73,13 @@ async def test_a_condition_that_doesnt_hold_leaves_the_request_queued_without_an
                             {"t": ctx.tenant_id})  # fmt: skip
             await s.execute(text("insert into run_slots (run_id, tenant_id) values (:r, :t)"),
                             {"r": uuid.uuid4(), "t": ctx.tenant_id})  # fmt: skip
-        elif breaks == "tenant_erasing":
-            await s.execute(text("update tenants set status = 'erasing' where id = :t"), {"t": ctx.tenant_id})
+        elif breaks in ("tenant_erasing", "tenant_erased"):
+            await s.execute(text("update tenants set status = :b where id = :t"),
+                            {"b": breaks.removeprefix("tenant_"), "t": ctx.tenant_id})  # fmt: skip
     if breaks == "key_unusable":  # the start is sealed with the tenant's key before anything is written (§2.3)
         keys = FixtureKeys(missing={str(ctx.tenant_id)})
     waiting = await begin(dispatch_sessionmaker, request, api_settings, keys=keys)
-    assert waiting == dispatch.Waiting(breaks)
+    assert waiting == dispatch.Waiting("tenant_erasing" if breaks == "tenant_erased" else breaks)
     assert await state(owner_sessionmaker, request.id) == {"request": ("queued", None, 0), "run": None, "slot": 0}
 
 

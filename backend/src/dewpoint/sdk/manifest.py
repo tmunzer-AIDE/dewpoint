@@ -9,8 +9,10 @@ from pydantic.json_schema import GenerateJsonSchema
 from pydantic_core import core_schema
 
 from dewpoint.sdk.connections import ConnectionType
+from dewpoint.sdk.declared import DeclaredModel
 from dewpoint.sdk.fields import CONNECTION, OPTIONS
 from dewpoint.sdk.node import ICON_RE, MAX_RETRY_ATTEMPTS, PORT_RE, RESERVED_PORTS, TYPE_RE, Node, NodeKind, SideEffect
+from dewpoint.sdk.triggers import Trigger, trigger_problems
 from dewpoint.sdk.version import SDK_VERSION
 
 PLUGIN_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,40}$")
@@ -212,21 +214,21 @@ def _problems(node: type[Node]) -> list[str]:
         return [f"{node.__name__}: missing {', '.join(missing)}"]
     name = f"{node.type}@{node.version}"
     out: list[str] = []
-    if not TYPE_RE.match(node.type):
+    if not TYPE_RE.fullmatch(node.type):
         out.append(f"{name}: type must look like 'plugin.name'")
     if isinstance(node.version, bool) or not isinstance(node.version, int) or node.version < 1:
         out.append(f"{name}: version must be an integer ≥ 1")
     if len(set(node.ports)) != len(node.ports):
         out.append(f"{name}: duplicate ports")
     for port in node.ports:
-        if not PORT_RE.match(port) or port in RESERVED_PORTS:
+        if not PORT_RE.fullmatch(port) or port in RESERVED_PORTS:
             out.append(f"{name}: invalid port {port!r}")
     if node.dynamic_ports is not None and node.dynamic_ports not in node.Config.model_fields:
         out.append(f"{name}: dynamic_ports names unknown config field {node.dynamic_ports!r}")
     out += _retry_problems(name, node)
     out += _connection_problems(name, node)
     out += _options_problems(name, node)
-    if node.icon is not None and (not isinstance(node.icon, str) or not ICON_RE.match(node.icon)):
+    if node.icon is not None and (not isinstance(node.icon, str) or not ICON_RE.fullmatch(node.icon)):
         out.append(f"{name}: icon must name a first-party icon (lowercase letters, digits and dashes)")
     out += [f"{name}: {problem}" for problem in _serializer_problems(node.Output.__pydantic_core_schema__)]
     if node.timeout.total_seconds() <= 0:
@@ -237,6 +239,13 @@ def _problems(node: type[Node]) -> list[str]:
         if node.side_effect is SideEffect.RECONCILABLE and node.reconcile is Node.reconcile:
             out.append(f"{name}: RECONCILABLE nodes must implement reconcile()")
     return out
+
+
+def _output_schema(output: type[BaseModel]) -> dict[str, Any]:
+    """What serialization emits: a model's fields, closed; a declared model's schema as declared (plugins-3 D23)."""
+    if issubclass(output, DeclaredModel):
+        return output.model_json_schema()
+    return _closed(output.model_json_schema(mode="serialization", schema_generator=_SerializedOutput))  # type: ignore[no-any-return]
 
 
 def node_manifest(node: type[Node]) -> dict[str, Any]:
@@ -253,9 +262,7 @@ def node_manifest(node: type[Node]) -> dict[str, Any]:
         "ports": list(node.ports),
         "dynamic_ports": node.dynamic_ports,
         "config_schema": node.Config.model_json_schema(mode="validation"),
-        "output_schema": _closed(
-            node.Output.model_json_schema(mode="serialization", schema_generator=_SerializedOutput)
-        ),
+        "output_schema": _output_schema(node.Output),
         "credentials": list(node.credentials),
         "capabilities": sorted(node.capabilities),
         "side_effect": node.side_effect.value,
@@ -282,10 +289,11 @@ class Plugin:
     version: str
     nodes: tuple[type[Node], ...]
     connection_types: tuple[ConnectionType, ...] = ()
+    triggers: tuple[Trigger, ...] = ()
 
     def manifest(self) -> dict[str, Any]:
         problems: list[str] = []
-        if not PLUGIN_NAME_RE.match(self.name):
+        if not PLUGIN_NAME_RE.fullmatch(self.name):
             problems.append(f"plugin name {self.name!r} must be a lowercase identifier")
         nodes: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -312,11 +320,22 @@ class Plugin:
             problems += found
             if not found:
                 kinds.append(kind.manifest())
-        if not self.nodes and not self.connection_types:
-            problems.append(f"plugin {self.name!r} declares nothing: no node and no connection type")
+        triggers: list[dict[str, Any]] = []
+        for trigger in self.triggers:
+            m = trigger.manifest()
+            found = trigger_problems(self.name, m)
+            if any(t["key"] == trigger.key for t in triggers):
+                found.append(f"duplicate trigger {trigger.key!r}")
+            problems += found
+            if not found:
+                triggers.append(m)
+        if not self.nodes and not self.connection_types and not self.triggers:
+            problems.append(f"plugin {self.name!r} declares nothing: no node, connection type or trigger")
         if problems:
             raise ManifestError(problems)
         out: dict[str, Any] = {"name": self.name, "version": self.version, "sdk_version": SDK_VERSION, "nodes": nodes}
         if kinds:
             out["connection_types"] = kinds
+        if triggers:
+            out["triggers"] = triggers
         return out

@@ -49,6 +49,8 @@ async def test_a_tick_while_the_gate_is_off_is_queued_and_starts_once_it_is_on(
     assert client.started == []  # the gate is off: it waits, queued
     async with owner_sessionmaker() as s, s.begin():
         await s.execute(text("update platform_settings set production_runs = true"))
+        await s.execute(text("insert into retention_sweeps (ended_at, succeeded, tenants, lag_s) "
+                             "values (now(), true, 0, 0)"))  # retention healthy (§10.3)  # fmt: skip
     assert await dispatch.dispatch_once(dispatch_sessionmaker, client, KEYS, api_settings, BUILD) == {"started": 1}
     async with owner_sessionmaker() as s:
         status = (await s.execute(text("select status from run_requests"))).scalar_one()

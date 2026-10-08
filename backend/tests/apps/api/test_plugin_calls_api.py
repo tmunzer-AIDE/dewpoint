@@ -20,13 +20,14 @@ from dewpoint.apps.worker.plugin_calls import PluginCallServer
 from dewpoint.core.crypto.kek import KekSet
 from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.egress.addresses import AllowEntry
+from dewpoint.core.erasure import service
 from dewpoint.core.plugins import asking
 from dewpoint.plugins.flow import PLUGIN as FLOW
-from dewpoint.plugins.mist import PLUGIN as MIST
 from tests.apps.api.helpers import session_client
 from tests.support.connections import types_for_testkit
 from tests.support.graphs import G
 from tests.support.netfakes import Request, Server, guard, serve, tls
+from tests.support.plugins.mist import MIST_TYPE_ONLY as MIST
 from tests.support.plugins.testkit import TESTKIT
 
 NAMES = ("dewpoint.test",)
@@ -493,3 +494,29 @@ async def test_options_whose_connection_changed_before_they_return_are_refused(
         monkeypatch.setattr(asking, "ask_and_wait", answered_then_edited)
         r = await c.post(_options(tid), json={"field": "site_id", "connection_id": cid, "query": ""})
     assert (r.status_code, r.json()) == (409, {"error": "connection_changed"})
+
+
+@pytest.mark.parametrize("asked", ["options", "verify"])
+async def test_an_ask_after_an_erasure_started_is_refused_and_records_nothing(
+    app, owner_sessionmaker, api_sessionmaker, api_settings, unserved, fake, monkeypatch, asked: str
+) -> None:
+    """The owner's review of 2b-4a v5: a write's check (`require`) and the call's insert are two transactions, the
+    request's ending before the ask. An erasure started between them is seen by the ask itself: 409 `tenant_erasing`,
+    nothing recorded."""
+    real = asking._ask
+
+    async def erased_first(sessionmaker: Any, tenant_id: Any, ask: Any) -> Any:
+        async with api_sessionmaker() as s, s.begin():
+            await service.start(s, tenant_id=tenant_id, requested_by=uuid.uuid4())
+        return await real(sessionmaker, tenant_id, ask)
+
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
+    async with c:
+        cid = await _connection(c, tid, fake[1].port)
+        monkeypatch.setattr(asking, "_ask", erased_first)
+        if asked == "options":
+            r = await c.post(_options(tid), json={"field": "site_id", "connection_id": cid, "query": ""})
+        else:
+            r = await c.post(f"/api/v1/t/{tid}/connections/{cid}/verify")
+    assert (r.status_code, r.json()) == (409, {"error": "tenant_erasing"})
+    assert await _calls_left(owner_sessionmaker) == 0

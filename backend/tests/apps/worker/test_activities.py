@@ -47,7 +47,7 @@ from dewpoint.engine.runtime.activities import (
 from dewpoint.engine.runtime.execution import VERSION_UNUSABLE
 from dewpoint.engine.runtime.ids import run_workflow_id
 from dewpoint.engine.runtime.size import PAYLOAD_TOO_LARGE, STEP_OUTPUT_TOO_LARGE, VERSION_TOO_LARGE
-from dewpoint.sdk import Node, SideEffect, StepContext, sensitive
+from dewpoint.sdk import Node, SideEffect, StepContext, declared_model, sensitive
 from tests.apps.worker.harness import MemoryStore
 from tests.support.plugins.testkit import AmbiguousSend, Blob, Echo, FailN, Reconcile, Sensitive, Slow
 
@@ -360,7 +360,7 @@ async def test_a_validator_bug_is_mapped_never_retried_and_quotes_nothing() -> N
     assert (output.type, output.non_retryable, output.details) == (
         "output_schema_violation",
         True,
-        ({"outcome": None, MAPPED: True},),
+        ({"outcome": "applied", MAPPED: True},),  # its run returned: the effect happened (the 3b-1 review's L6)
     )
     assert output.message == "The output doesn't match `testkit.buggy_send@1`: checking it raised KeyError."
     assert (config.type, config.non_retryable) == ("config_invalid", True)
@@ -577,3 +577,34 @@ async def test_an_output_past_the_inline_limit_it_was_sent_is_a_size_claim() -> 
     result = await call(step_activity_for(Blob, store), step("testkit.blob@1", {"size": 2_000}, inline_limit=1_024))
     handle = ClaimRef.of(result.output["value"])
     assert handle is not None and store.claims[handle.id].value == "x" * 2_000
+
+
+async def test_an_output_violation_after_the_node_ran_records_its_outcome() -> None:
+    """The 3b-1 review's L6: the node ran, so its effect happened; a failed output check says so (`applied`), as a
+    claim that fails after it does, so nobody takes a created object for one never made."""
+    bad = await failure(step_activity_for(Liar, MemoryStore()), step("testkit.liar@1", {"pin": 1234}))
+    assert (bad.type, bad.details) == ("output_schema_violation", ({"outcome": "applied", MAPPED: True},))
+
+
+DECLARED = declared_model(
+    "DeclaredConfig",
+    {"type": "object", "properties": {"body": {"type": "object", "properties": {"ssid": {"type": "string",
+                                                                                         "maxLength": 3}}}}},
+)  # fmt: skip
+
+
+class DeclaredNode(Node):
+    type = "testkit.declared"
+    version = 1
+    title = "Declared"
+    Config = DECLARED
+
+    async def run(self, ctx: StepContext, config: Any) -> BaseModel:
+        raise AssertionError("never reached")
+
+
+async def test_a_declared_configs_failure_names_the_keyword_never_the_value() -> None:
+    """The 3b-1 review's L5: a declared model's errors name each place and the schema's keyword."""
+    bad = await failure(step_activity_for(DeclaredNode, MemoryStore()),
+                        step("testkit.declared@1", {"body": {"ssid": "SuperSecretValue"}}))  # fmt: skip
+    assert bad.message == "The config doesn't match `testkit.declared@1`: body.ssid (schema_maxLength)."

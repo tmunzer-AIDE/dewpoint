@@ -38,6 +38,7 @@ from dewpoint.core.ingress.filters import MAX_BINDINGS, FilterError, validated
 from dewpoint.core.ingress.keys import ensure_event_key
 from dewpoint.core.models.ingress import InboundEvent, TenantEventCounters, TriggerBinding, WebhookEndpoint
 from dewpoint.core.models.workflows import Workflow
+from dewpoint.core.retention.cutoff import Cutoff, cutoff, event_kept, kept
 
 MIB = 1024 * 1024
 MAX_BODY = 5 * MIB  # the largest body limit, and ingress's global cap
@@ -53,8 +54,8 @@ MAX_POINTER = 256
 MAX_ALLOWLIST = 32
 LISTED = 100  # events a listing shows at most
 CANCELLED = "cancelled"
-UPDATABLE = frozenset({"name", "enabled", "allowlist", "tolerance_s", "body_limit", "events_pointer",
-                       "signature_header", "timestamp_header"})  # fmt: skip
+UPDATABLE = frozenset({"name", "enabled", "allowlist", "tolerance_s", "body_limit", "signature_header",
+                       "timestamp_header"})  # fmt: skip
 
 
 class WebhookRefusedError(Exception):
@@ -191,9 +192,10 @@ async def rotate_secret(s: AsyncSession, key: IngressKey, *, endpoint: WebhookEn
 async def update_endpoint(
     s: AsyncSession, *, endpoint: WebhookEndpoint, actor_id: uuid.UUID, changes: Mapping[str, Any]
 ) -> WebhookEndpoint:
-    """Only what `UPDATABLE` names changes; an endpoint's identity never does. Raises WebhookRefusedError."""
+    """Only what `UPDATABLE` names changes; an endpoint's identity (how it authenticates, where its events and their
+    ids are) never does. Raises WebhookRefusedError."""
     fixed = sorted(set(changes) - UPDATABLE)
-    nulled = sorted(k for k in set(changes) - {"events_pointer"} if changes[k] is None)
+    nulled = sorted(k for k in changes if changes[k] is None)
     problems = fixed + nulled + _problems(changes, auth=endpoint.auth_kind, id_source=None)
     if problems:
         raise WebhookRefusedError(422, {"error": "endpoint_invalid", "fields": sorted(set(problems))})
@@ -265,10 +267,11 @@ async def delete_binding(s: AsyncSession, *, binding: TriggerBinding, actor_id: 
                  {"endpoint_id": str(binding.endpoint_id), "workflow_id": str(binding.workflow_id)})  # fmt: skip
 
 
-async def events_of(s: AsyncSession, endpoint_id: uuid.UUID, status: str | None, *, dead: bool) -> list[InboundEvent]:
+async def events_of(s: AsyncSession, endpoint_id: uuid.UUID, status: str | None, *, dead: bool,
+                    kept_after: Cutoff) -> list[InboundEvent]:  # fmt: skip
     """The endpoint's newest events; dead ones only when `dead` (the caller has `tenant.manage`: the owner's M3
-    review), filtered by status or not."""
-    query = select(InboundEvent).where(InboundEvent.endpoint_id == endpoint_id)
+    review), filtered by status or not; none past the retention cutoff `kept_after` (§10.1)."""
+    query = select(InboundEvent).where(InboundEvent.endpoint_id == endpoint_id, kept(InboundEvent.ended_at, kept_after))
     if status is not None:
         query = query.where(InboundEvent.status == status)
     if not dead:
@@ -277,8 +280,8 @@ async def events_of(s: AsyncSession, endpoint_id: uuid.UUID, status: str | None,
     return list((await s.execute(query.order_by(*order).limit(LISTED))).scalars())
 
 
-async def dead_events(s: AsyncSession) -> list[InboundEvent]:
-    query = select(InboundEvent).where(InboundEvent.status == "dead")
+async def dead_events(s: AsyncSession, *, kept_after: Cutoff) -> list[InboundEvent]:
+    query = select(InboundEvent).where(InboundEvent.status == "dead", kept(InboundEvent.ended_at, kept_after))
     return list((await s.execute(query.order_by(InboundEvent.ended_at.desc()).limit(LISTED))).scalars())
 
 
@@ -293,9 +296,10 @@ async def _locked(s: AsyncSession, tenant_id: uuid.UUID, endpoint_id: uuid.UUID)
 
 async def cancel_event(s: AsyncSession, *, tenant_id: uuid.UUID, event_id: uuid.UUID,
                        actor_id: uuid.UUID) -> InboundEvent:  # fmt: skip
-    """A pending or dead event cancelled; what was pending released. Raises WebhookRefusedError."""
+    """A pending or dead event cancelled; what was pending released. One past the retention cutoff isn't found
+    (§10.1). Raises WebhookRefusedError."""
     seen = await s.get(InboundEvent, event_id)
-    if seen is None:
+    if seen is None or not await event_kept(s, await cutoff(s, tenant_id), seen):
         raise WebhookRefusedError(404, {"error": "not_found"})
     await _locked(s, tenant_id, seen.endpoint_id)
     event = (await s.execute(select(InboundEvent).where(InboundEvent.id == event_id).with_for_update()

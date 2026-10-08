@@ -24,10 +24,10 @@ from dewpoint.core.crypto.kek import KekSet
 from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.egress.addresses import AllowEntry
 from dewpoint.plugins.flow import PLUGIN as FLOW
-from dewpoint.plugins.mist import PLUGIN as MIST
 from tests.apps.api.helpers import session_client
 from tests.support.graphs import G
 from tests.support.netfakes import Request, Server, guard, serve, tls
+from tests.support.plugins.mist import MIST_TYPE_ONLY as MIST
 from tests.support.plugins.testkit import TESTKIT
 
 HOST = "api.eu.mist.com"

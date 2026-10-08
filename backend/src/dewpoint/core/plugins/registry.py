@@ -132,3 +132,15 @@ async def list_node_types(s: AsyncSession, states: Iterable[str] = ("active", "d
         .order_by(NodeTypeVersion.type, NodeTypeVersion.version)
     )
     return list(rows.scalars())
+
+
+async def list_triggers(s: AsyncSession) -> list[dict[str, Any]]:
+    """Every trigger the synced manifests declare (plugins-3 D17), with its plugin's name, by plugin and key: only
+    the declarations, never a whole manifest."""
+    declared = PluginManifest.manifest["triggers"]
+    rows = await s.execute(select(PluginManifest.name, declared).order_by(PluginManifest.name))
+    out: list[dict[str, Any]] = []
+    for name, triggers in rows.all():
+        for t in sorted(triggers if isinstance(triggers, list) else [], key=lambda t: str(t.get("key"))):
+            out.append({"plugin": name, **t})
+    return out

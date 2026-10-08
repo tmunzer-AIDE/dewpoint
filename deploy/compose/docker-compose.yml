@@ -31,6 +31,7 @@ services:
       DEWPOINT_WORKER_DB_PASSWORD: ${DEWPOINT_WORKER_DB_PASSWORD:?set in .env}
       DEWPOINT_DISPATCH_DB_PASSWORD: ${DEWPOINT_DISPATCH_DB_PASSWORD:?set in .env}
       DEWPOINT_INGRESS_DB_PASSWORD: ${DEWPOINT_INGRESS_DB_PASSWORD:?set in .env}
+      DEWPOINT_RETENTION_DB_PASSWORD: ${DEWPOINT_RETENTION_DB_PASSWORD:?set in .env}
     volumes: [pgdata:/var/lib/postgresql/data, ./initdb:/docker-entrypoint-initdb.d:ro]
     healthcheck: { test: ["CMD-SHELL", "pg_isready -U dewpoint_owner -d dewpoint"], interval: 5s, retries: 20 }
 
@@ -62,6 +63,9 @@ services:
       # Webhook endpoints' secrets are sealed under it (engine 2b spec §8.3): without it, the API makes none (503).
       DEWPOINT_INGRESS_KEY_B64: ${DEWPOINT_INGRESS_KEY_B64:-}
       DEWPOINT_INGRESS_KEY_ID: ${DEWPOINT_INGRESS_KEY_ID:-ingress-1}
+      # Set only during the ingress key's rollout: docs/operations/key-rotation.md
+      DEWPOINT_INGRESS_KEY_PREVIOUS_B64: ${DEWPOINT_INGRESS_KEY_PREVIOUS_B64:-}
+      DEWPOINT_INGRESS_KEY_PREVIOUS_ID: ${DEWPOINT_INGRESS_KEY_PREVIOUS_ID:-}
     depends_on: { migrate: { condition: service_completed_successfully } }
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/ready').status==200 else 1)"]
@@ -141,6 +145,21 @@ services:
       migrate: { condition: service_completed_successfully }
       temporal: { condition: service_healthy }
 
+  retention:
+    <<: *app
+    # Deletes each tenant's data past its retention, every hour (engine 2b spec §10.3; docs/operations/retention.md),
+    # as the only login that may. It never decrypts anything: its environment holds no key.
+    command: ["dewpoint", "retention"]
+    environment:
+      DEWPOINT_DATABASE_URL: postgresql+asyncpg://dewpoint_retention_login:${DEWPOINT_RETENTION_DB_PASSWORD}@postgres/dewpoint
+      # It carries tenant erasures on too (docs/operations/erasure.md), through Temporal, decoding no payload.
+      DEWPOINT_TEMPORAL_ADDRESS: temporal:7233
+      DEWPOINT_TEMPORAL_NAMESPACE: ${DEWPOINT_TEMPORAL_NAMESPACE:-default}
+    restart: unless-stopped  # the SLO needs a successful sweep a day: one that ends comes back
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      temporal: { condition: service_healthy }
+
   cel-evaluator:
     image: ${DEWPOINT_CEL_EVALUATOR_IMAGE:-dewpoint-cel-evaluator:dev}
     build: { context: ../.., dockerfile: deploy/docker/cel-evaluator.Dockerfile }
@@ -173,6 +192,9 @@ services:
       DEWPOINT_DATABASE_URL: postgresql+asyncpg://dewpoint_ingress_login:${DEWPOINT_INGRESS_DB_PASSWORD}@postgres/dewpoint
       DEWPOINT_INGRESS_KEY_B64: ${DEWPOINT_INGRESS_KEY_B64:-}
       DEWPOINT_INGRESS_KEY_ID: ${DEWPOINT_INGRESS_KEY_ID:-ingress-1}
+      # Set only during the ingress key's rollout: docs/operations/key-rotation.md
+      DEWPOINT_INGRESS_KEY_PREVIOUS_B64: ${DEWPOINT_INGRESS_KEY_PREVIOUS_B64:-}
+      DEWPOINT_INGRESS_KEY_PREVIOUS_ID: ${DEWPOINT_INGRESS_KEY_PREVIOUS_ID:-}
       # X-Forwarded-For is believed from `web` only: the `hooks` network, where it's ingress's one peer (ruling 11).
       DEWPOINT_INGRESS_TRUSTED_PROXIES: ${DEWPOINT_HOOKS_SUBNET:-172.31.255.248/29}
     networks:

@@ -1,8 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """The editor's palette of node types (sub-project 4, B5): each also says how a step of it runs."""
 
-import pytest
+from types import SimpleNamespace
+from typing import Any
 
+import pytest
+from pydantic import ValidationError
+
+from dewpoint.core.plugins import registry
 from tests.apps.api.helpers import session_client
 from tests.support.registry import sync_test_plugins
 
@@ -37,3 +42,34 @@ async def test_each_type_says_how_a_step_of_it_runs(app, owner_sessionmaker, api
 
 async def test_the_palette_needs_a_session(client) -> None:
     assert (await client.get("/api/v1/node-types")).status_code == 401
+
+
+async def test_the_gzipped_palette_still_says_how_each_step_runs(app, owner_sessionmaker, api_settings) -> None:
+    # Plugins 3b-1 compresses the catalog; B5's metadata travels in it, through the same model (the owner's review
+    # of #60).
+    c, _ = await session_client(app, owner_sessionmaker, api_settings, "viewer")
+    async with c:
+        zipped = await c.get("/api/v1/node-types", headers={"Accept-Encoding": "gzip"})
+        plain = await c.get("/api/v1/node-types", headers={"Accept-Encoding": "identity"})
+    assert zipped.headers["content-encoding"] == "gzip" and zipped.json() == plain.json()
+    loop = {t["ref"]: t for t in zipped.json()}["flow.loop@1"]
+    assert (loop["side_effect"], loop["timeout_s"], loop["retry"]["max_attempts"]) == ("none", 60.0, 3)
+
+
+async def test_a_row_the_answers_model_refuses_is_never_sent(
+    app, owner_sessionmaker, api_settings, monkeypatch
+) -> None:
+    # The catalog is a raw Response, which FastAPI's response model doesn't check: the route checks NodeTypeOut itself.
+    real = registry.list_node_types
+
+    async def with_a_stray(db: Any) -> list[Any]:
+        rows = await real(db)
+        stray = SimpleNamespace(**{k: getattr(rows[0], k) for k in ("ref", "type", "version", "state", "manifest")})
+        stray.kind = "plugin"  # neither action nor control
+        return [*rows, stray]
+
+    monkeypatch.setattr(registry, "list_node_types", with_a_stray)
+    c, _ = await session_client(app, owner_sessionmaker, api_settings, "viewer")
+    with pytest.raises(ValidationError):
+        async with c:
+            await c.get("/api/v1/node-types")

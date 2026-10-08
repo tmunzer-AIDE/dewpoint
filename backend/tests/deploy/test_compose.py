@@ -23,6 +23,7 @@ ENV = {
     "DEWPOINT_WORKER_DB_PASSWORD": "worker-pw",
     "DEWPOINT_DISPATCH_DB_PASSWORD": "dispatch-pw",
     "DEWPOINT_INGRESS_DB_PASSWORD": "ingress-pw",
+    "DEWPOINT_RETENTION_DB_PASSWORD": "retention-pw",
     "DEWPOINT_KEK_B64": "k" * 44,
     "DEWPOINT_AUDIT_SIGNING_KEY_B64": "s" * 44,
     "DEWPOINT_TEMPORAL_NAMESPACE": "dewpoint-ci",
@@ -123,6 +124,38 @@ def test_the_database_init_makes_an_ingress_login_from_its_password() -> None:
     ci = (COMPOSE.parents[2] / ".github" / "workflows" / "ci.yml").read_text()
     assert 'echo "DEWPOINT_INGRESS_DB_PASSWORD=$(openssl rand -hex 16)"' in ci
     assert "DEWPOINT_INGRESS_DB_PASSWORD=" in (COMPOSE.parent / ".env.example").read_text()
+
+
+def test_the_database_init_makes_a_retention_login_from_its_password() -> None:
+    """2b-4 (engine 2b spec §10.3): retention logs in as `dewpoint_retention_login`, which a fresh database's init
+    creates in the group role, from `DEWPOINT_RETENTION_DB_PASSWORD`; CI writes one like every other login's."""
+    assert environment("postgres")["DEWPOINT_RETENTION_DB_PASSWORD"] == "retention-pw"
+    init = (COMPOSE.parent / "initdb" / "10-roles.sh").read_text()
+    assert '-v retention_pw="$DEWPOINT_RETENTION_DB_PASSWORD"' in init
+    assert "CREATE ROLE dewpoint_retention_login LOGIN PASSWORD :'retention_pw' IN ROLE dewpoint_retention;" in init
+    assert "rolname='dewpoint_retention') THEN CREATE ROLE dewpoint_retention NOLOGIN" in init
+    ci = (COMPOSE.parents[2] / ".github" / "workflows" / "ci.yml").read_text()
+    assert 'echo "DEWPOINT_RETENTION_DB_PASSWORD=$(openssl rand -hex 16)"' in ci
+    assert "DEWPOINT_RETENTION_DB_PASSWORD=" in (COMPOSE.parent / ".env.example").read_text()
+
+
+def test_retention_runs_as_its_own_login_without_a_key_and_comes_back() -> None:
+    """§10.3: `dewpoint retention` is its own process, as the only login that deletes retained data. It never decrypts
+    anything, so it holds no key-encryption key; one that ends comes back, since the SLO needs a sweep a day. It carries
+    tenant erasures on too (2b-4a M4), through Temporal, with a plain client that decodes nothing."""
+    retention = service("retention")
+    assert retention["command"] == ["dewpoint", "retention"]
+    env = environment("retention")
+    assert env == {
+        "DEWPOINT_DATABASE_URL": "postgresql+asyncpg://dewpoint_retention_login:retention-pw@postgres/dewpoint",
+        "DEWPOINT_TEMPORAL_ADDRESS": "temporal:7233",
+        "DEWPOINT_TEMPORAL_NAMESPACE": "dewpoint-ci",
+    }
+    assert not [name for name in env if "KEK" in name]
+    assert retention["restart"] == "unless-stopped" and "ports" not in retention
+    assert retention["read_only"] is True and retention["cap_drop"] == ["ALL"]
+    assert retention["depends_on"] == {"migrate": {"condition": "service_completed_successfully"},
+                                       "temporal": {"condition": "service_healthy"}}  # fmt: skip
 
 
 NGINX = Path(__file__).parents[3] / "deploy" / "docker" / "nginx.conf"
@@ -241,3 +274,11 @@ def test_cis_ingress_checks_each_stop_a_failing_step() -> None:
         "A webhook through nginx and ingress (engine 2b spec §8.3, §12)"
     ]["run"]
     assert [line for line in run.splitlines() if line.strip().startswith("test ") and "&&" in line] == []
+
+
+@pytest.mark.parametrize("name", ["api", "ingress"])
+def test_the_ingress_keys_holders_take_a_previous_key_for_its_rollout(name: str) -> None:
+    """2b-4 (engine 2b spec §8.3): the ingress key's rollout configures the previous key on every process that holds
+    it; unset, it's empty."""
+    env = environment(name)
+    assert env["DEWPOINT_INGRESS_KEY_PREVIOUS_B64"] == "" and env["DEWPOINT_INGRESS_KEY_PREVIOUS_ID"] == ""

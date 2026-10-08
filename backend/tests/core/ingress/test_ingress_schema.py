@@ -155,14 +155,17 @@ async def test_a_binding_cant_point_to_another_tenants_workflow(owner_sessionmak
         ({"id_source": "none"}, {"id_source": "header", "id_header": "x-event-id"}),
         ({"id_source": "pointer", "id_pointer": "/id"}, {"id_pointer": "/other"}),
         ({"id_source": "header", "id_header": "x-event-id"}, {"id_header": "x-other-id"}),
+        ({}, {"events_pointer": "/events"}),
+        ({"events_pointer": "/events"}, {"events_pointer": None}),
+        ({"events_pointer": "/events"}, {"events_pointer": "/items"}),
     ],
 )
-async def test_the_api_cant_change_where_an_endpoints_ids_are(
+async def test_the_api_cant_change_where_an_endpoints_events_and_ids_are(
     owner_sessionmaker, api_sessionmaker, columns: dict[str, Any], changed: dict[str, Any]
 ) -> None:
-    """The owner's docs review: where an endpoint's ids are decides how its later deliveries are deduplicated, so it
-    never changes. Not even the API's own update, scoped to its tenant, can change it: its role has no grant on
-    `id_source`, `id_pointer` or `id_header`."""
+    """The owner's docs review and ruling D10: where an endpoint's events and their ids are decides how its later
+    deliveries are split and deduplicated, so it never changes. Not even the API's own update, scoped to its tenant, can
+    change it: its role has no grant on `id_source`, `id_pointer`, `id_header` or `events_pointer`."""
     tenant, endpoint_id = await endpoint(owner_sessionmaker, **columns)
     refused: DBAPIError | None = None
     try:
@@ -204,8 +207,9 @@ async def test_the_apis_role_has_no_grant_to_update_an_endpoints_rates(
 
 
 async def test_the_api_still_makes_endpoints_and_changes_what_it_manages(owner_sessionmaker, api_sessionmaker) -> None:
-    """The control for the test above, as the API's role: it still makes an endpoint, and changes every column the
-    API changes (a PATCH's fields, a rotated secret, the byte burst a larger body limit needs, the time)."""
+    """The control for the test above, as the API's role: it still makes an endpoint, with where its events and their
+    ids are, and changes every column the API changes (a PATCH's fields, a rotated secret, the byte burst a larger body
+    limit needs, the time)."""
     tenant, bearer = await endpoint(owner_sessionmaker)
     async with owner_sessionmaker() as s:
         user = (await s.execute(text("select created_by from webhook_endpoints where id = :e"),
@@ -215,8 +219,9 @@ async def test_the_api_still_makes_endpoints_and_changes_what_it_manages(owner_s
         await tenant_scope(s, tenant)
         await s.execute(
             text("insert into webhook_endpoints (id, tenant_id, name, created_by, auth_kind, hmac_secret, "
-                 "signature_header, timestamp_header, id_source, id_pointer, dedupe_key) values (:i, :t, 'signed', :u, "
-                 "'hmac', 'sealed', 'x-signature', 'x-timestamp', 'pointer', '/id', 'sealed-dedupe-key')"),
+                 "signature_header, timestamp_header, id_source, id_pointer, events_pointer, dedupe_key) values (:i, "
+                 ":t, 'signed', :u, 'hmac', 'sealed', 'x-signature', 'x-timestamp', 'pointer', '/id', '/events', "
+                 "'sealed-dedupe-key')"),
             {"i": signed, "t": tenant, "u": user},
         )  # fmt: skip
         await s.execute(
@@ -226,17 +231,17 @@ async def test_the_api_still_makes_endpoints_and_changes_what_it_manages(owner_s
         )  # fmt: skip
         await s.execute(
             text("update webhook_endpoints set name = 'renamed', enabled = false, allowlist = '{203.0.113.0/24}', "
-                 "tolerance_s = 600, body_limit = 5242880, byte_burst = 26278400, events_pointer = '/events', "
+                 "tolerance_s = 600, body_limit = 5242880, byte_burst = 26278400, "
                  "bearer_digest = :d, updated_at = now() where id = :e"),
             {"d": digest, "e": bearer},
         )  # fmt: skip
     made, changed = await state(owner_sessionmaker, signed), await state(owner_sessionmaker, bearer)
     assert (made["hmac_secret"], made["signature_header"], made["timestamp_header"]) == (b"resealed", "x-sig", "x-ts")
-    assert (made["id_source"], made["id_pointer"]) == ("pointer", "/id")
+    assert (made["id_source"], made["id_pointer"], made["events_pointer"]) == ("pointer", "/id", "/events")
     assert (changed["name"], changed["enabled"], changed["tolerance_s"], changed["body_limit"]) == (
         "renamed", False, 600, 5242880,
     )  # fmt: skip
-    assert (changed["events_pointer"], changed["bearer_digest"], changed["byte_burst"]) == ("/events", digest, 26278400)
+    assert (changed["bearer_digest"], changed["byte_burst"]) == (digest, 26278400)
 
 
 @pytest.mark.parametrize(

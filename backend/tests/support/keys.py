@@ -52,3 +52,15 @@ async def opened(payload: Payload) -> Any:
     codec = TenantCodec(FixtureKeys()).with_context(WorkflowSerializationContext("default", workflow_id))
     [plain] = await codec.decode([payload])
     return json.loads(plain.data)
+
+
+async def sealed_as_before(tenant_id: str, value: Any) -> Payload:
+    """`value` sealed under the tenant's fixture key, as a schedule's action (or a tick) carried it before the tick
+    contract: its legacy form, which still opens."""
+    from temporalio.converter import DataConverter
+
+    codec = TenantCodec(FixtureKeys()).with_context(
+        WorkflowSerializationContext("default", run_workflow_id(tenant_id, str(uuid.UUID(int=0))))
+    )
+    [sealed] = await codec.encode(DataConverter.default.payload_converter.to_payloads([value]))
+    return sealed

@@ -146,7 +146,7 @@ def test_plugin_manifest_checks_prefix_and_duplicates() -> None:
     ok = Plugin(name="demo", version="1.0.0", nodes=(Send,))
     manifest = ok.manifest()
     assert manifest["nodes"][0]["type"] == "demo.send"
-    assert manifest["sdk_version"] == "0.3.0"
+    assert manifest["sdk_version"] == "0.6.0"
     with pytest.raises(ManifestError, match="must start with 'other.'"):
         Plugin(name="other", version="1", nodes=(Send,)).manifest()
     with pytest.raises(ManifestError, match="duplicate"):
@@ -156,6 +156,22 @@ def test_plugin_manifest_checks_prefix_and_duplicates() -> None:
 def test_value_kinds_rejects_unknown_kind() -> None:
     with pytest.raises(ValueError, match="value_kinds"):
         value_kinds("python")
+
+
+@pytest.mark.parametrize(
+    ("plugin", "fragment"),
+    [
+        (Plugin(name="demo", version="1", nodes=(_node(type="demo.x\n", run=_run),)), "type must look like"),
+        (Plugin(name="demo", version="1", nodes=(_node(ports=("out\n",), run=_run),)), "invalid port"),
+        (Plugin(name="demo", version="1", nodes=(_node(icon="flag\n", run=_run),)), "icon must name"),
+        (Plugin(name="demo\n", version="1", nodes=(Send,)), "must be a lowercase identifier"),
+    ],
+)
+def test_a_name_with_a_trailing_newline_is_refused(plugin: Plugin, fragment: str) -> None:
+    """`$` also matches before a final newline (the owner's review R3 of 3b-2): every name is matched whole."""
+    with pytest.raises(ManifestError) as e:
+        plugin.manifest()
+    assert any(fragment in p for p in e.value.problems), e.value.problems
 
 
 class Defaults(BaseModel):

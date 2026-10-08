@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""A step attempt's network (plugins-3 D4, D5, D7, D9, D10): `ctx.http`, `ctx.net` and `ctx.connection()`.
+"""A step attempt's network (plugins-3 D4, D5, D7, D9, D10, D26): `ctx.http`, `ctx.net` and `ctx.connection()`, a
+connection's HTTP and its stream.
 
 - A step opens only a connection its own node names, as a literal of a field its node type marks, in its run's version,
   which publish also recorded in `connection_ids`; of a type the node declares; in the activity's tenant. Anything else
@@ -8,15 +9,18 @@
   anything is sent; the runtime applies it (the plugin never holds it, nor can it change the credentials or the
   origin).
 - Every request through a connection takes a token from each of its quota scopes, or fails `Cooldown` having sent
-  nothing. A provider's `Retry-After` blocks the scopes for every run; a node whose requests may be repeated waits out
-  a short one inside the attempt, any other fails `RateLimited`.
-- A simulated step sends nothing. The attempt's connections are one pool, closed when the attempt ends.
+  nothing; so does every stream opened, from its stream scopes. A provider's `Retry-After` blocks the scopes for every
+  run; a node whose requests may be repeated waits out a short one inside the attempt, any other fails `RateLimited`.
+- A connection's stream is its type's declared URL only; opening it sends nothing a node answers for, and a message
+  counts as a send unless the node marks it a probe. A plugin call opens none.
+- A simulated step sends nothing. The attempt's connections and streams are one pool, closed when the attempt ends.
 - The attempt remembers once a request may have left it (`may_have_sent`): the wrapper then never lets an ambiguous
   node's failure be retried, whatever the failure that ended it."""
 
 import asyncio
 import email.utils
 import json
+import math
 import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -52,6 +56,14 @@ from dewpoint.core.egress.http import (
     ResponseUnreadableError,
 )
 from dewpoint.core.egress.net import GuardedNet, GuardedStream, NetLimits
+from dewpoint.core.egress.ws import (
+    MAX_RECEIVE_WAIT_S,
+    GuardedSocket,
+    GuardedWebsocket,
+    HandshakeRejectedError,
+    StreamLostError,
+    WsLimits,
+)
 from dewpoint.core.models.connections import Connection as ConnectionRow
 from dewpoint.core.models.runs import Run
 from dewpoint.core.models.workflows import WorkflowVersion
@@ -62,6 +74,7 @@ from dewpoint.sdk import (
     ConnectionUnavailable,
     Cooldown,
     EgressRefused,
+    HandshakeRejected,
     InvalidRequest,
     MaybeSent,
     Node,
@@ -74,6 +87,7 @@ from dewpoint.sdk import (
     ResponseUnreadable,
     SideEffect,
     SimulationSendsNothing,
+    StreamLost,
     TlsVerificationFailed,
     TransportError,
 )
@@ -87,8 +101,9 @@ MAX_RETRY_AFTER_S = 3600  # a provider's wait past an hour is read as an hour (a
 # Nodes that may resend inside their attempt: a reconcilable node's retry checks for its effect first (`reconcile()`),
 # which only the engine's next attempt does; an ambiguous node never resends.
 RESENDS = (SideEffect.NONE, SideEffect.IDEMPOTENT, SideEffect.KEYED)
-NOTHING_SENT = (NotSentError, EgressRefusedError, InvalidRequestError, TlsVerificationError)
+NOTHING_SENT = (NotSentError, EgressRefusedError, InvalidRequestError, TlsVerificationError, HandshakeRejectedError)
 SCOPE_WAIT_S = 10.0  # the longest wait for a quota token before `Cooldown` (D9)
+RECEIVE_BEAT_S = 10.0  # a stream's receive heartbeats at least this often while it waits (D26; review L7)
 MIN_SECRET = 4  # the secret index's shortest string (engine 2b spec §3.7)
 URL_PART = 8  # a secret URL's path segments and query values this long are secrets too
 type Remember = Callable[[str, str, Sequence[str]], Awaitable[object]]
@@ -112,6 +127,10 @@ def mapped(error: Exception) -> TransportError:
         return ResponseUnreadable()
     if isinstance(error, CooldownError):
         return Cooldown()
+    if isinstance(error, HandshakeRejectedError):
+        return HandshakeRejected(error.status)
+    if isinstance(error, StreamLostError):
+        return StreamLost()
     return MaybeSent()
 
 
@@ -124,6 +143,8 @@ CORE_ERRORS = (
     RedirectRefusedError,
     ResponseTooLargeError,
     ResponseUnreadableError,
+    HandshakeRejectedError,
+    StreamLostError,
 )
 
 
@@ -220,7 +241,8 @@ class DbConnections:
 
 def secret_strings(secret: Mapping[str, Any], minimum: int = MIN_SECRET) -> list[str]:
     """Every string of a secret the index must know (D5): each value at least `minimum` long, and a secret URL's path
-    and long parts. A plugin call's answer is checked against every non-empty one (`minimum=1`)."""
+    and long parts, decoded and as written. A plugin call's answer is checked against every non-empty one
+    (`minimum=1`)."""
     out: list[str] = []
     for text in secret.values():
         if not isinstance(text, str) or len(text) < minimum:
@@ -231,8 +253,12 @@ def secret_strings(secret: Mapping[str, Any], minimum: int = MIN_SECRET) -> list
                 url = httpx.URL(text)
             except (httpx.InvalidURL, ValueError):
                 continue
-            parts = [url.path, *url.path.split("/"), *(v for _, v in url.params.multi_items())]
-            out.extend(p for p in parts if len(p) >= URL_PART)
+            raw_path, _, raw_query = url.raw_path.decode("ascii", "replace").partition("?")
+            parts = [
+                url.path, *url.path.split("/"), *(v for _, v in url.params.multi_items()),
+                raw_path, *raw_path.split("/"), *(pair.partition("=")[2] for pair in raw_query.split("&")),
+            ]  # fmt: skip
+            out.extend(p for p in parts if len(p) >= URL_PART)  # decoded and as written: an output could repeat either
     return sorted(set(out))
 
 
@@ -267,6 +293,7 @@ class Network:
     http_limits: HttpLimits = field(default_factory=HttpLimits)
     net_limits: NetLimits = field(default_factory=NetLimits)
     types: Mapping[str, WorkerType] = field(default_factory=dict)
+    ws_limits: WsLimits = field(default_factory=WsLimits)
 
     def attempt(
         self,
@@ -300,9 +327,11 @@ class Channel(Protocol):
 
     def beat(self) -> None: ...
 
-    async def send[T](self, call: Callable[[], Awaitable[T]]) -> T: ...
+    async def send[T](self, call: Callable[[], Awaitable[T]], *, counts: bool = True) -> T: ...  # a probe doesn't
 
     def core_http(self) -> GuardedHttp: ...
+
+    def core_ws(self) -> GuardedWebsocket: ...
 
 
 READ_METHODS = frozenset({"GET", "HEAD"})
@@ -310,15 +339,29 @@ READ_METHODS = frozenset({"GET", "HEAD"})
 METHOD_OVERRIDES = frozenset({"x-http-method-override", "x-http-method", "x-method-override"})
 
 
+def _reads_only(method: str, headers: Mapping[str, str] | None, content: bytes | None, json: Any) -> bool:
+    """GET or HEAD, with no body and no header asking a server for another method."""
+    return (
+        isinstance(method, str)
+        and method.upper() in READ_METHODS
+        and content is None
+        and json is None
+        and not any(not isinstance(name, str) or name.lower() in METHOD_OVERRIDES for name in headers or {})
+    )
+
+
+def _check_probe(probe: bool, method: str, headers: Mapping[str, str] | None, content: bytes | None, json: Any) -> None:
+    """A probe (a check before the node's effect) reads only, as a read-only channel's requests do: refused before
+    sending otherwise (the owner's review of the 3b-1 checkpoint: method-override headers too)."""
+    if probe and not _reads_only(method, headers, content, json):
+        raise InvalidRequest()
+
+
 def _check_read(
     channel: Channel, method: str, headers: Mapping[str, str] | None, content: bytes | None, json: Any
 ) -> None:
     """On a read-only channel: GET or HEAD only, with no body and no header asking for another method."""
-    if not channel.read_only:
-        return
-    if not isinstance(method, str) or method.upper() not in READ_METHODS or content is not None or json is not None:
-        raise ReadOnly()
-    if any(not isinstance(name, str) or name.lower() in METHOD_OVERRIDES for name in headers or {}):
+    if channel.read_only and not _reads_only(method, headers, content, json):
         raise ReadOnly()
 
 
@@ -336,13 +379,16 @@ class PlainHttp:
         content: bytes | None = None,
         json: Any = None,
         follow_same_origin: int = 0,
+        probe: bool = False,
     ) -> HttpResponse:
+        _check_probe(probe, method, headers, content, json)
         _check_read(self._attempt, method, headers, content, json)
         return await self._attempt.send(
             lambda: self._attempt.core_http().request(
                 method, url, headers=headers, params=params, content=content, json=json,
                 follow_same_origin=follow_same_origin,
-            )
+            ),
+            counts=not probe,
         )  # fmt: skip
 
 
@@ -396,6 +442,36 @@ class OpenedConnection:
     type: str
     config: Mapping[str, Any]
     http: "ConnectionHttp"
+    ws: "ConnectionWs"
+
+
+async def block_scopes(channel: Channel, scopes: Sequence[Scope], wait_s: float) -> None:
+    """A provider's wait, recorded on `scopes` for every run (D10). Best effort: a block that can't be recorded changes
+    nothing about the request's outcome."""
+    if not scopes or wait_s <= 0:
+        return
+    until = datetime.now(UTC) + timedelta(seconds=min(wait_s, MAX_RETRY_AFTER_S))
+    try:
+        async with channel.network.sessionmaker() as s, s.begin():
+            await tenant_scope(s, channel.tenant_id)
+            await block(s, channel.tenant_id, list(scopes), until)
+    except Exception as e:
+        _log.warning("rate_block_unrecorded", error=type(e).__name__)
+
+
+async def take_tokens(channel: Channel, scopes: Sequence[Scope]) -> None:
+    """A token from each scope, or `Cooldown` (D9); `NotSent` when the budget couldn't be read."""
+    try:
+        await acquire(
+            channel.network.sessionmaker, channel.tenant_id, list(scopes), max_wait_s=channel.scope_wait_s,
+            beat=channel.beat,
+        )  # fmt: skip
+    except CooldownError:
+        raise Cooldown() from None
+    except Exception as e:
+        if unavailable(e):  # the budget couldn't be read: nothing was sent
+            raise NotSent() from None
+        raise
 
 
 class ConnectionHttp:
@@ -408,11 +484,17 @@ class ConnectionHttp:
         base: httpx.URL,
         credentials: Mapping[str, str],
         scopes: Callable[[], Awaitable[list[Scope]]],
+        exact: bool = False,
     ) -> None:
         self._attempt, self._base, self._credentials = attempt, base, dict(credentials)
         self._scopes_of, self._scopes = scopes, list[Scope]()  # read at the first request, with its first token
+        self._exact = exact  # the base is a secret URL (an incoming webhook's): requests go to it exactly
 
     def _target(self, url: str) -> str:
+        if self._exact:
+            if url != "":
+                raise InvalidRequest()
+            return str(self._base)
         try:
             target = self._base.join(url)
         except (httpx.InvalidURL, ValueError, TypeError):
@@ -431,41 +513,41 @@ class ConnectionHttp:
         content: bytes | None = None,
         json: Any = None,
         follow_same_origin: int = 0,
+        probe: bool = False,
     ) -> HttpResponse:
+        _check_probe(probe, method, headers, content, json)
         _check_read(self._attempt, method, headers, content, json)
+        if self._exact and (params is not None or headers or follow_same_origin):
+            raise InvalidRequest()  # a secret URL's request is its URL, with nothing of the node's
         target = self._target(url)
         reserved = {name.lower() for name in self._credentials}
         if any(name.lower() in reserved for name in headers or {}):
             raise InvalidRequest()
         sent_headers = {**(headers or {}), **self._credentials}
         attempt = self._attempt
-        resends = attempt.resends
+        resends = attempt.resends or probe  # a probe is a read: resending it repeats nothing
         waited, retries = 0.0, 0
         while True:
             try:
                 if not self._scopes:
                     self._scopes = await self._scopes_of()
-                await acquire(
-                    attempt.network.sessionmaker, attempt.tenant_id, self._scopes, max_wait_s=attempt.scope_wait_s,
-                    beat=attempt.beat,
-                )  # fmt: skip
-            except CooldownError:
-                raise Cooldown() from None
             except Exception as e:
-                if unavailable(e):  # the budget couldn't be read: nothing was sent
+                if unavailable(e):  # the scope key couldn't be read: nothing was sent
                     raise NotSent() from None
                 raise
+            await take_tokens(attempt, self._scopes)
             answer = await attempt.send(
                 lambda: attempt.core_http().request(
                     method, target, headers=sent_headers, params=params, content=content, json=json,
                     follow_same_origin=follow_same_origin,
-                )
+                ),
+                counts=not probe,
             )  # fmt: skip
             if answer.status_code not in (429, 503):
                 return answer
             wait = retry_after_s(answer.header("retry-after"), datetime.now(UTC))
             if wait is not None:
-                await self._block(wait)
+                await block_scopes(attempt, self._scopes, wait)
             if answer.status_code == 503 and wait is None:
                 return answer  # a plain server error: the node reads it
             pause = max(wait, MIN_WAIT_S) if wait is not None else None
@@ -476,17 +558,74 @@ class ConnectionHttp:
                 continue
             raise RateLimited()
 
-    async def _block(self, wait_s: float) -> None:
-        """Best effort: a block that can't be recorded changes nothing about this request's outcome."""
-        if not self._scopes or wait_s <= 0:
-            return
-        until = datetime.now(UTC) + timedelta(seconds=min(wait_s, MAX_RETRY_AFTER_S))
+
+class _WebSocket:
+    """An open stream as a node holds it: a message counts as a send unless it's a probe."""
+
+    def __init__(self, channel: Channel, stream: GuardedSocket) -> None:
+        self._channel, self._stream = channel, stream
+
+    async def send(self, text: str, *, probe: bool = False) -> None:
+        await self._channel.send(lambda: self._stream.send(text), counts=not probe)
+
+    async def receive(self, timeout_s: float) -> str | None:
+        """Waits in slices of `RECEIVE_BEAT_S`, heartbeating between them, so a cancel reaches the node however long it
+        asked to wait."""
+        if (not isinstance(timeout_s, int | float) or isinstance(timeout_s, bool) or not math.isfinite(timeout_s)
+                or not 0 <= timeout_s <= MAX_RECEIVE_WAIT_S):  # fmt: skip
+            raise InvalidRequest()
+        remaining = float(timeout_s)
+        while True:
+            wait = min(remaining, RECEIVE_BEAT_S)
+            try:
+                text = await self._stream.receive(wait)
+            except CORE_ERRORS as e:
+                raise mapped(e) from None
+            remaining -= wait
+            if text is not None or remaining <= 0:
+                return text
+            self._channel.beat()
+
+    async def close(self) -> None:
+        await self._stream.close()
+
+
+class ConnectionWs:
+    """A connection's stream (D26): its type's declared URL only, its credentials applied by the runtime, a token from
+    each stream scope per opening, a 429's or 503's `Retry-After` blocking them; never on a read-only channel."""
+
+    def __init__(
+        self,
+        channel: Channel,
+        url: str | None,
+        credentials: Mapping[str, str],
+        scopes: Callable[[], Awaitable[list[Scope]]],
+    ) -> None:
+        self._channel, self._url, self._credentials, self._scopes_of = channel, url, dict(credentials), scopes
+
+    async def connect(self) -> _WebSocket:
+        channel = self._channel
+        if channel.read_only:  # a plugin call reads, and only through HTTP
+            raise ReadOnly()
+        if self._url is None:
+            raise InvalidRequest()
         try:
-            async with self._attempt.network.sessionmaker() as s, s.begin():
-                await tenant_scope(s, self._attempt.tenant_id)
-                await block(s, self._attempt.tenant_id, self._scopes, until)
+            scopes = await self._scopes_of()
         except Exception as e:
-            _log.warning("rate_block_unrecorded", error=type(e).__name__)
+            if unavailable(e):
+                raise NotSent() from None
+            raise
+        await take_tokens(channel, scopes)
+        try:
+            stream = await channel.core_ws().open(self._url, self._credentials)
+        except HandshakeRejectedError as e:
+            wait = retry_after_s(e.retry_after, datetime.now(UTC)) if e.status in (429, 503) else None
+            if wait is not None:
+                await block_scopes(channel, scopes, wait)
+            raise HandshakeRejected(e.status) from None
+        except CORE_ERRORS as e:
+            raise mapped(e) from None
+        return _WebSocket(channel, stream)
 
 
 async def credential_key(network: Network, tenant_id: uuid.UUID) -> Callable[[str], str]:
@@ -512,14 +651,20 @@ class Unsealed:
     secret: Mapping[str, Any]
     base: httpx.URL
     credentials: Mapping[str, str]
+    stream_url: str | None = None
+    exact: bool = False  # the base is a secret URL: requests go to it exactly
 
     def opened(self, channel: Channel, mac: Callable[[], Awaitable[Callable[[str], str]]]) -> OpenedConnection:
         async def scopes() -> list[Scope]:
             return self.kind.declared.scopes(self.stored_config, self.secret, await mac())
 
+        async def stream_scopes() -> list[Scope]:
+            return self.kind.declared.stream_scopes(self.stored_config, self.secret, await mac())
+
         return OpenedConnection(
             self.id, self.type, MappingProxyType(dict(self.config)),
-            ConnectionHttp(channel, self.base, self.credentials, scopes),
+            ConnectionHttp(channel, self.base, self.credentials, scopes, exact=self.exact),
+            ConnectionWs(channel, self.stream_url, self.credentials, stream_scopes),
         )  # fmt: skip
 
 
@@ -546,14 +691,18 @@ async def unseal(
         if key_unreadable(e) or unavailable(e):
             raise NotSent() from None  # the keyring didn't answer: nothing was sent, a retry may succeed
         raise
-    url = kind.declared.base_url(stored_config)
+    url = kind.declared.base_url(stored_config, secret)
     try:
         base = httpx.URL(url) if url is not None else None
     except (httpx.InvalidURL, ValueError, TypeError):
         base = None
     if base is None or base.scheme not in ("http", "https") or not base.host:  # plain http still needs an entry
         raise ConnectionUnavailable()
-    return Unsealed(connection_id, stored.type, kind, stored_config, config, secret, base, credentials)
+    stream_url = kind.declared.stream_url(stored_config)
+    return Unsealed(
+        connection_id, stored.type, kind, stored_config, config, secret, base, credentials, stream_url,
+        exact=kind.declared.exact,
+    )  # fmt: skip
 
 
 class AttemptNetwork:
@@ -578,6 +727,7 @@ class AttemptNetwork:
         self._in_flight = 0  # transport calls under way: each may have sent already
         self._http: GuardedHttp | None = None
         self._net: GuardedNet | None = None
+        self._ws: GuardedWebsocket | None = None
         self._named: frozenset[uuid.UUID] | None = None
 
     @property
@@ -598,8 +748,14 @@ class AttemptNetwork:
         may fail first while another's request has already arrived; the second review's finding 1)."""
         return self.may_have_sent or self._in_flight > 0
 
-    async def send[T](self, call: Callable[[], Awaitable[T]]) -> T:
-        """Runs a transport call; unless it failed having sent nothing, a request may now have left the attempt."""
+    async def send[T](self, call: Callable[[], Awaitable[T]], *, counts: bool = True) -> T:
+        """Runs a transport call; unless it failed having sent nothing, a request may now have left the attempt. A
+        probe (`counts=False`, a GET or HEAD the node makes before its effect) leaves the attempt as it was."""
+        if not counts:
+            try:
+                return await call()
+            except CORE_ERRORS as e:
+                raise mapped(e) from None
         self._in_flight += 1
         try:
             result = await call()
@@ -630,6 +786,14 @@ class AttemptNetwork:
                 limits=self.network.net_limits,
             )  # fmt: skip
         return self._net
+
+    def core_ws(self) -> GuardedWebsocket:
+        if self._ws is None:
+            self._ws = GuardedWebsocket(
+                self.network.guard, self.tenant_id, ssl_context=self.network.ssl_context,
+                limits=self.network.ws_limits,
+            )  # fmt: skip
+        return self._ws
 
     @property
     def http(self) -> Any:
@@ -662,6 +826,8 @@ class AttemptNetwork:
         return unsealed.opened(self, self._credential_key)
 
     async def aclose(self) -> None:
+        if self._ws is not None:
+            await self._ws.aclose()
         if self._http is not None:
             await self._http.aclose()
         if self._net is not None:

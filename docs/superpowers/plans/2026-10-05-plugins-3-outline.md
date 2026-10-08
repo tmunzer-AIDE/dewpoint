@@ -97,7 +97,7 @@ in-memory matcher for this attempt only.
 refuses one not naming a tenant connection of that type and fills `connection_ids` (no ABI bump). Deleting a
 connection that an enabled workflow's active closure or a queued request names gets 409 `connection_in_use`.
 
-**D7 The SSRF guard (`core/egress`), used by the worker on every connect and the API at connection creation.** One
+**D7 The SSRF guard (`core/egress`), used by the worker on every connect.** One
 `getaddrinfo` per connect; refused if any answer is non-global (loopback, private, link-local, CGNAT, multicast,
 reserved, unspecified, IPv4 inside mapped/NAT64/6to4/Teredo) unless an allowlist entry covers it. Connect to the
 vetted IP, SNI and certificate checked against the hostname (**V** httpcore 1.0.9
@@ -106,12 +106,16 @@ https only, http only to allowlisted destinations; no redirects unless a node op
 re-vetted; cross-host refused (stricter than §6.7). Connect 5 s, the step timeout overall, 10 MiB streamed (fatal past
 it), CR/LF in headers refused, one pool per attempt. Errors carry the outcome: `EgressRefused` fatal, `NotSent`
 retryable, `MaybeSent` per node policy; logs name the type only. `ctx.net` gives TCP, TLS, UDP and SMTP the same
-vetting and pinning.
+vetting and pinning. An advisory preflight in the API, for tenant-chosen destinations, on creation and on updates that
+supply a host-setting value, is deferred to 4g (editor UI 4 outline; proposed, pending approval); its design is in the
+plugins-3 ledger ("Deferred: the API's preflight on creation and host-setting updates").
 
 **D8 `egress_allowlist`.** An entry is a CIDR, an optional port range, a tenant id (NULL = every tenant, set
-explicitly) and a note; managed by `dewpoint platform egress add|list|remove`, audited; checked at connection creation
-(host resolved and vetted) and on every connect. Tenant-scoped, so one MSP customer's internal range never opens to
-another.
+explicitly) and a note; managed by `dewpoint platform egress add|list|remove`, audited; checked on every connect; that
+check is mandatory. Once the deferred preflight lands (D7), it gives advisory feedback on creation and on updates that
+supply a host-setting value, for tenant-chosen destinations: a refusal is a 422; `unresolved`, `timeout` and `busy`
+save the connection with a "not checked" warning, without a completed check. Tenant-scoped, so one MSP customer's
+internal range never opens to another.
 
 **D9 Rate buckets, keyed by the provider's quota scope.** `rate_buckets` (tenant, scope key, capacity, refill/s,
 tokens, `refilled_at`, `blocked_until`); a request takes one token from every bucket its connection type names, in one
@@ -144,8 +148,9 @@ field) needs ENGINE_ABI 7, new golden histories and republishing every workflow,
 **D11 Connection types from manifests.** A type declares key, label, config schema, secret schema (secret fields
 `x-sensitive`), auth (D4), host rule and whether it has `verify()`. Hosts: Mist its 12 clouds (**V** OAS `servers`)
 and their stream hosts (D26); Google Chat `chat.googleapis.com` (**V**); Slack and Teams free under D7 until 3c
-verifies a pattern; the rest free under D7 and D8. The API validates by schema only; an unknown type is refused until
-`plugins sync` ran.
+verifies a pattern; the rest free under D7 and D8. The API validates by the declaration (schemas, a secret URL's
+pattern); it does not vet destinations (the deferred preflight, D7); an unknown type is refused until `plugins sync`
+ran.
 
 **D12 SDK 0.2.0, additive.** `ctx.connection()`, `ctx.http`, `ctx.net`, `ctx.ws` (D26), `Node.options()`,
 connection-type `verify()`; manifest keys `connection_types`, `triggers`, `icon` and `options` fields, each emitted

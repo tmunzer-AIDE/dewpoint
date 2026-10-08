@@ -204,7 +204,7 @@ async def test_a_worker_set_to_makes_its_build_current_once_it_polls(
         return dev_env.client
 
     monkeypatch.setattr(main.Client, "connect", connect)
-    monkeypatch.setattr(main, "make_engine", lambda url: Engine())
+    monkeypatch.setattr(main, "make_engine", lambda url, **pool: Engine())
     monkeypatch.setattr(main, "make_sessionmaker", lambda engine: None)
     monkeypatch.setattr(main, "verify_environment", recorded)  # the check itself: tests/apps/test_environment.py
     monkeypatch.setattr(main, "reporter", lambda *args: unrecorded)  # the record itself: tests/core/platform

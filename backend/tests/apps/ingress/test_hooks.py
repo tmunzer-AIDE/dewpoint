@@ -58,9 +58,11 @@ async def test_every_refusal_before_recording_is_the_same_bodiless_401(make_app,
     _, endpoint_id = await hmac_endpoint(owner_sessionmaker)
     _, disabled = await hmac_endpoint(owner_sessionmaker, enabled=False)
     erasing, of_erasing = await hmac_endpoint(owner_sessionmaker)
+    erased, of_erased = await hmac_endpoint(owner_sessionmaker)  # a retained tombstone (2b-4a M4)
     _, fenced = await hmac_endpoint(owner_sessionmaker, allowlist=["203.0.113.0/24"])
     async with owner_sessionmaker() as s, s.begin():
         await s.execute(text("update tenants set status = 'erasing' where id = :t"), {"t": erasing})
+        await s.execute(text("update tenants set status = 'erased' where id = :t"), {"t": erased})
     app = make_app()
     stale = signed(BODY, now=app.state.clock.now - 301)
     refusals = {
@@ -68,6 +70,7 @@ async def test_every_refusal_before_recording_is_the_same_bodiless_401(make_app,
         "not an id": ("/hooks/not-a-uuid", signed(BODY)),
         "disabled endpoint": (f"/hooks/{disabled}", signed(BODY)),
         "erasing tenant": (f"/hooks/{of_erasing}", signed(BODY)),
+        "erased tenant": (f"/hooks/{of_erased}", signed(BODY)),
         "disallowed address": (f"/hooks/{fenced}", signed(BODY)),
         "wrong signature": (f"/hooks/{endpoint_id}", signed(BODY, secret=b"another")),
         "stale timestamp": (f"/hooks/{endpoint_id}", stale),

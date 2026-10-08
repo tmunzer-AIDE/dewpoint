@@ -142,12 +142,13 @@ async def test_with_the_gate_off_nothing_is_matched(ready, owner_sessionmaker, d
     assert await requests_of(owner_sessionmaker, event_id) == []
 
 
+@pytest.mark.parametrize("status", ["erasing", "erased"])  # erased: a retained tombstone (2b-4a M4)
 async def test_an_erasing_tenants_events_wait(dev, owner_sessionmaker, ingress_sessionmaker,
-                                              dispatch_sessionmaker) -> None:  # fmt: skip
+                                              dispatch_sessionmaker, status: str) -> None:  # fmt: skip
     await bind(owner_sessionmaker, dev)
     [event_id] = await send(ingress_sessionmaker, dev, ALARM)
     async with owner_sessionmaker() as s, s.begin():
-        await s.execute(text("update tenants set status = 'erasing' where id = :t"), {"t": dev.tenant_id})
+        await s.execute(text("update tenants set status = :s where id = :t"), {"s": status, "t": dev.tenant_id})
     assert await matched(dispatch_sessionmaker, dev, event_id) == "tenant_erasing"
     assert (await event_state(owner_sessionmaker, event_id))["status"] == "pending"
 

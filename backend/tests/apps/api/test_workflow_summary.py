@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from sqlalchemy import event, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
 
 from dewpoint.engine.graph.model import graph_hash, parse_graph
 from tests.apps.api.helpers import session_client
@@ -86,17 +87,16 @@ async def test_another_tenants_runs_never_count(app, owner_sessionmaker, api_set
     _, otid = await session_client(app, owner_sessionmaker, api_settings, "editor")
     async with c:
         wid, vid = await published(c, tid)
-        # A row in the other tenant claiming this tenant's workflow, with that workflow's own version: `runs_version_fk`
-        # holds (the version is the workflow's) and has no tenant column, so only row-level security and the
-        # statements' tenant filter keep it out.
-        await add_run(owner_sessionmaker, otid, wid, vid, status="failed")
+        # A row in the other tenant claiming this tenant's workflow, with that workflow's own version, can't be
+        # written at all: since main's 0035 (2b-4a) `runs_version_fk` names the tenant too (the owner's review of #60;
+        # ledger M37). Before it, only row-level security and the statements' tenant filter kept such a row out; that
+        # filter is held by `test_the_statements_filter_by_tenant_themselves`.
+        with pytest.raises(IntegrityError, match="runs_version_fk"):
+            await add_run(owner_sessionmaker, otid, wid, vid, status="failed")
         row = (await c.get(f"/api/v1/t/{tid}/workflows/{wid}")).json()
         listed = (await c.get(f"/api/v1/t/{tid}/workflows")).json()
     assert row["last_run"] is None and row["runs_24h"] == {"live": 0, "simulate": 0}
     assert row["needs_attention"] == [] and [w["last_run"] for w in listed] == [None]
-    async with owner_sessionmaker() as s:  # the row is there, under the other tenant
-        found = await s.execute(text("select tenant_id from runs where workflow_id = :w"), {"w": wid})
-        assert [r.tenant_id for r in found] == [otid]
 
 
 async def test_the_statements_filter_by_tenant_themselves(app, owner_sessionmaker, api_settings) -> None:
@@ -263,14 +263,16 @@ async def test_the_last_runs_read_answers_as_the_statement_it_replaced(
     app, owner_sessionmaker, api_sessionmaker, api_settings
 ) -> None:
     """Both modes of one workflow, a quiet workflow, equal timestamps (the greater id wins), a sub-run newer than its
-    root, and another tenant's run of the same workflow: the LATERAL read and the DISTINCT ON reference agree whole."""
+    root, and another tenant's newer run (of its own workflow: since main's 0035 a run can't name another tenant's,
+    ledger M37): the LATERAL read and the DISTINCT ON reference agree whole."""
     from dewpoint.apps import workflow_summary
     from dewpoint.core.db import tenant_scope
 
     c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
-    _, otid = await session_client(app, owner_sessionmaker, api_settings, "editor")
-    async with c:
+    other, otid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    async with c, other:
         (a, av), (b, bv), (quiet, _) = [await published(c, tid) for _ in range(3)]
+        theirs, theirs_v = await published(other, otid)
     t0 = datetime.now(UTC) - timedelta(hours=1)
     low, high = sorted((uuid.uuid4(), uuid.uuid4()))
     await put_run(owner_sessionmaker, tid, a, av, mode="live", status="failed", at=t0, rid=low)
@@ -279,7 +281,7 @@ async def test_the_last_runs_read_answers_as_the_statement_it_replaced(
     await put_run(owner_sessionmaker, tid, a, av, mode="simulate", status="cancelled", at=t0 - timedelta(minutes=1))
     root = await put_run(owner_sessionmaker, tid, b, bv, mode="live", status="succeeded", at=t0 - timedelta(minutes=9))
     await put_run(owner_sessionmaker, tid, b, bv, mode="live", status="failed", at=t0, parent=root)
-    await put_run(owner_sessionmaker, otid, b, bv, mode="simulate", status="failed", at=t0)
+    await put_run(owner_sessionmaker, otid, theirs, theirs_v, mode="simulate", status="failed", at=t0)
     ids = [uuid.UUID(w) for w in (a, b, quiet)]
     async with api_sessionmaker() as s, s.begin():
         await tenant_scope(s, tid)

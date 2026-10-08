@@ -1029,7 +1029,7 @@
       },
       "EndpointPatch": {
         "additionalProperties": false,
-        "description": "Only the fields given change, never an endpoint's identity (how it authenticates, where its ids are).",
+        "description": "Only the fields given change, never an endpoint's identity (how it authenticates, where its events and their ids\nare).",
         "properties": {
           "allowlist": {
             "anyOf": [
@@ -1068,17 +1068,6 @@
               }
             ],
             "title": "Enabled"
-          },
-          "events_pointer": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Events Pointer"
           },
           "name": {
             "anyOf": [
@@ -1132,6 +1121,21 @@
           }
         },
         "title": "EndpointPatch",
+        "type": "object"
+      },
+      "ErasureStartIn": {
+        "properties": {
+          "confirm": {
+            "maxLength": 63,
+            "minLength": 1,
+            "title": "Confirm",
+            "type": "string"
+          }
+        },
+        "required": [
+          "confirm"
+        ],
+        "title": "ErasureStartIn",
         "type": "object"
       },
       "ExpressionOut": {
@@ -1975,6 +1979,22 @@
         "title": "RerunIn",
         "type": "object"
       },
+      "RetentionIn": {
+        "additionalProperties": false,
+        "properties": {
+          "runs_days": {
+            "maximum": 365.0,
+            "minimum": 1.0,
+            "title": "Runs Days",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "runs_days"
+        ],
+        "title": "RetentionIn",
+        "type": "object"
+      },
       "RetryOut": {
         "additionalProperties": false,
         "properties": {
@@ -2488,6 +2508,85 @@
           "otpauth_uri"
         ],
         "title": "TotpEnrollOut",
+        "type": "object"
+      },
+      "TriggerEndpointOut": {
+        "additionalProperties": false,
+        "properties": {
+          "auth": {
+            "enum": [
+              "bearer",
+              "hmac"
+            ],
+            "title": "Auth",
+            "type": "string"
+          },
+          "events_pointer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Events Pointer"
+          },
+          "id_source": {
+            "const": "none",
+            "title": "Id Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "auth",
+          "events_pointer",
+          "id_source"
+        ],
+        "title": "TriggerEndpointOut",
+        "type": "object"
+      },
+      "TriggerTypeOut": {
+        "additionalProperties": false,
+        "description": "A trigger a synced plugin declares (plugins-3 D17): how its webhook endpoint is set up, where an event names its\ntopic, and each topic's event schema, which types a workflow's trigger.",
+        "properties": {
+          "endpoint": {
+            "$ref": "#/components/schemas/TriggerEndpointOut"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "plugin": {
+            "title": "Plugin",
+            "type": "string"
+          },
+          "topic_pointer": {
+            "title": "Topic Pointer",
+            "type": "string"
+          },
+          "topics": {
+            "additionalProperties": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Topics",
+            "type": "object"
+          }
+        },
+        "required": [
+          "plugin",
+          "key",
+          "label",
+          "endpoint",
+          "topic_pointer",
+          "topics"
+        ],
+        "title": "TriggerTypeOut",
         "type": "object"
       },
       "UserIn": {
@@ -3356,6 +3455,194 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/v1/admin/tenants/{tenant_id}/erasure": {
+      "get": {
+        "operationId": "shown_api_v1_admin_tenants__tenant_id__erasure_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Shown Api V1 Admin Tenants  Tenant Id  Erasure Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Shown",
+        "tags": [
+          "admin"
+        ]
+      },
+      "post": {
+        "operationId": "start_api_v1_admin_tenants__tenant_id__erasure_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ErasureStartIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Start Api V1 Admin Tenants  Tenant Id  Erasure Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/tenants/{tenant_id}/erasure/retry": {
+      "post": {
+        "operationId": "retry_api_v1_admin_tenants__tenant_id__erasure_retry_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Retry Api V1 Admin Tenants  Tenant Id  Erasure Retry Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Retry",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/tenants/{tenant_id}/erasure/stop": {
+      "post": {
+        "operationId": "stop_api_v1_admin_tenants__tenant_id__erasure_stop_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Stop Api V1 Admin Tenants  Tenant Id  Erasure Stop Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stop",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/api/v1/admin/users": {
       "post": {
         "description": "Create a local account. The new user must enroll MFA at first sign-in.",
@@ -4010,7 +4297,7 @@
     },
     "/api/v1/node-types": {
       "get": {
-        "description": "The editor's palette: node types that new versions may use (active) or still carry (deprecated).",
+        "description": "The editor's palette: node types that new versions may use (active) or still carry (deprecated). A raw Response\nskips FastAPI's response model, so each row is checked against NodeTypeOut here, as /trigger-types does (the owner's\nreview of #60), off the event loop as the compression is: the catalog runs to megabytes.",
         "operationId": "node_types_api_v1_node_types_get",
         "responses": {
           "200": {
@@ -4949,6 +5236,108 @@
         ]
       }
     },
+    "/api/v1/t/{tenant_id}/retention": {
+      "get": {
+        "operationId": "get_retention_api_v1_t__tenant_id__retention_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "integer"
+                  },
+                  "title": "Response Get Retention Api V1 T  Tenant Id  Retention Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Retention",
+        "tags": [
+          "retention"
+        ]
+      },
+      "put": {
+        "operationId": "set_retention_api_v1_t__tenant_id__retention_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RetentionIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "integer"
+                  },
+                  "title": "Response Set Retention Api V1 T  Tenant Id  Retention Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Retention",
+        "tags": [
+          "retention"
+        ]
+      }
+    },
     "/api/v1/t/{tenant_id}/runs": {
       "get": {
         "description": "Requests and runs, newest first by `(queued_at, id)`. The next page: `before` and `before_id`, the last item's\n`queued_at` and `id`, always together: items can be queued in the same instant, so the time alone would skip\nsome.",
@@ -5063,7 +5452,7 @@
     },
     "/api/v1/t/{tenant_id}/runs/{request_id}/cancel": {
       "post": {
-        "description": "200, `cancelled`: it was queued. 202, `requested`: recorded, for the dispatcher to apply when its start resolves\nor to send to Temporal. 409 `run_ended`: nothing left to cancel.",
+        "description": "200, `cancelled`: it was queued. 202, `requested`: recorded, for the dispatcher to apply when its start resolves\nor to send to Temporal. 409 `run_ended`: nothing left to cancel. 404 past the retention cutoff (\u00a710.1), which only\nan ended request can pass: there is nothing to cancel.",
         "operationId": "cancel_run_api_v1_t__tenant_id__runs__request_id__cancel_post",
         "parameters": [
           {
@@ -5119,7 +5508,7 @@
     },
     "/api/v1/t/{tenant_id}/runs/{request_id}/rerun": {
       "post": {
-        "description": "A new admission (source `rerun`) on the workflow's active version, with new input, or else the old request's\ncomplete input, validated and claimed again under the new request: no old handle is reused. The key is checked\nfirst: an exact retry returns the request it admitted, whatever retention has removed since; another request under\nthe key is a 409. 410 `input_not_retained` when the original input can't be rebuilt: a run from before 2b-2, a\nrefused request, an envelope or a claim retention has removed. New input needs none of it.",
+        "description": "A new admission (source `rerun`) on the workflow's active version, with new input, or else the old request's\ncomplete input, validated and claimed again under the new request: no old handle is reused. The key is checked\nfirst: an exact retry returns the request it admitted, whatever retention has removed of the old one's input, while\nthat request is within its own cutoff (410 `request_not_retained` past it); another request under the key is a 409.\n410 `input_not_retained` when the original input can't be rebuilt: a run from before 2b-2, a refused request, an\nenvelope or a claim retention has removed, or a request past the retention cutoff, whatever is still stored (\u00a710.1).\nNew input needs none of it.",
         "operationId": "rerun_api_v1_t__tenant_id__runs__request_id__rerun_post",
         "parameters": [
           {
@@ -5208,7 +5597,7 @@
     },
     "/api/v1/t/{tenant_id}/runs/{run_id}": {
       "get": {
-        "description": "A run with its steps and sub-runs, or a request that hasn't started as itself; with its CSV record (engine 2b\nspec \u00a78.1), when it took a CSV: the mapping, the file's headers, the row count and the skipped rows.",
+        "description": "A run with its steps and sub-runs, or a request that hasn't started as itself; with its CSV record (engine 2b\nspec \u00a78.1), when it took a CSV: the mapping, the file's headers, the row count and the skipped rows. A run whose\ntree, or a request that, passed the retention cutoff isn't found (\u00a710.1).",
         "operationId": "get_run_api_v1_t__tenant_id__runs__run_id__get",
         "parameters": [
           {
@@ -6791,7 +7180,7 @@
     },
     "/api/v1/t/{tenant_id}/workflows/{workflow_id}/runs": {
       "post": {
-        "description": "202 with the request, queued for the dispatcher (or as an exact retry finds it now).",
+        "description": "202 with the request, queued for the dispatcher (or as an exact retry finds it now, within the retention cutoff:\n410 `request_not_retained` past it).",
         "operationId": "start_run_api_v1_t__tenant_id__workflows__workflow_id__runs_post",
         "parameters": [
           {
@@ -7279,6 +7668,32 @@
         "summary": "Create",
         "tags": [
           "tenants"
+        ]
+      }
+    },
+    "/api/v1/trigger-types": {
+      "get": {
+        "description": "The triggers the synced plugins declare (plugins-3 D17): an endpoint for one is set up as it says, a binding\nfilters on its topic pointer, and a topic's schema types a workflow's trigger.",
+        "operationId": "trigger_types_api_v1_trigger_types_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/TriggerTypeOut"
+                  },
+                  "title": "Response Trigger Types Api V1 Trigger Types Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Trigger Types",
+        "tags": [
+          "node-types"
         ]
       }
     },

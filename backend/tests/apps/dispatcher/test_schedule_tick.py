@@ -120,10 +120,13 @@ async def test_an_input_the_active_version_no_longer_takes_is_a_refused_request(
     assert await ticked(dispatch_sessionmaker, ctx, schedule_id) == "refused:input_invalid"
 
 
-async def test_an_erasing_tenants_tick_is_an_audited_skip(ready, owner_sessionmaker, dispatch_sessionmaker) -> None:
+@pytest.mark.parametrize("status", ["erasing", "erased"])  # erased: a retained tombstone (2b-4a M4)
+async def test_an_erasing_tenants_tick_is_an_audited_skip(
+    ready, owner_sessionmaker, dispatch_sessionmaker, status: str
+) -> None:
     ctx, _, schedule_id = ready
     async with owner_sessionmaker() as s, s.begin():
-        await s.execute(text("update tenants set status = 'erasing' where id = :t"), {"t": ctx.tenant_id})
+        await s.execute(text("update tenants set status = :s where id = :t"), {"s": status, "t": ctx.tenant_id})
     assert await ticked(dispatch_sessionmaker, ctx, schedule_id) == "skipped:tenant_erasing"
     assert await count(owner_sessionmaker, "run_requests") == 0
     async with owner_sessionmaker() as s:

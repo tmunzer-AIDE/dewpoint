@@ -70,6 +70,21 @@ class ResponseUnreadable(TransportError):
     code, message = "response_unreadable", "The answer came in a form the step can't read."
 
 
+class HandshakeRejected(TransportError):
+    """A stream's opening handshake answered with `status` (not 101; a redirect is never followed). Only the handshake
+    was sent; a 429's `Retry-After` has blocked the stream's quota scopes already."""
+
+    code, message = "handshake_rejected", "The stream's handshake was refused."
+
+    def __init__(self, status: int) -> None:
+        super().__init__()
+        self.status = status
+
+
+class StreamLost(TransportError):
+    code, message = "stream_lost", "The stream closed or broke."
+
+
 class HttpResponse(Protocol):
     @property
     def status_code(self) -> int: ...
@@ -96,9 +111,16 @@ class HttpClient(Protocol):
         content: bytes | None = None,
         json: Any = None,
         follow_same_origin: int = 0,
+        probe: bool = False,
     ) -> HttpResponse:
         """`follow_same_origin`: how many redirects to the same origin to follow (GET and HEAD only); none by
-        default, and never to another origin."""
+        default, and never to another origin.
+
+        `probe`: a read the node makes before its effect, to check it may act (a scope check): GET or HEAD without a
+        body, else refused (`InvalidRequest`) before anything is sent. It doesn't count as a send, so an ambiguous
+        node whose later request fails having sent nothing is still retried; it may be resent within the attempt
+        after a short `Retry-After`. Its own failures are the node's to classify: one after which it may have arrived
+        changes nothing, being a read."""
         ...
 
 
@@ -116,6 +138,33 @@ class Net(Protocol):
     async def send_udp(self, host: str, port: int, data: bytes) -> None: ...
 
 
+class WebSocket(Protocol):
+    """One open stream (plugins-3 D26): text messages, each at most 1 MiB, at most 10 MiB received an attempt."""
+
+    async def send(self, text: str, *, probe: bool = False) -> None:
+        """A text message. It counts as a send, as an HTTP request does, unless `probe`: a message that changes nothing
+        (a subscription), which leaves the attempt as it was. `StreamLost` once the stream is gone."""
+        ...
+
+    async def receive(self, timeout_s: float) -> str | None:
+        """The next text message, or None when none came within `timeout_s` (nothing is lost: the next call reads it).
+        `StreamLost` once the stream closed or broke; `ResponseTooLarge` past a cap; `ResponseUnreadable` for a
+        binary message."""
+        ...
+
+    async def close(self) -> None: ...
+
+
+class ConnectionWs(Protocol):
+    async def connect(self) -> WebSocket:
+        """The connection type's stream (its `StreamEndpoint`), opened with its credentials, once a token is taken from
+        each of its stream quota scopes (`Cooldown` otherwise). Opening sends nothing a node answers for: failures are
+        `HandshakeRejected` (the status), `NotSent`, `EgressRefused`, `TlsVerificationFailed`, `Cooldown`; a type
+        without a stream, a simulated step and a plugin call are refused (`InvalidRequest`, `SimulationSendsNothing`,
+        `ReadOnly`)."""
+        ...
+
+
 class Connection(Protocol):
     """One of the tenant's connections, opened for this step. Its `http` applies the connection's credentials and
     resolves relative URLs against the connection's base; the secret itself is never exposed."""
@@ -131,3 +180,6 @@ class Connection(Protocol):
 
     @property
     def http(self) -> HttpClient: ...
+
+    @property
+    def ws(self) -> ConnectionWs: ...

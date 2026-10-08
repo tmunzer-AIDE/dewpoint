@@ -3,6 +3,9 @@
 
 import asyncio
 import dataclasses
+import gc
+import logging
+import types
 import uuid
 from datetime import timedelta
 from typing import Any
@@ -358,6 +361,38 @@ async def test_a_worker_without_the_run_in_its_cache_replays_it_and_carries_on(e
     async with workers(env.client, store, cache=0):
         result = await run(env.client, store, g, TRIGGER)
     assert result.outputs == {"doubled": [2, 4, 6], "side": "yes"}
+
+
+def _left_suspended(o: object) -> str | None:
+    """The run a `RunGraph.run` coroutine still suspended belongs to."""
+    if isinstance(o, types.CoroutineType) and o.cr_frame is not None and o.cr_code.co_qualname == "RunGraph.run":
+        return getattr(o.cr_frame.f_locals.get("self"), "run_id", None)
+    return None
+
+
+async def test_a_run_its_worker_dropped_is_closed_without_running_anything(
+    env: WorkflowEnvironment, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A worker that stops while a run waits leaves the run's coroutines suspended, not evicted, and the garbage
+    collector closes them later, in whatever thread it runs: inside another workflow's activation as likely as not.
+    Closing one ran its error path there: it logged `run_internal_error` under that workflow's ids (CI run 37607439980,
+    a loop batch's) and scheduled its last projection in that workflow. Closed, it runs nothing."""
+    store = MemoryStore()
+    g = graph().node("d", "flow.delay@1", {"duration_s": 3600})
+    gc.disable()  # its coroutine is closed below, not whenever the collector gets to it
+    try:
+        async with workers(env.client, store):
+            handle = await start(env.client, store, g, TRIGGER)
+            async for event in handle.fetch_history_events(wait_new_event=True):  # it waits in its drive loop
+                if event.event_type == EventType.EVENT_TYPE_TIMER_STARTED:
+                    break
+        [left] = [o for o in gc.get_objects() if _left_suspended(o) == run_id_of(handle)]
+        caplog.set_level(logging.DEBUG)
+        left.close()  # as collecting it does: what it ran outside a workflow would raise here
+    finally:
+        gc.enable()
+    await handle.terminate()
+    assert not [r.getMessage() for r in caplog.records if r.name == "temporalio.workflow"]
 
 
 async def test_a_timeout_after_an_ambiguous_send_is_never_retried(own_env: WorkflowEnvironment) -> None:

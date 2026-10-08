@@ -24,6 +24,7 @@ dependencies = [
   "protobuf>=7.35.1,<8",
   "temporalio==1.33.0",
   "ahocorasick-rs>=0.22",
+  "websockets>=17.1,<18",
 ]
 
 [project.scripts]
@@ -31,7 +32,11 @@ dewpoint = "dewpoint.apps.cli.main:app"
 
 [project.entry-points."dewpoint.plugins"]
 flow = "dewpoint.plugins.flow:PLUGIN"
+google_chat = "dewpoint.plugins.google_chat:PLUGIN"
 mist = "dewpoint.plugins.mist:PLUGIN"
+slack = "dewpoint.plugins.slack:PLUGIN"
+teams = "dewpoint.plugins.teams:PLUGIN"
+webhook = "dewpoint.plugins.webhook:PLUGIN"
 
 [dependency-groups]
 dev = [

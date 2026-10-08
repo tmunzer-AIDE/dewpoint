@@ -4,6 +4,61 @@ The outline (`docs/plugins-3-outline`, revision 5, 02b7e62) was approved as reco
 (D1–D28). This file records, per slice, the tasks, the mid-slice rulings ("Ruling: what - why - cost if wrong") the
 owner rules on at the checkpoint, and open questions.
 
+## Deferred: the API's preflight on creation and host-setting updates (D7, D8)
+
+Recorded 2026-10-08 on the owner's word, from a check of `origin/main` f0e7bf55 and five review rounds. Nothing is
+built; its owning slice, 4g in the editor UI 4 outline (`2026-10-05-editor-ui-4-outline.md`), is proposed, pending
+approval.
+
+**The gap.** The API's connection create and update (`core/connections/service.py`) run only the type's declared checks;
+only the worker builds the guard (`apps/worker/main.py`). No 3a-1 or 3a-2 task or ruling planned or dropped vetting at
+creation. An API client can create a connection to a destination the guard refuses (3c-1, unmerged, adds a generic
+webhook whose pattern admits `localhost`, private and link-local addresses): it is saved and fails, fatally
+(`EgressRefused`), at its first connect. Deferring is acceptable because the worker's check on every connect is
+mandatory and authoritative, not because nobody can reach the gap. Migration 0041 already grants `dewpoint_api` a
+tenant-scoped SELECT on `egress_allowlist`; it stays for the preflight.
+
+**Scope.** Destinations a tenant chooses: a `url_field` config value and a secret URL (`secret_url`); host maps fixed by
+the plugin (Mist) get no lookup. It runs on creation and on any update that supplies a host-setting value: a secret-only
+update of a secret URL, a changed `url_field` with or without a new secret, on a type with or without secret fields. A
+name-only edit does no lookup.
+
+**Design.**
+1. First transaction: authorization, the declaration and the body; the URL parsed and its host's shape checked (a
+   malformed host is a 422, before any DNS); the declaration's hash kept; then committed, so no pooled connection,
+   lifecycle lock or row lock is held during the lookup.
+2. The lookup, outside any transaction (a literal address needs none): `socket.getaddrinfo` on a dedicated executor of N
+   threads, never `loop.getaddrinfo`, which under uvloop (the API's loop) runs on libuv's shared pool, the one asyncpg's
+   connects use. N permits, each released only when its lookup's thread finishes, not when the caller times out; with no
+   free permit the lookup is skipped at once (`busy`), never queued. The request waits up to a timeout.
+3. Write transaction, in a new session (a repeat query in the first session returns its loaded objects unrefreshed): the
+   whole sign-in chain again from the request's cookie and CSRF header (session validity and revocation, the active
+   state, the user's `is_active`), then `require()`'s checks (the lifecycle lock, membership, role, the passkey
+   requirement, the tenant's status) and the tenant scope, through one function shared with the dependencies, which keep
+   their order and errors; the connection locked and reloaded (404 when deleted); the declaration's hash compared (409
+   when it changed); `secret_required` applied against the locked row; the tenant's and every tenant's allowlist entries
+   read, and the already-resolved addresses checked with the worker's port (explicit, or the scheme's default) and
+   plaintext rule (`http` needs an entry), through a verdict function split out of `Guard.vet` so the worker and the API
+   share it; then the write and its audit entry.
+
+**Outcomes.** A refusal is a 422 `destination_refused` naming the field only (never the host, an address or the reason),
+with nothing written. `unresolved` (a DNS failure or no answer), `timeout` and `busy` save the connection with a "not
+checked" warning, recorded in its audit entry: an advisory preflight, not a completed check. An allowlist read failure
+or any other error is a server error, never an acceptance. The web form shows the warnings (4g); a response field alone
+is not feedback.
+
+**Tests** (a fake resolver, no real DNS; counted in work units, not time): secret-only updates; a `url_field` change on
+a type without secret fields; name-only edits and Mist doing no lookup (resolver calls counted); `http` refused without
+an entry and accepted with one; explicit and default ports against an entry's range; mixed public and private answers;
+tenant and every-tenant entries, another tenant's not honoured; a refusal leaving the row unchanged with no audit entry;
+`unresolved`, `timeout` and `busy` warned, a malformed host and an allowlist failure not; during a blocked lookup, the
+pool's checked-out count at its baseline, an exclusive lifecycle lock takeable and the row lockable `NOWAIT`; an edit, a
+deletion and a declaration change between the transactions; a logout, a token rotation, a disabled account and a rotated
+CSRF token during the lookup; repeated timeouts while lookup threads are still blocked (the next request `busy` at once,
+the permits back when the threads finish).
+
+**Open for 4g's rulings:** N and the timeout (proposed: about 4 lookups and 2 s); the warnings' shape in the response.
+
 ## 3a-1 Egress and connections at run time
 
 Branch `feat/plugins-3a1` from `origin/main` 6482c53.
@@ -339,3 +394,937 @@ branch; `.env.example` held placeholders in all its revisions); this settles the
 then ran locally at `0812e14` with CI's versions (CLI 2.27.1, `python-queries` 1.8.11, `javascript-queries` 2.4.6) and
 query filter, over the whole tree: no findings in Python (45 queries) or JavaScript/TypeScript (89 queries). The
 `codeql` workflow is still disabled on GitHub.
+
+## 3b-1 Mist REST
+
+Branch `feat/plugins-3b1` from `origin/main` f65c6f9 (3a-2's merge), started 2026-10-06 on the owner's word. No
+migration expected: connection types, nodes and triggers all live in synced manifests.
+
+Tasks (test-first, in order):
+1. The OAS as data (D2): `mist.openapi.json` at 0613a22 vendored gzipped, its SHA-256 checked when it's read, a
+   `NOTICE` entry; a test pins each curated operation's method and path.
+2. The operation-policy map (D28, D24, D14): one generated data file with an entry per OAS operation (state, the nodes
+   that may reach it, capability, scope class, side effect and its evidence), made by a script from the OAS and the
+   reviewed table; a test regenerates it and refuses drift, and checks the invariants (deprecated and always-refused
+   routes denied, held operations reach nothing).
+3. SDK 0.4.0: models declared by a JSON Schema (validated by it, reporting it as their schema), for nodes generated
+   from data; a plugin's `triggers` (D12, D17), emitted only when set; the catalog checks both as data.
+4. The Mist client (D1, D16): requests through the connection's HTTP, path values checked and encoded, the org forced
+   to the connection's, a site checked to belong to it; status codes mapped; lists paged by `X-Page-*` headers,
+   searches by the body's `next` kept on the connection's host and path, under a page cap.
+5. One node type per curated operation (D23, D16, D15): config (connection, path values, query, body, a page cap,
+   an update's mode) and output (the 2xx answer) schemas from the OAS; side effects from the map; nested update
+   (merge by default, replace); delete's 404 on a retry. The manifest's size measured.
+6. Simulate (D13): the OAS's 2xx example when it validates, else a value made from the schema; every node checked.
+7. Options: the site picker and the org-scope resources' pickers.
+8. Any endpoint (D14): `mist.api.read` and `mist.api.write`, only what the map allows them, inside the connection's
+   scope, always-refused routes refused whatever the map says.
+9. The Mist webhook trigger (D17): the plugin declares its 30 topics' envelope schemas; the API lists trigger types;
+   an endpoint records the whole envelope (no events pointer, `id_source: none`); bindings filter on `/topic`.
+10. Proof: a curated read and a merge update through RunGraph against a local Mist fake, and a webhook delivery
+    through ingress into a run whose trigger is typed by its topic.
+
+Rulings:
+- Ruling: the branch starts from `origin/main` f65c6f9 (3a-2 merged) - as for 3a-2 - cost if wrong: one rebase.
+- Ruling: the OAS is taken from a local clone of `mistsys/mist_openapi` with `git show 0613a22:mist.openapi.json`
+  (the commit the appendix was generated from; that clone's working tree has local edits, which are not used), so
+  nothing is downloaded; SHA-256 of the file `22f55432535ab38f6c0539392a729b8fd515a9ccae9df693fbd4ff23d40b8fac`,
+  3,630,900 bytes; its `LICENSE` (MIT) comes from the same commit - cost if wrong: none (the hash pins the content).
+- Ruling: the SDK becomes 0.4.0 - 3b-1 adds schema-declared models and triggers - cost if wrong: none (the catalog
+  checks the major only).
+- Ruling (D23 measurement, before generation): the 262 curated operations' schemas, each with its own `$defs`, come to
+  6.5 MB of JSON (1.1 MB gzipped), 3.0 MB (0.3 MB gzipped) without `description` and `examples`; one schema reaches
+  341 KB (site settings), and device schemas about 300 KB. The palette (`GET /node-types`) returns every type's
+  schemas in one answer. Measured again on the generated manifests (task 5) before ruling on a split.
+- Ruling: every allowed operation is reachable by its curated node and by the any-endpoint node of its method
+  (`mist.api.read` for a GET, `mist.api.write` otherwise, always `ambiguous`) - D14 lets the generic nodes reach only
+  what the map allows, and an idempotent operation through `mist.api.write` is only retried less - cost if wrong:
+  none for safety; such a write never retries.
+- Ruling: the always-refused routes (D14) are read broadly: the roots `msps`, `self`, `login`, `logout`, `register`,
+  `recover`, `invite`, `installer`, `mobile` and `utils` (credential tests); any path with a segment `admins`,
+  `apitokens`, `invites`, `sdkinvites`, `marvisinvites`, `ssos`, `ssoroles`, `cert`, `crl`, `ssl_proxy_cert`,
+  `link_accounts`, `unlink_account`, `mist_scep`, `mist_nac_crls`, `export_idtokens`, `register_cmd` or
+  `request_ztp_password`; anything outside `/api/v1/`, or with an empty or dot segment: 173 operations - certificates,
+  CRLs, SCEP, OAuth links, registration commands and the ZTP password are authentication material - cost if wrong: a
+  reviewed certificate read can't be allowed without changing the rule.
+- Ruling: `listOrgAuditLogsLegacy` is denied as deprecated rather than held - D28 denies every deprecated operation,
+  stricter than D24's hold - cost if wrong: none.
+- Ruling: a side effect follows the method once evidence covers that kind: GET `none`, PUT and DELETE `idempotent`,
+  POST `ambiguous` (the creates and the two actions, alarm ack and device restart: ack's repeat behaviour isn't
+  documented, so D16's "else ambiguous") - cost if wrong: an ack that fails after sending needs a person.
+- Ruling: the approved metadata outside an org or site is `/api/v1/const/webhook_topics` alone, the one curated
+  constant - fail closed - cost if wrong: another constant needs a review.
+- The map (`backend/src/dewpoint/plugins/mist/data/policy.json`, made by `python -m dewpoint.plugins.mist.reviews`):
+  1,072 operations: 262 allowed (146 reads, 78 idempotent writes, 38 ambiguous; 173 org, 88 site, 1 metadata), 632
+  held (620 unreviewed, 12 the owner's), 178 denied (173 always refused, 5 deprecated).
+- Ruling: a declared model (`declared_model(name, schema)`) is the SDK's: it reports its schema in every mode, validates
+  with it (Draft 2020-12 and the formats a step's output is checked for: date, uuid, email, ipv4, ipv6, regex) and
+  names each failing place and the schema keyword, never the value; its output schema is shown exactly as declared,
+  not closed as a pydantic model's is - a generated node's schema is the provider's, and closing it would fail every
+  answer carrying a field the description doesn't list - cost if wrong: an undeclared output field is tainted, never
+  refused.
+- Ruling: a trigger declares only `id_source: none` and bearer or HMAC endpoints - ingress offers those, and D17 needs no
+  more - cost if wrong: a provider with event ids needs the declaration widened.
+- Ruling: a path value must be one segment of unreserved characters (letters, digits, `_ . ~ -`), neither `.` nor `..`,
+  then percent-encoded; anything else fails `mist.invalid_path_value` before sending - every curated parameter is a
+  UUID, a MAC or a name of that shape, and the open question of 3a-2 (typed text in a path) closes with it - cost if
+  wrong: a parameter with other characters needs the rule widened.
+- Ruling: a site is the connection's org's only when Mist's `GET /sites/{id}` answers that org's id exactly (one GET a
+  site per attempt), for curated site-scope nodes too, not only D14's any-endpoint nodes - a token can reach other
+  orgs' sites (an MSP's, an admin of several orgs) - cost if wrong: one more request per site-scope step.
+- Ruling: a search's `next` is followed only on the connection's host and exactly the search's own path (no fragment);
+  else the step fails `mist.invalid_next` - D14 - cost if wrong: a search Mist pages through another path stops
+  failing instead of truncating.
+- Ruling: a list without page headers whose page came back full is reported `truncated` - it may have more - cost if
+  wrong: a list of exactly a page's size says it might be truncated.
+- Ruling: the curated nodes are built when the plugin loads, from the map and the OAS, not written out as source -
+  those two files are the reviewed source, and a test checks the whole manifest as the catalog does - cost if wrong:
+  none (0.9 s at import).
+- Ruling: the generated models skip the metaschema check at import (`declared_model(..., checked=False)`): 524 checks
+  took 6 s; `plugins sync` checks every schema before registering it (11.6 s for Mist's manifest), and so does a test
+  - cost if wrong: a malformed schema shows at sync rather than at import.
+- Ruling: an output keeps the OAS's shape (types, properties, required fields, items) and drops value constraints
+  (formats, enums, patterns, bounds) and closed objects; `oneOf` becomes `anyOf` (without their enums, branches
+  overlap) - the OAS is documentation (D2) and Mist adds fields and values; what it doesn't describe is tainted, never
+  refused - cost if wrong: a pill loses an enum's list of values; an out-of-range value passes.
+- Ruling: a field is a secret, `x-sensitive` in config and output, when its name's last word is `psk`, `passphrase`,
+  `secret`, `password`, `token`, `community`, `key`, `keys`, `apitoken`, `keypair`, `kek` or `mack`, or it's named
+  `community_name`; a version can't then write it as a literal (engine 2b §3.8) - D16's list read by word - cost if
+  wrong: a few non-secrets are tainted (BGP communities, SSH public keys, `cleanup_psk`), or a secret named otherwise
+  isn't claimed.
+- Ruling: a config is checked by the OAS's constraints but not its formats - publish validates literals without
+  formats, so the run does the same and a version that publishes runs; path values are checked by the client - cost
+  if wrong: a malformed address reaches Mist, which refuses it (`mist.bad_request`).
+- Ruling: the four array query parameters (`labels`, `usermac_label` twice, `resp_attrs`) are left out - the OAS gives
+  no style, so whether Mist wants them repeated or comma-joined is unverified - cost if wrong: those filters wait for
+  a verification.
+- Ruling: an update's body requires nothing; `mode` is `merge` (the default, when a GET of the same path is allowed)
+  or `replace`; `clear` names top-level fields sent as null; a field both set and cleared, or nothing to change, fails
+  before anything is sent - D15's Keep / Set / Null as absent / set / cleared - cost if wrong: clearing a nested field
+  means setting its parent structure.
+- Ruling: a list answers `{results, total, truncated}`, a search Mist's answer with every page's results, without
+  `next`, and `truncated`; a page cap of 1-10 (default 1), a list's or search's timeout 5 minutes - the cap bounds a
+  step's memory (an output over 64 KB is already a size claim) - cost if wrong: a list past 10 pages of 1,000 is cut.
+- Ruling: a create's body is required, an action's (ack, restart) optional; an action answers `{}` and a delete
+  `{already_absent}`, whatever Mist's body says - the OAS describes no answer for them - cost if wrong: none.
+- Ruling: titles are the operationId in words ("List org sites"), descriptions the OAS's first paragraph cut at 300
+  characters, no icon - display metadata, changeable without a version - cost if wrong: none.
+- D23 measured on the generated manifest: 262 nodes, 8.0 MB (1.34 MB gzipped), 3.3 MB without `description`s; the
+  median node 5.6 KB; the largest site settings' update (634 KB: config 327 KB, output 307 KB), a device's update
+  (560 KB) and device profiles' create and update (500 KB). A schema's descriptions sit outside contract hashes, so
+  trimming them later makes no new versions. Splitting Mist into per-scope plugins changes no total, so it isn't
+  done. **For the owner:** `GET /node-types` answers every schema at once, 8 MB uncompressed (neither the API nor
+  nginx compresses); options are trimming descriptions, compressing, or a palette without schemas plus one type's
+  schemas on demand (an editor change).
+- Ruling: a simulated Mist step answers its operation's fixture without opening the connection: the OAS's first 2xx
+  example shaped as the output (a list's as `{results, total, truncated: false}`, a search's without `next`) when the
+  output schema accepts it, else the smallest value the schema accepts; a delete `{already_absent: false}`, an action
+  `{}`. The map and an update's config are checked as in a run. The step's `simulated` outcome is the fixture's label
+  - an output must match its schema, so it can't carry one - cost if wrong: none. Counts: 182 from examples (every
+  example present fits), 39 made from the schema (the OAS has no example), 41 fixed.
+- Ruling: pickers list a site-scope node's `site_id` (the org's sites) and an org resource's id or MAC where the map
+  allows a list at its collection's path (27 fields, 169 nodes); a site's resources (devices, maps…) get none - a hook
+  sees the typed text and the connection, never the rest of the config, so it can't know the site - cost if wrong: a
+  device id is typed or referenced, not picked.
+- Ruling: a picker reads one page of 1,000 (`limit=1000`) and filters it by the typed text locally; the text never
+  enters a path or a query (3a-2's open question); labels are `name`, else `ssid`, else the value; the node's own
+  operation and the list's must both be allowed - cost if wrong: an org with more than 1,000 sites shows its first
+  1,000, by Mist's order.
+- Ruling: `mist.api.read` and `mist.api.write` take a concrete path whose org is written as the connection's id or as
+  `{org_id}` (another org fails `mist.org_mismatch`); the config's `path` is an `anyOf` of one pattern per path the
+  map allows the node, so a version's reach is pinned in its contract (a later map that allows more makes a new
+  version; one that allows less refuses at run time) and publish refuses a literal path outside it - D28's check at
+  publish and at run time - cost if wrong: every map review that widens the generic nodes ships them as a new version.
+- Ruling: a generic request matches the most specific allowed template (most literal segments; a tie is refused), its
+  method must be the operation's, each path value must pass its parameter's schema (UUIDs and MAC patterns checked),
+  the query may name only the operation's (non-array) parameters, each value checked, and the body must pass the
+  operation's request body (an update's without required fields), or no body at all; everything is checked before
+  the connection is opened - D14 - cost if wrong: a parameter the OAS describes wrongly can't be sent until the map
+  overrides it.
+- Ruling: a generic node answers `{status, body}`, the body undeclared and so tainted; its simulation answers the
+  matched operation's OAS example with status 200 - D14, D13 - cost if wrong: none.
+- Open question (from the owner's remark, 2026-10-06: the OAS's examples are incomplete and may be outdated; the
+  schemas are the complete payloads): node schemas come only from the OAS's `schema` objects; examples are used only
+  as simulate fixtures (D13, recommended there). A fixture taken from an incomplete example can lack fields a real
+  answer has, so a later step referencing them could fail only in simulation. Alternative: build every fixture from
+  the schema (each declared property filled, to a bounded depth), with the example's values laid over where they
+  fit. Recommendation: switch to schema-built fixtures with example values laid over - the schema is the complete
+  shape - for the owner's ruling at the checkpoint.
+- Ruling: the Mist webhook trigger (`mist.webhook`) declares a bearer endpoint, no events pointer and no event ids, its
+  topic at `/topic`, and each of the OAS's 30 topics' envelope schema, relaxed as an output is (93 KB in all), its
+  `topic` fixed to the topic's name; every one passes publish's checks as a workflow's input schema. Its production
+  support still waits for a real delivery (D17, 2b-4 D13) - cost if wrong: none until then.
+- Ruling: `GET /api/v1/trigger-types` (any active session) lists the synced plugins' triggers, with each topic's
+  schema; nothing creates the endpoint or the binding for the editor yet (the existing webhook routes do, with the
+  declared settings) - D17 asks the editor to type pills per topic, which needs the schemas - cost if wrong: none.
+- Proof (`backend/tests/apps/worker/test_run_graph_mist.py`, task 10): a workflow of two generated nodes published,
+  admitted, dispatched and run through RunGraph against a local fake standing in for `api.eu.mist.com` (vetted,
+  pinned, TLS-checked; its port 443 redirected in the test's socket layer): the site checked, its devices listed, the
+  WLAN read and merge-updated (`auth` sent whole: its type and PSK kept, `pairwise` changed), every request with the
+  runtime's `Token` header, neither the token nor the PSK in any preview, the token in the run's secret index. The
+  same workflow simulated sends nothing. A Mist `alarms` envelope recorded by ingress's own function is matched by a
+  `/topic` binding and runs a workflow typed by the topic's schema; a `device-updowns` envelope matches nothing; an
+  `alarms` envelope whose events aren't a list is refused by admission (`input_invalid`).
+
+Runs at `7e81c7d` (tasks 1-10 done), 2026-10-06: the full backend suite, 3145 passed, 8 skipped, in 6 min 12 s
+(`-n auto`, with the reviewer's targeted runs alongside); ruff, format, mypy, import contracts and the OpenAPI drift
+check pass; the web client's `check:api`, lint, typecheck, 292 tests and build pass. CodeQL locally with CI's CLI
+(2.27.1) and query filter over the whole tree: no findings in Python (45 queries) or JavaScript/TypeScript (89).
+
+Checkpoint review (fresh-context reviewer, 2026-10-06, at `7e81c7d`): one High, three Medium and eleven Low findings,
+each fixed test-first and mutation-checked:
+- (H1, High) a curated node's id took any plain segment, so a sibling route's literal reached another operation:
+  `DELETE …/alarmtemplates/suppress` is `unsuppressOrgSuppressedAlarms` (held), and 17 such values reached held
+  operations (32 shadowings counting ties). Each path value's config pattern is now its parameter's (UUID, MAC, one
+  segment), so publish refuses it; every run and simulation checks each value against its parameter, and the concrete
+  path must resolve, among every OAS operation, to the node's own (the most literal template wins, a tie is refused),
+  for the generic nodes too: `373b731`, `75db8f8` (a test of the generic nodes' route check that the parameter
+  check masked).
+- (M1, Medium) the site check counted as a send, so an ambiguous site-scope write that never left (a restart whose
+  site check met a 503, a site of another org) ended `outcome_unknown`; (M2, Medium) a site delete's retry after the
+  delete applied found the site gone and failed `mist.not_found`.
+- Ruling (M1): a node may mark a GET or HEAD without a body as a **probe**, a read before its effect: the runtime
+  doesn't count it as a send (an ambiguous node's later failure that sent nothing stays retryable), may resend it
+  within the attempt after a short `Retry-After`, and refuses a probe of any other method or with a body before
+  sending. Mist's site check is a probe; one that may have reached Mist and failed is `mist.site_check_failed`,
+  retryable - the check D14 requires changes nothing - cost if wrong: a plugin marking a request that has an effect
+  as a probe has an ambiguous node retried after it (first-party code's declaration: the SDK is an API, not a sandbox).
+- Ruling (M2): a delete's retry whose site check finds the site gone answers `already_absent` - the object can't
+  outlive its site (D16) - cost if wrong: none.
+- (M3, Medium) `mist.api.write`'s body declared nothing, so a PSK written there as a literal published (the curated
+  node refuses it) and showed in previews. Fixed with the Ruling below; (L1) `magic`, a device's claim code, is now a
+  secret name.
+- Ruling (M3): the generic write's body marks, at any depth, every property name the OAS uses that the curated rule
+  calls a secret (76 names), as exact names: the engine never runs a pattern on workflow data (a sensitive
+  `patternProperties` marks its whole object), and the body's operation is known only at run time - the same reach as
+  the curated nodes' marking - cost if wrong: a secret under a name the OAS doesn't use isn't claimed, as with a
+  curated node.
+- Low findings, fixed together: (L2) simulate didn't check path values: it does now, with H1's checks; (L3) a list
+  reported a full page without headers as cut only when `limit` was asked: Mist's documented default page (100,
+  `guides/api-requests/pagination`) counts too, and the one unpaged list that takes `limit`
+  (`mist.site_wireless_client_stats.list`) says when it may be cut; (L4) a merge update's description warns of the
+  race D15 can't prevent; (L5) a declared model's error text quoted the value, and the step's message showed
+  `custom_error`: the input is hidden, and the message names the schema keyword (`schema_maxLength`); (L6) an output
+  check failing after the node ran recorded no outcome: it records `applied` (or `simulated`), as a claim failing then
+  does; (L7) a partial update of a typed union (a device: AP, switch or gateway) failed `oneOf` without `type`: a
+  partial body's `oneOf` is `anyOf`; (L8) a search at its cap judged a next page it would never follow; (L9) a
+  trailing newline passed the path-value check (`$`): `fullmatch`; (L10) a picker's list was checked by state only:
+  by `allowed()`, as any node's operation; (L11) four tests that couldn't fail were rewritten or removed (the most
+  specific route now has two candidates; the manifest-size bound is gone, the size being the ledger's), and a test
+  for a generic site path of another org added.
+- Ruling (L4): the exact merged body isn't previewed - it depends on the object read at run time, and a simulation
+  sends nothing, so it would need a new output field or a step-level preview contract; the description carries D15's
+  race warning instead - cost if wrong: an editor showing the body must wait for that contract.
+- Ruling (L6): outputs keep the OAS's `required` fields (pills need them unguarded); a Mist answer lacking one fails
+  `output_schema_violation`, now with `applied` recorded, so nobody takes a created object for one never made; the
+  read-only smoke test at the checkpoint is where a wrong `required` shows - cost if wrong: such a step fails after
+  its effect until the map overrides that schema.
+
+Runs after the review's fixes, at `5edee45` (2026-10-06): a first full run gave 3212 passed and 6 setup errors in
+`tests/sdk/test_manifest.py`, while another session's 14-worker suite loaded the machine (load average 36; the file
+passes alone, serial and parallel); the rerun: 3212 passed, 8 skipped, in 10 min 13 s, with that session's next run
+alongside. Ruff, format, mypy, import contracts and the OpenAPI drift check pass. CodeQL locally (CI's CLI 2.27.1 and
+query filter): no findings in Python or JavaScript/TypeScript.
+
+**Checkpoint (3b-1), for the owner:** every ruling above; the open question on simulate fixtures (the owner's remark on
+examples); the palette's 8 MB (D23); the `probe` the SDK gained for M1, a runtime change (`apps/worker/network.py`);
+an output check failing after a node ran now records `applied` for every node (L6, `apps/worker/activities.py`);
+`plugins sync` checks Mist's manifest in about 12 s. Not run: the Compose proof (needs the owner's say), the
+read-only Mist smoke test against a test org (D23's measure and L6's `required` fields; needs the owner's say).
+
+The owner's review of the checkpoint (`2c94e1e`, 2026-10-06, pasted): the review isn't closed; two earlier findings
+remain and `probe` adds one; the generic-secret leak, the picker refusal, the default page, the route shadowing and the
+output outcome are closed. Fixed test-first:
+- (O1, Medium) a probe accepted method-override headers (`X-HTTP-Method-Override: DELETE`): a GET the runtime took for
+  a read could apply an effect on a server honouring them. A probe now passes exactly the read-only channel's check
+  (GET or HEAD, no body, none of the three override headers), refused before sending otherwise.
+- (O2, Medium) the site check's `GET /sites/{id}` bypassed the map: with `getSiteInfo` held, a site-scope node still
+  sent it, then its own request; picker lists were checked, merge reads by state only.
+- Ruling (O2): every request a node makes for an operation other than its own is an auxiliary read the map lists for
+  that operation (`reads`: the site check's `getSiteInfo`, the same-path GET an update merges into, the lists its
+  pickers read) and allows, checked before anything is sent, in a run, a simulation and an options call; a site-scope
+  operation can't be allowed unless its site check is (the map's build fails); a merge read the map doesn't list or
+  allow leaves `replace` available - the map stays the single source (D28), its diff showing every read - cost if
+  wrong: holding `getSiteInfo` makes every site-scope node unavailable, as intended.
+- (O3, Low) a generic simulation answered `body: null` where the OAS has no example (`getOrgPsk`): it now answers the
+  example when the answer's schema (relaxed as an output's) accepts it, else the smallest value that schema accepts,
+  and null only for an operation that answers nothing - as the curated nodes do today. The fixture redesign the owner
+  recommends (bounded schema-built fixtures with validated example overlays, generic nodes included) is still the
+  open ruling above; it would replace both.
+
+Runs after the owner's three findings, at `839d733` (2026-10-06): the full backend suite, 3222 passed, 8 skipped, in
+6 min 33 s; ruff, format, mypy, import contracts and the OpenAPI drift check pass; CodeQL locally: no findings in
+Python or JavaScript/TypeScript. Still open for the owner: the rulings, the fixture redesign and the catalog's size (the
+owner recommends bounded schema-built fixtures with validated example overlays, generic nodes included, and catalog
+compression before a schema-on-demand redesign), the Compose proof, the read-only Mist smoke test, push and PR.
+
+The owner's second review of the checkpoint (`6c7e2bc`, 2026-10-07, pasted): O1-O3 closed (override-bearing probes
+refused on both channels; holding `getSiteInfo` stops curated and generic nodes; generic fixtures validate against every
+allowed operation's answer schema). One Low remained: (O4) with an update's merge read held, a merge simulated
+successfully (by default or asked), its authorization living only in the run's merge. The mode-aware check now sits in
+the preflight a run and a simulation share; `replace` reads nothing and stays available.
+
+The owner closed the 3b-1 technical review at `461a926` (2026-10-07): default and explicit merges are refused when their
+auxiliary read is held, denied or not delegated, in a run and a simulation alike, before the connection opens; replace
+stays available; the earlier findings stay resolved. This closes the technical review only: the rulings above, the
+fixture redesign, catalog compression, the Compose proof, the read-only Mist smoke test, and push and PR remain the
+owner's.
+
+The owner chose to have the fixture redesign and catalog compression built in this slice (2026-10-07, "approve 2
+and 3, build them"); both were built test-first. The two rulings below record how; like every 3b-1 ruling, they
+await the owner's sign-off, and the later technical clearance of R1 and R2 is not acceptance (corrected at the
+owner's review, 2026-10-07; an earlier wording read "approved"):
+- Ruling (fixtures): a fixture is built from the schema, every declared property filled to 6 levels (only the required
+  ones past them, so recursive schemas end), within 64 KB (the engine's inline limit; shallower past it): a given
+  default, an array of one element, a union's first branch, else the type's empty value. The OAS example, shaped as
+  the output, is laid over it: objects key by key, each array element over the built element; each part of the example
+  that the schema refuses is put back to the built one. Curated and generic nodes alike (a generic node over its
+  operation's answer schema, relaxed as an output's; null only when the operation answers nothing) - the OAS's examples
+  are incomplete (the owner's remark), so the schema gives the shape and the example values - cost if wrong: a fixture
+  fills optional properties a real answer may lack, so a simulation takes the "present" branch of a reference to one;
+  publish requires such a reference to carry a default, which prevents a missing-reference error, but the absent
+  (default) branch goes untested, and a failure there stays hidden until a real answer lacks the field (wording
+  corrected on the owner's review). Measured: all 262
+  curated fixtures in 0.2 s, the largest 30 KB (site settings), none past the budget; 182 take example values, 39 have
+  none, 41 are a delete's or an action's fixed answer.
+- Ruling (catalog): `GET /api/v1/node-types` and `GET /api/v1/trigger-types` answer gzipped (level 5) to a client that
+  accepts it (`Vary: Accept-Encoding`; a `q` of 0 refuses), rendered and compressed in a worker thread; no other route
+  is compressed - the catalog is the plugins' public metadata, while compressing an answer that holds a secret beside
+  what the client sent would let its length reveal the secret (BREACH); the documented response models are unchanged
+  (no OpenAPI drift) - cost if wrong: none; the schema-on-demand palette stays the editor's later redesign. Measured on
+  the installed plugins' 273 node types: 8.08 MB of JSON rendered in 26 ms, gzipped to 1.40 MB in 72 ms (level 6:
+  1.36 MB in 102 ms); returning the bytes also skips FastAPI's per-value encoding of the 8 MB.
+
+Runs after both, at `d09db0c` (2026-10-07): the full backend suite, 3235 passed, 8 skipped, in 9 min 7 s; ruff (one
+test line, fixed after), format, mypy, import contracts and the OpenAPI drift check pass; the web client's
+`check:api`, typecheck and 292 tests pass; CodeQL locally: no findings in Python or JavaScript/TypeScript.
+
+The owner's review of the redesign (`45d2245`, 2026-10-07, pasted): two Low findings and a wording correction.
+- (R1, Low) a fixture could be returned invalid or over budget: a merged `allOf` breaking one of its parts, or a default
+  too large to shrink. Every fixture returned is now one the schema accepts within the budget: shallower, then
+  without defaults, and when none is, the operation has no fixture and its simulation fails `simulation_unavailable`.
+- The ruling's wording claimed no failure hides behind a "present" fixture; corrected above: the default prevents a
+  missing-reference error, but the absent branch goes untested.
+- (R2, Low) the catalog's encoding was chosen loosely: `Q=0` or a wildcard went unread, identity couldn't be refused.
+  It's negotiated as RFC 9110 12.5.3 says: `q` in any case and a malformed one refusing its coding, `x-gzip` as
+  gzip, `*` for whatever isn't named, identity acceptable unless refused by name or by `*` (then, unnamed, yielding to
+  any coding accepted), the higher weight chosen (gzip on a tie), and 406 `not_acceptable` when neither gzip nor
+  identity is acceptable.
+Targeted runs at `3beacb5` (2026-10-07): the API tests (276), the plugin, SDK and end-to-end Mist proof tests (385),
+ruff, format, mypy, import contracts and the OpenAPI drift check pass; each of R1's and R2's fixes was also checked by
+disabling it (the tests fail). The last full run is `d09db0c`'s (3235 passed).
+
+The owner closed R1 and R2 at `5699914` (2026-10-07): fixture returns enforce the schema and the size cap, and when
+none fits, curated and generic simulations fail `simulation_unavailable` alike; the encoding cases negotiate correctly,
+406 included; the optional-field wording is corrected. The fixture and compression additions are technically cleared.
+This is technical closure only: the rulings, the Compose proof, the read-only Mist smoke test, and push and PR remain
+the owner's.
+
+The owner asked for the push and PR (2026-10-07). The branch was rebased onto `origin/main` 69944d0 (#46, #47: 2b-4a)
+without conflicts; the OpenAPI document and the web client's types still match (no drift, `check:api` passes). Full
+run at the rebased head: 3621 passed, 8 skipped, in 12 min 7 s; ruff, format, mypy and import contracts pass.
+
+**Status at the merge** (#49, `bc4c840`, 2026-10-07; all 15 checks passed): the technical review is closed; no 3b-1
+ruling has the owner's sign-off yet; the read-only Mist smoke test against a test org is pending. #49's e2e jobs ran
+the packaged Compose proof and the browser tests, so no separate local Compose run was made.
+
+Read-only Mist smoke run (2026-10-07): the owner ran `backend/tests/probes/mist_smoke.py` (local `test/mist-smoke`
+3dd2ebb) against the test org `9777c1a0-6ef6-11e6-8bbf-02e208b2d34f`, site `978c48e6-…`, on `api.mist.com`; GET only,
+the report holding names and schema rules, never a value. 146 curated reads in 108.6 s: 64 matched their output
+schema, 68 didn't, 1 failed, 13 were skipped (9 with nothing in this org to read their id from, 4 needing a query).
+- 53 of the 68 only because Mist answers null where the OAS types a value (79 places: ids such as `map_id` and
+  `template_id`, flags, lists), or a fractional number where it says integer (68 places: the `start` and `end` of
+  search and count answers, map origins).
+- 15 with real disagreements: fields typed otherwise (`lease_time`, `last_vlan` and `mfg_company_id` strings,
+  `random_mac` a boolean, a client's `model` an array, site settings' `flags` integers); unions no branch fits
+  (devices, device profiles, a port usage's `reauth_interval`); required fields absent (site stats' `country_code`
+  and `latlng`, discovered assets' `name`, WxRule usage's `client_mac`, `name`, `usage`, `dst_allow_wxtags`,
+  `dst_deny_wxtags`).
+- The failure: `searchOrgUserMacs` answered in a shape the search node doesn't read (`mist.invalid_answer`).
+- Sizes: wired-client searches about 434 KB a page; 2.25 MB across all answers.
+As shipped, those 69 operations fail their runs (`output_schema_violation` after the request, or `invalid_answer`).
+
+The OAS overlay (2026-10-07, the owner's request after the smoke run, while the upstream description is fixed):
+`backend/src/dewpoint/plugins/mist/data/oas-overlay.json`, 87 patches laid over the vendored file when it's read
+(`oas.document()`), each citing the smoke run and the definition it expects to replace: 43 fields nullable, 39 types
+widened (`start` and `end` of 14 search and count answers and map origins to numbers; `lease_time`, `last_vlan`,
+`mfg_company_id`, `random_mac`, a client's `model`, site settings' `flags` and an AP search result's bandwidths to
+both types seen), required fields dropped from site stats, assets, WxRule usage and AP search results, and
+`searchOrgUserMacs`'s answer an object with `results` and `total` (Mist's shape; the OAS says an array). A second probe
+run with per-branch union detail (`c8c59d8`) pinned the unions: the AP branch's `esl_config` and `usb_config` channels
+and band-6 `standard_power` null; an AP search result without `type`, `mxtunnel_status` or `wlans`, its bandwidths
+integers; a port usage's `reauth_interval` null.
+- Ruling: patches only what the smoke run showed, not every field made nullable - a nullable field makes every
+  reference to it need a default at publish (`ref.conditional`), so blanket nullability would weigh on every workflow
+  reading a Mist output - cost if wrong: a field null in another org's answers still fails its step until patched.
+- Ruling: the patched schemas are the components themselves, so they relax requests too (a PSK's `admin_sso_id` may be
+  sent null, an asset created without `name`, which Mist then refuses) - one description, read the same way in both
+  directions - cost if wrong: a config Mist refuses is caught by Mist (`mist.bad_request`) rather than at publish.
+- Ruling: the vendored file stays pinned; a patch whose target no longer reads as it expects fails the build, so
+  re-vendoring a fixed description retires its patches by test - cost if wrong: none.
+- Ruling: the changed output schemas change the contracts of the registered `@1` node types; they're amended in place,
+  not shipped as `@2`, since no environment runs workflows on Mist nodes yet - a database that already synced them
+  needs its Mist node-type rows reset before the next sync - cost if wrong: such a sync is refused (`contract changed`)
+  until reset. The owner confirmed (2026-10-07): no environment uses the Mist nodes yet, so amending `@1` is fine.
+- The user-MAC search now answers one page as Mist sends it (an object, `page` and `limit` in its query) instead of
+  paging headers it never sent; fixture counts move to 181 from examples and 40 from schemas.
+- The owner's third probe run (with the overlay): 127 matched, 6 mismatched, 0 failed, 13 skipped. The 6: two fields
+  missed (`alarm_search_result`'s `start` and `end`; `asset.map_id`), and two retyped fields that were references
+  (`client_nac.last_vlan`, `random_mac`) whose new type was added beside the reference, which JSON Schema applies too.
+  A retyped field's reference is now replaced by its new type, and a test checks the observed values validate, not
+  only the patched keyword. The overlay holds 90 patches: 44 nullable, 41 types widened (15 search and count answers'
+  `start` and `end`), 4 `required` lists trimmed, 1 answer reshaped.
+- The owner's fourth probe run (2026-10-07, at `a9c8610`): 133 matched their output schema, 0 mismatched, 0 failed;
+  13 skipped as before (9 with nothing in the test org to read their id from, 4 insight reads needing a `metrics`
+  query). Every curated read the probe could reach runs as shipped against this org.
+
+## 3b-2 Mist device utilities
+
+Branch `feat/plugins-3b2` from `origin/main` 5e79a10 (#51, after 3b-1's #49 and its follow-up #50), started 2026-10-07:
+I named 3b-2 as next and the owner said "let's continue". That is the go to build 3b-2; this section's rulings await
+the owner's sign-off. No migration expected. No real Mist call: the proof runs against local fakes (REST and stream).
+
+Facts checked before the tasks (never from memory):
+- `websockets` 17.1 as installed (`websockets/asyncio/client.py`): `connect(uri, sock=..., ssl=..., server_hostname=...,
+  proxy=..., additional_headers=..., open_timeout=..., ping_interval=..., ping_timeout=..., max_size=...)`; with `sock`
+  given it sets no proxy and refuses every redirect ("cannot follow redirect ... with a preexisting socket"); `max_size`
+  bounds a message.
+- Mist's stream (docs clone `mistapi-portal` 919c9b47, `guides/websocket/`): hosts `api-ws.<cloud>` beside each REST
+  `api.<cloud>` (`1_hosts`); `wss://api-ws.mist.com/api-ws/v1/stream` with `Authorization: Token` (`2_best_practices`);
+  `{"subscribe": channel}` answered `channel_subscribed` or `subscribe_failed` with a `detail` (sample: "Server error,
+  please try again later"); 2,000 connections an hour and 2,000 channels a connection per token, 429 past them
+  (`3_rate_limit`); device command output on `/sites/{site_id}/devices/{device_id}/cmd`, `data.session` matching the
+  POST answer's `session`, `data.raw` the text; `"finished": true` in table output (`samples/site_device_command_output`:
+  show ARP, show service path, show session); a release-DHCP sample whose `data` is a JSON string holding another
+  envelope (the OAS). Unsubscribing is mentioned but its message isn't documented.
+- The 30 utilities in the vendored OAS (0613a22): all exist, none deprecated; 25 answer `websocket_session`
+  (`{session}`, required), 5 an empty 200 (`bounce_port`, `clear_macs`, `clear_bpdu_error`, `release_dhcp_leases`,
+  `clear_session`); `resolve_dns` takes no body; five table commands take a refresh `interval` (at most 10 s) and
+  `duration` (at most 300 s); devices are typed `ap`, `switch` or `gateway`. In 3b-1's map each is `held`
+  (`unreviewed`). (An earlier line said 24 and 6, counting `resolve_dns` as empty: corrected when the reviews were
+  generated from the OAS.)
+
+Tasks (test-first, in order):
+1. `websockets` 17.1 becomes a direct dependency (D26; approved with the outline's rev 5).
+2. The guarded websocket in `core` (D26): wss only; the name vetted and the socket connected by the guard to a vetted
+   address, then handed to `websockets` (`sock`, `server_hostname`, `proxy=None`); opening 5 s, 1 MiB a message, 10 MiB
+   an attempt, pings every 60 s with a 45 s timeout; text messages only; failures as core errors.
+3. SDK 0.5.0: a connection's `ws.connect()` (its type's stream endpoint) and the `WebSocket` it gives (`send`, with
+   `probe` for a message that changes nothing; `receive` with a timeout; `close`); a connection type's
+   `StreamEndpoint` (host map, path, stream quota scopes) as data; `HandshakeRejected` (its status) and `StreamLost`.
+4. The runtime's connection stream (D4, D9, D10): the declared URL only, the credentials the runtime's, a token from
+   each stream scope per connection (`Cooldown` otherwise), a 429's `Retry-After` blocking those scopes; refused in a
+   simulation and on a plugin call's read-only channel; a counted send marks the attempt, a probe doesn't; closed with
+   the attempt. The API's cooldowns list the stream scopes.
+5. Mist's stream endpoint: each cloud's `api-ws` host, `/api-ws/v1/stream`, a stream scope per token.
+6. The utilities' reviews (D27, D28): each with its contract, stream mode, device types, permitted parameters,
+   execution bounds, repeat behaviour and evidence; allowed to its own node only; the map's version 2.
+7. The stream reader (D27): subscribe, acknowledgement (10 s), POST, the session's messages kept (at most 256 and 1 MiB
+   before the session is known), strict and bounded decoding, ANSI stripped; idle (10 s), first message (30 s),
+   maximum duration, terminal evidence; heartbeats; closed in `finally`; every failure classified.
+8. One node type per utility: config (connection, site, device, permitted parameters, maximum duration), output by
+   contract, the site and device-type checks, simulate, pickers.
+9. Proof: a ping streamed from a local stream fake and a bounce-port accepted by a local REST fake, through RunGraph;
+   the same run simulated sends nothing.
+
+Rulings:
+- Ruling: the branch starts from `origin/main` 5e79a10 - #50's overlay and #51's log fields included - cost if wrong:
+  one rebase.
+- Ruling: D26's `ctx.ws` is exposed as `connection.ws` only: the connection type's stream endpoint, its credentials
+  applied by the runtime, its stream scopes charged. A websocket without credentials waits for a node that needs one -
+  every node 3b-2 adds streams through its connection, and each surface is one more to guard - cost if wrong: adding
+  `ctx.ws` later is additive (an SDK minor).
+- Ruling: a node can't name the stream URL: it's the type's declared host (from a config field's host map) and path -
+  as the REST base is - cost if wrong: a provider whose stream URL varies per call needs the declaration widened.
+- Ruling: opening a stream sends nothing a node is accountable for (as a TCP connect isn't); a message sent counts as a
+  send unless the node marks it `probe` (a message that changes nothing, as Mist's subscribe) - fail closed for a
+  stream API whose messages act - cost if wrong: a node that mis-marks an acting message as a probe gets a retry it
+  shouldn't (first-party nodes only today).
+- Ruling: no unsubscribe message is sent: its format isn't documented; closing the connection ends its subscriptions -
+  cost if wrong: none (one connection a call, never shared).
+- Ruling: `subscribe_failed` is retryable only with the documented `detail` "Server error, please try again later",
+  fatal with any other - nothing was sent before the POST, so a retry is safe, but a refused channel or forbidden site
+  would only burn stream connections - cost if wrong: a transient failure worded otherwise fails the step.
+- Ruling: every disruptive utility is acceptance only (`{accepted: true, completion_known: false}`), none subscribes:
+  no completion, final message or readback is documented for any of the 11 (an empty 200 isn't documented as
+  completion; bounce port's docs sample streams "Port bounce complete." while its OAS answer is empty, unverified) -
+  cost if wrong: no output from the cable test (TDR) and the clears until a device run verifies a contract to promote.
+- Ruling: three diagnostics have stream terminal evidence (show ARP, show service path, show session: the docs samples'
+  `"finished": true` with `"status": "SUCCESS"`); the 16 others are bounded collections, and one that sees that evidence
+  ends early with `completion_known: true` - cost if wrong: a table command that never finishes fails its three nodes
+  `mist.completion_unknown` (retried, being repeatable diagnostics).
+- Ruling: a finished table whose `status` isn't `SUCCESS` fails `mist.command_failed` (fatal) - the device answered;
+  repeating a diagnostic the device refused won't change it - cost if wrong: a transient device failure isn't retried.
+- Ruling: the refresh parameters (`interval`, `duration`) aren't permitted: they repeat the output for up to 300 s, which
+  no contract bounds yet - cost if wrong: a repeated table needs a workflow loop.
+- Ruling: the device type is checked before anything else is sent: a probe read of the device (`getSiteDevice`, in the
+  map's reads), its `type` among the review's - D28's device types checked at run time, not only recorded - cost if
+  wrong: one more read a utility step.
+- Ruling: utilities are reachable by their own node only, never by `mist.api.write` - the generic node would bypass the
+  permitted parameters and the contract - cost if wrong: none for safety.
+- Ruling: the map's version is 2: an allowed utility's entry carries its review (`utility`: contract, stream, device
+  types, parameters, bounds, repeat); a map of version 1 is refused, as one of another description is - cost if wrong:
+  none (generated, and checked against the reviews by a test).
+- Ruling: a utility's contract is one its node implements: bounded collection, stream terminal evidence or acceptance
+  only; D28's documented REST completion and verified readback have no node yet, so a map naming them is refused -
+  cost if wrong: none until a utility needs one.
+- Ruling: a utility's device types are its OAS tag's (Utilities Common: AP, switch and gateway; LAN: switch; WAN:
+  gateway), narrowed or widened by its description's own list ("Ping from AP, Switch and SSR"; "BGP Summary from SSR,
+  SRX and Switch"; "Clear ARP cache for SSR, SRX and Switch"; port bounce "from Switch/Gateway"; TDR "from the
+  Switch"; show ARP's `node` "required for Gateways") - the documentation is the only evidence short of a device run -
+  cost if wrong: a supported type is refused `mist.device_type_unsupported`, or an unsupported one reaches Mist, which
+  refuses it.
+- Ruling: maxima on top of the OAS's: a ping's or a service ping's `count` at most 100, a traceroute's `timeout` at most
+  120 s, a streaming utility's own `max_duration_s` at most 240 - bounded collection needs a bounded command - cost if
+  wrong: a longer ping takes several steps.
+- Ruling: a device id has no picker: 3b-1's pickers are a site's and an org resource's, and a site resource's list
+  needs the chosen site, which an options query doesn't carry - cost if wrong: the device id is typed or referenced.
+- Ruling: the twelve utilities D27 holds back are `held` with their reason (shell, CLI config, support upload, FIPS
+  zeroize, reprovision, re-adoption, firmware rollback, VC switchover, packet capture, and the three JWT-URL streams);
+  `getSiteDeviceZtpPassword` stays denied as always refused, which is stricter - cost if wrong: none.
+- The map at task 6 (measured): 1,072 operations, 292 allowed (262 curated, 30 utilities: 19 diagnostics, 11
+  disruptive), 602 held (578 unreviewed, 24 the owner's or D27's), 178 denied.
+- Ruling (task 7, the stream reader): a finished table counts as evidence only with `"status": "SUCCESS"`; with another
+  status it's the device's refusal (`mist.command_failed`); without a status it's no evidence (`completion_unknown`) -
+  the docs show only `SUCCESS` - cost if wrong: a status-less finished table is retried instead of accepted.
+- Ruling: a table's evidence is the JSON object at the start of `raw`, whatever text follows it - the docs' show ARP
+  sample ends its table with `\n"}}` where show service path's and show session's end in a newline - cost if wrong:
+  trailing text that should have voided the table doesn't.
+- Ruling: a data envelope's channel must be the device's (compared in lower case), a nested envelope's too, at most one
+  level deep; `data` an object or a JSON string of one, never a string encoded twice; `session` a non-empty string and
+  `raw` a string; anything else is discarded, never accepted - cost if wrong: a reshaped Mist message reads as no
+  output (retried for diagnostics).
+- Ruling: while the POST is under way the reader buffers the channel's data (at most 256 messages and 1 MiB); a lost
+  stream or an overflow then lets the POST finish, since it's the command, and fails after it (`mist.stream_lost`,
+  `mist.output_unreadable`, `mist.output_overflow`) - cost if wrong: none.
+- Ruling: the kept output is at most 5,000 lines and 512 KiB (`truncated` past either; reading goes on to the end),
+  well under a step output's 1.75 MiB - cost if wrong: a long table is cut.
+- Ruling: a `HandshakeRejected` the node doesn't catch is retried by the runtime only for a 429 or a 5xx; a
+  `StreamLost` is handled as `MaybeSent` (8ac5b1f) - cost if wrong: none for safety.
+- Ruling (task 8, the utility nodes): a utility node is a curated operation (`MistUtility` extends `MistOperation`): the
+  same map, site and path checks and the same site picker, then the device check - one code path for what 3b-1's
+  review hardened - cost if wrong: none.
+- Ruling: a device whose answer names no `type` is refused `mist.device_type_unsupported` (the OAS's
+  `device_type_default_ap` suggests an unnamed type is an AP, but that's a default for writing) - fail closed - cost
+  if wrong: a utility on such a device fails until a device run shows what Mist answers.
+- Ruling: a utility whose OAS takes a body sends the permitted parameters given, `{}` when none are; `resolve_dns`,
+  which takes none, sends no body - cost if wrong: Mist refuses an empty body (`mist.bad_request`).
+- Ruling: an acceptance-only utility whose OAS answer holds a `session` reports it, and an answer without one is
+  `mist.invalid_answer` (after the send: outcome unknown, the node being ambiguous); the five answering nothing report
+  `{accepted, completion_known}` only - cost if wrong: none.
+- Ruling: a streaming utility's maximum duration defaults to 60 s (bounded collection) or 120 s (terminal evidence),
+  at most 240 s, within a 5-minute step timeout that also covers the 10 s acknowledgement, the POST and the 30 s first
+  message; an acceptance-only utility's timeout is a minute - cost if wrong: a slow table needs a longer maximum.
+- Ruling: a simulated utility answers its contract's shape (one line saying no command was sent; the session a fixed
+  placeholder), never an example of real output: the OAS has none to validate - cost if wrong: none.
+
+Fresh-context review of 3b-2 (at 40e800c, 2026-10-07): no High, 2 Medium, 7 Low and a parity note. Each finding is
+fixed test-first, and each fix's protection checked by disabling it.
+- M1 (disruptive utilities accepted their whole-device forms: an omitted, empty or `all` port list, an unfiltered MAC
+  table or ARP cache, an unscoped session clear, a BGP clear of `all` neighbors): each disruptive review names its
+  selectors (`ports`, `port`, `port_id`, `session_ids`, `neighbor`), required, a list of at least one, never `all` in
+  any case. Ruling: a whole-device form isn't permitted until the owner reviews it - D24 holds bulk forms where empty
+  means all - cost if wrong: clearing a whole table takes a loop over its ports.
+- M2 (`count` and `timeout` could be 0 or negative, which some pings read as unlimited): a bounded integer is at least
+  1. Ruling: every free-text string a utility sends (no enum) is one word of letters, digits and `. _ : / @ -` (host
+  names, addresses, interfaces, prefixes, names), at most 253 characters - such text reaches a device's command line
+  through Mist - cost if wrong: a name with another character is refused at publish.
+- L4 (show route's `node` is an object in the OAS, open to any keys): a permitted parameter can't be an object; show
+  route's `node` isn't permitted (the string form every other utility takes is refused by the OAS's object type).
+- L5 (the map's loader trusted a utility entry's consistency): where the map is read, a utility's entry must name its
+  own node alone (never `mist.api.read`/`write`), be a site's, pair `mist.diagnose` with idempotent and `mist.write`
+  with ambiguous, acceptance only and selectors, keep acceptance only ambiguous, and bound only its parameters and,
+  streaming, its duration; `api.routes` skips utilities whatever a map says; a stream on an answer without a session
+  fails the build where the OAS is read.
+- L1 (JSON nested past the decoder's limit raised `RecursionError`, which no phase caught, and the POST wait's `finally`
+  left the POST and the receive running): the three decoders read it as unreadable, so the message is discarded; the
+  wait cancels and awaits whatever is still running, the POST and the receive alike, whatever ended it.
+- L2 (a redirect whose Location isn't a websocket URL escaped as the library's own exception, retried or of unknown
+  outcome though nothing was sent; a malformed one read as not sent): every library exception is read for the refused
+  handshake behind it, so any redirect is `HandshakeRejected` with its status, anything else `NotSent`.
+- L3 (the library writes each handshake header at DEBUG, the token included): its logger is Dewpoint's own, pinned at
+  WARNING, so no level of the root logger lets such a line out.
+- The parity note (an attempt's websockets opened after `aclose()`): refused (`InvalidRequest`).
+- L6 (the checks before a collection could take longer than the reviewer's 75 s: three REST requests of up to 60 s
+  each, token waits, opening, the acknowledgement and in-attempt `Retry-After` waits; with a 240 s maximum the attempt
+  could pass its 5-minute timeout, losing its output and repeating the command): the collection ends 30 s before the
+  node's step timeout, counted from when it started running, as `max_duration` would. Ruling: the node's own timeout
+  is the reference; a graph that sets a shorter one cuts the collection by Temporal's timeout instead - cost if wrong:
+  such a step is retried as a timeout (the diagnostics are repeatable).
+- L7 (the runtime's receive waited up to an hour without a heartbeat, delaying a cancel): it waits in slices of 10 s,
+  heartbeating between them, the timeout checked first.
+
+### 3b-2 checkpoint (2026-10-07, at 8e96fda, local, not pushed)
+
+- Built (tasks 1-9, test-first): `websockets` 17.1 direct (983bb24); the guarded websocket (09c328d); SDK 0.5.0 with a
+  connection's stream (285694d); the runtime's connection stream (ae70993); Mist's stream endpoint and stream scope
+  (bc2e2a8); the 30 utility reviews in map version 2 (eaa614a); stream failures' classification (8ac5b1f); the stream
+  reader (9c0b952); a node per utility (ebd556f); the RunGraph proof (200e7ab); operator docs (7bc611a, 40e800c).
+- The map: 1,072 operations, 292 allowed (262 curated, 30 utilities: 19 diagnostics, 11 disruptive), 602 held, 178
+  denied. Mist declares 294 node types; its manifest is 8.25 MB.
+- Fresh-context review: no High; M1, M2, L1-L7 and the parity note fixed test-first, each protection checked by
+  disabling it (abfb1c3, 7b1aa66, 30401b3, 4ddd44d, 727db46, 8e96fda).
+- Verified locally: 1,843 tests (plugins, SDK, core, catalog, API, the worker's network, plugin calls and both Mist
+  RunGraph proofs), ruff, format, mypy, import contracts; CodeQL's python analysis (CI's CLI 2.27.1 and query filter)
+  0 findings at 8e96fda. Not run: the full backend suite (about 12 minutes: on the owner's word), a Compose proof, and
+  any real Mist call.
+- Unverified until a device run (each recorded above as a ruling): bounce port's streamed output; whether Mist sends
+  show ARP's table with text after it; `subscribe_failed` details other than the documented one; a device answer
+  without `type`; whether an empty body is what Mist expects where no parameter is given. Every utility is a POST to a
+  device, so a run against the test org needs the owner's go, and a device it may act on.
+- Awaiting the owner: sign-off on this section's rulings; the full suite; push and PR.
+
+The owner's technical review of 4d6c627 (2026-10-07): no High or Medium; four Low (R1-R4), each fixed test-first and
+its protection checked by disabling it. A technical review; the rulings above still await the owner's sign-off.
+- R1 (an opening under way when the attempt closed returned a live stream): the attempt's close fences openings under
+  way; a socket dialed or a handshake completed after it is closed and the opening refused (`InvalidRequest`).
+- R2 (vetting ran outside the 5 s opening bound): the guard's resolution and allowlist read count in it too.
+- R3 (Python's `$` matches before a final newline, so `"8.8.8.8\n"` passed the one-word pattern and reached the POST):
+  the one-word and `all` patterns end with `(?![\s\S])`, the text's very end in Python and JavaScript alike; the
+  stream path and host checks (SDK and catalog, the host check shared with 3a-2's host map) and the utility path
+  check use `fullmatch`. The same `.match` with `$` remains in older manifest validators (plugin names, type keys,
+  ports, icons, topics, header names, scope kinds, a verify's detail): flagged as its own task.
+- R4 (a JSON escape decoded to a lone surrogate, which then failed the byte counting): a session or a raw text that
+  isn't UTF-8 is unreadable, so the message is discarded in either phase, never counted or kept.
+- At eadff20 (local, not pushed): 1,857 tests in the affected areas, ruff, format, mypy, import contracts; CodeQL's
+  python analysis 0 findings. Still not run: the full suite, a Compose proof, any real Mist call.
+- The owner's review of the fixes (2026-10-07): R1-R4 technically closed at 12cd76b, no new findings. Technical closure
+  only: the rulings still await the owner's sign-off, and the full suite, any real Mist call, push and PR each wait for
+  the owner's word.
+- The owner signed off this section's rulings as written (2026-10-07, "go", confirmed in chat as covering the
+  rulings, push and PR after the full suite, and a real run against the test org).
+- Rebased onto `origin/main` af8b808 (#52, #53, #54; no conflicts; local backup branch
+  `backup/plugins-3b2-pre-rebase`). The full backend suite at the rebased head 80348ca: 3,929 passed, 8 skipped, in 8
+  minutes (`-n 10`).
+- The device-utility probe (`backend/tests/probes/mist_utilities.py`, bd03de3): `list` sends GETs only; `run` sends a
+  POST only to a diagnostic utility of a chosen device, any other request refused before sending. The owner chose
+  diagnostics only, on one device of each kind in the test org: a switch (EX4100-48MP), an SRX340, an SSR130 and an
+  AP47.
+- R3's class in the guarded websocket (flagged by the `fix/validator-fullmatch` work and named a follow-up in the
+  owner's review of it): `HEADER_NAME.match` let a header name ending in "\n" through, and `websockets` checks only a
+  header's value, so the line break would have gone into the handshake. `fullmatch` refuses it as an invalid header
+  before anything is resolved or dialed (4cee8c8, its test failing first). No other `.match` on a `$` pattern is new
+  on this branch: the utility path check and the SDK's stream path check already use `fullmatch`. The utility nodes'
+  path value patterns still end in `$`, like main's Mist path patterns (left as they are by the owner): a config may
+  hold "x\n", and the run refuses it before the connection opens (`mist.invalid_path_value`, `client.path`'s
+  `fullmatch`). At 4cee8c8: 245 tests (core egress, the worker's network, streams, plugin calls and the utilities'
+  RunGraph proof), ruff, format, mypy, import contracts. Not rerun: the full suite, CodeQL.
+
+The device runs (2026-10-07, diagnostics only, on the owner's go; the probe ran in this session; reports in the owner's
+home, mode 600, holding outcomes, counts and message shapes, never a value):
+- Run 1 (bd03de3): every streaming diagnostic on the four devices ended `mist.no_output`; the subscription was
+  acknowledged and each POST answered a `session`. Traced by shape: each output is a JSON string holding an envelope
+  whose channel names the device by its MAC, `/sites/<site>/devices/<mac>/cmd`, the MAC its id
+  `00000000-0000-0000-1000-<mac>` ends with, the session ours. Fixed (f4aebdf): that name is the device's command
+  channel too, at either level; another device's MAC, another site or another channel is still discarded.
+- Run 2 (f0806ea): 24 ok, 26 failed, 6 skipped (service ping and DHCP leases need a name of the org's).
+  - Every SRX and SSR table (OSPF database, interfaces, neighbors and summary, routes, BGP summary, forwarding table,
+    sessions, service path, ARP) ended on `"finished": true` with `"status": "SUCCESS"` within seconds, so the bounded
+    collections among them reported their completion; no table had text after it.
+  - Pings ended on idle, traceroutes at the 30 s maximum, the switch's MAC table on idle (73 messages).
+  - Show ARP on the switch and the SRX sent text (19 or more messages), no finished table: its terminal-evidence
+    contract failed every time (`mist.completion_unknown`).
+  - Commands to which a device sent nothing ended `mist.no_output` with only the acknowledgement seen: ARP, BGP
+    summary, 802.1X, EVPN and forwarding table on the switch; ARP, 802.1X, EVPN, MAC table, sessions and service path
+    on the SRX; ARP, 802.1X, EVPN, MAC table and DNS on the SSR; most of the AP's.
+  - The AP's output came after 30 s that time: another session's output (its earlier command's) reached the next
+    command's window, where it was discarded. Run 3 measured the AP alone: ping and ARP answered within 1 to 2 s and
+    succeeded. The 30 s first-message wait stays; a late answer fails `mist.no_output` and is retried.
+  - `mist.bad_request`: DNS resolution on the SRX (an SSR command; the review's device types are coarse, `gateway`);
+    the forwarding table on the SSR.
+- Ruling (changed after run 2, awaiting the owner's sign-off): show ARP is a bounded collection, no longer stream
+  terminal evidence - the docs' finished-table sample doesn't hold for a switch or an SRX; it still ends early, with
+  its completion known, when a finished table comes - cost if wrong: none for safety; a run that ends on idle doesn't
+  claim the table was complete. Show service path and show session keep their terminal evidence, which the SSR sent.
+  Run 4 (show ARP on the switch and the SRX): both ok, ended on idle (39 and 71 messages).
+- Still unverified: bounce port's answer and stream (no disruptive utility ran); a `subscribe_failed` detail (none
+  came); a device answer without `type` (every device had one).
+
+After the PR (2026-10-08):
+- The owner's technical review of 59111815: no new findings (the MAC channel keeps the site, device and exact-session
+  checks, nested envelopes and messages before the POST's answer included; show ARP reports `completion_known: false`
+  on idle and `true` on a finished table; the header-name fix holds). CI on #56 at 59111815: all nine checks passed
+  (the backend suite, the CEL gates, both CodeQL analyses, the Compose and browser e2e job). That run is 59111815's
+  only; the merge below needs its own.
+- `origin/main` moved to 4977bfe (#55, the Python validators' `fullmatch`), conflicting with #56 in the catalog's
+  `_host_problems`. The session "Fix websocket header-name check on plugins-3b2", at the owner's request, merged it
+  into this branch (c7e793f, a merge commit, no rebase), keeping 3b-2's labelled messages with #55's `fullmatch`. That
+  session ran the full backend suite at c7e793f: 3,977 passed, 8 skipped, in 10 minutes 36 seconds; this session ran
+  495 tests in the catalog, SDK, egress and Mist stream and utility areas; the owner's review found the resolution
+  correct (113 catalog and SDK tests). Not pushed: on the owner's word.
+- The show ARP ruling change (a bounded collection, above) still awaits the owner's sign-off.
+- The owner signed off the show ARP ruling change (a bounded collection) and the push of the merge (2026-10-08).
+
+## 3c-1 Messaging: chat and webhooks
+
+Branch `feat/plugins-3c1` from `origin/main` f0e7bf5 (#56), started 2026-10-08 on the owner's "let's go" after 3b-2
+merged; the outline's order puts 3c before 3d. A go to build; this section's rulings await the owner's sign-off. No
+migration expected. No real Slack, Teams or Google Chat call: tests and the proof run against local fakes.
+
+Facts checked (official documentation, read 2026-10-08; never from memory):
+- Slack incoming webhooks (docs.slack.dev `messaging/sending-messages-using-incoming-webhooks`, `apis/web-api/rate-limits`,
+  `reference/block-kit/*`, `messaging/formatting-message-text`, `changelog/2016-05-17-changes-to-errors-for-incoming-webhooks`):
+  - the URL's only documented form is `https://hooks.slack.com/services/T…/B…/…` (the `B` segment named the service
+    id; the `T` segment not named); the URL is a secret; channel, user name and icon can't be overridden;
+  - POST JSON with `text` (the `no_text` error says it's needed), optional `blocks`; success is 200 with body `ok`;
+    errors are 4xx with a reason string (400 `invalid_payload`, 403 `action_prohibited`, 404 `channel_not_found`, 410
+    `channel_is_archived`; 500 `rollup_error` in the 2016 mapping); "any other response code as a failure";
+  - rate: incoming webhooks 1 a second, short bursts allowed; about one message a second a channel; past it, 429 with
+    `Retry-After` in seconds;
+  - Block Kit: 50 blocks a message; section text 1 to 3,000 characters; up to 10 fields of 2,000; context up to 10
+    elements; actions up to 25 elements; a button's text 75 (plain text), its url 3,000; a message `text` past 40,000
+    characters is truncated (documented for chat.postMessage);
+  - escaping: `&`, `<` and `>` become `&amp;`, `&lt;` and `&gt;` when not used for formatting; `<!here>` is a special
+    mention; `verbatim: true` turns off automatic parsing (bare links, `@here`, channels).
+- Microsoft Teams through Workflows (learn.microsoft.com `connectors/teams` "When a Teams webhook request is received",
+  `power-automate/ip-address-configuration`, `troubleshoot/.../triggers-troubleshoot`; devblogs on the connectors'
+  retirement):
+  - Office 365 connectors stopped working by 2026-05-22; Workflows replace them;
+  - body `{"type": "message", "attachments": [{"contentType": "application/vnd.microsoft.card.adaptive",
+    "contentUrl": null, "content": <Adaptive Card>}]}`; POST only; samples at card version 1.2; Teams supports cards
+    up to 1.6 for bots; about 28 KB a message;
+  - the trigger's "Anyone" setting takes no authentication header (one sent fails it); the other settings need a
+    token;
+  - hosts: `*.logic.azure.com` (moved since 2025-11-30) and `*.api.powerplatform.com` for the public cloud (the
+    allowlist page; sovereign clouds have their own); the `sig` query value is the secret;
+  - the success status isn't documented for this trigger (Logic Apps' request trigger answers 202 without a Response
+    action), nor 429; throttling: 25 non-GET flow-bot posts a connection per 300 s; a flow throttled for 14 days is
+    turned off;
+  - cards (`task-modules-and-cards/cards/cards-format`, `cards-reference`, and the card schema
+    adaptivecards.microsoft.com `schemas/adaptive-card.json`, read 2026-10-08): markdown renders in a `TextBlock` and
+    in a fact's title and value, `[Title](url)` links included; a `TextRun`'s text: "Markdown is not supported";
+    `RichTextBlock` is 1.2, its inlines `TextRun`s only, no `wrap`; incoming-webhook cards support every native
+    element but `Action.Submit`, up to 1.6; a mention needs an `msteams` entity with the user's id;
+  - httpx 0.28.1 (the lock's) sends a `json=` body compact and UTF-8 (`httpx._content.encode_json`).
+- Google Chat incoming webhooks (developers.google.com `workspace/chat/quickstart/webhooks`, `spaces.messages/create`,
+  `format-messages`, `limits`):
+  - URL `https://chat.googleapis.com/v1/spaces/SPACE_ID/messages?key=KEY&token=TOKEN`; a webhook works only in its
+    space;
+  - POST JSON `{"text": …}`; cards over webhooks not documented; a message is at most 32,000 bytes;
+  - 1 request a second a space, shared by all its webhooks; 429 past a quota (no `Retry-After` documented); errors
+    are `google.rpc.Status` with 4xx or 5xx; the answer holds the message's `name` and `thread.name`;
+  - `<users/all>` mentions everyone in a text message; no escape is documented; `<url|text>` is a link.
+  - text syntax (`format-messages`, read again 2026-10-08): Chat's own by default - bold `*x*`, links
+    `<url|text>`, mentions `<users/{user}>`; Markdown (`[text](url)`, `<chat-user …>`) only when the request sets
+    `markupSyntax` to Markdown; bare URLs are linked; no escape is documented.
+
+Tasks (test-first, in order):
+1. SDK 0.6.0: a connection type whose base URL is a secret field (`SecretUrl`), the URL's shape the secret field's own
+   pattern; a rate scope keyed by a part of a secret field (`secret_pattern`); the message model (title, text, label
+   and value fields, link buttons, severity); the catalog checks the new declarations as data.
+2. The runtime and the API for a secret-URL connection: the request goes to that exact URL only, with no credentials
+   added; its parts join the secret index (as today); its quota scopes from URL parts; a URL of another shape is
+   refused when the connection is created.
+3. Slack: a connection type and `slack.send_message` (Block Kit, the documented escaping, every limit cut and marked;
+   200 `ok` sent, 4xx fatal, anything else after sending unknown).
+4. Teams: a connection type and `teams.send_message` (an Adaptive Card through a Workflows webhook; a 2xx is the flow's
+   acceptance, any other answer unknown).
+5. Google Chat: a connection type and `google_chat.send_message` (text, a scope per space).
+6. Webhook: a connection type, `webhook.send_message` (the message as JSON) and `webhook.send_json` (a body of the
+   workflow's).
+7. Simulate: each node renders and reports what would be cut, sending nothing.
+8. Proof: a workflow posting to Slack, Google Chat, Teams and a webhook through RunGraph against local fakes; simulated,
+   nothing is sent.
+9. Docs: the operator guide's connection types, their URLs and quotas.
+
+Rulings:
+- Ruling: 3c splits in two: 3c-1, the message model and its chat and webhook targets; 3c-2, SMTP (D20) and syslog
+  (D21) - HTTP and socket transports share little, and 3b split the same way - cost if wrong: one more PR.
+- Ruling: one plugin a target (`slack`, `teams`, `google_chat`, `webhook`), each with its connection type and node (the
+  webhook two: task 6, below); the
+  message model is the SDK's (`dewpoint.sdk.messages`), so any plugin can render it - a type key starts with its
+  plugin's name - cost if wrong: none.
+- Ruling: a secret-URL connection sends to its URL exactly, with no path, query or header of the node's; the URL's
+  shape is its secret field's pattern, checked at creation and again where it's read; no verify hook (verifying
+  would post to the channel; the pattern is the host and syntax check D3 names) - cost if wrong: a wrong URL fails at
+  its first send (`connection_unavailable` or the provider's 404).
+- Ruling: Slack's URL is its documented form only (`https://hooks.slack.com/services/T…/B…/…`, each segment letters
+  and digits): GovSlack's host isn't documented, so it's refused - cost if wrong: a GovSlack workspace waits for a
+  documented host.
+- Ruling: Slack's quota scope is one a tenant (D9's fallback: the `T` segment isn't documented as the workspace), 1 a
+  second with bursts of 3 - under-using the quota, never exceeding it - cost if wrong: a tenant's Slack messages queue
+  behind one another at 1 a second.
+- Ruling: a 429 or a 5xx after sending is `outcome_unknown` for every target (D10, D20): Slack and Google document a 429
+  past their rate, not that the message wasn't posted - cost if wrong: such a send needs a person; the buckets keep it
+  rare.
+- Ruling: Slack text is escaped (`&`, `<`, `>`) and sent in `mrkdwn` objects with `verbatim: true`; the title is a bold
+  line, not a `header` block, whose `plain_text` isn't documented to ignore mentions; button labels are `plain_text`
+  (Slack's only kind for them) - a value from run data never mentions `@here` or a channel, nor makes a link - cost if
+  wrong: a title loses the header's size. (Narrowed after the review of 1e71079, R4: no link labelled other than its URL;
+  a bare URL may link to itself.)
+- Ruling: Google Chat text replaces `<` and `>` with their full-width forms: no escape is documented, and `<users/all>`
+  would notify the whole space - cost if wrong: a `<` in a message shows as `＜`.
+- Ruling: Teams cards are version 1.2 (the documented samples'), rich text only (was "text blocks only": changed in
+  task 4, below) and `Action.OpenUrl` buttons; hosts
+  `*.logic.azure.com` and `*.api.powerplatform.com` only (the public cloud); no authentication header (the "Anyone"
+  trigger) - cost if wrong: a sovereign-cloud or a tenant-only trigger isn't reachable yet.
+- Ruling: a Teams 2xx is reported `{accepted: true}`, never `delivered`: the trigger's success status isn't documented,
+  and a flow accepting a request doesn't prove the post - cost if wrong: none.
+- Ruling: Teams's quota scope is per URL, 25 posts in 300 s (the flow-bot limit), bursts of 5 - cost if wrong: a fast
+  workflow waits. (Changed after the review: one a tenant, below.)
+- Ruling: Google Chat's scope is per space (D9: the URL's `spaces/{space}`), 1 a second, no burst - cost if wrong: none.
+- Ruling: a generic webhook's URL is any https URL the guard allows (http only to allowlisted addresses, D7: dropped
+  in task 6, below), the answer's status its only output (a receiver's body could quote anything) - cost if wrong: a receiver's answer isn't
+  readable.
+- Ruling (task 1): a secret URL's pattern is declared on the type (`SecretUrl(field, pattern)`), matched whole
+  (`re.fullmatch`) wherever the secret is read, not put on the secret field: pydantic's default regex engine has no
+  look-around, and with Python's it can't apply a pattern to a `SecretStr`, while a `$` in JSON Schema's Python check
+  would accept a final newline - cost if wrong: none.
+- Ruling (task 2): a secret-URL connection's request carries nothing of the node's - no path, query, parameters,
+  headers or redirects - the provider's URL is the whole request target, and a header of the node's could add
+  credentials the type doesn't declare - cost if wrong: a provider option set by query (Google Chat's threads) needs
+  the type to declare it.
+- Ruling (task 3, Slack): a 4xx is Slack's refusal (`slack.invalid_payload`, `slack.action_prohibited`,
+  `slack.channel_not_found`, `slack.channel_is_archived`, else `slack.refused`), never retried; the runtime marks an
+  ambiguous step's failure after a send `outcome_unknown` with that code kept (2b's rule: a later failure can't
+  establish what an earlier request did) - cost if wrong: the step reads unknown where Slack said no.
+- Ruling: a simulated send renders the message and reports what it would cut, `sent: true` like the real output's
+  shape, opening no connection - cost if wrong: none.
+- Ruling (task 4, Teams): run data goes in rich text blocks of text runs, never a `TextBlock` or a fact set: those
+  render markdown, so a `[label](url)` from run data would be a link with a label of its choosing, while a text run's
+  text isn't markdown; no `msteams` entity is ever sent, so `<at>` mentions no one - cost if wrong: fields lose the
+  fact set's columns, and markdown a workflow meant shows as typed.
+- Ruling (task 4, Teams): the body is kept within 24,000 bytes, measured as httpx sends it (compact UTF-8), under the
+  documented ~28 KB; it's fitted in levels - nothing cut, then the text, field values, labels, and last links - and
+  every cut or dropped value is named in `truncated` - cost if wrong: a message near the limit loses detail it could
+  have kept.
+- Ruling (task 4, Teams): every non-2xx answer is `teams.outcome_unknown`, a 4xx included (unlike Slack): the
+  trigger's error answers aren't documented, so none can be read as a refusal - cost if wrong: a refused send reads
+  unknown and needs a person.
+- Ruling (task 4, Teams): the severity is a subtle line, as in Slack, not a container style: the styles' rendering in
+  Teams isn't documented on the pages read - cost if wrong: the severity isn't coloured.
+- Ruling (task 5, Google Chat): the URL is the documented form exactly - `spaces/{space}/messages?key=…&token=…`, in
+  that order, no port nor other parameter; the space letters, digits, `-` and `_`; the key and token, whose
+  characters aren't documented, the URL's unreserved ones, `%` and `=` - cost if wrong: a URL Google issues with
+  another character is refused at creation until the class widens.
+- Ruling (task 5, Google Chat): text in Chat's own syntax (no `markupSyntax`, so Markdown never applies), the title
+  and labels bold; a link's `|` is percent-encoded so a URL never ends its link early - cost if wrong: a title's own
+  `*` or `_` may format it.
+- Ruling (task 5, Google Chat): the body is kept within 30,000 bytes as sent, under the documented 32,000, fitted in
+  Teams' levels, every cut or dropped value named - cost if wrong: a message near the limit loses detail.
+- Ruling (task 5, Google Chat): only a 200 is sent (Google answers the created message); a 4xx but 429 is
+  `google_chat.refused`, naming the status only, never the answer's message (it could quote anything); any other
+  answer is unknown - cost if wrong: as Slack's.
+- Ruling (task 6, webhook): two nodes, `webhook.send_message` (the message model as JSON, the chat targets'
+  configuration, so a workflow changes target without reshaping it) and `webhook.send_json` (D18's template body: a
+  JSON value of the workflow's), not one node with a union, whose configuration would take two shapes - cost if
+  wrong: one more node type.
+- Ruling (task 6, webhook): https only: a secret URL's pattern starts with https (task 1), so D7's http to an
+  allowlisted address isn't offered - cost if wrong: a plain-http receiver waits for a type that declares it.
+- Ruling (task 6, webhook): the URL is a lowercase host name or IPv4 address (no IPv6 literal, no trailing dot), a
+  port 1 to 65535, a path of RFC 3986's characters with its query; no user, no fragment - so the host the scope is
+  keyed by is the host connected to - cost if wrong: an IPv6-literal or an uppercase URL is refused at creation. (The
+  review added: not a chat target's own webhook host, below.)
+- Ruling (task 6, webhook): one quota scope a host (`secret_pattern` on the URL's host), 1 a second with bursts of 5:
+  a receiver's limit isn't known, and URLs to one receiver share its budget - cost if wrong: a fast workflow waits.
+- Ruling (task 6, webhook): no header of the node's (task 2), so a receiver that needs an authentication header
+  isn't reachable yet; the URL's own token is the credential - cost if wrong: such a receiver waits for a type that
+  declares the header as a secret.
+- Ruling (task 6, webhook): a 2xx is sent, its status the output; a 4xx but 429 is `webhook.refused`, naming the
+  status only; a 3xx (no redirect is followed), a 429, a 5xx or anything else is unknown; simulated, the status is
+  none - cost if wrong: as Slack's.
+- Ruling (task 6, webhook): a workflow's body is at most 1 MiB as sent and never NaN, checked when the configuration
+  is validated, before anything is sent; the message's size is its model's bound - cost if wrong: a larger body
+  needs a larger bound.
+- Ruling (task 6, webhook): its URL's path segments and query values of 8 characters or more join the secret index
+  like any secret URL's (task 2), so an output naming one (a path word such as `incoming`) is redacted - cost if
+  wrong: over-redaction of such words.
+
+Fresh-context review of 3c-1 (at e62f132, 2026-10-08): no High, no Medium, six Low and two notes. Each finding is
+fixed test-first, its protection checked by removing it (mutants named in each commit):
+- L1 (`c82364d`): a secret URL's pattern was checked as text only, so `https://x|http://.*` started with https yet
+  admitted plain http. Ruling: the runtime holds the rule - `secret()` takes a secret URL only if it starts with
+  `https://`, and `base_url()` reads none that doesn't - since a pattern's text can't prove what it matches - cost if
+  wrong: none.
+- L2 (`c82364d`): a `secret_pattern` whose group is optional or empty keyed a scope by nothing. A scope's part must
+  take part in the match and not be empty, where the secret is accepted and where scopes are keyed; else the secret
+  is refused before any request.
+- L3, a ruling challenge (`f6e6d4d`): Teams limits a flow bot's posts per Teams connection ("Non-Get requests per
+  connection", `connectors/teams`, read again 2026-10-08), which no Workflows URL names; keyed by URL, flows sharing
+  one connection each got a budget, as did one flow's URL spelt two ways. Ruling: Teams' scope is one a tenant
+  (`teams.tenant`), D9's fallback as Slack's - under-using the quota, never exceeding it - cost if wrong: a tenant's
+  Teams messages, every flow's together, queue at 25 in 300 s.
+- L4 (`7719a88`): the generic webhook accepted Slack's, Google Chat's and Teams' webhook URLs, and
+  `webhook.send_message` posts run data as it is, so a `<!channel>` would have reached Slack unescaped and the send
+  charged `webhook.host`. Ruling: the generic type refuses `hooks.slack.com`, `chat.googleapis.com` and any host
+  under `logic.azure.com`, `api.powerplatform.com` or `webhook.office.com`; those take their own type - cost if
+  wrong: a workflow that wanted the raw JSON shape on such a host can't have it.
+- L5 (`9c3728f`): the secret index held a URL's parts decoded only (a Chat token written `…%3D` was indexed as
+  `…=`). The raw path, raw segments and raw query values of 8 characters or more join it too.
+- L6 (`c48eec0`): httpx logs each request's whole URL at INFO; only the root's WARNING level kept it out. Configuring
+  the process sets `httpx` and `httpcore` to WARNING.
+- Note (docs): the webhook's docstring claimed a guard check at creation; the API's create path runs the type's
+  checks only, and the guard vets on every connect. Docstring corrected (`7719a88`). The gap against D7's and D8's
+  wording ("the API at connection creation") predates 3c-1; it's flagged for the owner as a separate task, not fixed
+  here.
+- Note (over-redaction): every secret-URL type's path segments and query values of 8 characters or more join the
+  index (task 2), so a provider's constant words (`services`, `messages`, `workflows`, `triggers`, `2016-06-01`,
+  `/triggers/manual/run`) are masked in every output of a run tree that uses such a connection, Mist's included.
+  Ruling: kept, fail-closed - cost if wrong: such words read redacted in those outputs. Recommendation for the owner,
+  not built: a type declares its URL's secret parts (named groups in its pattern: Teams' `sig`, Chat's `token`, a
+  Slack URL's last segment), the rest indexed only within the whole URL; it needs each provider's secret parts
+  verified first.
+
+### 3c-1 checkpoint (2026-10-08, at c48eec0, local, not pushed)
+
+- Built (tasks 1-9, test-first): SDK 0.6.0 with `SecretUrl`, `RateScope.secret_pattern` and the message model
+  (32b2d31); secret-URL connections at run time and at creation, exact URL only (616391e); Slack (5d56645); Teams
+  (4e34072); Google Chat (d34dd85); the generic webhook (684022d); simulate in each node; the RunGraph proof against
+  local fakes (fa26d8f); the operator guides (e62f132).
+- Fresh-context review: no High or Medium; L1-L6 fixed test-first, each protection checked by removing it; two notes
+  recorded above.
+- Verified at c48eec0: 1,656 tests across the SDK, the catalog, connections, egress, logs, the worker, the API's
+  connections and uvicorn logging, every plugin and the CLI; ruff, format, mypy and import contracts; CodeQL's
+  python analysis finds nothing locally, with CI's CLI and query filter.
+- Not run: the full suite (about 10 minutes, asked first); a Compose proof; any real Slack, Teams, Google Chat or
+  receiver call (each needs the owner's say and a test channel).
+- Awaiting the owner: sign-off of this section's rulings (amended in tasks 4 and 6 and after the review, as marked);
+  the full suite; push and PR.
+
+A technical review of 1e71079 (pasted by the owner, 2026-10-08): the six fixes above check out; four Low (R1-R4), no
+High or Medium. Each fixed test-first, its protection checked by removing it. A technical review: it grants no ruling
+acceptance or push permission.
+- R1 (`434db38`): `webhook.send_json` with a null body posted an empty request (httpx sends `json=None` as no body)
+  and reported it sent. Ruling: a workflow's body is never null - refused when validated and by the published schema
+  (`not: null`) - since sending `null` as content would need a content type a secret-URL request can't carry (task
+  2) - cost if wrong: a receiver that wants a bare `null` can't have it. A wire-level regression sends every falsy
+  body through the guarded transport to a local server: each arrives as its JSON with a JSON content type.
+- R2 (`61ef7ee`): Teams' bucket of 5 refilled at 25 per 300 s granted 30 posts in 300 s (29 in 288 s, measured on
+  the database bucket). Ruling (amends L3's): bursts of 5, then 20 in 300 s, so never more than 25 in any 300 s - a
+  work-unit test counts it exactly - cost if wrong: a tenant's Teams posts stay a little under the quota.
+- R3 (`4879091`): any Slack 200 was reported sent. Ruling: only a 200 whose body is exactly `ok` (the documented
+  acknowledgement) is sent; any other 200 is `slack.outcome_unknown`, never retried - cost if wrong: such a send
+  needs a person.
+- R4 (`86c9d9c`): Slack's top-level `text` (the escaped fallback) still turns "Regular URLs" into links unless `parse`
+  is `none` (`messaging/formatting-message-text`). Ruling (narrows Slack's and Google Chat's): run data never mentions
+  anyone nor makes a link labelled other than its own URL; a bare URL may become a link to itself. `parse: none`
+  isn't sent: it isn't documented for incoming webhooks, and an unknown field could make Slack refuse every send -
+  cost if wrong: a bare URL from run data is clickable, showing where it goes. Option for the owner: try `parse:
+  none` against a test channel (a real Slack call, on the owner's say). Docstrings and tests narrowed; a test pins
+  the fallback against a labelled link.
+- The creation-time vetting gap and the over-redaction note stand as separate owner decisions.
+
+### 3c-1 checkpoint, after the review of 1e71079 (2026-10-08, at 86c9d9c, local, not pushed)
+
+- Verified at 86c9d9c: 1,675 tests across the affected areas (as at c48eec0, plus the webhook's wire test); ruff,
+  format, mypy and import contracts; CodeQL's python analysis finds nothing locally.
+- Not run: the full suite (about 10 minutes, asked first); a Compose proof; any real provider call.
+- Awaiting the owner: technical closure of R1-R4; sign-off of this section's rulings (amended as marked); the full
+  suite; push and PR.
+- The review of the fixes (pasted by the owner, 2026-10-08): R1-R4 technically closed at 2ee0d8c, against the amended
+  contracts, no new findings (264 existing tests and 52 closure checks run independently; no real provider call). R1
+  and R4 change the promised behaviour rather than preserve it. A technical closure only: the revised null-body and
+  link rulings, and every other 3c-1 ruling, still await the owner's sign-off; the creation-time vetting gap and the
+  over-redaction note stay separate decisions.
+- The owner signed off this section's rulings, as amended and marked (2026-10-08), and authorized the full suite, the
+  push and the PR.
+- The full backend suite at 9e9881b (2026-10-08), as CI runs it: 3,834 passed with `-n auto`, then the CEL gate tests
+  on their own, 398 passed and 8 skipped.
+
+- The first push was declined by GitHub's push protection (2026-10-08): `test_slack.py` held Slack's documented
+  example webhook URL as one literal (since 5d56645), and gitleaks (the repository's config) also found the
+  secret-URL tests' fake key `k3y…` (since 616391e). On the owner's choice, the branch was rewritten from f0e7bf5
+  (`git filter-branch --tree-filter`, one idempotent text substitution in every commit): Slack's URL is assembled from
+  parts, the fake key is a run of `k` of the same length. Code is identical; the three test files alone differ, and
+  gitleaks finds nothing in the range. The pre-rewrite branch is kept as `backup/plugins-3c1-pre-rewrite` (c2a3127).
+  Every SHA this section names is a pre-rewrite one; the map, in order: ebf932b -> b71326b, 32b2d31 -> dd4bc7b, 616391e -> 7bd65f3, 5d56645 -> 0bde4a3, 4e34072 -> dd7b68b, d34dd85 -> 4914391, 684022d -> f985277, fa26d8f -> 8545b6e, e62f132 -> c63ac2d, c82364d -> eaf909f, f6e6d4d -> ae87c81, 7719a88 -> 548d5d4, 9c3728f -> 78fc369, c48eec0 -> 1efdda9, 1e71079 -> 3f74d5d, 434db38 -> 06ad7fb, 61ef7ee -> de3e9a8, 4879091 -> 8201fab, 86c9d9c -> a505157, 2ee0d8c -> 48069a7, cf69a8d -> b8fc955, be0e579 -> cba7847, 9e9881b -> e7efe68, c2a3127 -> 5eccfed.

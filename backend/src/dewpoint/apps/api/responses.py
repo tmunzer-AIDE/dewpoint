@@ -320,3 +320,21 @@ class OptionsOut(_Answer):
     """A node's options, from its `options()` on a worker (plugins-3 D3), for the editor or a start form's picker."""
 
     options: list[OptionOut]
+
+
+class TriggerEndpointOut(_Answer):
+    auth: Literal["bearer", "hmac"]
+    events_pointer: str | None
+    id_source: Literal["none"]
+
+
+class TriggerTypeOut(_Answer):
+    """A trigger a synced plugin declares (plugins-3 D17): how its webhook endpoint is set up, where an event names its
+    topic, and each topic's event schema, which types a workflow's trigger."""
+
+    plugin: str
+    key: str
+    label: str
+    endpoint: TriggerEndpointOut
+    topic_pointer: str
+    topics: dict[str, dict[str, Any]]

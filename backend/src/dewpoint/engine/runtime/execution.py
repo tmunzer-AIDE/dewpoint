@@ -343,6 +343,7 @@ class Execution:
             tasks[("step", inst)] = asyncio.create_task(self._timer(inst, self._timers[inst]))
         self._resume = []
         clock = asyncio.create_task(asyncio.sleep(max(0.0, (self.deadline - workflow.now()).total_seconds())))
+        closed = False
         try:
             while self.sched.ended is None:
                 self._serve_budget()
@@ -435,15 +436,22 @@ class Execution:
                     effect = task.result()
                     if effect is not None and key[0] != "cancelled":
                         self._apply(key, effect)
+        except GeneratorExit:
+            # Closed, never cancelled: its worker dropped it unevicted, and the garbage collector closes it in
+            # whatever thread it runs, inside another workflow's activation as likely as not. Anything run now would
+            # act on that workflow: nothing does.
+            closed = True
+            raise
         finally:
-            clock.cancel()
-            for key, task in tasks.items():
-                if key[0] not in ("project", "cancelled"):
-                    task.cancel()
-            # Each outstanding unit reports back first, a cancelled child included. A cancel of this execution meanwhile
-            # mustn't reach them again: Temporal refuses a second cancel of the same child, and then this workflow
-            # task could never complete. An end already decided stands.
-            await _landed(asyncio.gather(*tasks.values(), return_exceptions=True))
+            if not closed:
+                clock.cancel()
+                for key, task in tasks.items():
+                    if key[0] not in ("project", "cancelled"):
+                        task.cancel()
+                # Each outstanding unit reports back first, a cancelled child included. A cancel of this execution
+                # meanwhile mustn't reach them again: Temporal refuses a second cancel of the same child, and then this
+                # workflow task could never complete. An end already decided stands.
+                await _landed(asyncio.gather(*tasks.values(), return_exceptions=True))
         return None
 
     def _drain_due(self) -> bool:
@@ -622,7 +630,9 @@ class Execution:
             try:
                 await workflow.get_external_workflow_handle(workflow_id).signal(name, args=args)
             except Exception:  # the child ended meanwhile: nothing reads the answer
-                workflow.logger.warning("budget_signal_undelivered", extra={"to": workflow_id, "signal": name})
+                workflow.logger.warning(
+                    "budget_signal_undelivered", extra={"signal_to": workflow_id, "signal_name": name}
+                )
 
         self._signals.append(asyncio.create_task(send()))
 

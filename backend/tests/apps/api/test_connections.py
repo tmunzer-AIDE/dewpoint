@@ -5,8 +5,8 @@ import pytest
 from sqlalchemy import text
 
 from dewpoint.apps.plugin_loader import sync_installed
-from dewpoint.plugins.mist import PLUGIN as MIST
 from tests.apps.api.helpers import session_client
+from tests.support.plugins.mist import MIST_TYPE_ONLY as MIST
 
 ORG = str(uuid.uuid4())
 BODY = {
@@ -135,9 +135,12 @@ async def test_a_connection_shows_its_current_cooldowns(app, owner_sessionmaker,
             await s.execute(insert, {"t": tid, "s": f"mist.org:emea_01:{ORG}", "w": 120})
             await s.execute(insert, {"t": tid, "s": f"mist.token:{hasher(BODY['secret']['api_token'])}", "w": 600})
             await s.execute(insert, {"t": tid, "s": "mist.org:emea_01:someone-else", "w": 600})
+            stream = f"mist.stream:{hasher(BODY['secret']['api_token'])}"  # its stream's scope (plugins-3 D26)
+            await s.execute(insert, {"t": tid, "s": stream, "w": 300})
         r = await c.get(f"/api/v1/t/{tid}/connections/{cid}")
     shown = {x["scope"]: datetime.fromisoformat(x["until"]) - datetime.now(UTC) for x in r.json()["cooldowns"]}
-    assert set(shown) == {"mist.org", "mist.token"}
+    assert set(shown) == {"mist.org", "mist.token", "mist.stream"}
+    assert timedelta(seconds=280) < shown["mist.stream"] <= timedelta(seconds=305)
     assert timedelta(seconds=100) < shown["mist.org"] <= timedelta(seconds=125)
     assert timedelta(seconds=580) < shown["mist.token"] <= timedelta(seconds=605)
     assert "tok_" not in r.text and "someone-else" not in r.text
@@ -196,3 +199,30 @@ async def test_an_edit_racing_a_move_is_checked_against_the_move(app, owner_sess
             await asyncio.sleep(0.5)  # the restore has read the connection and is waiting on the move
         r = await restore
     assert (r.status_code, r.json()) == (422, {"error": "secret_required"})
+
+
+@pytest.mark.parametrize(
+    "webhook_url",
+    [
+        "https://evil.test/v1/spaces/space1/messages?key=kkkkkkkkkkkkkkkkkkk",
+        "https://hooks.test/v1/spaces/space1/messages?key=kkkkkkkkkkkkkkkkkkk\n",
+        "https://hooks.test/v1/spaces/space1/messages",
+    ],
+)
+async def test_a_webhook_url_of_another_shape_is_refused_naming_its_field(
+    app, owner_sessionmaker, api_settings, webhook_url: str
+) -> None:
+    """A secret-URL type (plugins-3 3c-1): the URL matches its type's pattern whole, or the connection isn't made."""
+    from tests.support.plugins.hookkit import HOOKKIT
+
+    async with owner_sessionmaker() as s, s.begin():
+        await sync_installed(s, [MIST, HOOKKIT])
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
+    async with c:
+        body = {"type": "hookkit", "name": "Hook", "config": {}, "secret": {"webhook_url": webhook_url}}
+        r = await c.post(f"/api/v1/t/{tid}/connections", json=body)
+        good = {**body, "secret": {"webhook_url": "https://hooks.test/v1/spaces/space1/messages?key=kkkkkkkkkkkkk"}}
+        made = await c.post(f"/api/v1/t/{tid}/connections", json={**good, "name": "Good hook"})
+    assert r.status_code == 422 and r.json() == {"error": "invalid", "fields": ["webhook_url"]}
+    assert "kkkkkkkkkkkkkkkkkkk" not in r.text and "evil" not in r.text
+    assert made.status_code == 201, made.text

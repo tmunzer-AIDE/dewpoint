@@ -14,8 +14,8 @@ writes its schedules' generations, so both take the two in the same order.
 
 An enabled schedule's tick is admitted as any durable source is (queued, or a `refused` request with admission's
 reason); one whose schedule was disabled before its pause reached Temporal, or deleted (its tombstone), is a `refused`
-request (`schedule_paused`, `schedule_deleted`); either way its `run.request` audit entry names the schedule. An
-`erasing` tenant's tick is an audited skip, never a request.
+request (`schedule_paused`, `schedule_deleted`); either way its `run.request` audit entry names the schedule. A tick
+of a tenant that isn't active (`erasing`, or `erased`) is an audited skip, never a request.
 After those decisions, a newly decided tick strictly past its schedule's catch-up window, by the database's clock read
 once it holds the row, is a `refused` request, `schedule_catchup_expired` (the owner's ruling on the whole-branch
 review): an outage of the dispatcher or the database longer than the window admits only the firings within it, as
@@ -24,7 +24,13 @@ never expires. These refusals are reported apart from Temporal's count of the fi
 recorded one alerts once (`schedule_tick_expired`), when its transaction has committed, never for a retry that finds it
 or an attempt rolled back.
 A platform-wide failure (the database, a key) raises, and the workflow retries it without limit (§2.5): a tick still
-unadmitted 10 minutes after its time alerts."""
+unadmitted 10 minutes after its time alerts.
+Its first act, in a transaction of its own, records its workflow and run ids (`schedule_firings`), a skip included: an
+erasure's firing inventory (2b-4a M4). Past its tenant's insert fence the record is refused; the tick still skips, and
+alerts (`schedule_tick_unrecorded`).
+What the tick carries in Temporal is the tick contract's (`apps.tick_contract`), unsealed: its outcome is reduced to
+the contract's codes (`tick_contract.outcome`), its failures to its failure codes, and its request row records the
+rest."""
 
 import json
 import uuid
@@ -32,12 +38,17 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import structlog
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio import activity
+from temporalio.api.enums.v1 import TaskQueueType
+from temporalio.api.taskqueue.v1 import TaskQueue
+from temporalio.api.workflowservice.v1 import DescribeTaskQueueRequest
+from temporalio.client import Client
 from temporalio.exceptions import ApplicationError
 
-from dewpoint.apps import admission, schedules
+from dewpoint.apps import admission, schedules, tick_contract
 from dewpoint.core.audit import service as audit
 from dewpoint.core.claims.cipher import ClaimCipher
 from dewpoint.core.crypto.keys import KeySource
@@ -45,6 +56,7 @@ from dewpoint.core.db import tenant_scope
 from dewpoint.core.models.requests import RunRequest
 from dewpoint.core.models.schedules import Schedule
 from dewpoint.core.models.tenancy import Tenant
+from dewpoint.core.tenancy import lifecycle
 from dewpoint.core.workflows.service import lock_for_admission
 from dewpoint.engine.runtime.ids import schedule_of
 
@@ -56,13 +68,13 @@ SCHEDULE_DELETED = "schedule_deleted"
 SCHEDULE_CATCHUP_EXPIRED = "schedule_catchup_expired"
 EXPIRED = "dewpoint.tick.expired"  # in the session's `info`: the expiries newly recorded, alerted on commit
 LATE = timedelta(minutes=10)  # §15: provisional
-TICK_IDENTITY = "tick_identity"
-SCHEDULE_UNKNOWN = "schedule_unknown"
+TICK_IDENTITY = tick_contract.TICK_IDENTITY
+SCHEDULE_UNKNOWN = tick_contract.SCHEDULE_UNKNOWN
 
 
 @dataclass(frozen=True)
 class TickInput:
-    schedule_id: str  # the action's argument, which must name the schedule the workflow id does
+    schedule_id: str  # the schedule the workflow id names (the workflow derives it from its id)
     key: str  # `sched:<schedule_id>:<nominal time>`
     nominal: str  # the nominal time, UTC, whole seconds: `2026-10-04T09:00:00Z`
 
@@ -103,6 +115,7 @@ async def admit_tick(
     `recorded` when its key already holds another outcome of this tick (it was paused then, enabled since). An expiry
     this call newly records is left in `s.info[EXPIRED]`, for the caller to alert on once its transaction commits."""
     await tenant_scope(s, tenant_id)
+    await lifecycle.hold_shared(s, tenant_id)  # first, as every writer of tenant data: an erasure's step 1 takes it
     found = await s.get(Schedule, schedule_id, populate_existing=True)  # row-level security: that tenant's only
     if found is None:
         raise ScheduleUnknownError(str(schedule_id))
@@ -115,7 +128,7 @@ async def admit_tick(
     ).scalar_one()  # exclusive, held until the caller commits: never a shared lock it would upgrade  # fmt: skip
     await _after_schedule_locked()
     tenant = await s.get(Tenant, tenant_id, populate_existing=True)
-    if tenant is None or tenant.status == "erasing":
+    if tenant is None or tenant.status != "active":  # erasing, or erased: never eligible again
         details: dict[str, object] = {"schedule_id": str(schedule_id), "tick": key, "reason": admission.TENANT_ERASING}
         await audit.record(s, tenant_id=tenant_id, actor_id=None, action="schedule.tick_skipped",
                            target_type="schedule", target_id=str(schedule_id), details=details)  # fmt: skip
@@ -161,11 +174,31 @@ async def admit_tick(
     return _outcome(admitted.request)
 
 
+_FIRING = text(
+    "INSERT INTO schedule_firings (workflow_id, run_id, tenant_id, schedule_id) SELECT :w, :r, :t, :s "
+    "WHERE EXISTS (SELECT 1 FROM schedules WHERE id = :s AND tenant_id = :t) ON CONFLICT DO NOTHING"
+)
+
+
 class Ticker:
     """`schedule.tick`, bound to the dispatcher's database and keys."""
 
     def __init__(self, sessionmaker: async_sessionmaker[AsyncSession], keys: KeySource) -> None:
         self.sessionmaker, self.keys = sessionmaker, keys
+
+    async def _recorded(self, tenant_id: uuid.UUID, schedule_id: uuid.UUID) -> None:
+        """This firing's ids, recorded once, whatever its outcome, if its tenant has the schedule it names (a tick of no
+        schedule fails right after, `schedule_unknown`); refused only past its tenant's insert fence."""
+        info = activity.info()
+        try:
+            async with self.sessionmaker() as s, s.begin():
+                await tenant_scope(s, tenant_id)
+                await s.execute(_FIRING, {"w": info.workflow_id, "r": info.workflow_run_id, "t": tenant_id,
+                                          "s": schedule_id})  # fmt: skip
+        except DBAPIError as e:
+            if getattr(e.orig, "sqlstate", None) != lifecycle.FENCED:
+                raise
+            log.error("schedule_tick_unrecorded", schedule_id=str(schedule_id))
 
     @activity.defn(name=TICK)
     async def tick(self, given: TickInput) -> str:
@@ -175,11 +208,12 @@ class Ticker:
                                    non_retryable=True)  # fmt: skip
         tenant_id, schedule_id = (uuid.UUID(part) for part in named)
         try:
+            await self._recorded(tenant_id, schedule_id)
             async with self.sessionmaker() as s, s.begin():
                 outcome = await admit_tick(s, self.keys, tenant_id=tenant_id, schedule_id=schedule_id, key=given.key)
             for expiry in s.info.pop(EXPIRED, []):  # committed: an attempt rolled back never gets here
                 log.error("schedule_tick_expired", **expiry)
-            return outcome
+            return tick_contract.outcome(outcome)  # its request row records the reason in full
         except ScheduleUnknownError:
             raise ApplicationError("A tick of no schedule of its tenant.", type=SCHEDULE_UNKNOWN,
                                    non_retryable=True) from None  # fmt: skip
@@ -188,6 +222,20 @@ class Ticker:
                 log.error("schedule_tick_late", schedule_id=str(schedule_id), attempt=activity.info().attempt,
                           error=type(e).__name__)  # fmt: skip
             raise
+
+
+async def admission_pollers(client: Client) -> list[str]:
+    """The identities Temporal shows polling the admission queue, for workflows and for activities: each dispatcher's.
+    One without the tick contract's mark (`tick_contract.IDENTITY`) runs ticks as before it."""
+    found: list[str] = []
+    for kind in (TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW, TaskQueueType.TASK_QUEUE_TYPE_ACTIVITY):
+        answer = await client.workflow_service.describe_task_queue(
+            DescribeTaskQueueRequest(
+                namespace=client.namespace, task_queue=TaskQueue(name=ADMISSION_QUEUE), task_queue_type=kind
+            )  # fmt: skip
+        )
+        found.extend(poller.identity for poller in answer.pollers)
+    return found
 
 
 def _parsed(stamp: str) -> datetime:
