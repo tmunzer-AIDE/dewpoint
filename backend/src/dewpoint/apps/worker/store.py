@@ -147,6 +147,15 @@ class DbRunStore:
             )
         return StoredClaim(found.value, found.sensitive_pointers)
 
+    async def fetch_many(self, tenant_id: str, run_id: str, claim_ids: Sequence[str]) -> dict[str, StoredClaim]:
+        """Claims as `fetch` reads one, in one session, a thousand a statement (2b-4b M3)."""
+        cipher = self._claims()
+        async with self.sessionmaker() as s, s.begin():
+            await tenant_scope(s, uuid.UUID(tenant_id))
+            found = await claims.fetch_many(s, cipher, uuid.UUID(tenant_id), run_id=uuid.UUID(run_id),
+                                            claim_ids=[uuid.UUID(c) for c in claim_ids])  # fmt: skip
+        return {str(c): StoredClaim(v.value, v.sensitive_pointers) for c, v in found.items()}
+
     async def write(
         self,
         tenant_id: str,

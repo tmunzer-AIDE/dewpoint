@@ -5,7 +5,7 @@ in-memory store and an in-process CEL evaluator (the real one needs Linux and it
 import asyncio
 import dataclasses
 import uuid
-from collections.abc import AsyncIterator, Iterable, Iterator
+from collections.abc import AsyncIterator, Iterable, Iterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -174,6 +174,9 @@ class MemoryStore:
         return [r for k, r in sorted(self.rows.items()) if k[0] == run_id]
 
     # --- claims (2b spec §3), checked as the database store checks them ------------------------------------------
+
+    async def fetch_many(self, tenant_id: str, run_id: str, claim_ids: Sequence[str]) -> dict[str, StoredClaim]:
+        return {c: await self.fetch(tenant_id, run_id, c) for c in dict.fromkeys(claim_ids)}
 
     async def fetch(self, tenant_id: str, run_id: str, claim_id: str) -> StoredClaim:
         held = self.claims.get(claim_id)

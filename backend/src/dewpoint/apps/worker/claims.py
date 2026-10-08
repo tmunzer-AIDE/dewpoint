@@ -85,6 +85,10 @@ class ClaimStore(Protocol):
         """A whole claim, for `run_id`: its owner, or a run it was granted to. Raises ClaimUnavailableError."""
         ...
 
+    async def fetch_many(self, tenant_id: str, run_id: str, claim_ids: Sequence[str]) -> dict[str, StoredClaim]:
+        """Whole claims, as `fetch` reads one, in one session: one this run may not read refuses them all."""
+        ...
+
     async def write(
         self,
         tenant_id: str,
@@ -604,21 +608,31 @@ async def filter_claimed(
 # --- crossing between runs (§3.4) ----------------------------------------------------------------------------------
 
 
-async def _closure(claim_ids: Sequence[str], fetch: Fetch) -> list[str]:
-    """`claim_ids` and every claim nested in them: what a run must be granted to resolve their handles."""
+CLOSURE_READS = 1_000  # claims a closure reads at once: their handles kept, their values let go
+
+
+async def _closure(claim_ids: Sequence[str], fetch_many: Callable[[Sequence[str]], Awaitable[dict[str, StoredClaim]]]
+                   ) -> list[str]:  # fmt: skip
+    """`claim_ids` and every claim nested in them: what a run must be granted to resolve their handles. Read a level
+    at a time, a thousand claims a read (the owner's ruling on the 2b-4b M2 measurement: a claim a session, about 7 ms
+    each, timed a crossing of 7,500 out), keeping only the handles each nests."""
     seen: set[str] = set()
-    queue = list(claim_ids)
-    while queue:
-        claim_id = queue.pop()
-        if claim_id in seen:
-            continue
-        seen.add(claim_id)
-        queue.extend(h.id for _, h in handles_in((await fetch(claim_id)).value))
+    level = sorted(set(claim_ids))
+    while level:
+        seen.update(level)
+        nested: set[str] = set()
+        for at in range(0, len(level), CLOSURE_READS):
+            found = await fetch_many(level[at : at + CLOSURE_READS])
+            nested.update(h.id for stored in found.values() for _, h in handles_in(stored.value))
+        level = sorted(nested - seen)
     return sorted(seen)
 
 
 async def _granted(store: ClaimStore, tenant: str, run: str, to: str, value: Any, root: str) -> None:
-    ids = await _closure([h.id for _, h in handles_in(value)], _fetcher(store, tenant, run))
+    async def fetch_many(claim_ids: Sequence[str]) -> dict[str, StoredClaim]:
+        return await store.fetch_many(tenant, run, claim_ids)
+
+    ids = await _closure([h.id for _, h in handles_in(value)], fetch_many)
     if ids:
         await store.grant(tenant, granted_by=run, to=to, claim_ids=ids, root_run_id=root)
 
