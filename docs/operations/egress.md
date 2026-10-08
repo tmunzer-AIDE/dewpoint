@@ -98,6 +98,28 @@ There are no client certificates. A message is at most 2048 octets over UDP and 
 Syslog has no acknowledgement: a sent message was handed over, not necessarily received, and a send is never retried
 once a byte may have left.
 
+### PagerDuty
+
+A `pagerduty` connection sends alert events through PagerDuty's Events API v2 (plugins-3 D22). It names the service
+region, which picks the host, and holds the integration key.
+
+- **Hosts.** `us`: `https://events.pagerduty.com/v2/enqueue`; `eu`: `https://events.eu.pagerduty.com/v2/enqueue`.
+  PagerDuty documents only the EU host; its path is taken to be the US one. A US host forwards an EU key's events.
+- **The integration key.** The 32-character key of a service's Events API v2 integration. The runtime puts it into
+  each event as `routing_key`; a step never holds it, can't set that field and can't send any body but a JSON object.
+  No authentication header is sent.
+- **Nothing is sent to test a connection.** Checking a key means sending an event, which would page someone: a wrong
+  key fails at its first send.
+- **A retry pages once.** A trigger's `dedup_key` is its config's, else one derived from the run and the step (64
+  hex characters), so a retried trigger joins the alert it opened. If that alert was resolved meanwhile, PagerDuty opens a new one. Acknowledge and resolve
+  name the alert by its `dedup_key`; with no open alert, PagerDuty drops them.
+- **Outcomes.** A 202 is applied. A 400 (`pagerduty.invalid_event`) or another 4xx (`pagerduty.refused`) fails the
+  step. A 429, a 5xx, or a 2xx other than 202 is retried. A 429's or 503's `Retry-After` is waited out within the
+  attempt, at most 3 times and 20 s in all; past that, the engine's next attempt retries.
+- **Bounds.** An event is at most 500,000 bytes as sent (PagerDuty takes 512 KB); the text and the fields' values are
+  cut to fit, and the step names what it cut. A summary is at most 1024 characters.
+- **Firewalls.** Allow the region's host on port 443.
+
 ## The allowlist
 
 Only a platform admin can change the allowlist, through the `dewpoint_admin` database role. Every change is audited:
@@ -135,9 +157,12 @@ per tenant, so connections that share a credential share one budget.
   space's webhooks.
 - **Webhook.** One scope a receiver's host (`webhook.host`): bursts of 5, then 1 a second.
 - **Email.** One scope a server host (`email.server`): bursts of 5, then 1 a second. Syslog has none.
+- **PagerDuty.** One scope an integration key (`pagerduty.integration`): bursts of 20, then 100 a minute, so never
+  more than 120 events in any 60 s (PagerDuty's limit a key). Its account's own limits apply too.
 - **When no token is available.** A step waits up to 10 s. After that it fails with `cooldown` and sends nothing.
 - **When the provider sends `Retry-After`.** That scope is blocked for every run, for up to an hour.
 - **Seeing a block.** `GET /api/v1/t/{tenant}/connections/{id}` lists each blocked scope's current cooldown, shown
   by its kind (`mist.org`, `mist.token`, `mist.stream`, `slack.tenant`, `teams.tenant`, `google_chat.space`,
-  `webhook.host`, `email.server`). That end time is live: it moves if the provider extends or lifts the block. A
-  stream's opening refused with a 429 or 503 and a `Retry-After` blocks its stream scopes the same way.
+  `webhook.host`, `email.server`, `pagerduty.integration`). That end time is live: it moves if the provider extends
+  or lifts the block. A stream's opening refused with a 429 or 503 and a `Retry-After` blocks its stream scopes the
+  same way.
