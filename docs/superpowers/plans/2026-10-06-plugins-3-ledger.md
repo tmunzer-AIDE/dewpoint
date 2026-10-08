@@ -1546,3 +1546,15 @@ technical closure. Both fixed test-first, each protection checked by removing it
   socket, the live TLS one after a failed STARTTLS included - cost if wrong: none. 0 hangs in 80 stress runs after.
 - L1: a session was registered only after vetting, and a closed client took new sends. `aclose()` sets a closed state,
   refused before vetting and checked after it, as the guarded websocket's fence; a closed client resolves nothing.
+- CodeQL then flagged a test wrapping a socket with the test CA's context (`py/insecure-protocol`, no TLS floor it
+  could see): the tests' client context now requires TLS 1.2, as the platform's (`d6da745`); CodeQL finds nothing.
+
+### 3c-2 checkpoint, after the review of c092eb9 (2026-10-08, at d6da745, local, not pushed)
+
+- Verified at d6da745: the whole backend suite, 4,478 passed and 8 skipped in 9 minutes with `-n auto`, the CEL gate
+  tests among them (run by a mistake: a shell glob emptied the intended file list, so pytest ran everything; not the
+  owner's authorized run, and CI keeps the gates apart); 1,950 tests across the affected areas at d0ec07a; ruff,
+  format, mypy, import contracts; gitleaks over the branch's commits; CodeQL's python analysis finds nothing.
+- Not run: a Compose proof; any real mail server or syslog receiver.
+- Awaiting the owner: technical closure of M1 and L1; sign-off of this section's rulings (the review's new ones
+  marked); push and PR.
