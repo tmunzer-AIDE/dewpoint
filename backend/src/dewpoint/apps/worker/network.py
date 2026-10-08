@@ -555,7 +555,12 @@ class ConnectionHttp:
         if self._exact and (params is not None or headers or follow_same_origin):
             raise InvalidRequest()  # a secret URL's request is its URL, with nothing of the node's
         if self._body:  # the credentials go into a JSON object body, never one the node set them in
-            if content is not None or not isinstance(json, dict) or any(name in json for name in self._body):
+            if (
+                content is not None
+                or type(json) is not dict
+                or any(type(k) is not str for k in json)
+                or any(name in json for name in self._body)
+            ):  # exact types: a key can't pass as another
                 raise InvalidRequest()
             json = {**json, **self._body}
         target = self._target(url)
@@ -737,13 +742,13 @@ class Unsealed:
     kind: WorkerType
     stored_config: Mapping[str, Any]
     config: Mapping[str, Any]
-    secret: Mapping[str, Any]
-    base: httpx.URL | None
-    credentials: Mapping[str, str]
+    secret: Mapping[str, Any] = field(repr=False)  # never in a repr: the secret, and what's made of it
+    base: httpx.URL | None = field(repr=False)  # a secret URL's
+    credentials: Mapping[str, str] = field(repr=False)
     stream_url: str | None = None
     exact: bool = False  # the base is a secret URL: requests go to it exactly
     smtp: SmtpTarget | None = None  # the type's mail server, when it declares one (its base is then none)
-    body: Mapping[str, str] = field(default_factory=dict)  # credentials put into each request's JSON body
+    body: Mapping[str, str] = field(default_factory=dict, repr=False)  # credentials put into each request's JSON body
 
     def opened(self, channel: Channel, mac: Callable[[], Awaitable[Callable[[str], str]]]) -> OpenedConnection:
         async def scopes() -> list[Scope]:

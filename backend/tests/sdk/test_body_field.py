@@ -9,9 +9,9 @@ from typing import Any
 import pytest
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
-from dewpoint.core.connections.declared import DeclaredType
+from dewpoint.core.connections.declared import DeclaredType, InvalidValueError
 from dewpoint.engine.registry.catalog import validate_plugin_manifest
-from dewpoint.sdk import BodyField, ConnectionType, HostMap, ManifestError, Plugin
+from dewpoint.sdk import BodyField, ConnectionType, HostMap, ManifestError, Plugin, StreamEndpoint, VerifyResult
 from dewpoint.sdk.version import SDK_VERSION
 
 
@@ -31,6 +31,12 @@ class OptionalSecret(BaseModel):
 
 
 HOSTS = HostMap("region", {"us": "events.example.com"})
+
+
+async def _verify(ctx: Any, connection: Any) -> VerifyResult:
+    return VerifyResult(ok=True, detail="ok")
+
+
 KIND = ConnectionType("demo", "Demo events", NoConfig, KeySecret, auth=BodyField("routing_key", "routing_key"),
                       host=HOSTS)  # fmt: skip
 
@@ -69,6 +75,12 @@ def test_the_runtime_reads_the_body_field_from_the_secret_and_sends_no_header() 
          "auth body field 'routing key' must be an identifier"),
         (ConnectionType("demo", "D", NoConfig, KeySecret, auth=BodyField("a.b", "routing_key"), host=HOSTS),
          "auth body field 'a.b' must be an identifier"),
+        (ConnectionType("demo", "D", NoConfig, KeySecret, auth=BodyField("routing_key", "routing_key"), host=HOSTS,
+                        stream=StreamEndpoint(HOSTS, "/ws")),
+         "a body field goes into no stream and no verify"),  # a stream would open unauthenticated (the review's L3)
+        (ConnectionType("demo", "D", NoConfig, KeySecret, auth=BodyField("routing_key", "routing_key"), host=HOSTS,
+                        verify=_verify),
+         "a body field goes into no stream and no verify"),  # a verify reads only: it can never carry the field
     ],
 )  # fmt: skip
 def test_a_body_field_is_checked(kind: ConnectionType, problem: str) -> None:
@@ -92,8 +104,22 @@ def _kind(change: Any) -> dict[str, Any]:
         (_kind(lambda t: t["auth"].pop("secret")), "auth must be {kind: header"),
         (_kind(lambda t: t["auth"].update(kind="query")), "auth must be {kind: header"),
         (_kind(lambda t: t["secret_schema"].update(required=[])), "isn't a required secret field"),
+        (_kind(lambda t: t.update(verify=True)), "a body field goes into no stream and no verify"),
+        (_kind(lambda t: t.update(stream={**t["host"], "path": "/ws", "rate_scopes": []})),
+         "a body field goes into no stream and no verify"),
     ],
 )  # fmt: skip
 def test_a_body_field_is_checked_as_data(manifest: dict[str, Any], problem: str) -> None:
     problems = validate_plugin_manifest(copy.deepcopy(manifest))
     assert any(problem in p for p in problems), problems
+
+
+@pytest.mark.parametrize("auth", [{"kind": "bearer", "secret": "routing_key"}, {"kind": None}, {}])
+def test_an_auth_kind_the_runtime_doesnt_know_sends_nothing(auth: dict[str, Any]) -> None:
+    """Defence in depth behind the catalog (the review's L1): a stored type of another auth kind is unusable, never
+    sent without credentials."""
+    declared = DeclaredType.from_manifest("demo", {**KIND.manifest(), "auth": auth})
+    with pytest.raises(InvalidValueError):
+        declared.credentials({"routing_key": "k" * 32})
+    with pytest.raises(InvalidValueError):
+        declared.body_credentials({"routing_key": "k" * 32})

@@ -259,11 +259,14 @@ def _props(schema: Any) -> Mapping[str, Any]:
     return props if isinstance(props, Mapping) else {}
 
 
-def _auth_problems(name: str, auth: Any, secret_fields: Mapping[str, Any], secret_schema: Any = None) -> list[str]:
+def _auth_problems(
+    name: str, auth: Any, secret_fields: Mapping[str, Any], secret_schema: Any = None, *, stream: bool = False,
+    verify: bool = False,
+) -> list[str]:  # fmt: skip
     if auth is None:
         return []
     if isinstance(auth, Mapping) and auth.get("kind") == "body_field":
-        return body_field_problems(name, auth, secret_schema)
+        return body_field_problems(name, auth, secret_schema, stream=stream, verify=verify)
     template = auth.get("template") if isinstance(auth, Mapping) else None
     if (
         not isinstance(auth, Mapping)
@@ -453,7 +456,8 @@ def _connection_type_problems(plugin: str, t: Any, seen: set[str]) -> list[str]:
     for prop, sub in secret_fields.items():
         if not isinstance(sub, Mapping) or sub.get(SENSITIVE) is not True or sub.get("type") != "string":
             out.append(f"{name}: secret field {prop!r} must be an x-sensitive string")
-    out += _auth_problems(name, t.get("auth"), secret_fields, t.get("secret_schema"))
+    out += _auth_problems(name, t.get("auth"), secret_fields, t.get("secret_schema"), stream="stream" in t,
+                          verify=t.get("verify") is True)  # fmt: skip
     out += _host_problems(name, t.get("host"), config_fields, secret_fields=secret_fields)
     scopes = t.get("rate_scopes")
     if not isinstance(scopes, list):

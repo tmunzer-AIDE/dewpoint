@@ -9,18 +9,36 @@ import json
 import uuid
 from typing import Any
 
+import httpx
 import pytest
 
-from dewpoint.apps.worker.network import DbConnections, Network, worker_types
+from dewpoint.apps.worker.network import ConnectionHttp, DbConnections, Network, Unsealed, worker_types
 from dewpoint.apps.worker.store import DbRunStore
 from dewpoint.core.egress.addresses import AllowEntry
-from dewpoint.sdk import InvalidRequest
+from dewpoint.sdk import InvalidRequest, ReadOnly
 from tests.support.connections import add_connection, seed_step
 from tests.support.keys import FixtureKeys
 from tests.support.netfakes import guard, respond, serve, tls
 from tests.support.plugins.bodykit import BODYKIT, ROUTING_KEY, Post
 
 NAMES = ("events.test",)
+
+
+class Lookalike(str):
+    """A key equal to the field's name for the wire, but not for a membership test (the review's L2)."""
+
+    __slots__ = ()
+
+    def __hash__(self) -> int:
+        return 1
+
+    def __eq__(self, other: object) -> bool:
+        return other is self
+
+
+class Blind(dict):  # type: ignore[type-arg]
+    def __contains__(self, key: object) -> bool:
+        return False
 
 
 async def _attempt(owner: Any, worker: Any, port: int) -> tuple[Any, uuid.UUID, Any]:
@@ -67,6 +85,10 @@ async def test_the_secret_is_the_bodys_field_and_no_header(owner_sessionmaker, w
         ("POST", {"content": b"raw", "json": {"event_action": "trigger"}}),  # httpx would send the raw bytes alone
         ("POST", {}),
         ("GET", {}),
+        ("POST", {"json": {Lookalike("routing_key"): "s" * 32, "event_action": "trigger"}}),
+        ("POST", {"json": Blind(event_action="trigger", routing_key="s" * 32)}),
+        ("POST", {"json": {1: "x", "event_action": "trigger"}}),
+        ("POST", {"json": {"event_action": "trigger"}, "probe": True}),
     ],
 )
 async def test_a_request_the_field_cant_go_into_is_refused(owner_sessionmaker, worker_sessionmaker, method: str,
@@ -79,3 +101,28 @@ async def test_a_request_the_field_cant_go_into_is_refused(owner_sessionmaker, w
         finally:
             await attempt.aclose()
     assert server.requests == [] and not attempt.uncertain
+
+
+class _ReadOnly:
+    read_only, resends = True, False
+
+
+@pytest.mark.parametrize(("method", "kwargs"), [("POST", {"json": {"event_action": "trigger"}}), ("GET", {})])
+async def test_a_read_only_channel_sends_nothing_through_a_body_field(method: str, kwargs: dict[str, Any]) -> None:
+    """A plugin call's channel reads only: a body-field connection can't send there (no channel method is reached)."""
+
+    async def scopes() -> list[Any]:
+        raise AssertionError("no token is taken")
+
+    http = ConnectionHttp(_ReadOnly(), httpx.URL("https://events.test"), {}, scopes, body={"routing_key": ROUTING_KEY})  # type: ignore[arg-type]
+    with pytest.raises((ReadOnly, InvalidRequest)):
+        await http.request(method, "/v2/enqueue", **kwargs)
+
+
+def test_an_unsealed_connections_repr_holds_no_secret() -> None:
+    """The review's L6: the secret, the base (a secret URL's), the header and body credentials never in a repr."""
+    secret = "S3cr3t" + "x" * 26
+    unsealed = Unsealed(id=uuid.uuid4(), type="t", kind=None, stored_config={}, config={},  # type: ignore[arg-type]
+                        secret={"routing_key": secret}, base=httpx.URL(f"https://hooks.test/{secret}"),
+                        credentials={"Authorization": secret}, body={"routing_key": secret})  # fmt: skip
+    assert secret not in repr(unsealed)

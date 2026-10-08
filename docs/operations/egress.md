@@ -111,13 +111,19 @@ region, which picks the host, and holds the integration key.
 - **Nothing is sent to test a connection.** Checking a key means sending an event, which would page someone: a wrong
   key fails at its first send.
 - **A retry pages once.** A trigger's `dedup_key` is its config's, else one derived from the run and the step (64
-  hex characters), so a retried trigger joins the alert it opened. If that alert was resolved meanwhile, PagerDuty opens a new one. Acknowledge and resolve
-  name the alert by its `dedup_key`; with no open alert, PagerDuty drops them.
-- **Outcomes.** A 202 is applied. A 400 (`pagerduty.invalid_event`) or another 4xx (`pagerduty.refused`) fails the
-  step. A 429, a 5xx, or a 2xx other than 202 is retried. A 429's or 503's `Retry-After` is waited out within the
-  attempt, at most 3 times and 20 s in all; past that, the engine's next attempt retries.
+  hex characters), so a retried trigger joins the alert it opened. If that alert was resolved meanwhile, PagerDuty
+  opens a new one. Acknowledge and resolve name the alert by its `dedup_key`; with no open alert, PagerDuty drops
+  them.
+- **Order isn't promised.** PagerDuty processes events asynchronously and doesn't document their order: an
+  acknowledge or resolve sent right after its trigger may be processed first and dropped, leaving the alert open.
+- **Outcomes.** A 202 means PagerDuty accepted the event. A 400 (`pagerduty.invalid_event`) or another 4xx
+  (`pagerduty.refused`) fails the step; a 408 or 425 is retried. A 429, a 5xx, or a 2xx other than 202 is retried
+  too, as PagerDuty advises, after 30 s, then 60 s, then 120 s: four attempts in three and a half minutes, unless the
+  step sets its own number. A 429's or 503's `Retry-After` is waited out within the attempt, at most 3 times and 20 s
+  in all.
 - **Bounds.** An event is at most 500,000 bytes as sent (PagerDuty takes 512 KB); the text and the fields' values are
-  cut to fit, and the step names what it cut. A summary is at most 1024 characters.
+  cut to fit, and the step names what it cut. A summary is one line of at most 1024 bytes (PagerDuty's 1024 in
+  whichever unit it counts); a title cut to fit is named too.
 - **Firewalls.** Allow the region's host on port 443.
 
 ## The allowlist

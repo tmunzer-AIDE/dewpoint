@@ -83,11 +83,15 @@ class BodyField:
     secret: str
 
 
-def body_field_problems(name: str, auth: Any, secret_schema: Any) -> list[str]:
-    """A body field's declaration, as data (the SDK checks its own manifest, the catalog a received one)."""
+def body_field_problems(name: str, auth: Any, secret_schema: Any, *, stream: bool, verify: bool) -> list[str]:
+    """A body field's declaration, as data (the SDK checks its own manifest, the catalog a received one). A type with
+    one has no stream (a handshake carries no JSON body: it would open unauthenticated) and no verify (a verify reads
+    only: it can never carry the field)."""
     if not isinstance(auth, Mapping) or set(auth) != {"kind", "field", "secret"} or auth["kind"] != "body_field":
         return [f"{name}: auth must be {{kind: header, header, template}} or {{kind: body_field, field, secret}}"]
     out: list[str] = []
+    if stream or verify:
+        out.append(f"{name}: a body field goes into no stream and no verify")
     field, secret = auth["field"], auth["secret"]
     if not isinstance(field, str) or not FIELD_RE.fullmatch(field):
         out.append(f"{name}: auth body field {field!r} must be an identifier")
@@ -317,7 +321,8 @@ class ConnectionType:
             return []
         if isinstance(self.auth, BodyField):
             secret_schema = self.Secret.model_json_schema(mode="validation")
-            return body_field_problems(name, _auth_manifest(self.auth), secret_schema)
+            return body_field_problems(name, _auth_manifest(self.auth), secret_schema, stream=self.stream is not None,
+                                       verify=self.verify is not None)  # fmt: skip
         out: list[str] = []
         if not HEADER_RE.fullmatch(self.auth.header):
             out.append(f"{name}: auth header {self.auth.header!r} must be a header name")

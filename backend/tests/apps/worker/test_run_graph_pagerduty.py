@@ -6,7 +6,8 @@ PagerDuty alert runs through admission, the dispatcher and RunGraph against a lo
 - every event goes to `/v2/enqueue`, carrying the connection's integration key as `routing_key` (the runtime's,
   never the plugin's) and no authentication header;
 - the trigger is keyed by the step's idempotency key: answered 503 once, the engine's retry sends the same
-  `dedup_key`, so it joins the alert it opened; acknowledge and resolve name that alert through a ref;
+  `dedup_key`, so it joins the alert it opened (its first wait cut from 30 s to 1 s here: the unit tests pin the
+  schedule); acknowledge and resolve name that alert through a ref;
 - no step's row holds the key, and each event charged the key's quota scope, keyed by a MAC;
 - simulated, nothing is sent."""
 
@@ -16,6 +17,8 @@ import json
 import re
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import replace
+from datetime import timedelta
 from typing import Any
 
 import httpcore
@@ -32,6 +35,7 @@ from dewpoint.core.db import tenant_scope
 from dewpoint.core.egress.addresses import AllowEntry
 from dewpoint.plugins.flow import PLUGIN as FLOW
 from dewpoint.plugins.pagerduty import PLUGIN as PAGERDUTY
+from dewpoint.plugins.pagerduty import TriggerAlert
 from tests.apps.dispatcher.support import BUILD
 from tests.apps.dispatcher.support import workers as ready_workers
 from tests.apps.test_admission import KEYS, current
@@ -52,6 +56,12 @@ def answer(writer: asyncio.StreamWriter, status: int, body: dict[str, Any]) -> N
     raw = json.dumps(body).encode()
     writer.write(f"HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {len(raw)}\r\n\r\n".encode()
                  + raw)  # fmt: skip
+
+
+@pytest.fixture(autouse=True)
+def quick_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The trigger's retry waits 1 s, not 30 s, in the manifest this test syncs (a local server doesn't skip time)."""
+    monkeypatch.setattr(TriggerAlert, "retry", replace(TriggerAlert.retry, initial_interval=timedelta(seconds=1)))
 
 
 @pytest.fixture

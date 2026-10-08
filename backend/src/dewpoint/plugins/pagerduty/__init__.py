@@ -10,16 +10,18 @@ about 120 in any 60 s.
 `pagerduty.trigger_alert` is keyed: its `dedup_key` is the config's, else the step's idempotency key, so a retried
 trigger joins the alert it opened (one resolved meanwhile opens a new alert: PagerDuty's documented behaviour).
 `pagerduty.acknowledge_alert` and `pagerduty.resolve_alert` are idempotent and name the alert by its `dedup_key`.
-The trigger renders the message model: `summary` the title, else the text, on one line, at most 1024 characters;
+The trigger renders the message model: `summary` the title, else the text, on one line, at most 1024 bytes;
 the severity mapped (info and success to info); `source` the config's; `custom_details` the text and the fields;
 `links` the message's links; the event within 500,000 bytes as sent (PagerDuty takes 512 KB), cut and reported.
 
-A 202 is applied; a 400 is `pagerduty.invalid_event`, another 4xx `pagerduty.refused`, both fatal; a 5xx is retried
-(the runtime waits out a 429's or a 503's short `Retry-After` in the attempt, and retries a 429 without one)."""
+A 202 is applied; a 400 is `pagerduty.invalid_event`, another 4xx but 408 and 425 `pagerduty.refused`, both fatal; a
+5xx, a 408 or a 425 is retried, after 30 s, 60 s, then 120 s, as PagerDuty advises (the runtime waits out a 429's or a
+503's short `Retry-After` in the attempt, and retries a 429 without one)."""
 
 import json
 import re
 import uuid
+from datetime import timedelta
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
@@ -34,6 +36,7 @@ from dewpoint.sdk import (
     Plugin,
     RateScope,
     RetryableError,
+    RetryDefaults,
     SideEffect,
     StepContext,
     connection_field,
@@ -50,7 +53,11 @@ SEVERITIES = {Severity.INFO: "info", Severity.SUCCESS: "info", Severity.WARNING:
 # the message model's own bounds: nothing cut.
 LEVELS = ((160_000, 40_000), (100_000, 10_000), (20_000, 2000), (4000, 500))
 KEY_TEXT = re.compile(r"[^\x00-\x1f\x7f]{1,255}")  # a dedup_key: at most 255 characters, no control character
-NEWLINES = re.compile(r"\r\n|\r|\n")
+# What a summary turns into a space: CR LF, a line break of any kind, any other control character.
+CONTROLS = re.compile(r"\r\n|[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+# PagerDuty: retry a 429 or a 5xx "after some time", "preferably with a backoff of a few minutes": 30 s, 60 s, 120 s.
+RETRY = RetryDefaults(max_attempts=4, initial_interval=timedelta(seconds=30), backoff=2.0,
+                      max_interval=timedelta(minutes=2))  # fmt: skip
 
 
 class PagerDutyConfig(BaseModel):
@@ -90,7 +97,7 @@ class TriggerConfig(Message):
     source: str = Field("dewpoint", min_length=1, max_length=255, title="Source",
                         description="The affected system, preferably its host name.")  # fmt: skip
     dedup_key: str | None = Field(None, title="Dedup key",
-                                  description="Names the alert; the step's own key when empty.")  # fmt: skip
+                                  description="Names the alert; the step's own key when not set.")  # fmt: skip
     component: str | None = Field(None, max_length=255, title="Component")
     group: str | None = Field(None, max_length=255, title="Group")
     event_class: str | None = Field(None, max_length=255, title="Class")
@@ -103,9 +110,11 @@ class TriggerConfig(Message):
 
 def _event(config: TriggerConfig, key: str, text_max: int, value_max: int) -> tuple[dict[str, Any], list[str]]:
     truncated: list[str] = []
-    # A title (at most 1000 characters) always fits; a summary made from the text is cut, losing nothing: the whole
-    # text is in the details.
-    summary = cut(NEWLINES.sub(" ", config.title or config.text), SUMMARY_MAX)[0]
+    # PagerDuty doesn't say whether its 1024 counts characters, UTF-16 units or bytes: bytes fit all three. A title
+    # cut is reported; a summary made from the text is cut losing nothing: the whole text is in the details.
+    summary, summary_cut = cut(CONTROLS.sub(" ", config.title or config.text), SUMMARY_MAX, unit="bytes")
+    if summary_cut and config.title:
+        truncated.append("title")
     text, text_cut = cut(config.text, text_max, unit="bytes")
     if text_cut:
         truncated.append("text")
@@ -145,10 +154,10 @@ def _applied(answer: HttpResponse) -> None:
         return
     if status == 400:
         raise FatalError("pagerduty.invalid_event", "PagerDuty refused the event as invalid.")
+    if status in (408, 425) or status >= 500:  # a timeout or a too-early request is transient (RFC 9110, RFC 8470)
+        raise RetryableError("pagerduty.unavailable", f"PagerDuty didn't take the event (HTTP {status}).")
     if 400 <= status < 500:
         raise FatalError("pagerduty.refused", f"PagerDuty refused the event (HTTP {status}).")
-    if status >= 500:
-        raise RetryableError("pagerduty.unavailable", f"PagerDuty didn't take the event (HTTP {status}).")
     raise RetryableError("pagerduty.unexpected", f"PagerDuty answered HTTP {status}, not 202.")
 
 
@@ -171,6 +180,7 @@ class TriggerAlert(Node):
     Output = TriggerOutput
     credentials = ("pagerduty",)
     side_effect = SideEffect.KEYED
+    retry = RETRY
 
     async def simulate(self, ctx: StepContext, config: TriggerConfig) -> TriggerOutput:
         key = config.dedup_key or ctx.idempotency_key()
@@ -206,6 +216,7 @@ class _AlertAction(Node):
     Output = AlertOutput
     credentials = ("pagerduty",)
     side_effect = SideEffect.IDEMPOTENT
+    retry = RETRY
 
     async def simulate(self, ctx: StepContext, config: AlertConfig) -> AlertOutput:
         return AlertOutput(dedup_key=config.dedup_key)
