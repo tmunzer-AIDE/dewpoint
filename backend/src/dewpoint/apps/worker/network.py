@@ -777,7 +777,7 @@ async def unseal(
             raise NotSent() from None  # the keyring didn't answer: nothing was sent, a retry may succeed
         raise
     smtp = kind.declared.smtp_target(stored_config, secret)
-    if smtp is not None:  # a mail server's type: no HTTP base, no stream
+    if smtp is not None or kind.declared.host is None:  # a mail server's, or no host at all (syslog's): no HTTP
         return Unsealed(connection_id, stored.type, kind, stored_config, config, secret, None, credentials, smtp=smtp)
     url = kind.declared.base_url(stored_config, secret)
     try:
