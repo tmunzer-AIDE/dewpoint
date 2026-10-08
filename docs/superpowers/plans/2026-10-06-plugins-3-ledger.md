@@ -1558,3 +1558,9 @@ technical closure. Both fixed test-first, each protection checked by removing it
 - Not run: a Compose proof; any real mail server or syslog receiver.
 - Awaiting the owner: technical closure of M1 and L1; sign-off of this section's rulings (the review's new ones
   marked); push and PR.
+
+A technical review of 82ae00b (pasted by the owner, 2026-10-08): M1 technically closed; L1 only partly: the
+attempt's and a plugin call's mail client is made lazily, after the scope lookup and the quota wait, so a closure
+during either recorded nothing and the resumed send (or probe) made a fresh client and went on. Fixed test-first
+(`7616eb8`): both record their closure and refuse to make a client after it; each protection's removal fails a test.
+A technical review only: no ruling sign-off or push authorization.
