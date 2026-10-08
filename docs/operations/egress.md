@@ -95,8 +95,9 @@ per tenant, so connections that share a credential share one budget.
   of 50, then 0.5 a second (1,800 an hour, under Mist's 2,000 connections an hour a token).
 - **Slack.** One scope a tenant (`slack.tenant`): bursts of 3, then 1 a second. A webhook URL names no documented
   workspace or channel, so a tenant's Slack webhooks share it.
-- **Teams.** One scope a tenant (`teams.tenant`): bursts of 5, then 25 posts in 300 s. That's Teams' limit for one
-  Teams connection posting as the flow bot; a webhook URL doesn't name the connection, so a tenant's flows share it.
+- **Teams.** One scope a tenant (`teams.tenant`): bursts of 5, then 20 more in 300 s, so never more than 25 posts in
+  any 300 s. That's Teams' limit for one Teams connection posting as the flow bot; a webhook URL doesn't name the
+  connection, so a tenant's flows share it.
   Microsoft turns off a flow that stays throttled for 14 days.
 - **Google Chat.** One scope a space (`google_chat.space`), read from the URL: 1 a second, no burst, shared by all the
   space's webhooks.

@@ -5,6 +5,7 @@ documented `{"type": "message", "attachments": [...]}` body, its run data in tex
 within 24,000 bytes as sent (Teams documents about 28 KB), cutting and marking what doesn't fit; a 2xx is the flow's
 acceptance, anything else unknown."""
 
+from fractions import Fraction
 from typing import Any
 
 import httpx
@@ -68,7 +69,28 @@ def test_the_plugin_validates_and_its_node_is_an_ambiguous_send() -> None:
     assert SendMessage.side_effect == SideEffect.AMBIGUOUS and SendMessage.credentials == ("teams",)
     [scope] = TEAMS.rate_scopes
     assert (scope.kind, scope.secret, scope.capacity) == ("teams.tenant", None, 5)
-    assert abs(scope.refill_per_s - 25 / 300) < 1e-9  # Teams' 25 flow-bot posts a connection per 300 s
+
+
+def most_taken(capacity: float, refill_per_s: float, window_s: int) -> int:
+    """The most requests a greedy caller gets from a full bucket within a closed window, by the buckets' rule
+    (`core.ratelimit.buckets`: `min(capacity, tokens + elapsed * refill)`, one token a request), counted exactly."""
+    refill = Fraction(refill_per_s).limit_denominator(10**6)
+    taken, now, tokens = 0, Fraction(0), Fraction(capacity)
+    while True:
+        while tokens >= 1:
+            tokens, taken = tokens - 1, taken + 1
+        now += (1 - tokens) / refill  # when the next whole token is there
+        if now > window_s:
+            return taken
+        tokens = Fraction(1)
+
+
+def test_the_scope_never_grants_more_than_25_posts_in_300_seconds() -> None:
+    """Teams' 25 flow-bot posts per 300 s, the burst included: a bucket of 5 refilled at 25 per 300 s grants 30 (a
+    review of 1e71079, R2)."""
+    [scope] = TEAMS.rate_scopes
+    assert most_taken(scope.capacity, scope.refill_per_s, 300) <= 25
+    assert most_taken(5, 25 / 300, 300) == 30 and most_taken(5, 20 / 300, 300) == 25  # the count itself
 
 
 @pytest.mark.parametrize("other", [PLATFORM, LOGIC.replace(":443", ""), LOGIC.replace("0a1b2c", "9z8y7x")])

@@ -4,9 +4,9 @@ request is received"; Office 365 connectors stopped working in May 2026), whose 
 
 The URL is a Workflows URL of the public cloud: a host under `logic.azure.com` or `api.powerplatform.com`
 (learn.microsoft.com `power-automate/ip-address-configuration`), https, on 443; the trigger must accept "Anyone":
-no authentication header is sent (`connectors/teams`). One quota scope a tenant, 25 posts in 300 seconds with bursts
-of 5: Teams limits a flow-bot's posts per Teams connection, which no URL names, so flows sharing one can't be told
-apart (D9's fallback, as Slack's).
+no authentication header is sent (`connectors/teams`). One quota scope a tenant, at most 25 posts in any 300 seconds
+(bursts of 5, then 20 in 300 s): Teams limits a flow-bot's posts per Teams connection, which no URL names, so flows
+sharing one can't be told apart (D9's fallback, as Slack's).
 
 The message is an Adaptive Card 1.2 (the documented samples' version) in the documented body, `{"type": "message",
 "attachments": [{"contentType": "application/vnd.microsoft.card.adaptive", "contentUrl": null, "content": …}]}`, in
@@ -69,7 +69,9 @@ TEAMS = ConnectionType(
     Config=TeamsConfig,
     Secret=TeamsSecret,
     host=SecretUrl("webhook_url", TEAMS_URL),
-    rate_scopes=(RateScope("teams.tenant", capacity=5, refill_per_s=25 / 300),),
+    # Bursts of 5 and 20 more in 300 s: never more than Teams' 25 in any 300 s, the burst included (a review of 1e71079,
+    # R2: refilling at 25 per 300 s granted 30).
+    rate_scopes=(RateScope("teams.tenant", capacity=5, refill_per_s=20 / 300),),
 )
 
 
