@@ -19,8 +19,8 @@ before migration 0040 is gone: a catch-up, in batches, then a short final step t
   between them (`IDLE_WAIT`): a client stalled there has its session ended, its lock with it, and nothing recorded
   (the review of checkpoint 5). Its commit waits for no synchronous standby (`synchronous_commit = local`, the owner's
   review of checkpoint 5: no bound above covers that wait); a failover that lost it leaves no cutover recorded, its
-  audit entry gone with it (the anchor signs none before the standbys hold it), and it's run again. So its hold is
-  those bounds and the local WAL flush, which no timeout bounds.
+  audit entry gone with it (the anchor signs none before the configured synchronous standbys acknowledge it), and it's
+  run again. So its hold is those bounds and the local WAL flush, which no timeout bounds.
 
 Every refusal is a `CutoverRefusedError`, said in its message; nothing is recorded by one. Its lock's connection lost
 before its end (a network, a restarted pooler; its lock released with it), the outcome stands all the same, an error or

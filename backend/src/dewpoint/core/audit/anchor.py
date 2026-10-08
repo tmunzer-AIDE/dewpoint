@@ -40,11 +40,14 @@ class FileAnchorSink:
 
 
 async def _held_by_standbys(s: AsyncSession) -> None:
-    """Every row `s` has read is on the synchronous standbys, when any is named: a commit of its own, later in the WAL
-    than theirs and writing to it (a logical message no one reads; an xid alone writes nothing, and waits for none),
-    waits for them under `synchronous_commit` on, whatever the session's. A row committed locally only (the inventory
-    cutover's audit entry: its commit waits for no standby) is visible before then; signed, then lost in a failover,
-    it would fail `audit verify` for good, the sink being append-only (the review of the 2b-4b M1 checkpoint 6)."""
+    """Every row `s` has read is acknowledged by the configured synchronous standbys, when any is named: a commit of
+    its own, later in the WAL than theirs and writing to it (a logical message no one reads; an xid alone writes
+    nothing, and waits for none), waits for them under `synchronous_commit` on, whatever the session's. A row committed
+    locally only (the inventory cutover's audit entry: its commit waits for no standby) is visible before then; signed,
+    then lost in a failover, it would fail `audit verify` for good, the sink being append-only (the review of the 2b-4b
+    M1 checkpoint 6). It proves receipt by the standbys Postgres waits for (`synchronous_standby_names`) only, not by
+    every server that could be promoted: an asynchronous replica may still lack it (the owner's review of checkpoint
+    6)."""
     engine = s.bind
     if not isinstance(engine, AsyncEngine):
         raise TypeError("an anchor's session is bound to an engine")
@@ -55,7 +58,8 @@ async def _held_by_standbys(s: AsyncSession) -> None:
 
 
 async def anchor_all(s: AsyncSession, sink: FileAnchorSink) -> int:
-    """Each scope's head not anchored yet, signed to `sink` once the synchronous standbys hold it, then recorded."""
+    """Each scope's head not anchored yet, signed to `sink` once the configured synchronous standbys acknowledge it,
+    then recorded."""
     heads = (
         await s.execute(text("select distinct on (scope) scope, seq, hash from audit_log order by scope, seq desc"))
     ).all()

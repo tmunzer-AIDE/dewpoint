@@ -52,7 +52,9 @@ old build's runs that still use it finish on the old build's workers, which stil
 
 Migrations 0035 to 0044 upgrade a database in use: each commits in short steps (`backend/migrations/online.py`), so
 normal reads and writes wait behind the upgrade for a step's bounds and its local WAL flush (below), and an upgrade
-interrupted anywhere is run again with `alembic upgrade head`. Two of the database's settings matter:
+interrupted anywhere is run again with `alembic upgrade head`. The waits measured (none over five seconds, under load,
+up to 100,000 root runs) are those configurations' results, not a guarantee: no timeout bounds the local WAL flush, so
+a stalled disk holds a step's locks as it holds every writer's commit. Two of the database's settings matter:
 
 - A step's statements run within its budget: 60% of the shortest `deadlock_timeout` the server, the database or any
   role has (`ALTER ROLE … SET deadlock_timeout`), and 1 second at most (each statement a 5% margin more). Its commit
@@ -93,7 +95,9 @@ dewpoint schedules inventory-cutover --attest --confirm  # records it, once
 Until then the old dispatcher may sync any schedule under the schedule's own Temporal id, so the database records each
 schedule added as one the inventory can't account for, and the new dispatcher's schedule passes and an erasure's
 schedule stages wait (`schedule_inventory_not_cut_over`, alerted on). The command refuses while Temporal shows a
-dispatcher from before 0040 polling the admission queue. It then works in two parts:
+dispatcher from before 0040 polling the admission queue. Temporal keeps listing a stopped dispatcher's poller for a
+while after its last poll (about four minutes in a local Compose upgrade): once the old dispatcher is stopped, run the
+dry run again until it no longer refuses. It then works in two parts:
 
 - **A catch-up, in batches of 1,000 schedules,** each committed on its own and holding no lock a schedule's writer
   waits for. It gives any schedule the database didn't record its incarnation 0. It also gives each schedule from
@@ -105,7 +109,10 @@ dispatcher from before 0040 polling the admission queue. It then works in two pa
   ended, nothing recorded: run it again. Its commit waits for no synchronous standby (`synchronous_commit = local`),
   so its hold is those bounds and the local WAL flush. If a failover loses it, its audit entry goes with it, the
   dispatcher's schedule passes wait again (`schedule_inventory_not_cut_over`), and you run it again. The audit anchor
-  signs no entry before the synchronous standbys hold it, so `audit verify` never names the lost one.
+  signs no entry before the configured synchronous standbys acknowledge it, so a failover to one of them never leaves
+  `audit verify` naming a lost entry. That covers the standbys Postgres waits for (`synchronous_standby_names`), not
+  every server that could be promoted: a failover to an asynchronous replica, or to one outside that set, can still
+  lose an entry already anchored.
 
 It refuses, records nothing and exits 1, saying why, when:
 - **Another cutover is running.** A second one refuses while the first runs: wait for it to end, then run the
