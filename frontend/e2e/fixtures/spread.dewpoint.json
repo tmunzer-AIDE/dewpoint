@@ -1,0 +1,14 @@
+{
+  "format": "dewpoint.workflow",
+  "format_version": 1,
+  "name": "Spread",
+  "graph": {
+    "graph_format": 1,
+    "nodes": [
+      { "id": "5b1c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e01", "key": "near", "type": "flow.transform@1", "config": { "fields": { "v": 1 } }, "position": { "x": 0, "y": 140 } },
+      { "id": "5b1c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e02", "key": "far", "type": "flow.transform@1", "config": { "fields": { "v": 2 } }, "position": { "x": 1400, "y": 700 } }
+    ],
+    "edges": []
+  },
+  "bindings": []
+}

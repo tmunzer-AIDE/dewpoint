@@ -7,13 +7,14 @@ import { useNavigate, useParams } from "@tanstack/react-router";
 import { Command } from "cmdk";
 import { useEffect, useRef, useState } from "react";
 import { client, ok } from "../lib/client";
+import { canEdit, workflowsQuery } from "../lib/workflows";
 
 // The selected option never takes focus (the search field keeps it), so it carries its own 3:1 outline (WCAG 1.4.11).
-const ITEM =
+export const PALETTE_ITEM =
   "flex cursor-pointer items-center justify-between gap-4 rounded-md px-3 py-2 text-body " +
   "data-[selected=true]:bg-accent-soft data-[selected=true]:text-accent-ink " +
   "data-[selected=true]:outline-2 data-[selected=true]:-outline-offset-2 data-[selected=true]:outline-focus";
-const GROUP = "[&_[cmdk-group-heading]]:px-3 [&_[cmdk-group-heading]]:pt-2 [&_[cmdk-group-heading]]:pb-1 " +
+export const PALETTE_GROUP = "[&_[cmdk-group-heading]]:px-3 [&_[cmdk-group-heading]]:pt-2 [&_[cmdk-group-heading]]:pb-1 " +
   "[&_[cmdk-group-heading]]:text-small [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-muted";
 
 export function CommandPalette() {
@@ -22,6 +23,7 @@ export function CommandPalette() {
   const navigate = useNavigate();
   const params = useParams({ strict: false });
   const tenants = useQuery({ queryKey: ["tenants"], queryFn: () => ok(client.GET("/api/v1/tenants")) });
+  const workflows = useQuery({ ...workflowsQuery(params.tenantId ?? ""), enabled: open && !!params.tenantId });
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -71,16 +73,39 @@ export function CommandPalette() {
         {open && (
           <Command label="Search or jump to" loop>
             <Command.Input
-              placeholder="Type a page or a tenant"
+              placeholder="Type a page, a workflow or a tenant"
               className="w-full rounded-t-dialog border-b border-line bg-transparent px-4 py-3 text-body-lg text-ink placeholder:text-muted focus-visible:-outline-offset-2"
             />
             <Command.List className="max-h-80 overflow-y-auto p-1">
               <Command.Empty className="px-3 py-2 text-body text-muted">Nothing matches.</Command.Empty>
-              <Command.Group heading="Go to" className={GROUP}>
+              <Command.Group heading="Go to" className={PALETTE_GROUP}>
+                {params.tenantId && (
+                  <Command.Item
+                    value="Workflows"
+                    className={PALETTE_ITEM}
+                    onSelect={() => go(() => navigate({ to: "/t/$tenantId/workflows", params: { tenantId: params.tenantId! } }))}
+                  >
+                    Workflows
+                  </Command.Item>
+                )}
+                {/* Only for a role that can create one: the server would refuse anyone else (403). */}
+                {params.tenantId && canEdit(tenants.data?.find((t) => t.id === params.tenantId)?.role) && (
+                  <Command.Item
+                    value="New workflow"
+                    className={PALETTE_ITEM}
+                    onSelect={() =>
+                      go(() =>
+                        navigate({ to: "/t/$tenantId/workflows", params: { tenantId: params.tenantId! }, search: { new: true } }),
+                      )
+                    }
+                  >
+                    New workflow
+                  </Command.Item>
+                )}
                 {params.tenantId && (
                   <Command.Item
                     value="Connections"
-                    className={ITEM}
+                    className={PALETTE_ITEM}
                     onSelect={() => go(() => navigate({ to: "/t/$tenantId/connections", params: { tenantId: params.tenantId! } }))}
                   >
                     Connections
@@ -89,7 +114,7 @@ export function CommandPalette() {
                 {params.tenantId && (
                   <Command.Item
                     value="Members & roles"
-                    className={ITEM}
+                    className={PALETTE_ITEM}
                     onSelect={() =>
                       go(() => navigate({ to: "/t/$tenantId/settings/members", params: { tenantId: params.tenantId! } }))
                     }
@@ -97,21 +122,39 @@ export function CommandPalette() {
                     Members &amp; roles
                   </Command.Item>
                 )}
-                <Command.Item value="Security" className={ITEM} onSelect={() => go(() => navigate({ to: "/account/security" }))}>
+                <Command.Item value="Security" className={PALETTE_ITEM} onSelect={() => go(() => navigate({ to: "/account/security" }))}>
                   Security
                 </Command.Item>
-                <Command.Item value="All tenants" className={ITEM} onSelect={() => go(() => navigate({ to: "/tenants" }))}>
+                <Command.Item value="All tenants" className={PALETTE_ITEM} onSelect={() => go(() => navigate({ to: "/tenants" }))}>
                   All tenants
                 </Command.Item>
               </Command.Group>
+              {params.tenantId && !!workflows.data?.length && (
+                <Command.Group heading="Workflows" className={PALETTE_GROUP}>
+                  {workflows.data.map((w) => (
+                    <Command.Item
+                      key={w.id}
+                      value={w.name}
+                      className={PALETTE_ITEM}
+                      onSelect={() =>
+                        go(() =>
+                          navigate({ to: "/t/$tenantId/workflows/$workflowId", params: { tenantId: params.tenantId!, workflowId: w.id } }),
+                        )
+                      }
+                    >
+                      {w.name}
+                    </Command.Item>
+                  ))}
+                </Command.Group>
+              )}
               {!!tenants.data?.length && (
-                <Command.Group heading="Tenants" className={GROUP}>
+                <Command.Group heading="Tenants" className={PALETTE_GROUP}>
                   {tenants.data.map((t) => (
                     <Command.Item
                       key={t.id}
                       value={`${t.name} ${t.slug}`}
-                      className={ITEM}
-                      onSelect={() => go(() => navigate({ to: "/t/$tenantId/connections", params: { tenantId: t.id } }))}
+                      className={PALETTE_ITEM}
+                      onSelect={() => go(() => navigate({ to: "/t/$tenantId/workflows", params: { tenantId: t.id } }))}
                     >
                       <span>{t.name}</span>
                       <span className="text-small text-muted">{t.role}</span>

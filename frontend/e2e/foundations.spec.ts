@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { Page } from "@playwright/test";
 import { expect, expectAccessible, test } from "./gate";
+import { ADMIN_STATE } from "./state";
 import * as OTPAuth from "otpauth";
 
 const EMAIL = process.env.E2E_ADMIN_EMAIL ?? "admin@example.com";
@@ -46,6 +47,8 @@ test.describe.serial("foundations", () => {
     await expect(page.getByRole("menuitem", { name: /Acme Retail/ })).toBeVisible();
     await expectAccessible(page, "tenant menu");
     await page.getByRole("menuitem", { name: /Acme Retail/ }).click();
+    await expect(page).toHaveURL(/\/t\/[0-9a-f-]+\/workflows$/); // a tenant opens on its workflows (4b ruling 19)
+    await page.getByRole("link", { name: "Connections" }).click();
     await expect(page).toHaveURL(/\/t\/[0-9a-f-]+\/connections/);
     const connectionsPath = new URL(page.url()).pathname;
     // This stack is a development deployment (Compose's dev override): every signed-in screen says so.
@@ -95,7 +98,15 @@ test.describe.serial("foundations", () => {
     await page.keyboard.press("Escape");
     await expect(palette).toBeHidden();
     await page.keyboard.press("ControlOrMeta+k");
+    // Enter goes to the option the palette has selected: each step waits for what it acts on (the owner's review of
+    // 5c6d802, after a run that went to Members; its cause unknown): the search focused, the letters in it, then
+    // Security the selected option.
+    const search = palette.getByRole("combobox");
+    await expect(search).toBeVisible();
+    await expect(search).toBeFocused();
     await page.keyboard.type("secur");
+    await expect(search).toHaveValue("secur");
+    await expect(palette.getByRole("option", { name: "Security", selected: true })).toBeVisible();
     await page.keyboard.press("Enter");
     await expect(page).toHaveURL(/\/account\/security/);
 
@@ -116,6 +127,7 @@ test.describe.serial("foundations", () => {
       await expectAccessible(page, `${path} at 320 px`);
     }
     await page.setViewportSize({ width: 1280, height: 720 });
+    await page.context().storageState({ path: ADMIN_STATE });
   });
 
   test("passkey added with a virtual authenticator signs in without a password", async ({ page }) => {

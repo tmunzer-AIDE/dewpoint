@@ -1,0 +1,16 @@
+{
+  "format": "dewpoint.workflow",
+  "format_version": 1,
+  "name": "Aliases",
+  "graph": {
+    "graph_format": 1,
+    "nodes": [
+      { "id": "4d1c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e0a", "key": "a", "type": "flow.transform@1", "config": { "fields": { "v": 1 } }, "position": { "x": 0, "y": 140 } },
+      { "id": "4d1c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e0b", "key": "b", "type": "flow.transform@1", "config": { "fields": { "v": 2 } }, "position": { "x": 0, "y": 280 } }
+    ],
+    "edges": [
+      { "from": { "node": "4D1C2F1E-1D1E-4C1E-8E1E-1E1E1E1E1E0A", "port": "out" }, "to": { "node": "4d1c2f1e1d1e4c1e8e1e1e1e1e1e1e0b" } }
+    ]
+  },
+  "bindings": []
+}

@@ -9,9 +9,20 @@
 import fs from "node:fs";
 import path from "node:path";
 
-/** Virtual modules whose code ships, by their owner: Vite's preload polyfill, and the CommonJS helpers of the Rollup
- * plugin Vite bundles (its LICENSE.md carries the bundled plugins' licences). Any other virtual module fails. */
-const VIRTUAL = { "\0vite/modulepreload-polyfill.js": "vite", "\0commonjsHelpers.js": "vite" };
+/** Virtual modules whose code ships, by their owner: Vite's preload polyfill and its loader for lazy chunks
+ * (`preload-helper`, Vite's `importAnalysisBuild`), and the CommonJS helpers of the Rollup plugin Vite bundles (its
+ * LICENSE.md carries the bundled plugins' licences). Any other virtual module fails. */
+const VIRTUAL = {
+  "\0vite/modulepreload-polyfill.js": "vite",
+  "\0vite/preload-helper.js": "vite",
+  "\0commonjsHelpers.js": "vite",
+};
+
+/** Packages whose published build inlines a dependency's code, by the dependency: the build's metadata sees only the
+ * package, but the dependency's code ships too, so its notice must. Reviewed in the installed package: dagre 3.1.1's
+ * `dist/dagre.esm.js` imports nothing and carries graphlib's `Graph` (4b, the canvas's auto layout). The dependency is
+ * read from beside the package in its `node_modules` (pnpm's and npm's layouts alike); one missing fails the build. */
+const INLINED = { "@dagrejs/dagre": ["@dagrejs/graphlib"] };
 
 const LICENCE_FILE = /^(?:licen[cs]e|copying)(?:[.-].*)?$/i;
 const NOTICE_FILE = /^notice(?:[.-].*)?$/i;
@@ -54,6 +65,10 @@ export function shippedRoots(build, ownerRoot) {
   }
   for (const asset of build.assets) for (const file of asset.originalFileNames) add(packageRoot(file));
   for (const file of build.watchFiles) if (/\.css$/.test(file)) add(packageRoot(file)); // inlined into the stylesheet
+  for (const root of [...roots]) {
+    const at = root.lastIndexOf("/node_modules/") + "/node_modules/".length;
+    for (const dependency of INLINED[/** @type {keyof typeof INLINED} */ (root.slice(at))] ?? []) add(`${root.slice(0, at)}${dependency}`);
+  }
   return roots;
 }
 
@@ -161,12 +176,16 @@ function selfTest() {
       [`${pnpm}/seroval@1.0.0/node_modules/seroval/dist/index.mjs`]: 0, // tree-shaken away: doesn't
       [`${pnpm}/@fontsource+inter@5.0.0/node_modules/@fontsource/inter/latin-400.css`]: 0, // CSS: ships as a stylesheet
       "\0vite/modulepreload-polyfill.js": 900, // Vite's own helper
+      "\0vite/preload-helper.js": 700, // and its loader for a lazy chunk (the editor's)
       "/w/src/main.tsx": 500,
+      [`${pnpm}/@dagrejs+dagre@3.1.1/node_modules/@dagrejs/dagre/dist/dagre.esm.js`]: 900, // its build inlines graphlib
     } }],
     assets: [{ originalFileNames: [`${pnpm}/@fontsource+mono@5.0.0/node_modules/@fontsource/mono/files/a.woff2`] }],
     watchFiles: [`${pnpm}/tailwindcss@4.3.3/node_modules/tailwindcss/preflight.css`, `${pnpm}/seroval@1.0.0/node_modules/seroval/x.js`],
   }, owner);
   const want = [
+    `${pnpm}/@dagrejs+dagre@3.1.1/node_modules/@dagrejs/dagre`,
+    `${pnpm}/@dagrejs+dagre@3.1.1/node_modules/@dagrejs/graphlib`, // beside it: its dependency, inlined in its build
     `${pnpm}/@fontsource+inter@5.0.0/node_modules/@fontsource/inter`,
     `${pnpm}/@fontsource+mono@5.0.0/node_modules/@fontsource/mono`,
     `${pnpm}/react@19.1.0/node_modules/react`,

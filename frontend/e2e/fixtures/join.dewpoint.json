@@ -1,0 +1,17 @@
+{
+  "format": "dewpoint.workflow",
+  "format_version": 1,
+  "name": "Join",
+  "graph": {
+    "graph_format": 1,
+    "nodes": [
+      { "id": "7a1c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e01", "key": "if", "type": "flow.if@1", "config": { "condition": { "$value": { "kind": "cel", "expr": "true" } } }, "position": { "x": 0, "y": 140 } },
+      { "id": "7a1c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e02", "key": "j", "type": "flow.transform@1", "config": { "fields": { "v": 1 } }, "position": { "x": 0, "y": 280 } }
+    ],
+    "edges": [
+      { "from": { "node": "7a1c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e01", "port": "true" }, "to": { "node": "7a1c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e02" } },
+      { "from": { "node": "7a1c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e01", "port": "false" }, "to": { "node": "7a1c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e02" } }
+    ]
+  },
+  "bindings": []
+}

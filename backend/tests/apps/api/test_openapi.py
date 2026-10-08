@@ -70,6 +70,74 @@ def test_slice_4a_routes_name_their_answer(method: str, path: str) -> None:
     assert "$ref" in body or "$ref" in body.get("items", {}), body
 
 
+# What the web client calls in slice 4b: each answers a named model.
+SLICE_4B = [
+    ("get", "/api/v1/node-types"),
+    ("get", "/api/v1/t/{tenant_id}/workflows"),
+    ("post", "/api/v1/t/{tenant_id}/workflows"),
+    ("get", "/api/v1/t/{tenant_id}/workflows/{workflow_id}"),
+    ("patch", "/api/v1/t/{tenant_id}/workflows/{workflow_id}"),
+    ("put", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft"),
+    ("post", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/validate"),
+    ("post", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/publish"),
+    ("get", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/versions"),
+    ("get", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/versions/{version_id}"),
+    ("post", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/activate"),
+    ("get", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/export"),
+    ("post", "/api/v1/t/{tenant_id}/workflows/import"),
+]
+
+
+@pytest.mark.parametrize("method,path", SLICE_4B)
+def test_slice_4b_routes_name_their_answer(method: str, path: str) -> None:
+    responses = schema()["paths"][path][method]["responses"]
+    ok = next(code for code in responses if code.startswith("2"))
+    body = responses[ok]["content"]["application/json"]["schema"]
+    assert "$ref" in body or "$ref" in body.get("items", {}), body
+
+
+GRAPH = {"$ref": "#/components/schemas/Graph"}
+
+
+def test_the_draft_put_documents_its_body_as_a_graph() -> None:
+    """The route parses a plain object itself, for its `graph.format` diagnostics (ledger ruling 47, 4b ruling 8)."""
+    body = schema()["paths"]["/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft"]["put"]["requestBody"]
+    assert body["content"]["application/json"]["schema"] == GRAPH
+
+
+def test_a_workflow_answer_documents_its_draft_as_a_graph() -> None:
+    assert schema()["components"]["schemas"]["WorkflowDetailOut"]["properties"]["draft"] == GRAPH
+
+
+def test_a_versions_graph_is_documented_as_a_graph() -> None:
+    assert schema()["components"]["schemas"]["VersionDetailOut"]["properties"]["graph"] == GRAPH
+
+
+def test_a_files_graph_is_documented_as_a_graph() -> None:
+    assert schema()["components"]["schemas"]["WorkflowDocument"]["properties"]["graph"] == GRAPH
+
+
+def test_publishs_body_is_optional() -> None:
+    """Verified against FastAPI 0.141.1: an optional body model is documented as itself or null, not required."""
+    body = schema()["paths"]["/api/v1/t/{tenant_id}/workflows/{workflow_id}/publish"]["post"]["requestBody"]
+    assert "required" not in body
+    assert body["content"]["application/json"]["schema"]["anyOf"] == [
+        {"$ref": "#/components/schemas/PublishIn"},
+        {"type": "null"},
+    ]
+
+
+def test_the_graph_components_are_the_models_own() -> None:
+    """No other component shares a name with one of the graph's models (a clash would mix two shapes)."""
+    from dewpoint.engine.graph.model import Graph
+
+    own = Graph.model_json_schema(mode="validation", ref_template="#/components/schemas/{model}")
+    components = schema()["components"]["schemas"]
+    for name, sub in own.pop("$defs").items():
+        assert components[name] == sub, name
+    assert components["Graph"] == own
+
+
 def test_options_answer_a_named_model() -> None:
     """Plugin-call options (plugins-3 D3, D19), which the editor's slice 4f calls, answer `OptionsOut`."""
     paths = schema()["paths"]

@@ -21,7 +21,18 @@ class DraftConflictError(Exception):
         self.current_revision = current_revision
 
 
-async def create_workflow(s: AsyncSession, ctx: TenantContext, *, name: str, draft: dict[str, Any]) -> Workflow:
+class VersionChangedError(Exception):
+    """A publish named the newest version it expected, and another is newest now."""
+
+    def __init__(self, latest: int) -> None:
+        super().__init__(f"the newest version is {latest}")
+        self.latest = latest
+
+
+async def create_workflow(
+    s: AsyncSession, ctx: TenantContext, *, name: str, draft: dict[str, Any], source: str | None = None
+) -> Workflow:
+    """A new workflow; `source` says where it came from when it wasn't typed in ("import"), for the audit log."""
     wf = Workflow(
         id=uuid.uuid4(),
         tenant_id=ctx.tenant_id,
@@ -41,7 +52,7 @@ async def create_workflow(s: AsyncSession, ctx: TenantContext, *, name: str, dra
         action="workflow.create",
         target_type="workflow",
         target_id=str(wf.id),
-        details={"name": name},
+        details={"name": name, **({"source": source} if source else {})},
     )
     return wf
 
@@ -121,6 +132,18 @@ async def save_draft(s: AsyncSession, wf: Workflow, *, expected_revision: int, d
     return int(revision)
 
 
+async def locked_active_version(s: AsyncSession, workflow_id: uuid.UUID) -> WorkflowVersion | None:
+    """The workflow's active version, read after this transaction updated its row (`save_draft`): the row lock it holds
+    until commit keeps an activation from changing it before the answer is sent. A `Workflow` read before the update
+    may name an older one (`save_draft` updates with `synchronize_session=False`)."""
+    q = (
+        select(WorkflowVersion)
+        .join(Workflow, Workflow.active_version_id == WorkflowVersion.id)
+        .where(Workflow.id == workflow_id)
+    )
+    return (await s.execute(q)).scalar_one_or_none()
+
+
 async def update_workflow(
     s: AsyncSession, ctx: TenantContext, wf: Workflow, *, name: str | None, enabled: bool | None
 ) -> Workflow:
@@ -176,10 +199,7 @@ class NewVersion:
 
 async def insert_version(s: AsyncSession, ctx: TenantContext, wf: Workflow, new: NewVersion) -> WorkflowVersion:
     """Insert the next version and make it active. The caller holds the workflow row lock."""
-    latest = await s.execute(
-        select(func.coalesce(func.max(WorkflowVersion.number), 0)).where(WorkflowVersion.workflow_id == wf.id)
-    )
-    number = int(latest.scalar_one()) + 1
+    number = await latest_version_number(s, wf.id) + 1
     version = WorkflowVersion(
         id=new.id,
         tenant_id=wf.tenant_id,
@@ -247,6 +267,14 @@ async def set_active(s: AsyncSession, ctx: TenantContext, wf: Workflow, version:
     )
 
 
+async def latest_version_number(s: AsyncSession, workflow_id: uuid.UUID) -> int:
+    """The newest version's number, 0 when none: the caller holds the workflow's row lock, so it can't change."""
+    latest = await s.execute(
+        select(func.coalesce(func.max(WorkflowVersion.number), 0)).where(WorkflowVersion.workflow_id == workflow_id)
+    )
+    return int(latest.scalar_one())
+
+
 async def get_version(s: AsyncSession, workflow_id: uuid.UUID, version_id: uuid.UUID) -> WorkflowVersion | None:
     q = select(WorkflowVersion).where(WorkflowVersion.id == version_id, WorkflowVersion.workflow_id == workflow_id)
     return (await s.execute(q)).scalar_one_or_none()
@@ -289,7 +317,17 @@ async def other_abi(s: AsyncSession, version_ids: Iterable[uuid.UUID], abi: int)
     return [(version_id, version_abi) for version_id, version_abi in rows]
 
 
+async def blocked_by_many(s: AsyncSession, versions: Iterable[WorkflowVersion]) -> dict[uuid.UUID, list[str]]:
+    """Each version's lifecycle entries that stop it from running (retired or missing), in one read of the states of
+    every entry any of them uses."""
+    entries = {v.id: lifecycle.entries_for(v.closure_node_refs, v.closure_cel_profiles) for v in versions}
+    current = await lifecycle.states(s, {e for used in entries.values() for e in used})
+    return {
+        version_id: [e.key for e in lifecycle.not_executable({e: current[e] for e in used})]
+        for version_id, used in entries.items()
+    }
+
+
 async def blocked_by(s: AsyncSession, version: WorkflowVersion) -> list[str]:
     """Lifecycle entries in the version's closure that stop it from running (retired or missing)."""
-    current = await lifecycle.states(s, lifecycle.entries_for(version.closure_node_refs, version.closure_cel_profiles))
-    return [e.key for e in lifecycle.not_executable(current)]
+    return (await blocked_by_many(s, [version]))[version.id]
