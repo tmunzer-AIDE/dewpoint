@@ -1035,3 +1035,67 @@ the ledger ruling numbered 67 higher (ruling 5 is 72); a higher number (47, 65) 
     While this tenant's connections and workflows are loading, or when they couldn't be read, no choice is offered; a
     binding with nothing to offer says to choose "Leave unbound". - Unbound must be a deliberate choice, never a default
     nor a failed lookup. - One choice more per binding before an import.
+
+### Owner, #60 reviewed (2026-10-08, pasted)
+
+The owner reviewed head d960959 against main 6e092b5: "#60 is not merge-ready." The exit-race hold closes; the
+owner reran the original reproduction, and the editor stays locked until sign-out gives up its own hold.
+- **High.** Combining the migrations made two Alembic heads: 0047 still chained from 0042, while main had gone on to
+  0044. "Chain it from main's current head, 0044, without rewriting main's migrations." Update its reservation
+  comment (main holds 0043 and 0044), keep the historical ruling, and append the corrected chain, with replacement
+  slots coordinated for future work.
+- **`/node-types`** needs no choice between contracts: keep main's gzip negotiation and catalog transport with 4b's
+  `NodeTypeOut` and run-time metadata. A raw `Response` bypasses the response model, so validate and serialize with
+  `TypeAdapter(list[NodeTypeOut])` before `catalog_answer`, as main's `/trigger-types` does. Keep `/trigger-types`,
+  regenerate both frontend API files from the combined backend, and exercise metadata, compression and OpenAPI
+  together.
+- Main requires both CodeQL contexts, `analyze (python)` and `analyze (javascript-typescript)`. "Acceptance needs the
+  resolved, combined tree checked—not just the previously accepted branch."
+- M25 and the outage test remain the agreed separate follow-ups.
+
+### 4b, merged with main for #60 (2026-10-08)
+
+M36. **The branch merges main at 6e092b5 (be8bfc7, a merge commit), as the owner's review of #60 rules.**
+    - **The migration chain.** 0047 (`runs_workflow_last`) now chains from main's head, 0044. The chain has one head
+      again, and main's migrations are untouched. A test holds it: one head, 0047 after 0044, read from Alembic's own
+      scripts. The historical ruling stands as written (ruling 72; M5): 0047 was written on 0042.
+    - **Slots.** Main used 0043 and 0044, which this ledger had reserved for B4b and B8. Those two need replacement
+      slots, which the owner assigns. The next free numbers are 0048 and 0049. 0045 and 0046 stay reserved, for B7 and
+      B9.
+    - **`/node-types`.** It keeps main's gzip negotiation and catalog transport, and answers 4b's `NodeTypeOut`. Each
+      row is validated and serialized through `TypeAdapter(list[NodeTypeOut])`, as `/trigger-types` does, before
+      `catalog_answer`, off the event loop: the catalog runs to megabytes. `/trigger-types` is unchanged, and both
+      frontend API files were regenerated from the combined backend.
+    - Tests for the route:
+      - the gzipped palette carries B5's metadata, the same as plain;
+      - a row the model refuses is never sent. Without the validation this test failed; with it, it passes.
+    - The cost if wrong is the owner's call: a row that doesn't fit the model now fails the palette (500) rather than
+      reaching the editor.
+M37. **Two summary tests follow main's 0035.**
+    - Since 2b-4a, `runs_version_fk` names the tenant: `(workflow_version_id, workflow_id, tenant_id)`. A run can no
+      longer name another tenant's workflow.
+    - `test_another_tenants_runs_never_count` now asserts the database refuses such a row, a stronger guarantee than
+      the M3 scenario the owner had restored.
+    - The statements' own tenant filter is still held by `test_the_statements_filter_by_tenant_themselves`.
+    - The reference comparison seeds another tenant's newer run of its own workflow, not of this one.
+    - What the owner had required (milestone 1 review, correction 2) is now impossible to seed; the owner may want the
+      new form confirmed.
+M38. **The combined tree's checks** (be8bfc7, main 6e092b5 merged):
+    - Backend:
+      - ruff, format (743 files) and mypy (275 source files) clean; import contracts 11 kept; pip-licenses clean.
+      - The OpenAPI dump matches the regenerated `openapi.json`. The replay gate, against main, finds no history
+        changed.
+      - The parallel suite, without the serial CEL group: 3,955 passed, 0 failed, in 18 min 29 s. That ran past the
+        owner's ~10 minutes without asking first: main's added tests weren't estimated.
+      - The serial CEL group, by ruling 66's procedure: 406 passed, none skipped, 99 s.
+    - Frontend: 543 tests in 46 files; lint, types, `check:api` (the regenerated schema), licences, self-tests and the
+      build clean.
+    - Browser gate, on a freshly reset stack (main's new retention service included; the scratch stack's `.env` gained
+      a generated `DEWPOINT_RETENTION_DB_PASSWORD`):
+      - The first run had **1 failed and 20 not run**. Foundations' palette step typed "secur" and pressed Enter, and
+        landed on Settings → Members, not Security. The load average was then about 37 on 14 cores (other sessions).
+        A race between typing and the palette's filtering is suspected, not established.
+      - The rerun passed 27 of 27.
+    - CodeQL, run locally as codeql.yml does, with CI's versions (CLI 2.27.1, python-queries 1.8.11,
+      javascript-queries 2.4.6, read from main's run 37746611558): 0 findings in each language.
+    - gitleaks 8.30.1 over f65c6f9..HEAD: no leaks.
