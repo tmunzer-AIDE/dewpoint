@@ -250,14 +250,16 @@ over when it goes). It asks Temporal about each request at most once every 30 se
   retirement's `open_runs` check and an erasure's stage 50.
 - **History Temporal no longer has**, for a started run, such a sub-run or a held slot: left as it is, with an error
   (`run_history_missing`, `subrun_history_missing`, `slot_history_missing`); no outcome is invented and no slot
-  released. Recover it by hand.
+  released. Recover it with an operator's command ([below](#the-operators-commands)). Such a sub-run (one orphaned
+  before the upgrade that added this, say, and closed past the namespace's retention) is asked about again less and
+  less often, twice its last gap each time from 30 seconds, up to a day, with its error each time.
 - **Recovery reasons** are recorded, not only logged: each of `start_after_end`, `start_history_missing`,
   `start_unresolved` (once past its 10 minutes), `run_history_missing`, `slot_history_missing` and
   `subrun_history_missing` is kept in `recovery_items` with its item, since when, and when it was last seen again. An
-  item that resolves on its own (Temporal answers again, the start is verified, the run ends) loses its reasons. Such a sub-run (one orphaned before the upgrade that added this, say, and closed past
-  the namespace's retention) is asked about again less and less often, twice its last gap each time from 30 seconds,
-  up to a day, with its error each time.
-- **Recovering a sub-run whose history is gone** (an exceptional recovery, by hand, as the database's owner):
+  item that resolves on its own (Temporal answers again, the start is verified, the run ends) loses its reasons. A
+  start left `starting` is settled with an operator's command too.
+- **Recovering a sub-run whose history is gone by hand** (an exceptional recovery, as the database's owner, without an
+  audit entry: prefer the command):
   1. Read the namespace the deployment recorded: `SELECT temporal_namespace FROM platform_settings;`.
   2. Confirm Temporal has no execution under the sub-run's workflow id, `t:<tenant id>:run:<run id>`, in that
      namespace: `temporal workflow describe --namespace <namespace> --workflow-id <workflow id>` answers `NotFound`.
@@ -291,7 +293,8 @@ again, going on with the others meanwhile.
 The 7th failure in a row, about an hour after the first, **holds** the item. It's alerted on once, with the tenant,
 the item and the last error's type: `dispatch_held`, `reconcile_starting_held`, `reconcile_open_held`,
 `reconcile_slot_held`, `cancel_held`, `match_held` or `subrun_held`. No pass tries it again until an operator releases
-it. A success clears its kind's count; a reconciliation's clears its request's count in every phase.
+it ([below](#the-operators-commands)). A success clears its kind's count; a reconciliation's clears its request's count
+in every phase.
 
 What isn't counted keeps its own handling:
 
@@ -305,6 +308,47 @@ its run, and its reconciliation goes on. A held cancel stays requested: the requ
 
 The counts are kept in `work_failures`, by tenant, kind and item, with the last error's type, never its text. They go
 with their item under retention, and with their tenant at an erasure's stage 80.
+
+### The operator's commands
+
+A platform admin settles an item a pass left for recovery, and releases a held item, through the API: on an active
+MFA session, and for each change a second factor proven within the reauthentication window (5 minutes by default).
+Each change is audited with the admin's user id.
+
+| Request | What it does |
+|---|---|
+| `GET /api/v1/admin/recovery` | the recovery reasons recorded, across tenants: tenant, reason, item, `since`, `last_seen_at` |
+| `GET /api/v1/admin/held` | the held items, across tenants: tenant, kind of work, item, errors, the last error's type, `held_at` |
+| `POST /api/v1/admin/tenants/{tenant}/held/release` | `{kind, item_id}`: the item's hold for that kind of work ends, and its pass tries it again; another kind's hold stays (`work_failure.release`) |
+| `POST /api/v1/admin/tenants/{tenant}/commands` | `{kind, item_id, evidence, idempotency_key}`: a command, recorded `pending` (202), for the dispatcher's leader to carry out (`operator.command.request`) |
+| `GET /api/v1/admin/tenants/{tenant}/commands/{id}` | the command: `pending`, `applied` or `refused`, with its outcome |
+
+A command acts only on an item with one of its reasons recorded (else `409 not_recoverable`), and keeps when that
+reason was recorded. Asked again with the same idempotency key, it's the same command (200); an item has one command of
+a kind pending at a time (`409 command_pending`). The evidence, up to 500 characters, is the operator's note of how they
+confirmed the loss (the namespace's retention, an erasure, a restore): required where the item's history is gone.
+
+| Command | Its reason | What it does once Temporal is asked |
+|---|---|---|
+| `record_lost_run` | `run_history_missing` | Absent: the run `failed` with `history_lost`, its steps still `running` closed `outcome_unconfirmed`, its slot released. |
+| `record_lost_subrun` | `subrun_history_missing` | Absent: the sub-run the same; it has no slot. |
+| `release_lost_slot` | `slot_history_missing` | Absent: the slot of a run whose row ended, released. |
+| `settle_ended` | `start_after_end`, `start_history_missing` | Terminal: the request `started`, and its run records the end Temporal reports if it has none. Absent, with evidence: the request `started`, its run's recorded end standing. |
+
+The leader takes up to 20 pending commands a cycle, oldest first, and for each:
+
+1. refuses it unless its operator is still an active platform admin (`unauthorized`), and its item's reason is still
+   recorded since the time it was asked on (`stale`: the reason resolved, or resolved and was recorded again);
+2. asks Temporal about the item's execution in the namespace the deployment recorded (`namespace_mismatch` otherwise):
+   an answer that isn't certain refuses it (`temporal_uncertain`), as does an execution still there for a lost-history
+   command (`execution_present`), or a live one to settle (`execution_live`), or no evidence where it's needed
+   (`evidence_missing`);
+3. applies it in one transaction, every change conditional on what it checked (`changed` if the item moved meanwhile),
+   with the command's outcome and an audit entry naming the operator (`operator.command.applied`, or
+   `operator.command.refused` with why).
+
+Nothing retries a start. A command an unexpected error stops is refused once (`internal_error`): ask again once it's
+mended. The database failing leaves it pending for the next cycle.
 
 ## Cancelling and re-running
 
@@ -568,6 +612,7 @@ its error class's either way.
 | `failed` | `start_failed` | It never started: Temporal refused it, or its start couldn't be encrypted and was never sent. |
 | `failed` | `version_unusable` | This build can't load or run the version, for example a node type it lacks. Nothing ran. |
 | `failed` | `internal_error` | A bug in the interpreter. The message names the exception's type, and the worker's log names where it was raised, or says the result was too large to return; please report it. A bug fails the run's Temporal execution at once (never retried), and the reconciler records the end within about 30 seconds: steps the run hadn't recorded yet are absent, any still `running` show `outcome_unconfirmed`, no failure handler runs, and its iterations are its interpreter's last count, unverified. A sub-flow's or a batch's bug fails its step or loop with the same code. |
+| `failed` | `history_lost` | An operator settled the run once Temporal no longer had its history ([the operator's commands](#the-operators-commands)): an administrative settlement, not proof that it failed. Whether it ran to its end is unconfirmed; its steps still `running` show `outcome_unconfirmed`. |
 | `failed` | `payload_too_large` | The run's outputs were too large to return (over 1.75 MiB once encrypted). A step or a loop fails with the same code, below. |
 | `failed` | `snapshot_too_large` | The run's state was too large to carry on as a new Temporal execution (over 1.5 MiB). |
 | `failed` | `terminated` | A sub-run that an operator terminated in Temporal. It couldn't record its end, so its parent did, and the step or loop that started it failed with the same code. |

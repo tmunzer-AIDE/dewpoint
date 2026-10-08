@@ -113,6 +113,44 @@
         "title": "CodeIn",
         "type": "object"
       },
+      "CommandIn": {
+        "properties": {
+          "evidence": {
+            "default": "",
+            "maxLength": 500,
+            "title": "Evidence",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "item_id": {
+            "format": "uuid",
+            "title": "Item Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "record_lost_run",
+              "record_lost_subrun",
+              "release_lost_slot",
+              "settle_ended"
+            ],
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "item_id",
+          "idempotency_key"
+        ],
+        "title": "CommandIn",
+        "type": "object"
+      },
       "ConnectionCreateIn": {
         "properties": {
           "config": {
@@ -1052,6 +1090,34 @@
         "title": "RecoveryCodesOut",
         "type": "object"
       },
+      "ReleaseIn": {
+        "properties": {
+          "item_id": {
+            "format": "uuid",
+            "title": "Item Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "dispatch",
+              "reconcile_starting",
+              "reconcile_open",
+              "reconcile_slot",
+              "cancel",
+              "match",
+              "subrun"
+            ],
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "item_id"
+        ],
+        "title": "ReleaseIn",
+        "type": "object"
+      },
       "RerunIn": {
         "additionalProperties": false,
         "properties": {
@@ -1760,6 +1826,210 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/v1/admin/held": {
+      "get": {
+        "operationId": "held_api_v1_admin_held_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Held Api V1 Admin Held Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Held",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/recovery": {
+      "get": {
+        "operationId": "recovery_api_v1_admin_recovery_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Recovery Api V1 Admin Recovery Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Recovery",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/tenants/{tenant_id}/commands": {
+      "post": {
+        "operationId": "ask_api_v1_admin_tenants__tenant_id__commands_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CommandIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Ask Api V1 Admin Tenants  Tenant Id  Commands Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ask",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/tenants/{tenant_id}/commands/{command_id}": {
+      "get": {
+        "operationId": "command_api_v1_admin_tenants__tenant_id__commands__command_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "command_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Command Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Command Api V1 Admin Tenants  Tenant Id  Commands  Command Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Command",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/api/v1/admin/tenants/{tenant_id}/erasure": {
       "get": {
         "operationId": "shown_api_v1_admin_tenants__tenant_id__erasure_get",
@@ -1943,6 +2213,61 @@
           }
         },
         "summary": "Stop",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/tenants/{tenant_id}/held/release": {
+      "post": {
+        "operationId": "release_api_v1_admin_tenants__tenant_id__held_release_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReleaseIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Release Api V1 Admin Tenants  Tenant Id  Held Release Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Release",
         "tags": [
           "admin"
         ]

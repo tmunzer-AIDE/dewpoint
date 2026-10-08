@@ -39,6 +39,7 @@ from temporalio.service import RPCError, RPCStatusCode
 from dewpoint.apps.dispatcher import dispatch, reconcile
 from dewpoint.core.audit import service as audit
 from dewpoint.core.db import tenant_scope, unavailable
+from dewpoint.core.recovery import LOST
 from dewpoint.core.runs import service as runs
 from dewpoint.core.runs.service import HISTORY_LOST as HISTORY_LOST_CODE
 from dewpoint.engine.runtime.ids import run_workflow_id
@@ -57,7 +58,6 @@ HISTORY_LOST_MESSAGE = (
     "Its history was gone before its end was recorded: an operator settled it. Whether it ran to its end is "
     "unconfirmed."
 )
-LOST = ("record_lost_run", "record_lost_subrun", "release_lost_slot")  # only on its history gone, with evidence
 
 _PENDING = text("select tenant_id, command_id from pending_commands(:n)")
 _COMMAND = text(
