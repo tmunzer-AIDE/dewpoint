@@ -1482,3 +1482,10 @@ Rulings:
   renders from a placeholder sender (the connection isn't opened) - cost if wrong: none.
 - Ruling (task 4): verify names what failed: `auth_failed` (535 at AUTH), `refused`, `tls_unavailable`,
   `auth_unavailable`, `tls_verification_failed`, `egress_refused`, else `unreachable` - cost if wrong: none.
+- Ruling (task 5): a syslog node sends through the step's guarded network (`ctx.net`) to the connection's host and
+  port only, read from the connection's validated config; no SDK change: syslog has no credentials to apply - cost if
+  wrong: none.
+- Ruling (task 5): a CEF payload is sent without the BOM (RFC 5424's MSG-ANY): CEF readers expect `CEF:` first; its
+  Device Version is the plugin's - cost if wrong: a strict receiver reads its encoding as unspecified.
+- Ruling (task 5): simulated, a syslog message is cut for the default transport, TLS (8192 octets): the connection
+  isn't opened, so its transport isn't known - cost if wrong: a UDP connection cuts more than the simulation shows.

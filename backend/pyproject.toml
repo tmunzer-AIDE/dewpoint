@@ -36,6 +36,7 @@ flow = "dewpoint.plugins.flow:PLUGIN"
 google_chat = "dewpoint.plugins.google_chat:PLUGIN"
 mist = "dewpoint.plugins.mist:PLUGIN"
 slack = "dewpoint.plugins.slack:PLUGIN"
+syslog = "dewpoint.plugins.syslog:PLUGIN"
 teams = "dewpoint.plugins.teams:PLUGIN"
 webhook = "dewpoint.plugins.webhook:PLUGIN"
 
