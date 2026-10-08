@@ -1694,3 +1694,6 @@ checked by removing it (24 mutants, all killed; `98ff5628`):
 
 The owner signed off this section's rulings (2026-10-08: "sign-of ok"), the review's M1, L3, L4, L5 and the order
 limit included, simulate's departure from D13's exact request too; and authorized the full suite, push and PR.
+- Merged `origin/main` 9cb4be3 (#64, no conflicts; no rebase, so the reviewed SHAs stand): 757bc49. Full suite there:
+  4,325 passed (`-n auto`), the CEL gates 398 passed and 8 skipped; gitleaks over the branch's commits finds nothing;
+  CodeQL's python analysis finds nothing locally.
