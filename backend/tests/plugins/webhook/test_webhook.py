@@ -29,6 +29,9 @@ def declared() -> DeclaredType:
         "https://receiver:8443/events",  # a single label: the guard decides where it resolves
         "https://203.0.113.7/x",
         "https://example.com:65535/a/@b",  # an `@` in the path names no user
+        "https://hooks.slack.com.example.com/x",  # another domain's host, however it starts
+        "https://chat.googleapis.com.example.com/x",
+        "https://api.slack.com/x",
     ],
 )
 def test_an_https_url_is_taken(url: str) -> None:
@@ -57,6 +60,26 @@ def test_an_https_url_is_taken(url: str) -> None:
     ],
 )
 def test_any_other_url_is_refused(url: str) -> None:
+    with pytest.raises(InvalidValueError):
+        declared().secret({"url": url})
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://hooks.slack.com/services/T0001/B0002/abcdef",
+        "https://hooks.slack.com",
+        "https://hooks.slack.com:443/services/x",
+        "https://chat.googleapis.com/v1/spaces/AAAA/messages?key=k&token=t",
+        "https://prod-00.westus.logic.azure.com:443/workflows/x/triggers/manual/paths/invoke?sig=s",
+        "https://logic.azure.com/x",
+        "https://default0a.3d.environment.api.powerplatform.com/powerautomate/x",
+        "https://xxxxx.webhook.office.com/webhookb2/x",
+    ],
+)
+def test_a_chat_targets_own_url_is_refused(url: str) -> None:
+    """Slack's, Google Chat's and Teams' webhooks have their own types, which escape run data and charge the
+    provider's scope; through this one a `<!channel>` in run data would reach Slack as it is (the 3c-1 review, 4)."""
     with pytest.raises(InvalidValueError):
         declared().secret({"url": url})
 

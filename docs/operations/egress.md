@@ -52,7 +52,7 @@ connection's secret.
 | `slack` | Slack's documented form only: `https://hooks.slack.com/services/T…/B…/…` | `hooks.slack.com` |
 | `teams` | A Teams Workflows URL ("When a Teams webhook request is received"), its trigger set to accept "Anyone": `https://….logic.azure.com/…` or `https://….api.powerplatform.com/…`, on port 443 | the flow's host |
 | `google_chat` | A space's webhook: `https://chat.googleapis.com/v1/spaces/SPACE/messages?key=…&token=…` | `chat.googleapis.com` |
-| `webhook` | Any https URL: a lowercase host name or IPv4 address, an optional port, a path and query; no user name, no fragment | the receiver's host |
+| `webhook` | Any https URL: a lowercase host name or IPv4 address, an optional port, a path and query; no user name, no fragment. Not a Slack, Teams or Google Chat webhook: those take their own type, which escapes run data | the receiver's host |
 
 - **Checked as written.** A URL of another shape is refused when the connection is created, naming its field, and
   again whenever it's read. Teams' sovereign clouds, GovSlack and Office 365 connectors (retired by Microsoft) aren't

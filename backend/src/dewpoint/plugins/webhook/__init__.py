@@ -2,7 +2,8 @@
 """A generic webhook (plugins-3 3c-1, D18): a POST of JSON to a receiver's URL, which is the credential.
 
 The URL is any https URL with a lowercase host name or IPv4 address, an optional port, and a path and query of RFC
-3986's characters, no user, no fragment; the SSRF guard vets where it resolves at creation and on every connect (D7).
+3986's characters, no user, no fragment, and not Slack's, Google Chat's or Teams' webhook host, which have types of
+their own; the SSRF guard vets where it resolves on every connect (D7).
 A secret URL's pattern starts with https, so a plain-http receiver isn't reachable yet. One quota scope a host, 1 a
 second with bursts of 5: a receiver's limits aren't known, and URLs to one host share its budget (D9).
 
@@ -34,7 +35,13 @@ from dewpoint.sdk.messages import Message
 HOST = r"[a-z0-9-]{1,63}(\.[a-z0-9-]{1,63}){0,126}"
 PORT = r"(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3})"
 PATH = r"/[A-Za-z0-9._~!$&'()*+,;=:@%/?-]{0,4000}"  # RFC 3986's unreserved, sub-delims, ':', '@', '/', '?' and '%'
-WEBHOOK_URL = rf"https://{HOST}(:{PORT})?({PATH})?"
+# Not a host whose webhooks have a type of their own, which escapes run data and charges the provider's scope (the 3c-1
+# review, finding 4): Slack's, Google Chat's, Teams' Workflows and the retired Office 365 connectors'.
+DEDICATED = (
+    r"(?!(hooks\.slack\.com|chat\.googleapis\.com|([a-z0-9-]+\.)*(logic\.azure\.com|api\.powerplatform\.com"
+    r"|webhook\.office\.com))([:/]|\Z))"
+)
+WEBHOOK_URL = rf"https://{DEDICATED}{HOST}(:{PORT})?({PATH})?"
 BODY_MAX = 1 << 20  # bytes of a workflow's body as sent
 
 
