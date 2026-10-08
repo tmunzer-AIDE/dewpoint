@@ -42,6 +42,7 @@ from dewpoint.core.db import tenant_scope, unavailable
 from dewpoint.core.recovery import LOST
 from dewpoint.core.runs import service as runs
 from dewpoint.core.runs.service import HISTORY_LOST as HISTORY_LOST_CODE
+from dewpoint.engine.runtime.activities import RunResult
 from dewpoint.engine.runtime.ids import run_workflow_id
 
 log = structlog.get_logger("dewpoint.dispatcher")
@@ -179,7 +180,9 @@ async def _asked(sessionmaker: async_sessionmaker[AsyncSession], client: Client,
         recorded = (await s.execute(_NAMESPACE)).scalar()
     if recorded != client.namespace:
         return Answer(NAMESPACE_MISMATCH)
-    handle = client.get_workflow_handle(run_workflow_id(str(command.tenant_id), str(command.item_id)))
+    handle = client.get_workflow_handle(
+        run_workflow_id(str(command.tenant_id), str(command.item_id)), result_type=RunResult
+    )  # a completed execution's own end, as it returned it
     try:
         described = await handle.describe(rpc_timeout=reconcile.CALL_DEADLINE)
     except RPCError as e:
@@ -190,7 +193,12 @@ async def _asked(sessionmaker: async_sessionmaker[AsyncSession], client: Client,
         return Answer(TEMPORAL_UNCERTAIN)
     if described.status is None or described.status in reconcile.LIVE:
         return Answer("live")
-    ended = await reconcile.reported_end(handle, described.status, command.item_id)
+    if command.kind != "settle_ended":  # it's there: a lost-history command needs no more to refuse
+        return Answer("terminal")
+    try:
+        ended = await reconcile.reported_end(handle, described.status, command.item_id)
+    except (RPCError, TimeoutError):  # its end unread this time: nothing is settled on it
+        return Answer(TEMPORAL_UNCERTAIN)
     return Answer("terminal", ended, described.close_time)
 
 
@@ -257,15 +265,15 @@ async def _release_lost_slot(s: AsyncSession, command: Command, _answer: Answer)
 
 
 async def _settle_ended(s: AsyncSession, command: Command, answer: Answer) -> str | None:
+    ended = answer.ended
+    if answer.kind != "absent" and ended is None:  # a terminal answer carries its end: else nothing changes
+        return None
     found = await s.execute(text("update run_requests set status = 'started' where id = :i and status = 'starting' "
                                  "returning id"), {"i": command.item_id})  # fmt: skip
     if found.first() is None:
         return None
-    if answer.kind == "absent":
+    if ended is None:
         return SETTLED_ABSENT  # its row's recorded end stands
-    ended = answer.ended
-    if ended is None:  # a terminal answer carries its end
-        return None
     await runs.finish_run(s, command.item_id, status=ended.status, ended_at=answer.close_time or datetime.now(UTC),
                           error_code=ended.error_code, error_message=ended.error_message, iterations=ended.iterations,
                           if_running=True)  # fmt: skip

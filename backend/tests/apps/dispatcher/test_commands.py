@@ -8,8 +8,10 @@ operator; or refuses it, with why, audited alike.
 `history_lost` is an administrative settlement: the run's outcome is unconfirmed, its steps still `running` close
 unconfirmed, and its slot is released. Here Temporal is a stand-in answering as the case needs."""
 
+import dataclasses
 import uuid
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -20,6 +22,7 @@ from temporalio.service import RPCStatusCode
 from dewpoint.apps.dispatcher import commands
 from dewpoint.core.auth.users import create_user
 from dewpoint.core.runs.service import HISTORY_LOST, OUTCOME_UNCONFIRMED
+from dewpoint.engine.runtime.activities import RunResult
 from tests.apps.dispatcher.test_reconcile import DescribeFails
 from tests.apps.dispatcher.test_reconcile_runs import Described
 from tests.apps.test_runs import rpc
@@ -258,3 +261,58 @@ async def test_a_command_an_unexpected_error_stops_is_refused_once_never_retried
     assert await commands.commands_once(dispatch_sessionmaker, GONE) == {commands.INTERNAL_ERROR: 1}
     assert await decided(owner_sessionmaker, command) == ("refused", commands.INTERNAL_ERROR, True)
     assert await audited(owner_sessionmaker, command) == [("operator.command.refused", admin, commands.INTERNAL_ERROR)]
+
+
+class Completed:
+    """An execution that completed, read as the SDK reads one: its result a `RunResult` only for a handle asked with
+    that `result_type`, else the converter's plain dict. `fails`: its result unreadable (Temporal not answering)."""
+
+    namespace = "default"
+
+    def __init__(self, fails: BaseException | None = None) -> None:
+        self.fails = fails
+
+    def get_workflow_handle(self, _: str, *, result_type: Any = None, **__: Any) -> Any:
+        fails, ended = self.fails, RunResult("succeeded", {}, None, 3)
+
+        class Handle:
+            async def describe(self, **_: Any) -> Any:
+                return SimpleNamespace(status=WorkflowExecutionStatus.COMPLETED, close_time=None)
+
+            async def result(self, **_: Any) -> Any:
+                if fails is not None:
+                    raise fails
+                return ended if result_type is RunResult else dataclasses.asdict(ended)
+
+        return Handle()
+
+
+async def test_settling_a_start_whose_execution_completed_records_its_own_end(
+    owner_sessionmaker, dispatch_sessionmaker
+) -> None:  # fmt: skip
+    """The fresh M3 review's I1: the most common terminal status; its result read as the run's own."""
+    ctx, admin = await tenant(owner_sessionmaker), await operator(owner_sessionmaker)
+    item = await ended_start(owner_sessionmaker, ctx, ended=False)
+    _, command = await asked(owner_sessionmaker, ctx, "settle_ended", admin, item=item, evidence="")
+    assert await commands.commands_once(dispatch_sessionmaker, Completed()) == {commands.SETTLED_TERMINAL: 1}
+    assert await ended(owner_sessionmaker, item) == ("succeeded", None, True)
+    assert await decided(owner_sessionmaker, command) == ("applied", commands.SETTLED_TERMINAL, True)
+
+
+@pytest.mark.parametrize(
+    ("kind", "client", "outcome"),
+    [
+        ("record_lost_run", Completed(), commands.EXECUTION_PRESENT),  # its end never read: it's there
+        ("settle_ended", Completed(rpc(RPCStatusCode.UNAVAILABLE)), commands.TEMPORAL_UNCERTAIN),
+        ("settle_ended", Completed(TimeoutError()), commands.TEMPORAL_UNCERTAIN),
+    ],
+    ids=["present", "result_unanswered", "result_timed_out"],
+)
+async def test_a_completed_execution_refuses_a_lost_history_command_and_an_unread_end_is_uncertain(
+    owner_sessionmaker, dispatch_sessionmaker, kind: str, client: Any, outcome: str
+) -> None:  # fmt: skip
+    ctx, admin = await tenant(owner_sessionmaker), await operator(owner_sessionmaker)
+    item = await ended_start(owner_sessionmaker, ctx, ended=False) if kind == "settle_ended" else None
+    _, command = await asked(owner_sessionmaker, ctx, kind, admin, item=item)
+    assert await commands.commands_once(dispatch_sessionmaker, client) == {outcome: 1}
+    assert await decided(owner_sessionmaker, command) == ("refused", outcome, True)
