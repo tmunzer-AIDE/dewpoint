@@ -80,9 +80,22 @@ sees `trigger.rows` (one object per row, each column by its name) and `trigger.r
 - **Memory, per API process:** at the platform's caps, an upload's parse peaks near 145 MiB and holds about 90 MiB
   until it answers, and a CSV start's rows about 235 MiB until its transaction commits (measured as Python's own
   allocations: `tests/probes/csv_memory.py`). So each API process takes at most `DEWPOINT_CSV_CONCURRENCY` uploads,
-  CSV starts and re-runs keeping their original's input at once (2 by default: about 470 MiB at worst, beside the
-  process itself); one past it is refused at once with 503 `csv_busy` and `Retry-After: 1`, before an upload's body
-  is read or a start opens its file, nothing recorded: ask again. A provisional number, for the owner's sizing.
+  CSV starts and re-runs keeping their original's input at once (2 by default); one past it is refused at once with
+  503 `csv_busy` and `Retry-After: 1`, before an upload's body is read or a start opens its file, nothing recorded:
+  ask again. A slot is held until the request's transaction commits. Measured as the process sees it
+  (`tests/probes/test_csv_rss.py`, the worst shape, through the commit, on one macOS development machine, 2026-10-09):
+  two worst-case jobs at once raised the process's physical footprint (its resident memory with its compressed pages,
+  the allocator's overhead included) about 465 MiB above idle, one about 325 MiB, and the allocator kept most of it
+  afterwards: **size an API process for its peak, about 250 MiB a slot plus the process itself**. Two slots are
+  provisional, not a production memory limit: a Linux container's allocator (glibc's, with an arena per thread) isn't
+  measured yet.
+- **The CPU work runs off the event loop**, in a thread, inside the request's slot: an upload's parse and preview,
+  a start's rows, and the input's check against the trigger's schema and its split (at the caps the check and the
+  split take about 3 s each; they held the API's event loop up to 12 s for two starts at once). The database session
+  stays on the loop. With two worst-case starts in one process, the loop's longest wait was 0.24 s (the rows' encoding
+  for their claim stays on it) and a cheap request answered in 43 ms at the median, 0.8 s at the 95th percentile and
+  0.9 s at most; the starts themselves took longer (35 s for the two, against 25 s on the loop), the CPU shared
+  under Python's global lock.
 - **A loop over the rows** needs no `declassify` entry: their count is `trigger.row_count`, already public. Rows that
   together pass 64 KiB are one claim, and the loop gives each iteration a handle to its row: a step's reference to a
   cell is read in its own activity, but CEL over a cell (a condition on `item.status`) runs in `cel.evaluate`, one
