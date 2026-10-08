@@ -26,6 +26,10 @@ class Script:
     end: int | None = 250
     end_delay_s: float = 0.0
     names: tuple[str, ...] = ("mail.test",)
+    greeting_flood: int = 0  # continuation lines before the greeting's last
+    flood_width: int = 96  # each one's text
+    drip_s: float = 0.0  # the greeting one byte at a time, forever, this far apart
+    end_flood: int = 0  # continuation lines before the answer to the message's end
 
 
 @dataclass
@@ -54,6 +58,14 @@ async def _session(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, s
         for i, text in enumerate(texts):
             writer.write(f"{code}{'-' if i < len(texts) - 1 else ' '}{text}\r\n".encode())
 
+    if script.drip_s:
+        while True:
+            writer.write(b"2")
+            await writer.drain()
+            await asyncio.sleep(script.drip_s)
+    for _ in range(script.greeting_flood):
+        writer.write(b"220-" + b"x" * script.flood_width + b"\r\n")
+        await writer.drain()
     say(script.greeting, "mail.test ESMTP")
     await writer.drain()
     if script.greeting != 220:
@@ -120,6 +132,9 @@ async def _session(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, s
                         return
                 except TimeoutError:
                     pass
+            for _ in range(script.end_flood):
+                writer.write(b"250-" + b"x" * 96 + b"\r\n")
+                await writer.drain()
             say(script.end, "queued")
         elif verb == "QUIT":
             got.quit = True

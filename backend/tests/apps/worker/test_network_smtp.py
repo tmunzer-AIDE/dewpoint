@@ -4,6 +4,7 @@ runtime signing in with the stored password, which joins the run's secret index;
 send; a definite refusal leaves the attempt as it was (nothing was delivered), a connection lost after the payload
 doesn't; the connection has no HTTP; a plugin call may probe, never send; a long send heartbeats."""
 
+import asyncio
 import ipaddress
 import uuid
 from types import SimpleNamespace
@@ -182,6 +183,32 @@ async def test_a_plugin_call_may_probe_but_never_send(owner_sessionmaker, worker
             await call.aclose()
     [got] = server.sessions  # the send never connected
     assert got.logins == [("PLAIN", "ops", PASSWORD)] and got.mail == [] and got.quit
+
+
+async def test_closing_the_attempt_aborts_a_send_left_running(owner_sessionmaker, worker_sessionmaker) -> None:
+    """A node's send it didn't await ends with its attempt (the review's M1)."""
+    async with serve_smtp(Script(end_delay_s=30.0)) as server:
+        seeded, cid = await _setup(owner_sessionmaker, server.port)
+        a = attempt(worker_sessionmaker, seeded)
+        conn = await a.connection(cid)
+        task = asyncio.create_task(conn.smtp.send(["ops@example.com"], MESSAGE))
+        for _ in range(1000):
+            if server.sessions and server.sessions[0].payload is not None:
+                break
+            await asyncio.sleep(0.01)
+        await a.aclose()
+        with pytest.raises(MaybeSent):
+            await asyncio.wait_for(task, 5)
+    assert server.sessions[0].client_closed
+
+
+async def test_an_attempt_keeps_one_mail_client_so_closing_reaches_every_send(owner_sessionmaker, worker_sessionmaker):
+    seeded, _ = await _setup(owner_sessionmaker, 2525)
+    a = attempt(worker_sessionmaker, seeded)
+    try:
+        assert a.core_smtp() is a.core_smtp()
+    finally:
+        await a.aclose()
 
 
 async def test_a_long_send_heartbeats(owner_sessionmaker, worker_sessionmaker, monkeypatch) -> None:

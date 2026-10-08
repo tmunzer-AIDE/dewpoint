@@ -9,7 +9,10 @@ Nothing can be delivered until the payload is written: a refusal before it is th
 octets) is refused before connecting, as are recipients or a sender of another form."""
 
 import asyncio
+import concurrent.futures
 import dataclasses
+import socket
+import time
 from typing import Any
 
 import pytest
@@ -245,3 +248,124 @@ async def test_a_cancelled_send_closes_its_socket() -> None:
                 break
             await asyncio.sleep(0.01)
     assert server.sessions[0].client_closed
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        Script(greeting_flood=100_000),  # past 100 lines
+        Script(greeting_flood=20, flood_width=8000),  # under 100 lines, past 64 KiB
+        Script(extensions=("STARTTLS", *(f"X{i}" for i in range(150)))),
+    ],
+)
+async def test_a_reply_past_its_bounds_is_refused_having_sent_nothing(script: Script) -> None:
+    """A reply is at most 100 lines and 64 KiB (the review's H1: a server flooding continuation lines grew the worker
+    without bound)."""
+    async with serve_smtp(script) as server:
+        with pytest.raises(NotSentError):
+            await asyncio.wait_for(smtp().send(target(server.port), ["ops@example.com"], MESSAGE), 10)
+    assert all(got.mail == [] for got in server.sessions)
+
+
+async def test_an_end_reply_past_its_bounds_may_have_delivered() -> None:
+    async with serve_smtp(Script(end_flood=100_000)) as server:
+        with pytest.raises(MaybeSentError):
+            await asyncio.wait_for(smtp().send(target(server.port), ["ops@example.com"], MESSAGE), 10)
+
+
+async def test_a_session_has_a_deadline_however_slowly_the_server_drips() -> None:
+    """Each read within `operation_s` doesn't keep a session past `session_s` (the review's H1)."""
+    async with serve_smtp(Script(drip_s=0.05)) as server:
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(NotSentError):
+            await smtp(limits=SmtpLimits(operation_s=1.0, session_s=0.5)).send(target(server.port),
+                                                                              ["ops@example.com"], MESSAGE)  # fmt: skip
+        assert asyncio.get_running_loop().time() - started < 3
+    assert server.sessions[0].mail == []
+
+
+async def test_a_deadline_after_the_payload_may_have_delivered() -> None:
+    async with serve_smtp(Script(end_delay_s=5.0)) as server:
+        with pytest.raises(MaybeSentError):
+            await smtp(limits=SmtpLimits(session_s=0.5)).send(target(server.port), ["ops@example.com"], MESSAGE)
+
+
+async def test_sessions_never_take_the_loops_default_executor() -> None:
+    """The guard resolves names on the default executor: a slow server's session must not hold it (the review's H1)."""
+    loop = asyncio.get_running_loop()
+    loop.set_default_executor(concurrent.futures.ThreadPoolExecutor(max_workers=1))
+    async with serve_smtp(Script(drip_s=0.05)) as server:
+        tasks = [asyncio.create_task(smtp(limits=SmtpLimits(session_s=3.0)).send(target(server.port),
+                                                                                 ["ops@example.com"], MESSAGE))
+                 for _ in range(2)]  # fmt: skip
+        await asyncio.sleep(0.3)
+        assert await asyncio.wait_for(loop.run_in_executor(None, lambda: 7), 1.0) == 7
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.parametrize("fails", [False, True])  # the first address connects slowly, or fails slowly
+async def test_a_send_cancelled_while_connecting_never_reaches_the_server(
+    monkeypatch: pytest.MonkeyPatch, fails: bool
+) -> None:
+    """The review's M1: a cancel during `create_connection` closed nothing, and the session went on to deliver, or to
+    the next address."""
+    real, calls = socket.create_connection, []
+
+    def slow(*args: Any, **kwargs: Any) -> socket.socket:
+        calls.append(args)
+        time.sleep(0.6)
+        if fails and len(calls) == 1:
+            raise ConnectionRefusedError()
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(socket, "create_connection", slow)
+    async with serve_smtp() as server:
+        task = asyncio.create_task(smtp({"mail.test": ["127.0.0.1", "127.0.0.1"]}).send(
+            target(server.port), ["ops@example.com"], MESSAGE))  # fmt: skip
+        await asyncio.sleep(0.2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(1.0)  # the thread's connect ends meanwhile
+    assert len(calls) == 1  # the next address is never tried
+    assert all(got.mail == [] and got.commands == [] for got in server.sessions)
+
+
+async def test_closing_aborts_a_send_left_running() -> None:
+    """A send the node didn't await ends with its attempt (the review's M1)."""
+    async with serve_smtp(Script(end_delay_s=30.0)) as server:
+        mail = smtp()
+        task = asyncio.create_task(mail.send(target(server.port), ["ops@example.com"], MESSAGE))
+        for _ in range(1000):
+            if server.sessions and server.sessions[0].payload is not None:
+                break
+            await asyncio.sleep(0.01)
+        await mail.aclose()
+        with pytest.raises(MaybeSentError):
+            await asyncio.wait_for(task, 5)
+    assert server.sessions[0].client_closed
+
+
+async def test_a_session_stuck_connecting_past_its_deadline_sent_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An abort can't interrupt a connect: past the deadline the send fails having sent nothing, without waiting."""
+    real = socket.create_connection
+
+    def stuck(*args: Any, **kwargs: Any) -> socket.socket:
+        time.sleep(2.0)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(socket, "create_connection", stuck)
+    async with serve_smtp() as server:
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(NotSentError):
+            await smtp(limits=SmtpLimits(session_s=0.3, connect_s=0.3)).send(target(server.port), ["ops@example.com"],
+                                                                            MESSAGE)  # fmt: skip
+        assert asyncio.get_running_loop().time() - started < 1.5
+        await asyncio.sleep(2.0)  # the thread ends, aborted
+    assert all(got.commands == [] for got in server.sessions)
+
+
+def test_a_targets_repr_never_shows_its_password() -> None:
+    assert "pa55-word" not in repr(target(25)) and "pa55-word" not in str(target(25))

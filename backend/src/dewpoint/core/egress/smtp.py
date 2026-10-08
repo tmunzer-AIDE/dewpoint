@@ -12,6 +12,11 @@ else `NotSentError`. After it, a 250 is sent; a 4yz or 5yz is a definite refusal
 make a subsequent attempt to deliver" (§4.2.5); any other answer, a connection lost or a timeout without one is
 `MaybeSentError` (§4.5.3.2.6 warns of duplicates).
 
+A server can't hold the worker: a reply is at most 100 lines and 64 KiB, a session at most `session_s` (aborted
+past it), and sessions run on a pool of their own, never the event loop's default executor, which resolves names
+for every guarded request. Cancelling a send, or closing the attempt, aborts its session wherever it is: before an
+address is tried, after connecting, before each command.
+
 The message goes on the wire whole or not at all: a bare CR or LF (the way to smuggle a second message past a
 server), a NUL or a line past 998 octets is refused before connecting, as is a sender, a recipient or a credential of
 another form. Failures name no host, address or server text; nothing is logged."""
@@ -21,9 +26,11 @@ import re
 import smtplib
 import socket
 import ssl
+import threading
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 
 import httpx
 
@@ -41,6 +48,8 @@ MAX_RECIPIENTS = 50  # under RFC 5321's 100 a message (§4.5.3.1.8)
 MAX_LINE = 998  # octets before the CRLF (RFC 5322 §2.1.1; RFC 5321 §4.5.3.1.6 counts 1000 with it)
 CREDENTIAL = re.compile(r"[\x20-\x7e]{1,1024}")  # `smtplib` signs in with ASCII only
 MECHANISMS = ("PLAIN", "LOGIN")
+MAX_REPLY_LINE, MAX_REPLY_LINES, MAX_REPLY = 8192, 100, 64 * 1024  # a reply's line, lines and octets
+POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="dewpoint-smtp")  # the process's mail sessions
 _STUFF = re.compile(rb"(?m)^\.")  # a line's leading dot doubled (RFC 5321 §4.5.2); lines end in CRLF only
 
 
@@ -54,14 +63,15 @@ class SmtpTarget:
     security: str
     sender: str
     username: str | None
-    password: str | None
-    ehlo_name: str
+    password: str | None = field(repr=False)
+    ehlo_name: str = ""
 
 
 @dataclass(frozen=True)
 class SmtpLimits:
     connect_s: float = 5.0
     operation_s: float = 60.0  # each blocking read or write, the answer to the message's end included
+    session_s: float = 120.0  # a whole session, connect to QUIT
     max_message: int = 10 * 1024 * 1024
 
 
@@ -79,6 +89,14 @@ class TlsUnavailableError(Exception):
 
 class AuthUnavailableError(Exception):
     """The server offered no mechanism the runtime signs in with: nothing more was sent."""
+
+
+class ReplyTooLargeError(OSError):
+    """A reply past its bounds: the connection is closed, as on any broken exchange."""
+
+
+class AbortedError(OSError):
+    """The session was aborted: cancelled, closed with its attempt, or past its deadline."""
 
 
 def _refusal(stage: str, reply: int) -> Exception:
@@ -122,6 +140,31 @@ class _Pinned(smtplib.SMTP):
     def _get_socket(self, host: str, port: int, timeout: float) -> socket.socket:
         return self._pinned
 
+    def getreply(self) -> tuple[int, bytes]:
+        """A reply, as `smtplib`'s, but bounded: `smtplib` reads continuation lines without end (the review's H1)."""
+        if self.file is None:
+            if self.sock is None:
+                raise smtplib.SMTPServerDisconnected("closed")
+            self.file = self.sock.makefile("rb")
+        lines: list[bytes] = []
+        total = 0
+        while True:
+            line = self.file.readline(MAX_REPLY_LINE + 1)
+            if not line:
+                self.close()
+                raise smtplib.SMTPServerDisconnected("closed")
+            total += len(line)
+            if len(line) > MAX_REPLY_LINE or total > MAX_REPLY or len(lines) >= MAX_REPLY_LINES:
+                self.close()
+                raise ReplyTooLargeError()
+            lines.append(line[4:].strip(b" \t\r\n"))
+            try:
+                code = int(line[:3])
+            except ValueError:
+                return -1, b"\n".join(lines)
+            if line[3:4] != b"-":
+                return code, b"\n".join(lines)
+
 
 class _Session:
     """One connection, start to QUIT, run in a worker thread; `abort` closes its socket from the event loop."""
@@ -129,8 +172,17 @@ class _Session:
     def __init__(self, target: SmtpTarget, context: ssl.SSLContext, limits: SmtpLimits) -> None:
         self.target, self.context, self.limits = target, context, limits
         self.sock: socket.socket | None = None
+        self.aborted = threading.Event()
+        self.payload = False  # once the payload's first byte may have left
+
+    def _go_on(self) -> None:
+        """While connecting, where no socket is open yet for `abort` to close (the review's M1); once one is, closing
+        it ends the session at its next read or write."""
+        if self.aborted.is_set():
+            raise AbortedError()
 
     def abort(self) -> None:
+        self.aborted.set()
         sock = self.sock
         if sock is not None:
             try:
@@ -141,12 +193,16 @@ class _Session:
 
     def _connect(self, addresses: Sequence[Address]) -> socket.socket:
         for address in addresses:
+            self._go_on()
             try:
                 raw = socket.create_connection((str(address), self.target.port), timeout=self.limits.connect_s)
             except OSError:
                 continue
             raw.settimeout(self.limits.operation_s)
             self.sock = raw
+            if self.aborted.is_set():  # aborted while connecting: `abort` found no socket to close
+                raw.close()
+                raise AbortedError()
             if self.target.security != "tls":
                 return raw
             try:
@@ -156,6 +212,7 @@ class _Session:
                 raise TlsVerificationError() from None
             except (ssl.SSLError, OSError):
                 raw.close()
+                self._go_on()  # a handshake the abort broke tries no other address
                 continue
             return self.sock
         raise NotSentError("connect")
@@ -199,8 +256,10 @@ class _Session:
 
     def run(self, addresses: Sequence[Address], recipients: Sequence[str] | None, message: bytes | None) -> list[str]:
         """Probes when `message` is None: connect, greet, secure, sign in, QUIT."""
-        client = _Pinned(self._connect(addresses), self.target, self.limits)
-        payload = False
+        try:
+            client = _Pinned(self._connect(addresses), self.target, self.limits)
+        except AbortedError:
+            raise NotSentError("smtp") from None
         try:
             code, _ = client.connect(self.target.host, self.target.port)
             if code != 220:
@@ -229,7 +288,7 @@ class _Session:
             code, _ = client.docmd("DATA")
             if code != 354:
                 raise _refusal("data", code)
-            payload = True  # from here, the server may have taken it
+            self.payload = True  # from here, the server may have taken it
             stuffed = _STUFF.sub(b"..", message)
             client.send(stuffed + (b"" if stuffed.endswith(b"\r\n") else b"\r\n") + b".\r\n")
             code, _ = client.getreply()
@@ -241,8 +300,8 @@ class _Session:
         except (SmtpRefusedError, TlsUnavailableError, AuthUnavailableError, TlsVerificationError, NotSentError,
                 MaybeSentError):  # fmt: skip
             raise
-        except (OSError, ssl.SSLError, ValueError, UnicodeError):  # `smtplib`'s errors are OSErrors
-            raise (MaybeSentError("smtp") if payload else NotSentError("smtp")) from None
+        except (OSError, ssl.SSLError, ValueError, UnicodeError):  # `smtplib`'s errors are OSErrors; an abort's too
+            raise (MaybeSentError("smtp") if self.payload else NotSentError("smtp")) from None
         finally:
             try:
                 client.quit()
@@ -266,6 +325,7 @@ class GuardedSmtp:
         # the same trust as the HTTP client's: the bundled CAs, never SSL_CERT_FILE or SSL_CERT_DIR; TLS 1.2 or later
         self._context = ssl_context or httpx.create_ssl_context(trust_env=False)
         self.limits = limits or SmtpLimits()
+        self._sessions: set[_Session] = set()  # under way: aborted when the attempt closes
 
     async def send(self, target: SmtpTarget, recipients: Sequence[str], message: bytes) -> list[str]:
         """The recipients refused when the server took the message for the others."""
@@ -279,8 +339,24 @@ class GuardedSmtp:
     async def _run(self, target: SmtpTarget, recipients: list[str] | None, message: bytes | None) -> list[str]:
         addresses = await self._guard.vet(target.host, target.port, self._tenant, plaintext=target.security == "none")
         session = _Session(target, self._context, self.limits)
+        self._sessions.add(session)
+        work = asyncio.get_running_loop().run_in_executor(POOL, session.run, addresses, recipients, message)
         try:
-            return await asyncio.to_thread(session.run, addresses, recipients, message)
+            try:
+                return await asyncio.wait_for(asyncio.shield(work), self.limits.session_s)
+            except TimeoutError:
+                session.abort()  # past its deadline: the thread ends on its closed socket, naming what may have left
+                try:
+                    return await asyncio.wait_for(asyncio.shield(work), self.limits.connect_s)
+                except TimeoutError:
+                    raise (MaybeSentError("smtp") if session.payload else NotSentError("smtp")) from None
         except asyncio.CancelledError:
             session.abort()  # the thread's blocked read ends now, not at its timeout
             raise
+        finally:
+            self._sessions.discard(session)
+
+    async def aclose(self) -> None:
+        """Aborts every session still under way (a send the node didn't await ends with its attempt)."""
+        for session in list(self._sessions):
+            session.abort()

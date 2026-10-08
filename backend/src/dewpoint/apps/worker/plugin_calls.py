@@ -89,6 +89,7 @@ class CallNetwork:
     def __init__(self, network: Network, claimed: calls.Claimed, allowed: frozenset[str]) -> None:
         self.network, self.tenant_id, self._claimed, self._allowed = network, claimed.tenant_id, claimed, allowed
         self._http: GuardedHttp | None = None
+        self._smtp: GuardedSmtp | None = None
         self.secrets: list[str] = []  # every string of the secrets this call opened: never in its answer
         self.changed = False  # the connection changed since the API read it
 
@@ -115,9 +116,12 @@ class CallNetwork:
     def core_smtp(self) -> GuardedSmtp:
         """A mail server's probe (D3's read-only adapter): connect, greet, secure, sign in, QUIT; `ConnectionSmtp`
         refuses a send before asking."""
-        return GuardedSmtp(
-            self.network.guard, self.tenant_id, ssl_context=self.network.ssl_context, limits=self.network.smtp_limits
-        )
+        if self._smtp is None:
+            self._smtp = GuardedSmtp(
+                self.network.guard, self.tenant_id, ssl_context=self.network.ssl_context,
+                limits=self.network.smtp_limits,
+            )  # fmt: skip
+        return self._smtp
 
     @property
     def http(self) -> Any:
@@ -143,6 +147,8 @@ class CallNetwork:
         return unsealed.opened(self, lambda: credential_key(self.network, self.tenant_id))
 
     async def aclose(self) -> None:
+        if self._smtp is not None:
+            await self._smtp.aclose()
         if self._http is not None:
             await self._http.aclose()
 

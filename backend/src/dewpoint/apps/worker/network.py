@@ -816,6 +816,7 @@ class AttemptNetwork:
         self._http: GuardedHttp | None = None
         self._net: GuardedNet | None = None
         self._ws: GuardedWebsocket | None = None
+        self._smtp: GuardedSmtp | None = None
         self._named: frozenset[uuid.UUID] | None = None
 
     @property
@@ -876,9 +877,12 @@ class AttemptNetwork:
         return self._net
 
     def core_smtp(self) -> GuardedSmtp:
-        return GuardedSmtp(
-            self.network.guard, self.tenant_id, ssl_context=self.network.ssl_context, limits=self.network.smtp_limits
-        )
+        if self._smtp is None:  # one for the attempt: closing it aborts any session still under way
+            self._smtp = GuardedSmtp(
+                self.network.guard, self.tenant_id, ssl_context=self.network.ssl_context,
+                limits=self.network.smtp_limits,
+            )  # fmt: skip
+        return self._smtp
 
     def core_ws(self) -> GuardedWebsocket:
         if self._ws is None:
@@ -919,6 +923,8 @@ class AttemptNetwork:
         return unsealed.opened(self, self._credential_key)
 
     async def aclose(self) -> None:
+        if self._smtp is not None:
+            await self._smtp.aclose()
         if self._ws is not None:
             await self._ws.aclose()
         if self._http is not None:
