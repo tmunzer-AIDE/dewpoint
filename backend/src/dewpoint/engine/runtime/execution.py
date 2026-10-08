@@ -991,10 +991,7 @@ class Execution:
                                       strict=True):  # fmt: skip
                     outcomes[i] = outcome
             return outcomes
-        shared = await self._shared_once(task, owner, scope)
-        if isinstance(shared, Failure):
-            return [cel.Outcome(error=shared.code, message=shared.message)] * len(task.bindings)
-        task = shared
+        task = await self._shared_once(task, owner, scope)
         out: list[cel.Outcome] = []
         profile = self.program.cel_profile
 
@@ -1082,25 +1079,28 @@ class Execution:
             self._task_budget().charge(structure=units)
             await self._yield_point(None, structure=STRUCTURE_STEP)
 
-    async def _shared_once(
-        self, task: resolve.CelTask, owner: Step | None, scope: ScopeKey
-    ) -> resolve.CelTask | Failure:
+    async def _shared_once(self, task: resolve.CelTask, owner: Step | None, scope: ScopeKey) -> resolve.CelTask:
         """#26: a plain value several binding sets share (a filter's every item binding the same string) goes to
         `cel.evaluate` once, as a size claim, and each set carries its handle, which the evaluator resolves (engine 2b
         spec §4.2). Each set carried its own copy: 1,000 items over a 65,500-character string sent about 64 MB, until
         Temporal terminated the run for its history's size. Shared is the same value bound in several sets, at any
-        depth (binding never copies a value, though a projection makes a new container around it); a value no
-        heavier than its handle (`SHARED_MIN`), or whose copies would add less than `SHARED_REPEAT`, stays, and so
-        does one too large to claim whole (a leaf past one spill's limit; a set binding it is refused, as before).
-        Claimed in the order first bound, so a replay claims the same. A Failure when a claim couldn't be written: no
-        set is sent."""
+        depth (binding never copies a value, though a projection makes a new container around it). Claimed in the
+        order first bound, so a replay claims the same; each whole, in one claim (the review of the M2 checkpoint,
+        I1), its id from this call's own seed (C2: never another filter's, iteration's or continued run's). A value no
+        heavier than its handle (`SHARED_MIN`), whose copies would add less than `SHARED_REPEAT`, too large for one
+        spill, or whose claim couldn't be written (M1: claiming is a saving, never a requirement), is sent as copies,
+        as before: the history guard still applies. The walk, and the sets rebuilt, are charged their values at yield
+        points, as binding is (M2)."""
         seen: dict[int, list[Any]] = {}  # id -> [the value, the sets it's in, the last set seen in]
+        visited: list[int] = []  # each set's values walked
         for k, bindings in enumerate(task.bindings):
-            stack = list(bindings.values())
+            await self._yield_point(None)
+            count, stack = 0, list(bindings.values())
             while stack:
                 value = stack.pop()
                 if not isinstance(value, str | list | dict) or ClaimRef.of(value) is not None:
                     continue
+                count += 1
                 entry = seen.get(id(value))
                 if entry is not None:  # its parts were walked where it was first seen
                     if entry[2] != k:
@@ -1108,20 +1108,25 @@ class Execution:
                     continue
                 seen[id(value)] = [value, 1, k]
                 stack.extend(value.values() if isinstance(value, dict) else value if isinstance(value, list) else ())
+            self._yield.charge(nodes=count)
+            visited.append(count)
+        candidates = [
+            (key, value)
+            for key, (value, sets, _) in seen.items()
+            if sets > 1 and (weight := json_bytes(value)) > SHARED_MIN and weight * (sets - 1) >= SHARED_REPEAT
+        ]
+        if not candidates:
+            return task
+        seed = workflow.uuid4()  # this call's own: its claims' ids are never another call's
+        converter = workflow.payload_converter()
         handles: dict[int, Any] = {}
-        for key, (value, sets, _) in seen.items():
-            if sets < 2:
-                continue
-            weight = json_bytes(value)
-            if weight <= SHARED_MIN or weight * (sets - 1) < SHARED_REPEAT:
-                continue
-            where = f"shared/{iteration_key(scope)}/{owner.topo if owner else 'run'}/{len(handles)}"
-            fitted = await self._fit(value, 0, where, step=owner, scope=scope)
-            if isinstance(fitted, Failure) and fitted.code == PAYLOAD_TOO_LARGE:
-                continue  # a leaf past one spill's limit: it stays, and a set that binds it is refused as before
-            if isinstance(fitted, Failure):
-                return fitted
-            handles[key] = fitted
+        for n, (key, value) in enumerate(candidates):
+            entry = {"id": str(uuid.uuid5(seed, str(n))), "value": value}
+            alone = SpillInput([entry], self.root_run_id, str(owner.id) if owner else None, iteration_key(scope))
+            if not fits(alone, converter):
+                continue  # one spill can't carry it whole: it stays, and a set binding it is refused as before
+            if await self._spill([entry], owner, scope) is None:
+                handles[key] = ClaimRef(entry["id"]).to_json()
         if not handles:
             return task
 
@@ -1134,7 +1139,12 @@ class Execution:
                 return [swapped(v) for v in value]
             return value
 
-        return resolve.CelTask(task.record, tuple(swapped(b) for b in task.bindings), task.local)
+        rebuilt = []
+        for bindings, count in zip(task.bindings, visited, strict=True):
+            await self._yield_point(None)
+            rebuilt.append(swapped(bindings))
+            self._yield.charge(nodes=count)
+        return resolve.CelTask(task.record, tuple(rebuilt), task.local)
 
     async def _yield_point(
         self, record: ExpressionRecord | None, *, send: int = 0, structure: int = 0, whole: bool = False
@@ -1233,11 +1243,11 @@ class Execution:
         record = self.program.record(step.id, "/predicate")
         views = [self._view(inst.scope, item=(item, i)) for i, item in enumerate(items)]
         try:
-            task = await self._cel_task(record, views, inline=len(items) <= FILTER_INLINE)
+            task = await self._cel_task(record, views, inline=len(items) <= FILTER_INLINE, owner=step, scope=inst.scope)
         except resolve.ValueFailure as e:
             return _Effect(failure=e.failure)
         kept: list[Any] = []
-        for item, outcome in zip(items, await self._evaluate(task), strict=True):
+        for item, outcome in zip(items, await self._evaluate(task, owner=step, scope=inst.scope), strict=True):
             if not outcome.ok:
                 return _Effect(failure=Failure(str(outcome.error), outcome.message))
             if not isinstance(outcome.value, bool):

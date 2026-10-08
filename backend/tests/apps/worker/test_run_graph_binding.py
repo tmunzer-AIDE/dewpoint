@@ -8,6 +8,7 @@ import asyncio
 from typing import Any
 
 import pytest
+from temporalio import workflow
 from temporalio.api.enums.v1 import EventType
 from temporalio.client import WorkflowHandle
 from temporalio.testing import WorkflowEnvironment
@@ -114,22 +115,122 @@ async def test_issue_26s_shared_string_goes_to_the_evaluator_once_not_with_every
     assert sent and sum(sent) < 100_000, sent
 
 
-@pytest.mark.parametrize(("value", "items"), [("x" * 200, 1_000), ("x" * 1_000, 20)], ids=["light", "few copies"])
-async def test_a_shared_value_stays_when_claiming_it_would_save_nothing(
-    env: WorkflowEnvironment, value: str, items: int
+@pytest.mark.parametrize(
+    ("chars", "items", "claimed"),
+    [(200, 300, False), (300, 300, True), (1_000, 20, False), (1_000, 70, True)],
+    ids=["light", "past SHARED_MIN", "few copies", "past SHARED_REPEAT"],
+)
+async def test_a_shared_value_is_claimed_only_when_that_saves_something(
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch, chars: int, items: int, claimed: bool
 ) -> None:  # fmt: skip
-    """A shared value no heavier than its handle (`SHARED_MIN`), or whose copies add less than `SHARED_REPEAT`, stays
-    in every set: no claim is written."""
+    """A shared value no heavier than its handle (`SHARED_MIN`, 256 bytes), or whose copies add less than
+    `SHARED_REPEAT` (64 KiB), stays in every set; just past either, it's claimed once. On the evaluator's path, where
+    claiming applies (the review of the M2 checkpoint, I2: run locally, the test checked nothing)."""
+    from dewpoint.engine.runtime import execution
     from dewpoint.engine.runtime.activities import CLAIMS_SPILL
 
+    monkeypatch.setattr(execution, "LOCAL_CEL_PROFILE", None)
     store = MemoryStore()
     g = issue_26(items)
     g.settings["outputs"] = {"kept": ref("steps.f.output.count", default=-1)}
     async with workers(env.client, store):
-        handle = await start(env.client, store, g, {"s": value})
+        handle = await start(env.client, store, g, {"s": "x" * chars})
         result = await asyncio.wait_for(handle.result(), 60)
-    assert result.status == "succeeded", result
+    assert result.status == "succeeded" and result.outputs == {"kept": min(items, chars)}, result
     spills = [e async for e in handle.fetch_history_events()
               if e.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED
               and e.activity_task_scheduled_event_attributes.activity_type.name == CLAIMS_SPILL]  # fmt: skip
-    assert spills == []
+    assert len(spills) == (1 if claimed else 0)
+    sent = sum(await request_bytes(handle))
+    assert (sent < chars * items) is claimed  # copies when it stays: every set carries it
+
+
+TWO = {"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "string"}}, "required": ["a", "b"]}
+
+
+async def test_shared_claims_of_two_filters_never_collide(env: WorkflowEnvironment) -> None:
+    """The review of the M2 checkpoint (C2): every claim `_shared_once` wrote took one id per execution for its first
+    value, the filter's step and scope never passed: a second filter over another shared string wrote other content
+    under the same id, the store refused it, and the step failed `internal_error`. Each call's claims have ids of
+    their own."""
+    store = MemoryStore()
+    g = G()
+    outputs = {"a": ref("steps.fa.output.count"), "b": ref("steps.fb.output.count")}
+    g.settings = {"input_schema": TWO, "outputs": outputs}
+    g.node("fa", "flow.filter@1", {"items": list(range(10)), "predicate": cel("size(trigger.a) > item")})
+    g.node("fb", "flow.filter@1", {"items": list(range(10)), "predicate": cel("size(trigger.b) > item")})
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, {"a": "a" * 20_000, "b": "b" * 20_000})
+        result = await asyncio.wait_for(handle.result(), 60)
+    assert (result.status, result.outputs) == ("succeeded", {"a": 10, "b": 10}), result
+
+
+FIELDS = {f"k{i}": {"type": "string"} for i in range(30)}  # declared: an undeclared position is sensitive
+M = {"type": "object", "properties": FIELDS, "additionalProperties": False}
+OBJECT = {"type": "object", "properties": {"m": M}, "required": ["m"]}
+
+
+async def test_a_shared_value_is_written_as_one_claim(
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:  # fmt: skip
+    """The review of the M2 checkpoint (I1): `_fit` split a shared container into a claim per field (31 for an object of
+    30), which the evaluator then fetched for every set. A shared value one spill can carry is written whole, as one
+    claim."""
+    from dewpoint.engine.runtime import execution
+
+    monkeypatch.setattr(execution, "LOCAL_CEL_PROFILE", None)  # to the evaluator, whatever its size
+    store = MemoryStore()
+    g = G()
+    g.settings = {"input_schema": OBJECT, "outputs": {"n": ref("steps.f.output.count")}}
+    g.node("f", "flow.filter@1", {"items": list(range(10)), "predicate": cel("size(trigger.m) > item")})
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, {"m": {f"k{i}": "v" * 1_000 for i in range(30)}})
+        result = await asyncio.wait_for(handle.result(), 60)
+    assert (result.status, result.outputs) == ("succeeded", {"n": 10}), result
+    assert len([c for c in store.claims.values() if c.kind == "spill"]) == 1
+
+
+async def test_a_shared_value_whose_claim_cant_be_written_is_sent_as_copies(
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:  # fmt: skip
+    """The review of the M2 checkpoint (M1): claiming a shared value is a saving, not a requirement. A spill that fails
+    (the claim store unavailable) left every set failed; the sets now carry the value, as before #26's claim."""
+    write = MemoryStore.write
+
+    async def failing(self: MemoryStore, tenant_id: str, claims: Any, *, kind: str, **kw: Any) -> None:
+        if kind == "spill":
+            raise RuntimeError("the claim store is unavailable")
+        await write(self, tenant_id, claims, kind=kind, **kw)
+
+    monkeypatch.setattr(MemoryStore, "write", failing)
+    store = MemoryStore()
+    async with workers(env.client, store):
+        handle = await start(env.client, store, issue_26(100), {"s": "x" * 65_500})
+        result = await asyncio.wait_for(handle.result(), 120)
+    assert (result.status, result.outputs) == ("succeeded", {"kept": 100, "code": "none"}), result
+
+
+async def test_finding_shared_values_is_charged_as_binding_is(
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:  # fmt: skip
+    """The review of the M2 checkpoint (M2): the walk that finds the shared values, and the sets rebuilt with their
+    handles, ran in one workflow task, uncharged, however many sets. Each set's walk is charged its values (`nodes`),
+    at a yield point, as each view's binding is: a filter of 100 items charges at least two hundred."""
+    from dewpoint.engine.cel import route as route_module
+    from dewpoint.engine.runtime import execution
+
+    charges: list[int] = []
+
+    class Counting(route_module.YieldBudget):
+        def charge(self, record: Any = None, *, nodes: int = 0, **kw: Any) -> None:
+            if nodes and not workflow.unsafe.is_replaying():
+                charges.append(nodes)
+            super().charge(record, nodes=nodes, **kw)
+
+    monkeypatch.setattr(execution, "YieldBudget", Counting)
+    store = MemoryStore()
+    async with workers(env.client, store):
+        handle = await start(env.client, store, issue_26(100), {"s": "x" * 65_500})
+        result = await asyncio.wait_for(handle.result(), 60)
+    assert result.status == "succeeded", result
+    assert len(charges) >= 200
