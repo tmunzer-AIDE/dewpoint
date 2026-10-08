@@ -852,3 +852,186 @@ M35. **Every exit that joins a decision holds the document in its own right** (t
         adds 307,602.
       - No backend or deploy file changed.
     - The owner's review. - An exit kind beyond these two would need its own name in `holders`.
+
+### Owner, 4b accepted (2026-10-08, in chat)
+
+The owner approved the visual checkpoint and, when asked, gave final acceptance of slice 4b at fd988dd, the exit-race
+fix (M35) included. Push and a PR followed, by the same answer. As the owner's plan section says, the plan's rulings
+join this ledger now, as 68–95. They are copied as ruled. Inside them, a reference to a plan ruling from 1 to 28 means
+the ledger ruling numbered 67 higher (ruling 5 is 72); a higher number (47, 65) is already this ledger's.
+
+68. **Accepted. Triggers wait for 4c.** Triggers are rows (schedules, webhook bindings, CSV uploads), not graph nodes,
+   and their setup is 4c's. So 4b's chooser (1b) asks only how to start (Blank, Import from file); its first step,
+   "What starts it?", arrives with 4c's trigger setup. The list (1a) has no Trigger column until then. - Showing a
+   trigger the editor can't set up would promise what 4b can't do. - 1b's first step and 1a's column wait one slice.
+69. **Accepted. A start card heads the canvas, and no end marker closes it.** The card is not a graph node: it stands
+   for whatever starts a run, and its edges reach every entry step (a step with no incoming edge). Its "+" adds a
+   first step. 1c's "End · run succeeds" marker is left out: a run ends when no step remains, and a drawn end would
+   look like a step. - The graph has no trigger node to draw. - One cue fewer than 1c.
+70. **Accepted. Step badges are problems and "runs as a separate step".** 1c's "conditional" badge needs the
+   validator's liveness per step, which B6 brings in 4c; "disabled" has no meaning in the graph model (`GraphNode`
+   has no such field). - Neither can be shown truthfully in 4b. - Two of the outline's three badges wait or drop.
+71. **Accepted, with the filter correction. The list's filters and columns.** Name, Version, Last run (live; the last
+   simulation beneath it, apart), Last 24 h, Enabled, and a row menu (Open, Export). Filters: All, Published,
+   Unpublished changes (a workflow never published included: ruling 6), Needs attention, as a segmented control with
+   counts (no pills, §6); the text filter matches names (no tags exist). No delete: no route deletes a workflow, and
+   the API's database role has no DELETE grant on `workflows`. - What the API supports today. - No delete from the UI.
+72. **Decided (owner, milestone 1 review, 2026-10-06): the index and a batched LATERAL read.** Slot 0047 holds
+   `runs_workflow_last` on `runs (workflow_id, mode, queued_at DESC, id DESC) WHERE kind = 'run'`, chained from the
+   head (0042); 0043-0046 stay reserved. The list reads every workflow's last root run of each mode in one LATERAL
+   statement, one ordered index lookup per workflow and mode, keeping the tenant, root-run and mode filters and the
+   newest-first order (the mode's form: ledger M5). See Task 5a. - The probe's history-wide scan and on-disk sort
+   (1.5 s at 1M root runs). - An index on a hot table: one more entry per root run written.
+73. **Accepted, with the filter correction. "Unpublished changes" compares graph hashes.** The draft's `graph_hash`
+   (parsed and hashed on read, once per draft revision and off the event loop) against the active version's. Never
+   published counts as unpublished, in the summary and in the list's filter. No edit count (outline B3). Positions
+   count: moving a step is an unpublished change, as the hash says. - The hash is what publish records. - A list's
+   first read after a restart parses each draft once (bounded by the 1 MiB body cap; the probe measures it).
+74. **Amended (owner): live failures drive attention; simulations stay separately identified.** Needs attention is the
+   last *live* root run failed or exceeded its deadline, or the active version can't run (`blocked_by`). The last
+   simulated run is its own field (`last_simulation`) and shows apart in the simulation colour; a later successful
+   simulation never clears a live failure, and a failed one never raises attention. Schedules' sync errors join with
+   4c. **Last 24 h** counts root runs queued in the last 24 hours, live and simulated apart; the list shows the live
+   count and "+N simulated". - Live and simulated are never blended (D2). - None.
+75. **Accepted. The draft PUT's schema documents `Graph` while the route parses a plain object** (ruling 47). FastAPI
+   ignores `WithJsonSchema` on a body and merges `openapi_extra` into the generated object schema (both verified
+   against FastAPI 0.141.1), so `openapi.py` refines the one schema both the API and `dewpoint api openapi` emit: the
+   draft PUT's body becomes exactly `{"$ref": "#/components/schemas/Graph"}`. The route keeps its own parsing, so its
+   `graph.format` diagnostics and admission checks (non-finite numbers, depth, value count) stay as they are. -
+   Typing the body as `Graph` would route bad drafts through `{"error":"invalid","fields":[...]}` and skip those
+   checks. - The documented body and the parsed one are two declarations, held together by a test.
+76. **Accepted. Answers keep a draft verbatim** (`draft: object` in the schema); the client types it as `Graph` at one
+   boundary (`asGraph` in `src/lib/graph.ts`). - A response model typed `Graph` would re-serialize the stored draft
+   with defaults the author never wrote. - One cast, at one place.
+77. **Accepted. Inserting on an edge offers only steps that continue the flow:** a type with an `out` port, or
+    `flow.loop`'s `done`. "+" after a port offers every type; a type with no ports (`flow.stop`, `flow.fail`) ends its
+    branch. - Inserting a branching step mid-edge would have to guess which port carries the rest of the flow. -
+    Inserting an `if` mid-flow takes two actions (add after, reconnect).
+78. **Accepted. A new step** gets a random UUID, a key from its type's last segment (`transform`, then `transform_2`),
+    a config with its schema's top-level defaults (a connection field gets none), no options (the server's defaults),
+    and a place below its source; inserting on an edge moves every step at or below that place down one row. - Keys
+    must be unique and match `^[a-z][a-z0-9_]{0,62}$`. - None.
+79. **Accepted. Deleting a step asks first**, and when the step has exactly one incoming and one outgoing edge, its
+    predecessor is reconnected to its successor; the dialog says so. References to the step in other steps' values
+    stay, and the validator reports them (`ref.unknown_step`). Its `settings.declassify` entries go with it. - Healing
+    a chain is what a person deleting a middle step expects; rewriting references isn't. - None.
+80. **Amended (owner): single-pointer movement equivalent to a drag. Moving steps.** A pointer drags; a step's panel
+    also has "Place on the canvas…" (the next click on an empty place puts the step there, centred on it; Escape or
+    Cancel stops it) and four buttons that move it 20 px a click; Shift+arrow keys nudge the focused step by 20 px;
+    Auto layout arranges the whole graph. Positions are saved in the draft. - WCAG 2.5.7: auto layout doesn't put a
+    step where a person wants it, and keyboard nudging alone isn't a pointer's alternative. - A placing mode the
+    design doesn't show (a bar above the canvas says what the next click does).
+81. **Accepted. Connecting existing steps.** A port's "Connect to…" lists the steps that may follow it (not itself,
+    not one that would close a cycle, not one already connected from that port); dragging from a handle does the
+    same with a pointer. An edge is removed from its "+" item with Delete, after a confirmation. - Every pointer
+    action has a keyboard one (2.1.1). - None.
+82. **Amended (owner): demonstrably complete keyboard navigation. The keyboard model (D16), exactly.** The canvas is one
+    tab stop. Its items are the start card, each step, each edge (its "+"), and each free port (its "+"); each lists its
+    children from the start card down, and a step no entry reaches (a cycle no entry leads into, a step whose only edges
+    in come from steps that aren't there) joins the start card's children, topmost first, so every item drawn is
+    reached. A step joined from two places is a child of both, so the keys carry the path they came by (revision 3, the
+    owner's correction 3): Down goes to the first child, Up back the way the keys came, Left and Right among the
+    children of the item they came from (at a join, the branch taken), each passing over items already on the path (a
+    cycle's way back, a self edge), so a path never repeats an item; a click, Tab or a change starts the path afresh
+    from the walk's own. Home goes to the start card. Enter on a step opens its panel (read-only in 4b; 4c's drawer
+    replaces it), on an edge or a free port the picker; `A` opens the picker after the focused step's first port; `C`
+    connects from it; Delete asks; Escape closes the picker or panel and returns focus; Ctrl or Cmd+Z undoes, Shift+Ctrl
+    or Cmd+Z redoes. A polite live region announces what changed. React Flow's own keyboard handling is off. Tests press
+    every key from every path reached, over chains, branches, joins (one a second branch also reaches), cycles, separate
+    components and an imported draft's dangling, repeated and self edges, editable and read only (a viewer, a conflict,
+    a viewed version); the editor's own wiring is tested at that join for all three read-only cases, and the browser
+    walks an imported cycle. - D16. - None.
+83. **Accepted. A problem focuses its step** on the canvas (brought into view); the field itself waits for 4c's
+    drawer. - 4b has no field to focus. - None.
+84. **Amended (owner): server-bound publish confirmation.** Publish needs `workflow.publish`; an editor without it
+    doesn't see Publish, the enable switch, or Make active. The confirmation names the next number from the versions
+    list ("Publish version 3"), and publish sends that list's newest number as `expected_latest_version`, which the
+    API checks under the lock that numbers the new version (Task 4); a mismatch is `409 version_changed`, and the
+    editor refreshes the list and asks again with the new number. Publish names no number while the list loads,
+    refreshes or can't be read. Callers that send no expectation (the CLI, the tests) publish as before. A publish
+    refused for a check only publish runs (`connection.*`, `subflow.*`, `declassify.forbidden`, `lifecycle.*`,
+    `version.unbounded`) shows those in the problems panel, marked "found at publish". - A dialog that names a
+    number the server may not use isn't a confirmation. - One more 409 the editor handles.
+85. **Amended (owner): validated, fail-closed portable files. Export and import (B12).** Export is the saved draft
+    (never unsaved local edits: an export that would miss them stops and says so, offering the last saved draft by
+    name), as `{"format": "dewpoint.workflow", "format_version": 1, "name", "graph", "bindings"}`. `graph` is the
+    draft with every site emptied: each connection field (a top-level config property its type marks
+    `x-dewpoint-connection`, the only place the SDK allows the marker), each `flow.run_workflow`'s `workflow_id`, and
+    `settings.failure_handler`. Each binding has an id, a kind, the connection type, a label and its sites. Export
+    refuses (`422 not_portable`) a step of a type the server doesn't know, two steps sharing an id, and a site holding
+    anything but an id. Import checks the whole file first: the envelope (the model, extra keys refused), the graph's
+    format, every step's type known, no id embedded at a site (so "leave unbound" can't keep one), binding ids used
+    once, sites listed once, and each site one the server's schemas mark for that binding's kind and connection type
+    (`422 bad_document`); then each chosen id against the tenant's own (`422 bad_binding`). Schedules, webhook
+    bindings and CSV mappings are rows, not graph, and don't travel. - Never carry one tenant's ids into another's,
+    never write where nothing checked. - A workflow with a step whose plugin isn't installed here can't be exported
+    portably, or imported, until it is.
+86. **Accepted. Workflows lands a tenant.** Workflows joins the rail first; choosing a tenant (the switcher, the
+    palette) opens its workflows (D10); the palette lists the current tenant's workflows and "New workflow". The editor
+    uses the 60 px icon rail at every width, and keeps the shell's header (tenant, ⌘K, Security, Sign out); its own
+    toolbar sits below it with the breadcrumb, save state and actions. - One header everywhere. - 1c's single header
+    row becomes two.
+87. **Accepted. React Flow's attribution link is hidden** (`proOptions.hideAttribution`), which its MIT licence allows;
+    the third-party notices carry its licence. Only its structural `base.css` is imported: colours, borders and shadows
+    come from our tokens. - An external link in the canvas, and a second visual language. - None.
+88. **Accepted, extended by correction 4. Undo and redo stay local** (D17): a history of up to 100 documents in
+    memory, cleared when the editor closes. Undo is off after a conflict (the editor is read-only), and while a
+    publication or an activation runs. - D17. - None.
+89. **Accepted (owner, with revision 2); extended in revisions 3 and 4. Leaving the editor saves first, as one
+    transaction.** One decision, the editor's: save what's pending; when that can't be done (a failed save, a
+    conflict), ask: stay, download my version, or leave without saving. It answers every way out: router navigations
+    (the breadcrumb, the rail, the palette, the tenant switcher) through the router's blocker; sign-out, which asks it
+    before revoking the session or clearing the query cache; and an ended session, which keeps the shell and the
+    unsaved work on screen with a notice instead of swapping it for the sign-in page. Exits that overlap share the
+    decision in flight, so one answer (a Stay included) settles every one of them, and Sign out runs once at a time.
+    Once an exit is agreed to, the document is held (no edit, no undo) until the exit completes or is withdrawn (a
+    sign-out that failed withdraws it): no edit lands after the consent and is discarded under it, and the navigation
+    that follows sign-out doesn't ask again. Closing the tab gets the browser's prompt. Reload after a conflict asks
+    before discarding the local version. The saver is disposed when the editor closes: a save still in flight that
+    answers afterwards sends nothing more. - The debounce and a conflict both leave work only on the screen, and a
+    revoked session or a cleared cache must not take it first; neither may an exit's consent stand for work made
+    after it (the owner's review of revision 3). - Leaving waits as long as a save takes; an ended session waits for
+    the person's choice; the editor is read only while a sign-out waits on the server.
+90. **Accepted (owner, with revision 2); extended in revision 3. The editor opens on a fresh snapshot, and stays
+    open.** It waits for the workflow read made after it mounted (never a cached copy, which would conflict on the
+    first edit), and keeps what it opened with (the workflow, the step types, the role): a later read or a failed
+    refresh of an auxiliary query neither replaces nor closes it, and a failure shows beside it; the query cache is
+    cleared only at sign-out, after the editor's decision. -
+    A stale draft turns the first edit into a conflict; a background failure must not discard local work. - One read,
+    and a moment of "Loading…", on every entry; step types refreshed elsewhere may lag in an open editor.
+91. **Accepted (owner, with revision 2); extended in revision 3. A check is current only for what's on the screen.**
+    The editor says "Checking…" or "Not checked" before the first answer, "Check failed" when a request fails, "…
+    before your edits" when the answer is for an older revision or edits came since; badges sit on the steps, and a
+    step's panel lists its problems, only while the check is current. What only publish found carries its own
+    snapshot (revision and generation) and is current on the same terms: afterwards it stays in the panel's "Found
+    at publish", marked as before the latest edits, never in a step's problems or an unqualified count. Viewing a
+    version shows none of the draft's. - A failed or stale check must not keep reassuring, nor a stale finding
+    alarm. - Badges disappear between an edit and the next check (about a second, plus the check).
+92. **Accepted (owner, with revision 3): the non-null hash proof shows a version holds the submitted graph, not which
+    caller published it. An outcome is said only when known.** A publish or an activation without an answer from the API
+    (the network, or a 5xx) is read back and reported as found, or as not known; never as failed, and never as published
+    without evidence. A version holds this draft only if its recorded `graph_hash` is the hash the server gave for the
+    revision submitted (the save's answer, or the load's `draft_graph_hash`); a version of that number with another hash
+    is another publication, and this one was refused; with no hash for the draft submitted, nothing is proven either
+    way, and it's "not known". The active version and the draft's comparison always come from the read (or the answer)
+    itself, never from the number hoped for. A version made active stays made active when the read after it fails, and
+    the draft's comparison with it is "not known" until read (`Saved · v1 is active`); nothing read back leaves the
+    active version "not known". Only the newest "View version" answer is shown. - A version's existence and the draft's
+    current revision don't say which revision the version holds (the owner reproduced both wrong inferences). - Two
+    reads after a lost answer; the draft's hash travels in the save's answer and the summary.
+93. **Accepted (owner, with revision 2). A draft that can't be exported portably is offered as it is, labelled.** In
+    the editor, a refused export offers "Download this draft as it is (not portable)", a `.draft.json` file the
+    importer refuses (it isn't a `dewpoint.workflow` file); the list says to open the workflow for it. - The owner's
+    option of a separately labelled recovery download: the person keeps their work, and the label says the file
+    holds this tenant's ids. - One more download path carrying the tenant's ids, as the conflict's download already
+    does.
+94. **Accepted (owner, with revision 3). A save's answer names the version it compared with.** `put_draft` reads the
+    active version after its compare-and-swap, under the row lock the swap took, and answers it (`active_version_id`,
+    `active_version_number`) beside `unpublished_changes` and the saved draft's `graph_hash`; the editor labels the
+    active version from that same answer. - The route reads the workflow without a lock, so an activation can land
+    between that read and the swap (the owner's correction 5). - Two fields more on each save's answer, and one read.
+95. **Accepted (owner, with revision 3). Bindings are chosen, from what was read.** Each binding starts at "Choose…",
+    and the import waits for a choice for every one: one of this tenant's, or "Leave unbound" (left out of what's sent).
+    While this tenant's connections and workflows are loading, or when they couldn't be read, no choice is offered; a
+    binding with nothing to offer says to choose "Leave unbound". - Unbound must be a deliberate choice, never a default
+    nor a failed lookup. - One choice more per binding before an import.
