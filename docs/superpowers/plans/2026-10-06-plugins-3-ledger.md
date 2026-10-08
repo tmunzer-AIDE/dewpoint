@@ -1894,3 +1894,5 @@ closure. Fixed test-first, its protection checked by removing it (`e5d3ff6e`):
 
 The owner signed off this section's rulings (2026-10-08: "I'm good"), the review's M2, M3, M4, L3, L6 and L7 included,
 simulate's departure from D13's exact request too; and authorized the full suite, push and PR.
+- Full suite at bfc8e3c (on `origin/main` 16666f6, which hadn't moved): 4,522 passed (`-n auto`), the CEL gates 398
+  passed and 8 skipped; gitleaks over the branch's commits finds nothing; CodeQL's python analysis finds nothing locally.
