@@ -33,6 +33,9 @@ from structlog.typing import EventDict, Processor, WrappedLogger
 
 WHERE_FRAMES = 8  # the innermost frames an exception's log names
 UVICORN = ("uvicorn", "uvicorn.access")  # the loggers uvicorn's own configuration gives handlers of its own
+# The HTTP libraries' loggers: httpx logs each request's whole URL at INFO, and an incoming webhook's URL is its
+# credential (plugins-3 3c-1 review, finding 6). Only their warnings and errors are written.
+HTTP = ("httpx", "httpcore")
 # A record's `extra=` fields written, the ones the engine logs by: a workflow bug's type and where (engine 2b spec
 # §6.7), and an undelivered budget signal's workflow, an id the server built, and its name. No other is written.
 EXTRAS = ("error_type", "where", "signal_to", "signal_name")
@@ -126,6 +129,8 @@ def configure() -> None:
         if logger.handlers:
             logger.handlers.clear()
             logger.propagate = True
+    for name in HTTP:
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 _FAILED = ("lifespan.startup.failed", "lifespan.shutdown.failed")
