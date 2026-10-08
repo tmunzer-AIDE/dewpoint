@@ -91,6 +91,11 @@ Each slice is shippable on its own branch (D26) and ends at one checkpoint (revi
 (Resource → Action, live options that accept pills, Find a setting), nested update, the message composer with Slack,
 Teams and Google Chat previews, and the run form's connection-scoped pickers (`picker`).
 
+**4g — connection forms for declared types** (proposed, pending approval): lifts D1's "Mist only": the add-connection
+form for any synced type, built from its declaration; the API's preflight on creation and on updates that supply a
+host-setting value (plugins-3 outline D7, D8; plugins-3 ledger, "Deferred: the API's preflight on creation and
+host-setting updates"); its warnings shown in the form.
+
 **Helm:** out of sub-project 4 (D25).
 
 ## 3. Decisions
@@ -98,7 +103,8 @@ Teams and Google Chat previews, and the run form's connection-scoped pickers (`p
 Each gives my recommendation (**Rec**). D1–D7 are where the design and §10 differ.
 
 - **D1 Connections.** 1i makes it a Settings tab (with LLM and MCP sections); §10.2 and your slicing make it a rail
-  item. Rec: a rail item showing 1i's sectioned page, Mist only until 3 and 5.
+  item. Rec: a rail item showing 1i's sectioned page, Mist only until 3 and 5. Forms for the other synced types: 4g
+  (proposed, pending approval).
 - **D2 Simulated.** §10.1: neutral hatched slate. The design: slate (`--sim`) outlines and a "◌" marker, no hatch, no
   simulated-result screen. Rec: slate for simulate controls; simulated results (node badges, test and run banners,
   origin tags) add a hatch (a bundled SVG) and their text label, so colour is never the only signal.

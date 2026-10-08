@@ -4,6 +4,61 @@ The outline (`docs/plugins-3-outline`, revision 5, 02b7e62) was approved as reco
 (D1–D28). This file records, per slice, the tasks, the mid-slice rulings ("Ruling: what - why - cost if wrong") the
 owner rules on at the checkpoint, and open questions.
 
+## Deferred: the API's preflight on creation and host-setting updates (D7, D8)
+
+Recorded 2026-10-08 on the owner's word, from a check of `origin/main` f0e7bf55 and five review rounds. Nothing is
+built; its owning slice, 4g in the editor UI 4 outline (`2026-10-05-editor-ui-4-outline.md`), is proposed, pending
+approval.
+
+**The gap.** The API's connection create and update (`core/connections/service.py`) run only the type's declared checks;
+only the worker builds the guard (`apps/worker/main.py`). No 3a-1 or 3a-2 task or ruling planned or dropped vetting at
+creation. An API client can create a connection to a destination the guard refuses (3c-1, unmerged, adds a generic
+webhook whose pattern admits `localhost`, private and link-local addresses): it is saved and fails, fatally
+(`EgressRefused`), at its first connect. Deferring is acceptable because the worker's check on every connect is
+mandatory and authoritative, not because nobody can reach the gap. Migration 0041 already grants `dewpoint_api` a
+tenant-scoped SELECT on `egress_allowlist`; it stays for the preflight.
+
+**Scope.** Destinations a tenant chooses: a `url_field` config value and a secret URL (`secret_url`); host maps fixed by
+the plugin (Mist) get no lookup. It runs on creation and on any update that supplies a host-setting value: a secret-only
+update of a secret URL, a changed `url_field` with or without a new secret, on a type with or without secret fields. A
+name-only edit does no lookup.
+
+**Design.**
+1. First transaction: authorization, the declaration and the body; the URL parsed and its host's shape checked (a
+   malformed host is a 422, before any DNS); the declaration's hash kept; then committed, so no pooled connection,
+   lifecycle lock or row lock is held during the lookup.
+2. The lookup, outside any transaction (a literal address needs none): `socket.getaddrinfo` on a dedicated executor of N
+   threads, never `loop.getaddrinfo`, which under uvloop (the API's loop) runs on libuv's shared pool, the one asyncpg's
+   connects use. N permits, each released only when its lookup's thread finishes, not when the caller times out; with no
+   free permit the lookup is skipped at once (`busy`), never queued. The request waits up to a timeout.
+3. Write transaction, in a new session (a repeat query in the first session returns its loaded objects unrefreshed): the
+   whole sign-in chain again from the request's cookie and CSRF header (session validity and revocation, the active
+   state, the user's `is_active`), then `require()`'s checks (the lifecycle lock, membership, role, the passkey
+   requirement, the tenant's status) and the tenant scope, through one function shared with the dependencies, which keep
+   their order and errors; the connection locked and reloaded (404 when deleted); the declaration's hash compared (409
+   when it changed); `secret_required` applied against the locked row; the tenant's and every tenant's allowlist entries
+   read, and the already-resolved addresses checked with the worker's port (explicit, or the scheme's default) and
+   plaintext rule (`http` needs an entry), through a verdict function split out of `Guard.vet` so the worker and the API
+   share it; then the write and its audit entry.
+
+**Outcomes.** A refusal is a 422 `destination_refused` naming the field only (never the host, an address or the reason),
+with nothing written. `unresolved` (a DNS failure or no answer), `timeout` and `busy` save the connection with a "not
+checked" warning, recorded in its audit entry: an advisory preflight, not a completed check. An allowlist read failure
+or any other error is a server error, never an acceptance. The web form shows the warnings (4g); a response field alone
+is not feedback.
+
+**Tests** (a fake resolver, no real DNS; counted in work units, not time): secret-only updates; a `url_field` change on
+a type without secret fields; name-only edits and Mist doing no lookup (resolver calls counted); `http` refused without
+an entry and accepted with one; explicit and default ports against an entry's range; mixed public and private answers;
+tenant and every-tenant entries, another tenant's not honoured; a refusal leaving the row unchanged with no audit entry;
+`unresolved`, `timeout` and `busy` warned, a malformed host and an allowlist failure not; during a blocked lookup, the
+pool's checked-out count at its baseline, an exclusive lifecycle lock takeable and the row lockable `NOWAIT`; an edit, a
+deletion and a declaration change between the transactions; a logout, a token rotation, a disabled account and a rotated
+CSRF token during the lookup; repeated timeouts while lookup threads are still blocked (the next request `busy` at once,
+the permits back when the threads finish).
+
+**Open for 4g's rulings:** N and the timeout (proposed: about 4 lookups and 2 s); the warnings' shape in the response.
+
 ## 3a-1 Egress and connections at run time
 
 Branch `feat/plugins-3a1` from `origin/main` 6482c53.
