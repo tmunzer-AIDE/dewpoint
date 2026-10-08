@@ -157,22 +157,25 @@ async def test_a_recount_waits_for_an_insert_and_counts_it(ready, owner_sessionm
     assert right[0] == 2 and await counted(owner_sessionmaker, ready) == (right, right)
 
 
-async def test_a_match_waits_for_a_recount_and_releases_after_it(
+async def test_a_match_during_a_recount_passes_its_event_by_then_matches_after_it(
     ready, owner_sessionmaker, ingress_sessionmaker, dispatch_sessionmaker, monkeypatch
 ) -> None:
+    """D9 (2b-4b M3): the recount holds the endpoint's row, so a match meanwhile passes its event by, `busy`, at once,
+    writing nothing, never waiting; once the recount commits, the event matches and the counters are right."""
     [event_id] = await send(ingress_sessionmaker, ready, ALARM)
     await drifted(owner_sessionmaker, ready)
     reached, release = await _held(monkeypatch, recount, "_after_recount_locked")
     counting = asyncio.create_task(recount.recount_once(dispatch_sessionmaker))
     await reached.wait()
-    matcher = asyncio.create_task(matching.match_event(
-        dispatch_sessionmaker, KEYS, matching.Verified(), tenant_id=ready.tenant_id, event_id=event_id,
-        endpoint_id=ready.endpoint_id,
-    ))  # fmt: skip
-    await _waiting(owner_sessionmaker)
+
+    async def match() -> str:
+        return await matching.match_event(dispatch_sessionmaker, KEYS, matching.Verified(), tenant_id=ready.tenant_id,
+                                          event_id=event_id, endpoint_id=ready.endpoint_id)  # fmt: skip
+
+    assert await asyncio.wait_for(match(), 5) in (matching.BUSY, matching.BUSY_TENANT)
     release.set()
     await counting
-    assert await matcher == "matched"
+    assert await match() == "matched"
     right = await truth(owner_sessionmaker, ready)
     assert right[0] == 0 and await counted(owner_sessionmaker, ready) == (right, right)
 
