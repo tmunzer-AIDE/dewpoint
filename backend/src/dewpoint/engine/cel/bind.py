@@ -187,20 +187,41 @@ class Measure:
 
 
 def measure(bindings: Mapping[str, Any]) -> Measure:
-    sizes = [len(canonical_json(v)) for v in bindings.values()]
-    lists = maps = strings = nodes = 0
+    """What routing reads of one view's bindings. Exact within the local caps; past one, its sizes are lower bounds that
+    pass it, found without serializing what passes it (#18: each view's measure serialized every value it bound, a
+    shared 1.8 MiB string once per item, a cost the yield budget, charging `nodes`, never counted). `nodes` and
+    `handles` are always exact: the walk visits every value, as binding them did. So the route, the budget's charge and
+    the handles seen are what they were, and no workflow command changes."""
+    least: list[int] = []  # each value's canonical JSON bytes at least: characters, quotes and punctuation
+    lists = maps = strings = nodes = seen = 0
     handles = False
-    stack = list(bindings.values())
-    while stack:
-        v = stack.pop()
-        nodes += 1
-        if isinstance(v, dict):
-            maps = max(maps, len(v))
-            handles = handles or MARKER in v
-            stack.extend(v.values())
-        elif isinstance(v, list):
-            lists = max(lists, len(v))
-            stack.extend(v)
-        elif isinstance(v, str):
-            strings = max(strings, len(v.encode()))
+    for value in bindings.values():
+        bound, stack = 0, [value]
+        while stack:
+            v = stack.pop()
+            nodes += 1
+            if isinstance(v, dict):
+                maps = max(maps, len(v))
+                handles = handles or MARKER in v
+                bound += 1 + sum((len(k) if isinstance(k, str) else 1) + 4 for k in v)  # {, "k":, and , or }
+                stack.extend(v.values())
+            elif isinstance(v, list):
+                lists = max(lists, len(v))
+                bound += 1 + len(v)  # [, and , or ]
+                stack.extend(v)
+            elif isinstance(v, str):
+                bound += 2 + len(v)
+                past = seen + bound > caps.TOTAL_JSON or len(v) > caps.STRING_BYTES or not _within(lists, maps)
+                strings = max(strings, len(v) if past else len(v.encode()))  # characters: at most its bytes
+            else:
+                bound += 1
+        least.append(bound)
+        seen += bound
+    if seen > caps.TOTAL_JSON or strings > caps.STRING_BYTES or not _within(lists, maps):
+        return Measure(seen, max(least, default=0), lists, maps, strings, nodes, handles)
+    sizes = [len(canonical_json(v)) for v in bindings.values()]  # within the caps: a few times TOTAL_JSON at most
     return Measure(sum(sizes), max(sizes, default=0), lists, maps, strings, nodes, handles)
+
+
+def _within(lists: int, maps: int) -> bool:
+    return lists <= caps.LIST_LENGTH and maps <= caps.MAP_ENTRIES
