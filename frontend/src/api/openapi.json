@@ -1118,6 +1118,42 @@
         "title": "ReleaseIn",
         "type": "object"
       },
+      "ReleaseManyIn": {
+        "description": "A tenant's held items of one kind, held before `held_before`: `max` of them at most, oldest first.",
+        "properties": {
+          "held_before": {
+            "format": "date-time",
+            "title": "Held Before",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "dispatch",
+              "reconcile_starting",
+              "reconcile_open",
+              "reconcile_slot",
+              "cancel",
+              "match",
+              "subrun"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "max": {
+            "maximum": 1000.0,
+            "minimum": 1.0,
+            "title": "Max",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "held_before",
+          "max"
+        ],
+        "title": "ReleaseManyIn",
+        "type": "object"
+      },
       "RerunIn": {
         "additionalProperties": false,
         "properties": {
@@ -2218,6 +2254,80 @@
         ]
       }
     },
+    "/api/v1/admin/tenants/{tenant_id}/held/count": {
+      "get": {
+        "description": "What a bulk release would free: the tenant's held items of `kind` held before `held_before`.",
+        "operationId": "held_count_api_v1_admin_tenants__tenant_id__held_count_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "enum": [
+                "dispatch",
+                "reconcile_starting",
+                "reconcile_open",
+                "reconcile_slot",
+                "cancel",
+                "match",
+                "subrun"
+              ],
+              "title": "Kind",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "held_before",
+            "required": true,
+            "schema": {
+              "format": "date-time",
+              "title": "Held Before",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Held Count Api V1 Admin Tenants  Tenant Id  Held Count Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Held Count",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/api/v1/admin/tenants/{tenant_id}/held/release": {
       "post": {
         "operationId": "release_api_v1_admin_tenants__tenant_id__held_release_post",
@@ -2268,6 +2378,62 @@
           }
         },
         "summary": "Release",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/tenants/{tenant_id}/held/release-many": {
+      "post": {
+        "description": "A bulk release (the owner's ruling on the M3 checkpoint): bounded by tenant, kind, `held_before` and `max`, never\nall of them across tenants; audited once, with what it released; what's still held answered.",
+        "operationId": "release_many_api_v1_admin_tenants__tenant_id__held_release_many_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReleaseManyIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Release Many Api V1 Admin Tenants  Tenant Id  Held Release Many Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Release Many",
         "tags": [
           "admin"
         ]

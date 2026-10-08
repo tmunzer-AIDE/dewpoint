@@ -275,6 +275,26 @@ LANGUAGE sql SECURITY DEFINER SET search_path = public, pg_temp SET row_security
   )
   SELECT EXISTS (SELECT 1 FROM gone)
 $$""",
+    # In bulk (the owner's ruling on the M3 checkpoint): the caller's tenant's held rows of one kind, held before a
+    # time, counted, then released oldest first, 1,000 at most a call
+    """CREATE FUNCTION work_failures_held_count(held_kind text, held_before timestamptz) RETURNS integer
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp SET row_security = off AS $$
+  SELECT count(*)::integer FROM work_failures f
+  WHERE f.tenant_id = app_tenant_id() AND f.kind = held_kind AND f.held_at IS NOT NULL AND f.held_at < held_before
+$$""",
+    """CREATE FUNCTION work_failures_release_many(held_kind text, held_before timestamptz, max_rows integer)
+RETURNS integer
+LANGUAGE sql SECURITY DEFINER SET search_path = public, pg_temp SET row_security = off AS $$
+  WITH gone AS (
+    DELETE FROM work_failures f WHERE (f.tenant_id, f.item_id, f.kind) IN (
+      SELECT w.tenant_id, w.item_id, w.kind FROM work_failures w
+      WHERE w.tenant_id = app_tenant_id() AND w.kind = held_kind AND w.held_at IS NOT NULL AND w.held_at < held_before
+      ORDER BY w.held_at, w.item_id
+      LIMIT least(max_rows, 1000))
+    RETURNING 1
+  )
+  SELECT count(*)::integer FROM gone
+$$""",
     """CREATE FUNCTION work_failures_held(max_rows integer)
 RETURNS TABLE (tenant_id uuid, kind text, item_id uuid, errors integer, last_error text, held_at timestamptz)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp SET row_security = off AS $$
@@ -292,10 +312,13 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp SET row_s
 $$""",
     *(f"REVOKE ALL ON FUNCTION {f} FROM PUBLIC" for f in ("pending_commands(integer)", "platform_admin_active(uuid)",
                                                            "work_failure_release(text, uuid)",
+                                                           "work_failures_held_count(text, timestamptz)",
+                                                           "work_failures_release_many(text, timestamptz, integer)",
                                                            "work_failures_held(integer)",
                                                            "recovery_items_listed(integer)")),
     "GRANT EXECUTE ON FUNCTION pending_commands(integer), platform_admin_active(uuid) TO dewpoint_dispatch",
     "GRANT EXECUTE ON FUNCTION work_failure_release(text, uuid), work_failures_held(integer), "
+    "work_failures_held_count(text, timestamptz), work_failures_release_many(text, timestamptz, integer), "
     "recovery_items_listed(integer) TO dewpoint_api",
     "GRANT SELECT ON recovery_items TO dewpoint_api",
     f"GRANT SELECT (id, {OPERATOR_COLUMNS}, status, outcome, requested_at, decided_at) ON operator_commands "
@@ -384,7 +407,8 @@ def downgrade() -> None:
     for table in ("work_failures", "recovery_items"):
         op.execute(f"DROP FUNCTION {table}_clear(text[], uuid[], uuid[])")
     op.execute("DROP FUNCTION work_settled_clear(integer)")
-    for function in ("pending_commands(integer)", "platform_admin_active(uuid)", "work_failure_release(text, uuid)",
+    for function in ("work_failures_held_count(text, timestamptz)", "work_failures_release_many(text, timestamptz, integer)",
+                     "pending_commands(integer)", "platform_admin_active(uuid)", "work_failure_release(text, uuid)",
                      "work_failures_held(integer)", "recovery_items_listed(integer)"):  # fmt: skip
         op.execute(f"DROP FUNCTION {function}")
     for table in reversed(TABLES):

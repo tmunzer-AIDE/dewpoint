@@ -8,7 +8,8 @@ admin's user id with the change, in its transaction.
   with the operator's evidence where the item's history is gone. An operator's idempotency key returns the same
   command again; an item has one pending command of a kind.
 - **A release** of a held item, for the kind of work it names, at once, through a guarded function: never another
-  kind's hold, nor a count that isn't held.
+  kind's hold, nor a count that isn't held. **In bulk**, a tenant's held items of one kind held before a time, counted
+  first, then released oldest first, `RELEASE_MAX` at most a request, audited once: never all of them across tenants.
 - **The listings**, across tenants: held items and recovery reasons, as ids, kinds, reasons and times."""
 
 import uuid
@@ -26,7 +27,7 @@ from dewpoint.core.config import Settings
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.http import active_session, ensure_fresh_reauth, get_db, get_settings_dep, require_platform_admin
 from dewpoint.core.models.identity import AuthSession, User
-from dewpoint.core.recovery import COMMANDS, EVIDENCE_LIMIT, LOST, CommandKind, WorkKind
+from dewpoint.core.recovery import COMMANDS, EVIDENCE_LIMIT, LOST, RELEASE_MAX, CommandKind, WorkKind
 from dewpoint.core.runs.service import sanitize
 from dewpoint.core.tenancy import lifecycle
 from dewpoint.core.tenancy.lifecycle import FENCED
@@ -46,6 +47,14 @@ class CommandIn(BaseModel):
 class ReleaseIn(BaseModel):
     kind: WorkKind
     item_id: uuid.UUID
+
+
+class ReleaseManyIn(BaseModel):
+    """A tenant's held items of one kind, held before `held_before`: `max` of them at most, oldest first."""
+
+    kind: WorkKind
+    held_before: datetime
+    max: int = Field(ge=1, le=RELEASE_MAX)
 
 
 def _shown(row: Any) -> dict[str, object]:
@@ -162,6 +171,48 @@ async def release(
                        target_type="work_item", target_id=str(body.item_id),
                        details={"kind": body.kind, "item_id": str(body.item_id)})  # fmt: skip
     return {"released": True, "kind": body.kind, "item_id": str(body.item_id)}
+
+
+@router.get("/tenants/{tenant_id}/held/count")
+async def held_count(
+    tenant_id: uuid.UUID,
+    kind: WorkKind,
+    held_before: datetime,
+    _: User = Depends(require_platform_admin),
+    db: AsyncSession = Depends(get_db, scope="function"),
+) -> dict[str, object]:
+    """What a bulk release would free: the tenant's held items of `kind` held before `held_before`."""
+    await tenant_scope(db, tenant_id)
+    return {"kind": kind, "held_before": held_before.isoformat(), "held": await _held(db, kind, held_before)}
+
+
+async def _held(db: AsyncSession, kind: str, held_before: datetime) -> int:
+    found = await db.execute(text("SELECT work_failures_held_count(:k, :b)"), {"k": kind, "b": held_before})
+    return int(found.scalar_one())
+
+
+@router.post("/tenants/{tenant_id}/held/release-many")
+async def release_many(
+    tenant_id: uuid.UUID,
+    body: ReleaseManyIn,
+    admin: User = Depends(require_platform_admin),
+    sess: AuthSession = Depends(active_session),
+    settings: Settings = Depends(get_settings_dep),
+    db: AsyncSession = Depends(get_db, scope="function"),
+) -> dict[str, object]:
+    """A bulk release (the owner's ruling on the M3 checkpoint): bounded by tenant, kind, `held_before` and `max`, never
+    all of them across tenants; audited once, with what it released; what's still held answered."""
+    ensure_fresh_reauth(sess, settings)
+    await _tenant(db, tenant_id)
+    released = await db.execute(text("SELECT work_failures_release_many(:k, :b, :n)"),
+                                {"k": body.kind, "b": body.held_before, "n": body.max})  # fmt: skip
+    count = int(released.scalar_one())
+    await audit.record(db, tenant_id=tenant_id, actor_id=admin.id, action="work_failure.release_many",
+                       target_type="tenant", target_id=str(tenant_id),
+                       details={"kind": body.kind, "held_before": body.held_before.isoformat(), "max": body.max,
+                                "released": count})  # fmt: skip
+    return {"kind": body.kind, "held_before": body.held_before.isoformat(), "released": count,
+            "held": await _held(db, body.kind, body.held_before)}  # fmt: skip
 
 
 @router.get("/held")

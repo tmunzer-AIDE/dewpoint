@@ -17,3 +17,4 @@ COMMANDS: dict[CommandKind, tuple[str, ...]] = {
 LOST = ("record_lost_run", "record_lost_subrun", "release_lost_slot")
 EVIDENCE_LIMIT = 500
 WORK: tuple[str, ...] = get_args(WorkKind)
+RELEASE_MAX = 1_000  # held items one bulk release frees, at most (the owner's ruling on the M3 checkpoint)

@@ -321,7 +321,7 @@ def test_every_tenant_scoped_write_goes_through_require(api_settings) -> None:
     admins = [route for route in writes if route.path.startswith("/api/v1/admin/")]
     assert len(writes) > 20  # the inventory isn't empty
     assert sorted(route.path.split("{tenant_id}/")[1] for route in admins) == [
-        "commands", "erasure", "erasure/retry", "erasure/stop", "held/release",
+        "commands", "erasure", "erasure/retry", "erasure/stop", "held/release", "held/release-many",
     ]  # fmt: skip
     assert [route.path for route in admins if not _admins(route)] == []
     assert [

@@ -224,3 +224,67 @@ async def test_two_requests_with_one_key_at_once_get_the_same_command(
         reused = await admin.post(url(tenant, "commands"), json=asked("record_lost_run", other))
     assert (first.status_code, again.status_code, again.json()["id"]) == (202, 200, first.json()["id"])
     assert (reused.status_code, reused.json()) == (409, {"error": "idempotency_key_reused"})
+
+
+async def aged(owner: Any, tenant: uuid.UUID, kind: str, minutes: int, n: int = 1) -> list[uuid.UUID]:
+    """`n` items of `kind` held `minutes` ago."""
+    items = [uuid.uuid4() for _ in range(n)]
+    async with owner() as s, s.begin():
+        for item in items:
+            await s.execute(text("insert into work_failures (tenant_id, kind, item_id, errors, last_error, due_at, "
+                                 "held_at) values (:t, :k, :i, 7, 'RuntimeError', now(), "
+                                 "now() - make_interval(mins => :m))"),
+                            {"t": tenant, "k": kind, "i": item, "m": minutes})  # fmt: skip
+    return items
+
+
+async def test_held_items_are_released_in_bulk_by_kind_and_held_before_counted_first_bounded_audited(
+    app, owner_sessionmaker, api_settings
+) -> None:  # fmt: skip
+    """The owner's ruling on the M3 checkpoint (after a bad deploy holds many items): a tenant's held items of one kind,
+    held before a time, counted first, then released oldest first, at most `max` a request (1,000 at most), in one
+    audited change; never another kind's, a newer hold, a count not held, or another tenant's."""
+    from datetime import UTC, datetime, timedelta
+
+    admin, admin_id = await admin_of(app, owner_sessionmaker, api_settings)
+    (tenant, _), (other, _) = [await tenant_of(app, owner_sessionmaker, api_settings) for _ in range(2)]
+    old = await aged(owner_sessionmaker, tenant, "cancel", 120, n=5)
+    newer = await aged(owner_sessionmaker, tenant, "cancel", 5)
+    another_kind = await aged(owner_sessionmaker, tenant, "dispatch", 120)
+    theirs = await aged(owner_sessionmaker, other, "cancel", 120)
+    await held(owner_sessionmaker, tenant, "cancel", uuid.uuid4(), hold=False)  # counting, not held
+    before = (datetime.now(UTC) - timedelta(minutes=60)).isoformat()
+    query = {"kind": "cancel", "held_before": before}
+    async with admin:
+        counted = await admin.get(url(tenant, "held/count"), params=query)
+        assert (counted.status_code, counted.json()) == (200, {"kind": "cancel", "held_before": before, "held": 5})
+        first = await admin.post(url(tenant, "held/release-many"), json=query | {"max": 3})
+        assert (first.status_code, first.json()) == (200, {"kind": "cancel", "held_before": before, "released": 3,
+                                                           "held": 2})  # fmt: skip
+        rest = await admin.post(url(tenant, "held/release-many"), json=query | {"max": 1000})
+        assert rest.json()["released"] == 2
+        too_many = await admin.post(url(tenant, "held/release-many"), json=query | {"max": 1001})
+        no_kind = await admin.post(url(tenant, "held/release-many"), json={"held_before": before, "max": 10})
+        assert (too_many.status_code, no_kind.status_code) == (422, 422)
+    async with owner_sessionmaker() as s:
+        left = set((await s.execute(text("select item_id from work_failures"))).scalars())
+    assert left & set(old) == set() and {*newer, *another_kind, *theirs} <= left
+    assert [(a, t, d["released"]) for a, t, d in await audited(owner_sessionmaker, "work_failure.release_many")] == [
+        (admin_id, str(tenant), 3), (admin_id, str(tenant), 2),
+    ]  # fmt: skip
+
+
+async def test_a_bulk_release_needs_a_fresh_factor_and_an_active_tenant(app, owner_sessionmaker, api_settings) -> None:
+    stale, _ = await admin_of(app, owner_sessionmaker, api_settings, fresh=False)
+    admin, _ = await admin_of(app, owner_sessionmaker, api_settings)
+    tenant, _ = await tenant_of(app, owner_sessionmaker, api_settings)
+    await aged(owner_sessionmaker, tenant, "cancel", 120)
+    query = {"kind": "cancel", "held_before": "2999-01-01T00:00:00+00:00", "max": 10}
+    async with stale:
+        refused = await stale.post(url(tenant, "held/release-many"), json=query)
+        assert (refused.status_code, refused.json()) == (403, {"error": "reauth_required"})
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text("update tenants set status = 'erasing' where id = :t"), {"t": tenant})
+    async with admin:
+        erasing = await admin.post(url(tenant, "held/release-many"), json=query)
+        assert (erasing.status_code, erasing.json()) == (409, {"error": "tenant_erasing"})
