@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     passkey_options_per_ip: int = 30  # anonymous passkey challenges per source IP per 15-minute window
     webauthn_challenges_max: int = 10_000  # outstanding (unexpired) challenges across the platform
     max_request_body_bytes: int = 1_048_576  # counted as received: chunked bodies have no Content-Length
+    # CSV uploads and CSV starts at once, per API process: each may hold about 235 MiB (2b-4b M3, `apps/csv_slots.py`)
+    csv_concurrency: int = Field(default=2, ge=1)
     max_run_duration_days: int = 30  # spec §6: whole logical run, including continue-as-new and waits
     temporal_address: str = "localhost:7233"
     temporal_namespace: str = "default"

@@ -77,6 +77,12 @@ sees `trigger.rows` (one object per row, each column by its name) and `trigger.r
 - **What the run keeps:** the mapping, the file's headers and the skipped rows (each one's number and first code, the
   first 100 errors in detail, and their count), encrypted beside its input; its details show them (`run.view`). The
   audit entry keeps a tenant-keyed digest of the file and counts.
+- **Memory, per API process:** at the platform's caps, an upload's parse peaks near 145 MiB and holds about 90 MiB
+  until it answers, and a CSV start's rows about 235 MiB until its transaction commits (measured as Python's own
+  allocations: `tests/probes/csv_memory.py`). So each API process takes at most `DEWPOINT_CSV_CONCURRENCY` uploads,
+  CSV starts and re-runs keeping their original's input at once (2 by default: about 470 MiB at worst, beside the
+  process itself); one past it is refused at once with 503 `csv_busy` and `Retry-After: 1`, before an upload's body
+  is read or a start opens its file, nothing recorded: ask again. A provisional number, for the owner's sizing.
 - **A loop over the rows** needs no `declassify` entry: their count is `trigger.row_count`, already public. Rows that
   together pass 64 KiB are one claim, and the loop gives each iteration a handle to its row: a step's reference to a
   cell is read in its own activity, but CEL over a cell (a condition on `item.status`) runs in `cel.evaluate`, one
