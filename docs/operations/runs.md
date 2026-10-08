@@ -504,12 +504,13 @@ claims are.
   holds; a sub-flow grants its parent the claims in its outputs. A failure handler is granted what its trigger holds.
 - **How many claims one crossing carries (a present limit).** A sub-flow's input, a sub-flow's outputs and a loop
   batch's items cross to another run with the claims they hold, granted in one activity with a one-minute timeout.
-  That activity still reads each claim, and checks its right to grant it, one at a time: measured on a test machine,
-  about 7 to 8 ms a claim for output claims held by grant, a tenth of them nesting another. So a crossing of about
-  7,500 such claims or more can time out: the step or loop that started it fails with `internal_error`, and a sub-flow
-  whose outputs hold that many fails itself. A list held as one claim crosses as one. Reading and checking them in
-  batches is planned (2b-4b M3); until a crossing of 10,000 realistic claims is shown to succeed end to end, none that
-  size is supported.
+  Since 2b-4b M3 that activity checks a thousand claims a statement, from their owners and sizes, and reads them in
+  groups of at most 16 MiB, keeping only the handles each nests. Measured through the activity's own code on a
+  worker's engines, beside 30 activities projecting steps (`tests/probes/test_crossing_load.py`, a development
+  machine, 2026-10-08): 10,000 claims of 1 KiB held by grant, nested three levels, granted in 1.75 s (it was about 7
+  to 8 ms a claim, one at a time, so about 7,500 could time out). Past the timeout the step or loop that started it
+  fails with `internal_error`, and a sub-flow whose outputs hold that many fails itself. A list held as one claim
+  crosses as one. A whole run on a dev server with such a crossing isn't measured yet.
 - **The secret index.** Every string of 4 characters or more in a sensitive claim joins its run tree's index (the run,
   its sub-runs and its batches share one), stored encrypted, and so does a map key claimed with its map. Every
   message leaving an activity (a step's error, a CEL error, a `fail` node's message) and every row the projection
@@ -613,7 +614,9 @@ key `$claim` too), `unexpected_error`, `evaluation_error`, `type_mismatch`, `tim
 `iteration_cap_exceeded`, `outcome_unconfirmed` (the run ended before the step's outcome was recorded: a bug in the
 interpreter failed the run, or a batch of its loop, or the run ended from outside; whether the step ran is unconfirmed,
 and it is never a plugin's failure; a projection landing after the run's end, or after its batch's closing while the
-run still runs, writes its steps so too: the run's row keeps each closed batch, `unconfirmed_batches`),
+run still runs, writes its steps so too: the run's row keeps each closed batch, `unconfirmed_batches`; each projection
+with a `running` row checks it against every closed batch: measured, 50 such rows take 37 ms with none closed, 53 with
+1,000, 246 with 10,000),
 `node_type_unavailable` (the registry lists the node
 type, but no worker of this build runs it: install its plugin on the workers), `payload_too_large`,
 `claim_unavailable` (a claim the run may not read, that isn't there or that's nested deeper than 32 claims, or the
