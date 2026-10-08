@@ -9,6 +9,9 @@ decide what a node may do (itil creates and resolves incidents). Requests go to 
 then 2 a second; an instance's own hourly rules answer 429 with a `Retry-After`. Verify reads one incident."""
 
 import re
+import uuid
+from datetime import timedelta
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
@@ -16,17 +19,44 @@ from dewpoint.sdk import (
     CallContext,
     Connection,
     ConnectionType,
+    FatalError,
     HeaderAuth,
+    HttpResponse,
+    Node,
     Plugin,
     RateScope,
+    RetryableError,
+    RetryDefaults,
+    SideEffect,
+    StepContext,
     TransportError,
     UrlField,
     VerifyResult,
+    connection_field,
 )
 from dewpoint.sdk.connections import HOST_RE
+from dewpoint.sdk.messages import MARK, Message, Severity
 
 TABLE = "/api/now/v2/table/incident"
+JSON = {"Accept": "application/json"}
+FIELDS = "sys_id,number,correlation_id"  # what an answer carries back
 KEY_TEXT = re.compile(r"[\x21-\x7e]{16,1024}")  # a key's format isn't documented: printable ASCII, no space
+SYS_ID = re.compile(r"[0-9a-f]{32}")  # the form every documented example shows; no page states it
+NUMBER = re.compile(r"[\x21-\x7e]{1,40}")
+CORRELATION = re.compile(r"[A-Za-z0-9._:-]{1,100}")  # no query syntax: escaping a value isn't documented
+# What a one-line value turns into a space: CR LF, a line break of any kind, any other control character.
+CONTROLS = re.compile(r"\r\n|[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+SHORT_MAX, LONG_MAX = 160, 4000  # the task fields' documented lengths (the Case API): short_description, description
+LEVELS = {Severity.CRITICAL: "1", Severity.WARNING: "2", Severity.INFO: "3", Severity.SUCCESS: "3"}
+RETRY = RetryDefaults(max_attempts=4, initial_interval=timedelta(seconds=5), backoff=2.0,
+                      max_interval=timedelta(seconds=20))  # fmt: skip
+SIMULATED_ID, SIMULATED_NUMBER = "0" * 32, "INC0000000"  # a simulation's fixture: nothing was created
+REFUSALS = {
+    400: ("servicenow.invalid_request", "ServiceNow refused the request as invalid."),
+    401: ("servicenow.unauthorized", "ServiceNow refused the API key."),
+    403: ("servicenow.forbidden", "The key's user may not do this: an ACL, a business rule or a data policy."),
+    404: ("servicenow.not_found", "ServiceNow has no such record, or the key's user can't see it."),
+}
 
 
 class ServiceNowConfig(BaseModel):
@@ -90,4 +120,193 @@ SERVICENOW = ConnectionType(
 )
 
 
-PLUGIN = Plugin(name="servicenow", version="1.0.0", nodes=(), connection_types=(SERVICENOW,))
+def _units(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
+def cut16(text: str, limit: int) -> tuple[str, bool]:
+    """`text` within `limit` UTF-16 units (Java's count, never more than the characters'), ending with `MARK` when it
+    had to be cut; whether it was."""
+    if _units(text) <= limit:
+        return text, False
+    budget, size, kept = limit - _units(MARK), 0, []
+    for char in text:
+        size += _units(char)
+        if size > budget:
+            break
+        kept.append(char)
+    return "".join(kept) + MARK, True
+
+
+def _sys_id(value: str | None) -> str | None:
+    if value is not None and not SYS_ID.fullmatch(value):
+        raise ValueError("a sys_id: 32 lowercase hex characters")
+    return value
+
+
+def _line(value: str | None) -> str | None:
+    if value is not None and CONTROLS.search(value):
+        raise ValueError("one line")
+    return value
+
+
+def _answered(answer: HttpResponse, expected: int) -> None:
+    status = answer.status_code
+    if status == expected:
+        return
+    if status in REFUSALS:
+        raise FatalError(*REFUSALS[status])
+    if status in (408, 425) or status >= 500:  # a timeout or a too-early request is transient (RFC 9110, RFC 8470)
+        raise RetryableError("servicenow.unavailable", f"ServiceNow didn't take the request (HTTP {status}).")
+    if 400 <= status < 500:
+        raise FatalError("servicenow.refused", f"ServiceNow refused the request (HTTP {status}).")
+    raise RetryableError("servicenow.unexpected", f"ServiceNow answered HTTP {status}, not {expected}.")
+
+
+def _unreadable() -> RetryableError:
+    return RetryableError("servicenow.unexpected", "ServiceNow's answer isn't the record it should be.")
+
+
+def _result(answer: HttpResponse) -> Any:
+    try:
+        body = answer.json()
+    except ValueError:
+        raise _unreadable() from None
+    return body.get("result") if isinstance(body, dict) else None
+
+
+def _ids(record: Any) -> tuple[str, str]:
+    """A record's sys_id and number, or `servicenow.unexpected`: it may exist, and a retry looks again."""
+    sys_id = record.get("sys_id") if isinstance(record, dict) else None
+    number = record.get("number") if isinstance(record, dict) else None
+    if not isinstance(sys_id, str) or not SYS_ID.fullmatch(sys_id) or not isinstance(number, str):
+        raise _unreadable()
+    if not NUMBER.fullmatch(number):
+        raise _unreadable()
+    return sys_id, number
+
+
+Level = Literal["1", "2", "3"]
+LEVEL_HELP = "1 High, 2 Medium, 3 Low; the severity's when not set."
+
+
+class CreateConfig(Message):
+    connection: uuid.UUID = connection_field("servicenow")
+    urgency: Level | None = Field(None, title="Urgency", description=LEVEL_HELP)
+    impact: Level | None = Field(None, title="Impact", description=LEVEL_HELP)
+    caller_id: str | None = Field(None, title="Caller", description="A user's sys_id.")
+    assignment_group: str | None = Field(None, title="Assignment group", description="A group's sys_id.")
+    category: str | None = Field(None, min_length=1, max_length=100, title="Category")
+    subcategory: str | None = Field(None, min_length=1, max_length=100, title="Subcategory")
+    contact_type: str | None = Field(None, min_length=1, max_length=100, title="Channel",
+                                     description="A contact_type value, e.g. monitoring.")  # fmt: skip
+    correlation_id: str | None = Field(None, title="Correlation ID",
+                                       description="Names the incident; the step's own key when not set.")  # fmt: skip
+    correlation_display: str = Field("Dewpoint", min_length=1, max_length=100, title="Correlation display")
+
+    @field_validator("caller_id", "assignment_group")
+    @classmethod
+    def _reference(cls, value: str | None) -> str | None:
+        return _sys_id(value)
+
+    @field_validator("category", "subcategory", "contact_type", "correlation_display")
+    @classmethod
+    def _one_line(cls, value: str | None) -> str | None:
+        return _line(value)
+
+    @field_validator("correlation_id")
+    @classmethod
+    def _correlation(cls, value: str | None) -> str | None:
+        if value is not None and not CORRELATION.fullmatch(value):
+            raise ValueError("1 to 100 of A-Z a-z 0-9 . _ : -")
+        return value
+
+
+def render_incident(config: CreateConfig, key: str) -> tuple[dict[str, Any], list[str]]:
+    """The incident's fields, raw values (`sysparm_input_display_value` false), its `correlation_id` the config's, else
+    `key` (the step's), and the names of what it cut. A title cut to fit is reported; a short description made from the
+    text isn't (the text is in the description)."""
+    truncated: list[str] = []
+    short, short_cut = cut16(CONTROLS.sub(" ", config.title or config.text), SHORT_MAX)
+    if short_cut and config.title:
+        truncated.append("title")
+    blocks = [config.text]
+    if config.fields:
+        blocks.append("\n".join(f"{f.label}: {f.value}" for f in config.fields))
+    if config.links:
+        blocks.append("\n".join(f"{link.label}: {link.url}" for link in config.links))
+    description, description_cut = cut16("\n\n".join(blocks), LONG_MAX)
+    if description_cut:
+        truncated.append("description")
+    level = LEVELS[config.severity]
+    body: dict[str, Any] = {"short_description": short, "description": description,
+                            "urgency": config.urgency or level, "impact": config.impact or level}  # fmt: skip
+    for name in ("caller_id", "assignment_group", "category", "subcategory", "contact_type"):
+        value = getattr(config, name)
+        if value is not None:
+            body[name] = value
+    body["correlation_id"] = config.correlation_id or key
+    body["correlation_display"] = config.correlation_display
+    return body, truncated
+
+
+class CreateOutput(BaseModel):
+    sys_id: str
+    number: str
+    correlation_id: str
+    truncated: list[str]
+
+
+class CreateIncident(Node):
+    """Opens a ServiceNow incident."""
+
+    type = "servicenow.create_incident"
+    version = 1
+    title = "Create a ServiceNow incident"
+    description = (
+        "Opens an incident from a message. A retry looks for the incident first, by its correlation ID, the step's "
+        "own unless set: an incident is opened once."
+    )
+    Config = CreateConfig
+    Output = CreateOutput
+    credentials = ("servicenow",)
+    side_effect = SideEffect.RECONCILABLE
+    retry = RETRY
+
+    async def simulate(self, ctx: StepContext, config: CreateConfig) -> CreateOutput:
+        key = config.correlation_id or ctx.idempotency_key()
+        _, truncated = render_incident(config, key)
+        return CreateOutput(sys_id=SIMULATED_ID, number=SIMULATED_NUMBER, correlation_id=key, truncated=truncated)
+
+    async def run(self, ctx: StepContext, config: CreateConfig) -> CreateOutput:
+        key = config.correlation_id or ctx.idempotency_key()
+        body, truncated = render_incident(config, key)
+        connection = await ctx.connection(config.connection)
+        params = {"sysparm_fields": FIELDS, "sysparm_exclude_reference_link": "true"}
+        answer = await connection.http.request("POST", TABLE, params=params, headers=JSON, json=body)
+        _answered(answer, 201)
+        sys_id, number = _ids(_result(answer))
+        return CreateOutput(sys_id=sys_id, number=number, correlation_id=key, truncated=truncated)
+
+    async def reconcile(self, ctx: StepContext, config: CreateConfig) -> CreateOutput | None:
+        """The step's incident, if an earlier attempt opened it: a record whose `correlation_id` is the step's (the
+        Table API ignores a query part it can't read, so every record is checked); none, and the create didn't
+        land."""
+        key = config.correlation_id or ctx.idempotency_key()
+        connection = await ctx.connection(config.connection)
+        params = {"sysparm_query": f"correlation_id={key}^ORDERBYsys_created_on", "sysparm_fields": FIELDS,
+                  "sysparm_limit": "10"}  # fmt: skip
+        answer = await connection.http.request("GET", TABLE, params=params, headers=JSON)
+        _answered(answer, 200)
+        records = _result(answer)
+        if not isinstance(records, list):
+            raise _unreadable()
+        for record in records:
+            if isinstance(record, dict) and record.get("correlation_id") == key:
+                sys_id, number = _ids(record)
+                _, truncated = render_incident(config, key)
+                return CreateOutput(sys_id=sys_id, number=number, correlation_id=key, truncated=truncated)
+        return None
+
+
+PLUGIN = Plugin(name="servicenow", version="1.0.0", nodes=(CreateIncident,), connection_types=(SERVICENOW,))

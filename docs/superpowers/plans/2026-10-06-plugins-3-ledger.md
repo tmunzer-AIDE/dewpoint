@@ -1799,3 +1799,14 @@ Rulings:
   passes verify.
 - Ruling: a simulated step renders and reports what it would cut, opening no connection, in the real output's shape
   (3c and 3d-1's precedent) - cost if wrong: a simulation doesn't show the body.
+- Ruling (task 2): a sys_id is 32 lowercase hex characters (every documented example's form; no page states it), and
+  an incident number 1 to 40 printable ASCII characters; an answer whose record is of another form is
+  `servicenow.unexpected`, retried, so the retry's `reconcile()` looks again - cost if wrong: an instance with another
+  form can't be used.
+- Ruling (task 2): lengths count UTF-16 units (Java's count: never more than the characters, so it fits either) -
+  cost if wrong: text with characters outside the BMP is cut a little early.
+- Ruling (task 2): a configured `correlation_id` should name one incident: a retry adopts the oldest incident carrying
+  it (the query orders by `sys_created_on`, at most 10 records read) - cost if wrong: a workflow reusing one id across
+  runs has a retried create adopt an earlier run's incident.
+- Ruling (task 2): a simulated create returns sys_id `0` x 32 and number `INC0000000`, labelled a fixture by D13 - cost
+  if wrong: none (later simulated steps take it and send nothing).
