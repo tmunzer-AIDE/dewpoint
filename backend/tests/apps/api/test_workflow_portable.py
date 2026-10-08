@@ -10,7 +10,7 @@ from sqlalchemy import select
 from dewpoint.core.models.audit import AuditEntry
 from tests.apps.api.helpers import member_client, session_client
 from tests.support.connections import add_connection
-from tests.support.graphs import cel
+from tests.support.graphs import cel, ref
 from tests.support.registry import sync_test_plugins
 
 CALL, SUB = str(uuid.uuid4()), str(uuid.uuid4())
@@ -216,3 +216,28 @@ async def test_viewers_export_and_only_editors_import(app, owner_sessionmaker, a
         assert doc.status_code == 200
         r = await viewer.post(f"/api/v1/t/{tid}/workflows/import", json={"name": "X", "document": doc.json()})
         assert r.status_code == 403
+
+
+def _send(token: object) -> dict:
+    return {
+        "graph_format": 1,
+        "nodes": [{"id": CALL, "key": "send", "type": "testkit.ambiguous_send@1", "config": {"token": token}}],
+        "edges": [],
+    }  # noqa: E501
+
+
+async def test_a_draft_holding_a_sensitive_literal_isnt_exported(app, owner_sessionmaker, api_settings) -> None:
+    # Ledger M25: a value written into a field its type marks sensitive would travel in the file, to any tenant that
+    # imports it. Export refuses it, by the validator's own rule (`sensitive.literal`), and never says it.
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    async with c:
+        leaky = (await c.post(f"/api/v1/t/{tid}/workflows", json={"name": "Leaky", "draft": _send("tok-9f2c")})).json()
+        r = await c.get(f"/api/v1/t/{tid}/workflows/{leaky['id']}/export")
+        passed = (
+            await c.post(f"/api/v1/t/{tid}/workflows", json={"name": "Passed", "draft": _send(ref("trigger.token"))})
+        ).json()  # noqa: E501
+        ok = await c.get(f"/api/v1/t/{tid}/workflows/{passed['id']}/export")
+    problem = {"reason": "sensitive_literal", "binding": None, "node": CALL, "field": "/token"}
+    assert (r.status_code, r.json()) == (422, {"error": "not_portable", "problems": [problem]})
+    assert "tok-9f2c" not in r.text
+    assert ok.status_code == 200, ok.text  # filled at run time from the run's input: nothing to carry

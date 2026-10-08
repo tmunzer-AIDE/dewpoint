@@ -8,7 +8,7 @@ and CSV mappings are rows, not graph: they don't travel."""
 
 import copy
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -155,6 +155,17 @@ def held(draft: Mapping[str, Any], config_schemas: Mapping[str, Mapping[str, Any
     if problems:
         raise NotPortableError(problems)
     return out
+
+
+def sensitive_problems(diagnostics: Iterable[Any]) -> list[Problem]:
+    """A value written into a field its step's type marks sensitive (the validator's `sensitive.literal`, engine 2b spec
+    §3.8) would travel in the file to whoever imports it (ledger M25, the owner's ruling): each a reason to refuse the
+    export, named by its step and field, never by its value."""
+    return [
+        Problem("sensitive_literal", node=None if d.node is None else str(d.node), field=d.field)
+        for d in diagnostics
+        if d.code == "sensitive.literal"
+    ]
 
 
 def export_document(

@@ -383,16 +383,25 @@ async def export(
     workflow_id: uuid.UUID,
     ctx: TenantContext = Depends(require(P.WORKFLOW_VIEW)),
     db: AsyncSession = Depends(get_db, scope="function"),
+    settings: Settings = Depends(get_settings_dep),
 ) -> dict[str, object]:
     """The saved draft as a file, every id of this tenant's replaced by a typed placeholder (B12). Refused, never
-    approximated, when that can't be done for certain (4b ruling 18)."""
+    approximated, when that can't be done for certain (4b ruling 18), or when the draft holds a value written into a
+    field marked sensitive, which the file would carry (ledger M25): every reason at once, by the validator's rule."""
     wf = await _get(db, ctx, workflow_id)
     schemas = await _config_schemas(db, wf.draft)
+    problems: list[portable.Problem] = []
+    found: list[tuple[portable.Site, str]] = []
     try:
-        labels = await _labels(db, ctx.tenant_id, portable.held(wf.draft, schemas))
-        return portable.export_document(wf.name, wf.draft, schemas, labels)
+        found = portable.held(wf.draft, schemas)
     except portable.NotPortableError as e:
-        raise _not_portable(e) from None
+        problems.extend(e.problems)
+    checked = await workflow_ops.check_draft(db, ctx.tenant_id, wf.draft, settings)
+    problems.extend(portable.sensitive_problems(checked.diagnostics))
+    if problems:
+        raise _not_portable(portable.NotPortableError(problems))
+    labels = await _labels(db, ctx.tenant_id, found)
+    return portable.export_document(wf.name, wf.draft, schemas, labels)
 
 
 @router.post("/t/{tenant_id}/workflows/import", status_code=201, response_model=WorkflowDetailOut)

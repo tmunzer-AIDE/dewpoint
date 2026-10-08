@@ -21,6 +21,7 @@ from dewpoint.engine.graph.csv import RESERVED as CSV_RESERVED
 from dewpoint.engine.graph.csv import is_canonical, trigger_schema
 from dewpoint.engine.graph.diagnostics import Diagnostic, Severity
 from dewpoint.engine.graph.model import CsvSettings, Graph, GraphNode
+from dewpoint.engine.graph.schema_messages import explain
 from dewpoint.engine.graph.schemas import (
     PathError,
     Resolved,
@@ -771,7 +772,8 @@ class _Validator:
             path = tuple(e.absolute_path)
             if any(path[: len(p)] == p for p in envelopes):
                 continue  # computed at run time; checked through its reference type instead
-            self.err("config.invalid", e.message, node=node, fld=prefix + pointer_str(path))
+            # Said without the value: jsonschema quotes it, and it may be sensitive (ledger M25).
+            self.err("config.invalid", explain(e), node=node, fld=prefix + pointer_str(path))
 
     def _output_schema(
         self, n: GraphNode, spec: NodeTypeSpec, resolved: Mapping[Pointer, Resolved | None]
@@ -870,7 +872,7 @@ class _Validator:
         if schema is None:
             return
         for e in sorted(Draft202012Validator(schema).iter_errors(instance), key=lambda e: str(list(e.absolute_path))):
-            self.err("config.invalid", e.message, node=site.node, fld=site.field + pointer_str(tuple(e.absolute_path)))
+            self.err("config.invalid", explain(e), node=site.node, fld=site.field + pointer_str(tuple(e.absolute_path)))
 
     def _ref_value(self, site: _Site, value: RefValue, target: Mapping[str, Any] | None) -> Resolved | None:
         resolved = self._resolve(site, value.path)
