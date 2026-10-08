@@ -25,6 +25,7 @@ which a concurrent start under it has taken), builds its rows against the frozen
 with the rest of the trigger, keeps the mapping, headers and skipped rows as the request's CSV record, and consumes the
 upload, all in the same savepoint."""
 
+import asyncio
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import timedelta
@@ -35,7 +36,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps import csv_uploads
-from dewpoint.apps.csv_input import CsvFileError, RowError, build_rows, mapping_problems, read_table
+from dewpoint.apps.csv_input import Built, CsvFileError, RowError, build_rows, mapping_problems, read_table
 from dewpoint.apps.inputs import INPUT_INVALID, RESERVED_INPUT, InputRefusedError, claim_input
 from dewpoint.apps.workflow_ops import abi_reasons
 from dewpoint.core.audit import service as audit
@@ -349,7 +350,7 @@ async def _frozen(
     try:
         envelope = await claim_input(
             s, keys, tenant_id=tenant_id, run_id=request_id, root_run_id=request_id, schema=trigger_schema(settings),
-            value=value,
+            value=value, off_loop=csv is not None or retained,  # the work a CSV slot bounds: a CSV's rows, perhaps
         )  # fmt: skip
     except InputRefusedError as e:
         raise _Refused(e.reason, e.reasons, version.id) from None
@@ -410,6 +411,15 @@ async def _rows(
     if not live:
         raise _Refused(UPLOAD_EXPIRED, ["This upload has expired: upload the file again."], version_id)
     data = await ClaimCipher(keys, purpose=csv_uploads.PURPOSE).open(str(tenant_id), str(upload.id), upload.staged)
+    headers, built = await asyncio.to_thread(_built_rows, data, declared, csv, version_id)  # the session: the loop's
+    if built.skipped and not csv.skip_invalid:
+        raise _Refused(INPUT_INVALID, [_row_message(e) for e in built.errors[:_LISTED]], version_id)
+    return _Built(headers, built.rows, built.skipped, built.errors, built.error_count, upload.file_digest)
+
+
+def _built_rows(data: bytes, declared: dict[str, Any], csv: CsvStart, version_id: uuid.UUID) -> tuple[list[str], Built]:
+    """The staged file's headers and rows, built against the declaration: CPU only (seconds at the caps), which the
+    caller runs off the event loop, inside its CSV slot (the owner's ruling 2 on 2b-4b's M3 checkpoint)."""
     try:  # under the frozen version's caps, which may be lower than those it was uploaded under
         table = read_table(data, max_rows=int(declared["max_rows"]), max_bytes=csv_uploads.byte_cap(declared))
     except CsvFileError as e:
@@ -419,10 +429,7 @@ async def _rows(
     if problems:
         messages = [f"The mapping's column `{p['column']}`: {p['code']}." for p in problems[:_LISTED]]
         raise _Refused(CSV_MAPPING_INVALID, messages, version_id)
-    built = build_rows(table, columns, csv.mapping)
-    if built.skipped and not csv.skip_invalid:
-        raise _Refused(INPUT_INVALID, [_row_message(e) for e in built.errors[:_LISTED]], version_id)
-    return _Built(table.headers, built.rows, built.skipped, built.errors, built.error_count, upload.file_digest)
+    return table.headers, build_rows(table, columns, csv.mapping)
 
 
 async def _insert(
