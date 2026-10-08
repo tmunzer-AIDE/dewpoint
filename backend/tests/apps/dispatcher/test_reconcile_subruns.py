@@ -169,3 +169,25 @@ async def test_a_sub_run_not_due_yet_is_left_for_later(owner_sessionmaker, dispa
     closed = Described(WorkflowExecutionStatus.TERMINATED)
     assert await reconcile.reconcile_subruns(dispatch_sessionmaker, closed) == {}
     assert await ended(owner_sessionmaker, orphan["sub"]) == ("running", None)
+
+
+async def test_a_reason_the_erasures_fence_refuses_never_undoes_the_passs_own_write(
+    owner_sessionmaker, dispatch_sessionmaker
+) -> None:  # fmt: skip
+    """The owner's ruling on the M3 checkpoint: past an erasure's stage 60 the fence refuses a recovery reason's insert;
+    the item's own write in the same transaction (when it was asked about) stands, and the pass goes on."""
+    from dewpoint.apps.dispatcher import recovery
+    from tests.core.erasure.test_fence import erasure_at
+    from tests.core.retention.support import request
+
+    orphan = await _orphan(owner_sessionmaker)
+    started = await request(owner_sessionmaker, orphan["ctx"], "started", None)
+    await erasure_at(owner_sessionmaker, orphan["ctx"]["t"], 60)
+    await reconcile._checked_alone(dispatch_sessionmaker, orphan["ctx"]["t"], started, recovery.RUN_HISTORY_MISSING)
+    await reconcile._subrun_checked_alone(dispatch_sessionmaker, orphan["ctx"]["t"], orphan["sub"], backoff=True)
+    async with owner_sessionmaker() as s:
+        asked = await s.execute(text("select (select checked_at is not null from run_requests where id = :r), "
+                                     "(select checked_at is not null from runs where id = :s), "
+                                     "(select count(*) from recovery_items where item_id = any(:i))"),
+                                {"r": started, "s": orphan["sub"], "i": [started, orphan["sub"]]})  # fmt: skip
+        assert tuple(asked.one()) == (True, True, 0)

@@ -12,6 +12,8 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from dewpoint.core.tenancy.lifecycle import FENCED
+
 log = structlog.get_logger("dewpoint.dispatcher")
 
 START_AFTER_END, START_HISTORY_MISSING = "start_after_end", "start_history_missing"
@@ -28,8 +30,16 @@ _RESOLVED = text("SELECT recovery_items_clear(:r, :t, :i)")  # by tenant and ite
 
 
 async def noted(s: AsyncSession, tenant_id: uuid.UUID, reason: str, item_id: uuid.UUID) -> None:
-    """`reason` seen for the item, in `s`'s transaction (scoped to its tenant): recorded, or seen again."""
-    await s.execute(_NOTED, {"t": tenant_id, "r": reason, "i": item_id})
+    """`reason` seen for the item, in `s`'s transaction (scoped to its tenant): recorded, or seen again. Under a
+    savepoint: past an erasure's stage 60 its fence refuses the insert, and the transaction's own write stands (the
+    owner's ruling on the M3 checkpoint): the erasure deletes the item anyway."""
+    try:
+        async with s.begin_nested():
+            await s.execute(_NOTED, {"t": tenant_id, "r": reason, "i": item_id})
+    except DBAPIError as e:
+        if getattr(e.orig, "sqlstate", None) != FENCED:
+            raise
+        log.info("recovery_reason_fenced", reason=reason)
 
 
 async def resolved(
