@@ -6,7 +6,17 @@ REST API key, which the runtime sends as the `x-sn-apikey` header: the plugin ne
 auth legacy and restricts it on new instances; its OAuth client credentials are off by default. The key's user's roles
 decide what a node may do (itil creates and resolves incidents). Requests go to `/api/now/v2/table/incident`: version
 2 answers a query matching nothing with 200 and an empty list. One quota scope a key on an instance: bursts of 10,
-then 2 a second; an instance's own hourly rules answer 429 with a `Retry-After`. Verify reads one incident."""
+then 2 a second; an instance's own hourly rules answer 429 with a `Retry-After`. Verify reads one incident.
+
+`servicenow.create_incident` is reconcilable: its `correlation_id` is the config's, else the step's idempotency key,
+and a retry first asks for it, keeping only records carrying it exactly (the Table API ignores a query part it can't
+read). It renders the message model: `short_description` one line of at most 160 UTF-16 units, `description` the
+text, fields and links, at most 4,000, cut and reported; urgency and impact from the severity unless set.
+`servicenow.update_incident` and `servicenow.resolve_incident` are idempotent PATCHes by sys_id; resolve checks the
+answer kept the state it set. `servicenow.add_work_note` is ambiguous: each note appends.
+
+The expected 201 or 200 is applied; a 400, 401, 403, 404 or another 4xx is fatal; a 408, a 425, a 5xx, another status
+or an answer it can't read is retried, after 5 s, 10 s, then 20 s."""
 
 import re
 import uuid
