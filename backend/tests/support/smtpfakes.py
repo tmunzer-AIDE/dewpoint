@@ -169,3 +169,31 @@ async def serve_smtp(script: Script | None = None, *, implicit_tls: bool = False
         yield state
     finally:
         server.close()
+
+
+@asynccontextmanager
+async def delaying_tls(port: int, delay_s: float) -> AsyncIterator[int]:
+    """A proxy on 127.0.0.1 to `port` that holds each chunk the server sends starting a TLS handshake record (0x16) for
+    `delay_s`: a client's handshake then blocks that long, the window an abort must reach. Yields the proxy's port."""
+
+    async def pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, hold: bool) -> None:
+        try:
+            while data := await reader.read(65_536):
+                if hold and data[:1] == b"\x16":
+                    await asyncio.sleep(delay_s)
+                writer.write(data)
+                await writer.drain()
+        except (ConnectionError, OSError):
+            pass
+        finally:
+            writer.close()
+
+    async def on_connect(client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter) -> None:
+        server_reader, server_writer = await asyncio.open_connection("127.0.0.1", port)
+        await asyncio.gather(pipe(client_reader, server_writer, False), pipe(server_reader, client_writer, True))
+
+    proxy = await asyncio.start_server(on_connect, "127.0.0.1", 0)
+    try:
+        yield proxy.sockets[0].getsockname()[1]
+    finally:
+        proxy.close()

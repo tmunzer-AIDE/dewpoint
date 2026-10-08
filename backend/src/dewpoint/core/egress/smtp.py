@@ -184,14 +184,42 @@ class _Session:
             raise AbortedError()
 
     def abort(self) -> None:
+        """From any thread: the session stops at its next step. Its socket is shut down at the descriptor, which wakes
+        a read or write blocked on it (a TLS handshake's included) and fails every later one; never closed here: a
+        descriptor closed under another thread's blocked call may not wake it, and its number may be reused by
+        another socket meanwhile. The session's own thread closes it."""
         self.aborted.set()
         sock = self.sock
         if sock is not None:
             try:
-                sock.shutdown(socket.SHUT_RDWR)
+                socket.socket.shutdown(sock, socket.SHUT_RDWR)  # the descriptor's, not `SSLSocket.shutdown`, which
+            except OSError:  # drops the TLS object another thread may be using
+                pass
+
+    def _close(self) -> None:
+        """In the session's own thread only."""
+        sock = self.sock
+        if sock is not None:
+            try:
+                socket.socket.shutdown(sock, socket.SHUT_RDWR)
             except OSError:
                 pass
             sock.close()
+
+    def _tls(self, raw: socket.socket) -> ssl.SSLSocket:
+        """TLS on `raw`, abort-safe: `wrap_socket` detaches `raw`, so the TLS socket is the session's before its
+        handshake, for an abort to shut the live one down; a session aborted meanwhile goes no further (the owner's
+        review of c092eb9, M1)."""
+        tls = self.context.wrap_socket(raw, server_hostname=self.target.host, do_handshake_on_connect=False)
+        self.sock = tls
+        self._fence(tls)  # an abort before this socket was the session's closed the detached `raw`, to no effect
+        tls.do_handshake()  # an abort from here shuts this socket down, the handshake with it
+        return tls
+
+    def _fence(self, sock: socket.socket) -> None:
+        if self.aborted.is_set():
+            sock.close()
+            raise AbortedError()
 
     def _connect(self, addresses: Sequence[Address]) -> socket.socket:
         for address in addresses:
@@ -208,15 +236,15 @@ class _Session:
             if self.target.security != "tls":
                 return raw
             try:
-                self.sock = self.context.wrap_socket(raw, server_hostname=self.target.host)
+                return self._tls(raw)
             except ssl.SSLCertVerificationError:
-                raw.close()
+                self._close()
                 raise TlsVerificationError() from None
             except (ssl.SSLError, OSError):
-                raw.close()
+                if self.sock is not None:
+                    self.sock.close()
                 self._go_on()  # a handshake the abort broke tries no other address
                 continue
-            return self.sock
         raise NotSentError("connect")
 
     def _greet(self, client: _Pinned) -> None:
@@ -233,7 +261,7 @@ class _Session:
         if client.sock is None:  # the server closed the connection
             raise NotSentError("smtp")
         try:
-            client.sock = self.sock = self.context.wrap_socket(client.sock, server_hostname=self.target.host)
+            client.sock = self._tls(client.sock)
         except ssl.SSLCertVerificationError:
             raise TlsVerificationError() from None
         client.file = None  # RFC 3207 §4.2: what the server said before TLS is forgotten
@@ -312,7 +340,7 @@ class _Session:
                 client.quit()
             except (OSError, ssl.SSLError, ValueError):
                 pass
-            self.abort()
+            self._close()
 
 
 class GuardedSmtp:
@@ -330,7 +358,8 @@ class GuardedSmtp:
         # the same trust as the HTTP client's: the bundled CAs, never SSL_CERT_FILE or SSL_CERT_DIR; TLS 1.2 or later
         self._context = ssl_context or httpx.create_ssl_context(trust_env=False)
         self.limits = limits or SmtpLimits()
-        self._sessions: set[_Session] = set()  # under way: aborted when the attempt closes
+        self._sessions: set[_Session] = set()  # under way, vetting included: aborted when the attempt closes
+        self._closed = False
 
     async def send(self, target: SmtpTarget, recipients: Sequence[str], message: bytes) -> list[str]:
         """The recipients refused when the server took the message for the others."""
@@ -342,11 +371,15 @@ class GuardedSmtp:
         await self._run(target, None, None)
 
     async def _run(self, target: SmtpTarget, recipients: list[str] | None, message: bytes | None) -> list[str]:
+        if self._closed:  # the attempt ended: nothing more starts (as the guarded websocket's fence)
+            raise InvalidRequestError("closed")
         addresses = await self._guard.vet(target.host, target.port, self._tenant, plaintext=target.security == "none")
+        if self._closed:  # the attempt ended while this vetted (the owner's review of c092eb9, L1)
+            raise InvalidRequestError("closed")
         session = _Session(target, self._context, self.limits)
         self._sessions.add(session)
-        work = asyncio.get_running_loop().run_in_executor(POOL, session.run, addresses, recipients, message)
         try:
+            work = asyncio.get_running_loop().run_in_executor(POOL, session.run, addresses, recipients, message)
             try:
                 return await asyncio.wait_for(asyncio.shield(work), self.limits.session_s)
             except TimeoutError:
@@ -362,6 +395,8 @@ class GuardedSmtp:
             self._sessions.discard(session)
 
     async def aclose(self) -> None:
-        """Aborts every session still under way (a send the node didn't await ends with its attempt)."""
+        """Aborts every session still under way (a send the node didn't await ends with its attempt), and refuses any
+        later one."""
+        self._closed = True
         for session in list(self._sessions):
             session.abort()

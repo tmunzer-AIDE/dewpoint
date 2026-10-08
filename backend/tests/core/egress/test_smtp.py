@@ -11,14 +11,18 @@ octets) is refused before connecting, as are recipients or a sender of another f
 import asyncio
 import concurrent.futures
 import dataclasses
+import ipaddress
 import socket
+import ssl
 import time
 from typing import Any
 
 import pytest
 
+from dewpoint.core.egress.addresses import AllowEntry
 from dewpoint.core.egress.guard import (
     EgressRefusedError,
+    Guard,
     InvalidRequestError,
     MaybeSentError,
     NotSentError,
@@ -31,9 +35,10 @@ from dewpoint.core.egress.smtp import (
     SmtpRefusedError,
     SmtpTarget,
     TlsUnavailableError,
+    _Session,
 )
-from tests.support.netfakes import TENANT, guard, tls
-from tests.support.smtpfakes import Script, serve_smtp
+from tests.support.netfakes import LOOPBACK_ENTRY, TENANT, guard, tls
+from tests.support.smtpfakes import Script, delaying_tls, serve_smtp
 
 NAMES = ("mail.test",)
 MESSAGE = (b"From: alerts@example.com\r\nTo: ops@example.com\r\nSubject: Disk full\r\n\r\nDisk full on db-1\r\n"
@@ -370,3 +375,139 @@ async def test_a_session_stuck_connecting_past_its_deadline_sent_nothing(monkeyp
 
 def test_a_targets_repr_never_shows_its_password() -> None:
     assert "pa55-word" not in repr(target(25)) and "pa55-word" not in str(target(25))
+
+
+@pytest.mark.parametrize("security", ["tls", "starttls"])
+@pytest.mark.parametrize("ending", ["cancel", "close", "deadline"])
+async def test_a_session_ended_during_its_tls_handshake_never_goes_on(security: str, ending: str) -> None:
+    """`wrap_socket` detaches the raw socket before its blocking handshake: an abort then closed a dead socket, the
+    handshake completed, and the session delivered (the owner's review of c092eb9, M1); after a deadline that said
+    nothing was sent, a retry would have duplicated it."""
+    async with serve_smtp(implicit_tls=security == "tls") as server, delaying_tls(server.port, 1.0) as port:
+        mail = smtp(limits=SmtpLimits(session_s=0.4, connect_s=0.3) if ending == "deadline" else None)
+        task = asyncio.create_task(mail.send(target(port, security), ["ops@example.com"], MESSAGE))
+        await asyncio.sleep(0.4 if ending != "deadline" else 0.0)
+        if ending == "cancel":
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            if ending == "close":
+                await mail.aclose()
+                closed = asyncio.get_running_loop().time()
+            with pytest.raises(NotSentError):
+                await asyncio.wait_for(task, 5)
+            if ending == "close":  # the live TLS socket was shut down: the held handshake ended at once
+                assert asyncio.get_running_loop().time() - closed < 0.3
+        await asyncio.sleep(1.5)  # the held handshake completes meanwhile
+    assert all(got.mail == [] and got.payload is None and got.logins == [] for got in server.sessions)
+
+
+class PausedResolver:
+    def __init__(self) -> None:
+        self.release, self.asked = asyncio.Event(), 0
+
+    async def resolve(self, host: str, port: int) -> list[Any]:
+        self.asked += 1
+        await self.release.wait()
+        return [ipaddress.ip_address("127.0.0.1")]
+
+
+async def test_closing_reaches_a_send_still_vetting_and_refuses_new_ones() -> None:
+    """A session was registered only once vetting ended, and a closed client took new sends (the owner's review of
+    c092eb9, L1): closing now fences both, as the guarded websocket does."""
+    resolver = PausedResolver()
+
+    async def allowlist(_: object) -> list[AllowEntry]:
+        return [LOOPBACK_ENTRY]
+
+    async with serve_smtp() as server:
+        mail = GuardedSmtp(Guard(resolver=resolver, allowlist=allowlist), TENANT,
+                           ssl_context=tls(NAMES).client_context())  # type: ignore[arg-type]  # fmt: skip
+        task = asyncio.create_task(mail.send(target(server.port), ["ops@example.com"], MESSAGE))
+        await asyncio.sleep(0.1)
+        await mail.aclose()
+        resolver.release.set()
+        with pytest.raises(InvalidRequestError):
+            await asyncio.wait_for(task, 5)
+        with pytest.raises(InvalidRequestError):
+            await mail.send(target(server.port), ["ops@example.com"], MESSAGE)
+        with pytest.raises(InvalidRequestError):
+            await mail.probe(target(server.port))
+    assert server.sessions == [] and resolver.asked == 1  # a closed client resolves nothing more
+
+
+class AbortingContext:
+    """An SSL context that aborts the session as `wrap_socket` returns, before the TLS socket is the session's: the
+    abort then finds only the detached raw socket to close."""
+
+    def __init__(self, real: ssl.SSLContext) -> None:
+        self.real, self.mail = real, None
+
+    def wrap_socket(self, *args: Any, **kwargs: Any) -> ssl.SSLSocket:
+        tls = self.real.wrap_socket(*args, **kwargs)
+        for session in list(self.mail._sessions):  # type: ignore[attr-defined]
+            session.aborted.set()
+        return tls
+
+
+@pytest.mark.parametrize("security", ["tls", "starttls"])
+async def test_an_abort_just_before_the_tls_socket_is_the_sessions_stops_it(security: str) -> None:
+    context = AbortingContext(tls(NAMES).client_context())
+    async with serve_smtp(implicit_tls=security == "tls") as server:
+        mail = GuardedSmtp(guard({"mail.test": ["127.0.0.1"]}), TENANT, ssl_context=context)  # type: ignore[arg-type]
+        context.mail = mail  # type: ignore[assignment]
+        with pytest.raises(NotSentError):
+            await mail.send(target(server.port, security), ["ops@example.com"], MESSAGE)
+    assert all(got.logins == [] and got.mail == [] for got in server.sessions)
+
+
+def test_an_abort_shuts_a_socket_down_but_leaves_closing_to_its_thread() -> None:
+    """Closing a descriptor under another thread's blocked handshake may not wake it, and its number can be reused by
+    a new socket meanwhile (the stress runs' hang); `SSLSocket.shutdown` drops the TLS object that thread is using. An
+    abort shuts the descriptor down: the session's own next step fails, as an `OSError`."""
+    left, right = socket.socketpair()
+    tls_socket = tls(NAMES).client_context().wrap_socket(left, server_hostname="mail.test",
+                                                          do_handshake_on_connect=False)  # fmt: skip
+    session = _Session(target(25), tls(NAMES).client_context(), SmtpLimits())
+    session.sock = tls_socket
+    try:
+        session.abort()
+        assert tls_socket.fileno() != -1  # still the session's to close
+        with pytest.raises(OSError):  # an `AttributeError` if the TLS object had been dropped
+            tls_socket.do_handshake()
+    finally:
+        tls_socket.close()
+        right.close()
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        Script(),
+        Script(end=554),
+        Script(end=None),
+        Script(end_delay_s=5.0),
+        Script(names=("other.test",)),  # STARTTLS fails: `smtplib` holds the detached raw socket, the TLS one is ours
+    ],
+)
+async def test_every_sessions_socket_is_closed_when_it_ends(monkeypatch: pytest.MonkeyPatch, script: Script) -> None:
+    sessions: list[_Session] = []
+    made = _Session.__init__
+
+    def recorded(self: _Session, *args: Any) -> None:
+        made(self, *args)
+        sessions.append(self)
+
+    monkeypatch.setattr(_Session, "__init__", recorded)
+    async with serve_smtp(script) as server:
+        try:
+            await smtp(limits=SmtpLimits(session_s=0.5)).send(target(server.port), ["ops@example.com"], MESSAGE)
+        except (SmtpRefusedError, MaybeSentError, TlsVerificationError):
+            pass
+        [session] = sessions
+        for _ in range(200):  # an aborted session's thread ends just after its send did
+            if session.sock is not None and session.sock.fileno() == -1:
+                break
+            await asyncio.sleep(0.01)
+    assert session.sock is not None and session.sock.fileno() == -1
