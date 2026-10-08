@@ -24,6 +24,16 @@ PATH_RE = re.compile(r"^(/[A-Za-z0-9_~-][A-Za-z0-9._~-]{0,63}){1,16}$")  # segme
 
 
 FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# A mail address the runtime and plugins accept (plugins-3 D20): an ASCII dot-atom local part of at most 64 characters
+# at a domain of two or more labels, at most 254 characters in all (RFC 5321 §4.5.3.1, RFC 5322 §3.4.1); no quoted
+# local part, no address literal, no SMTPUTF8. Matched whole (`fullmatch`).
+_ATEXT = r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]"
+_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+MAIL_ADDRESS = re.compile(
+    rf"(?=[^@]{{1,64}}@)(?=.{{3,254}}\Z){_ATEXT}+(?:\.{_ATEXT}+)*@{_LABEL}(?:\.{_LABEL})+"  # 254 bounds the domain too
+)
+SMTP_SECURITY = ("none", "starttls", "tls")
+SMTP_KEYS = frozenset({"host", "port", "security", "sender", "username", "password"})
 
 
 def template_parts(template: str) -> list[tuple[str, str | None]]:
@@ -132,6 +142,56 @@ class StreamEndpoint:
     rate_scopes: tuple[RateScope, ...] = ()
 
 
+@dataclass(frozen=True)
+class SmtpServer:
+    """A connection type that sends mail (plugins-3 D4, D20): the runtime speaks SMTP to the host and port these config
+    fields hold, secured as the security field says (`starttls`, `tls` or `none`), from the sender field's address,
+    and signs in with the username config field and the password secret field when both are named and set. The plugin
+    never holds the password, nor names another server or sender."""
+
+    host: str
+    port: str
+    security: str
+    sender: str
+    username: str | None = None
+    password: str | None = None
+
+
+def smtp_problems(name: str, smtp: Any, config_schema: Any, secret_schema: Any) -> list[str]:
+    """An SMTP server's declaration, as data (the SDK checks its own manifest, the catalog a received one): the host,
+    port, security and sender are required config fields, the security field allows only the known modes, and a
+    username config field and a password secret field are named together or not at all."""
+    if not isinstance(smtp, Mapping) or set(smtp) != SMTP_KEYS:
+        return [f"{name}: an smtp server needs exactly {sorted(SMTP_KEYS)}"]
+    where = f"{name}: smtp"
+    config = config_schema.get("properties", {}) if isinstance(config_schema, Mapping) else {}
+    required = config_schema.get("required", []) if isinstance(config_schema, Mapping) else []
+    secret = secret_schema.get("properties", {}) if isinstance(secret_schema, Mapping) else {}
+    out: list[str] = []
+    for role in ("host", "port", "security", "sender"):
+        found = smtp[role]
+        if not isinstance(found, str) or found not in config or found not in required:
+            out.append(f"{where} {role} field {found!r} isn't a required config field")
+    security = smtp["security"]
+    prop = config.get(security) if isinstance(security, str) else None
+    enum = prop.get("enum") if isinstance(prop, Mapping) else None
+    if prop is not None and (not isinstance(enum, list) or not enum or not set(enum) <= set(SMTP_SECURITY)):
+        out.append(f"{where} security field {security!r} may only allow 'none', 'starttls', 'tls'")
+    username, password = smtp["username"], smtp["password"]
+    if (username is None) != (password is None):
+        out.append(f"{where} username and password are named together")
+    if username is not None and (not isinstance(username, str) or username not in config):
+        out.append(f"{where} username field {username!r} isn't a config field")
+    if password is not None and (not isinstance(password, str) or password not in secret):
+        out.append(f"{where} password field {password!r} isn't a secret field")
+    return out
+
+
+def smtp_manifest(server: SmtpServer) -> dict[str, Any]:
+    return {"host": server.host, "port": server.port, "security": server.security, "sender": server.sender,
+            "username": server.username, "password": server.password}  # fmt: skip
+
+
 type Verify = Callable[[CallContext, Connection], Awaitable[VerifyResult]]
 
 
@@ -146,6 +206,7 @@ class ConnectionType:
     rate_scopes: tuple[RateScope, ...] = field(default=())
     verify: Verify | None = None
     stream: StreamEndpoint | None = None
+    smtp: SmtpServer | None = None
 
     def problems(self) -> list[str]:
         name = f"connection type {self.key!r}"
@@ -167,6 +228,11 @@ class ConnectionType:
         for scope in self.rate_scopes:
             out += self._scope_problems(name, scope, config_fields, secret_fields)
         out += self._stream_problems(name, config_fields, secret_fields)
+        if self.smtp is not None:
+            if self.host is not None or self.auth is not None or self.stream is not None:
+                out.append(f"{name}: an SMTP type has no HTTP host, auth header or stream")
+            out += smtp_problems(name, smtp_manifest(self.smtp), self.Config.model_json_schema(mode="validation"),
+                                 self.Secret.model_json_schema(mode="validation"))  # fmt: skip
         return out
 
     def _stream_problems(self, name: str, config_fields: set[str], secret_fields: set[str]) -> list[str]:
@@ -287,20 +353,24 @@ class ConnectionType:
             host = {"kind": "url_field", "field": self.host.field}
         elif isinstance(self.host, SecretUrl):
             host = {"kind": "secret_url", "field": self.host.field, "pattern": self.host.pattern}
-        return {
-            "key": self.key,
-            "label": self.label,
-            "config_schema": self.Config.model_json_schema(mode="validation"),
-            "secret_schema": secret_schema,
-            "auth": (
-                {"kind": "header", "header": self.auth.header, "template": self.auth.template}
-                if self.auth is not None
-                else None
-            ),
-            "host": host,
-            "rate_scopes": [_scope_manifest(s) for s in self.rate_scopes],
-            "verify": self.verify is not None,
-        } | ({"stream": self._stream_manifest()} if self.stream is not None else {})
+        return (
+            {
+                "key": self.key,
+                "label": self.label,
+                "config_schema": self.Config.model_json_schema(mode="validation"),
+                "secret_schema": secret_schema,
+                "auth": (
+                    {"kind": "header", "header": self.auth.header, "template": self.auth.template}
+                    if self.auth is not None
+                    else None
+                ),
+                "host": host,
+                "rate_scopes": [_scope_manifest(s) for s in self.rate_scopes],
+                "verify": self.verify is not None,
+            }
+            | ({"stream": self._stream_manifest()} if self.stream is not None else {})
+            | ({"smtp": smtp_manifest(self.smtp)} if self.smtp is not None else {})
+        )
 
     def _stream_manifest(self) -> dict[str, Any]:
         assert self.stream is not None  # noqa: S101 - only when set
