@@ -1516,3 +1516,18 @@ fixed test-first, its protection checked by removing it (mutants named in each c
   failure is `email.invalid_message`, fatal, before anything is sent.
 - Also: `SmtpTarget`'s repr leaves the password out; `smtp_problems` reports an enum with an unhashable item rather
   than raising.
+
+### 3c-2 checkpoint (2026-10-08, at bce79ea, local, not pushed)
+
+- Built (tasks 1-8, test-first; the runtime's and syslog's tests were written before their code but run after it,
+  while a mutation run held the tree, so their mutants are the proof): SDK 0.7.0 (afc0466); guarded SMTP (109344e);
+  the runtime's `connection.smtp` (6d3eb25); email (abbc7ee); syslog (bb9a222); a host-less type opens with no HTTP,
+  found by the proof (c926c49); the RunGraph proof (3781f48); the operator guides (a468385).
+- Fresh-context review: H1, M1 and L3-L6 fixed test-first, each protection checked by removing it (d47941d, 97b345a,
+  ledger bce79ea).
+- Verified at bce79ea: 1,935 tests across the SDK, the catalog, connections, egress, logs, the worker, the API's
+  connections and plugin calls, every plugin and the CLI; ruff, format, mypy, import contracts; gitleaks over the
+  branch's commits finds nothing; CodeQL's python analysis finds nothing locally.
+- Not run: the full suite (about 10 minutes, asked first); a Compose proof; any real mail server or syslog receiver
+  (each needs the owner's say and a test account or receiver).
+- Awaiting the owner: sign-off of this section's rulings; the full suite; push and PR.
