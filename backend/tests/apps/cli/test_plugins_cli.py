@@ -27,6 +27,7 @@ def test_entry_points_expose_the_first_party_plugins() -> None:
         "google_chat",
         "mist",
         "pagerduty",
+        "servicenow",
         "slack",
         "syslog",
         "teams",

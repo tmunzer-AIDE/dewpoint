@@ -1697,3 +1697,202 @@ limit included, simulate's departure from D13's exact request too; and authorize
 - Merged `origin/main` 9cb4be3 (#64, no conflicts; no rebase, so the reviewed SHAs stand): 757bc49. Full suite there:
   4,325 passed (`-n auto`), the CEL gates 398 passed and 8 skipped; gitleaks over the branch's commits finds nothing;
   CodeQL's python analysis finds nothing locally.
+- 3d-1 MERGED by the owner (#65, merge 16666f6, 2026-10-08), CI green.
+
+## 3d-2 ITSM: ServiceNow
+
+Branch `feat/plugins-3d2` from `origin/main` 16666f6 (#65), started 2026-10-08 on the owner's "let's go" for 3d-2. A
+go to build; this section's rulings await the owner's sign-off. No migration and no SDK change expected (the API key is
+a header: `HeaderAuth`). No real ServiceNow call: tests and the proof run against local fakes.
+
+Facts checked (official sources, read 2026-10-08 by a research subagent, with spot checks of the Table API, the basic
+auth restriction and the API key pages; never from memory; a fact only the Community or a KB excerpt gives is marked):
+- Table API (www.servicenow.com/docs, Zurich `c_TableAPI`; REST response codes `r_RESTAPIHTTPResponseCodes`):
+  - `POST /api/now/table/{table}`: 201, body `{"result": {...}}` with the new record's fields; `GET` lists records
+    (`sysparm_query`, `sysparm_fields` ("Invalid fields are ignored"), `sysparm_limit` (default 10000, applied before
+    ACLs), `sysparm_display_value` (default false), `sysparm_exclude_reference_link`); `PATCH
+    /api/now/table/{table}/{sys_id}`: 200 with the updated record (its parameters `sysparm_display_value`,
+    `sysparm_fields`, `sysparm_input_display_value`, `sysparm_query_no_domain`, `sysparm_view`);
+  - versioned as `/api/now/{api_version}/table/{table}`, the unversioned path the latest; on no match "Version 1
+    returns error code 404", "Version 2 returns success code 200 and an empty array";
+  - "By default, if part of a query is invalid, such as an invalid field name, the instance ignores the invalid
+    part" (`glide.invalid_query.returns_no_rows`, default false); escaping `^` inside a value isn't documented;
+  - 400 bad request, 401 "not authorized to use the API", 403 "not permitted" (ACLs, "business rule or data policy
+    constraints"), 404 (an ACL or no such resource), 500, 502, 503; no idempotency header; journal values aren't
+    echoed in a response;
+  - data policies bind "the REST Table API"; UI policies only forms.
+- Authentication (REST APIs page; basic auth pages, Zurich and Australia; API key page, Brazil):
+  - basic auth is "a legacy method", use "strongly discouraged"; "In zBoot scenarios, basic authentication is
+    restricted by default"; enforcing, it allows only Web Services Access Only accounts, an MFA one-time password or
+    the `snc_basic_auth_api_access` role (401 otherwise: an employee's blog);
+  - OAuth client credentials: token endpoint `/oauth_token.do`, off by default
+    (`glide.oauth.inbound.client.credential.grant_type.enabled`), tokens last 30 minutes;
+  - API key (since Washington DC: Community advocate blog): plugin "API Key and HMAC Authentication"; an inbound
+    authentication profile whose parameter is the `x-sn-apikey` header (or a query parameter), an optional prefix;
+    a REST API Key record tied to a user, its expiry optional; a REST API Access Policy naming the API ("Token Based
+    Auth isn't allowed in the Global REST API Policy"); the key's format isn't documented.
+- Rate limits (inbound REST rate limiting, Zurich): admin-made hourly rules per user, role or all users, none
+  documented by default; 429 with `Retry-After` (seconds), `X-RateLimit-Limit`, `X-RateLimit-Reset`,
+  `X-RateLimit-Rule`. A full API semaphore queue answers 429 without `Retry-After` (KB3046852, excerpt only). Default
+  quota rule "REST Table API request timeout": 60 s.
+- Incident fields:
+  - maximum lengths, documented only for the task fields a case inherits (Case API, Xanadu): `correlation_id` 100,
+    `correlation_display` 100, `short_description` 160, `description`, `work_notes`, `comments`, `close_notes` 4,000;
+  - `urgency` and `impact` 1 High, 2 Medium, 3 Low (Case API); priority follows from them;
+  - states New, In Progress, On Hold, Resolved, Closed, Canceled (Zurich state model), their numbers not documented
+    (Resolved 6: the Community only); `close_code` ("Resolution code") and `close_notes` ("Resolution notes"): no
+    documented choice list, nor whether they're mandatory;
+  - creating needs itil, sn_incident_write or admin; resolving itil, list_updater, sn_incident_write or admin; no
+    field is marked mandatory, Caller included;
+  - instances live at `https://<instance>.service-now.com`, or a custom URL (plugin `com.snc.customurl`).
+
+Tasks (test-first, in order):
+1. The connection type `servicenow`: the instance URL, the API key sent as `x-sn-apikey`, a quota scope, a verify
+   hook that reads one incident.
+2. `servicenow.create_incident` (reconcilable): renders the message model; `reconcile()` finds the step's incident by
+   its `correlation_id`, checking each record the query returns.
+3. `servicenow.update_incident` and `servicenow.resolve_incident` (idempotent); resolve checks the state it set.
+4. `servicenow.add_work_note` (ambiguous: a note appends).
+5. Simulate: each node renders and reports what it would cut, sending nothing.
+6. Proof: a workflow creating, noting and resolving an incident through RunGraph against a local Table API fake, the
+   create's first answer lost after the record was stored; simulated, nothing is sent.
+7. Docs: the operator guide's ServiceNow connection, its setup and its quota.
+
+Rulings:
+- Ruling: the connection authenticates with a REST API key, sent as the `x-sn-apikey` header (`HeaderAuth`; the
+  profile's prefix left empty); no basic auth (legacy, restricted by default on new instances) and no OAuth client
+  credentials (off by default, and its 30-minute tokens need a token flow the runtime doesn't have) - cost if wrong: an
+  instance whose admin won't create a key, a profile and a Table API access policy can't connect until another auth
+  kind lands (D4's `basic` stays unbuilt).
+- Ruling: the key is 16 to 1,024 printable ASCII characters, no space (its format isn't documented) - cost if wrong: a
+  key of another form can't be stored.
+- Ruling: the instance URL is `https://` and a lowercase host name, no port, no path (the default domain or a custom
+  URL); requests go to `/api/now/v2/table/incident`, pinned to v2 so an empty query answers 200 - cost if wrong: an
+  instance on another port or path can't connect.
+- Ruling: one quota scope a key on an instance (`servicenow.key`): bursts of 10, then 2 a second (7,200 an hour); a
+  429's `Retry-After` blocks it as D10 says (an hourly rule's can be long) - cost if wrong: a fast workflow waits, or
+  an instance's own rule answers 429 first.
+- Ruling: `create_incident` is reconcilable: its `correlation_id` is the config's, else the step's idempotency key (64
+  hex); a config's is 1 to 100 of `A-Z a-z 0-9 . _ : -` (no query syntax: escaping isn't documented). `reconcile()`
+  queries `correlation_id=<it>` and keeps only records whose `correlation_id` equals it (an ignored query returns
+  others); one found is the step's incident, none means the create didn't land - cost if wrong: a record the key's
+  user can't read (ACLs apply after the limit) is created again.
+- Ruling: the create renders the message model: `short_description` the title, else the text, one line, at most 160
+  characters; `description` the text, the fields and the links, at most 4,000 characters, cut and reported;
+  `urgency` and `impact` from the severity (critical 1, warning 2, info and success 3) unless set; `caller_id`,
+  `assignment_group` (sys_ids), `category`, `subcategory` and `contact_type` as given; `correlation_display`
+  `Dewpoint` unless set. Raw values only (`sysparm_input_display_value` false) - cost if wrong: a team must look up
+  sys_ids.
+- Ruling: `resolve_incident` sets `state` to the config's value (default `6`, Resolved by the Community's account),
+  `close_code` and `close_notes` (both required: their mandatory status isn't documented, and the choice list varies
+  by instance), then checks the answer's `state` is the value it set, else `servicenow.not_resolved`, fatal - cost if
+  wrong: an instance whose Resolved isn't 6 sets it in the config.
+- Ruling: `add_work_note` appends a work note (or a customer-visible comment when asked), at most 4,000 characters,
+  cut and reported; ambiguous (D22) - cost if wrong: none.
+- Ruling: answers: the expected 201 or 200 is applied; 400 `servicenow.invalid_request`, 401
+  `servicenow.unauthorized`, 403 `servicenow.forbidden`, 404 `servicenow.not_found`, another 4xx
+  `servicenow.refused`, all fatal; 408, 425, a 5xx, or another 2xx retried (`servicenow.unavailable`,
+  `servicenow.unexpected`): the runtime waits out a 429's `Retry-After` or retries a 429 without one; retries after
+  5 s, 10 s, then 20 s (four attempts; nothing documented) - cost if wrong: a slow semaphore outlasts them.
+- Ruling: verify reads one incident (`sysparm_limit=1`, `sysparm_fields=sys_id`): 200 `ok`, 401 `invalid_key`, 403
+  `no_table_access`, else `unexpected_status`, or `unreachable` - cost if wrong: a key that can read but not write
+  passes verify.
+- Ruling: a simulated step renders and reports what it would cut, opening no connection, in the real output's shape
+  (3c and 3d-1's precedent) - cost if wrong: a simulation doesn't show the body.
+- Ruling (task 2): a sys_id is 32 lowercase hex characters (every documented example's form; no page states it), and
+  an incident number 1 to 40 printable ASCII characters; an answer whose record is of another form is
+  `servicenow.unexpected`, retried, so the retry's `reconcile()` looks again - cost if wrong: an instance with another
+  form can't be used.
+- Ruling (task 2): lengths count UTF-16 units (Java's count: never more than the characters, so it fits either) -
+  cost if wrong: text with characters outside the BMP is cut a little early.
+- Ruling (task 2): a configured `correlation_id` should name one incident: a retry adopts the oldest incident carrying
+  it (the query orders by `sys_created_on`, at most 10 records read) - cost if wrong: a workflow reusing one id across
+  runs has a retried create adopt an earlier run's incident.
+- Ruling (task 2): a simulated create returns sys_id `0` x 32 and number `INC0000000`, labelled a fixture by D13 - cost
+  if wrong: none (later simulated steps take it and send nothing).
+- Ruling (tasks 3 and 4): the change nodes PATCH `/incident/{sys_id}` (a sys_id as task 2 rules, so no path can be
+  named) and take only an answer for that sys_id, else `servicenow.unexpected`, retried. `update_incident` sets only
+  the fields given, at least one: `short_description` (one line, cut to 160), `description` (cut to 4,000), `urgency`,
+  `impact`, `state` (a raw value, 1 to 4 digits), `assignment_group` (a sys_id), `category`, `subcategory`; a value
+  cut is reported - cost if wrong: a field a team needs waits for a version 2.
+- Ruling (tasks 3 and 4): `close_code` is one line of at most 100 characters (the instance's code list isn't
+  documented); `close_notes` and a note are cut to 4,000 and reported; a note is a work note unless `comments` is
+  asked for - cost if wrong: none.
+- Ruling (task 5): a simulated change returns its sys_id, number `INC0000000` (a fixture), resolve the state it
+  would set, and what it would cut - cost if wrong: none.
+
+Fresh-context review of 3d-2 (at 99e6ade, 2026-10-08): no High, four Medium, eight Low; one ruling challenged (M3).
+Each fixed test-first, its protection checked by removing it (19 mutants, all killed; `6740070a`), but L5 (gone with
+M3) and L7 (a ruling):
+- M1: a 201 whose body it couldn't read was retried; when the key's user can create but not read the incident, the
+  retry's search finds nothing and creates another. A 201 proves the incident exists: `servicenow.created_unreadable`,
+  fatal, never retried.
+- M2: a search answering only other records (the Table API ignoring a query part it can't read) was taken as "not
+  created", and the step's own record may lie past the 10 read. Ruling: such an answer leaves the outcome unknown
+  (`servicenow.unconfirmed`, `outcome_unknown`); only an empty answer means the create didn't land - cost if wrong: a
+  person checks an instance whose search misbehaves instead of a second incident.
+- M3 (ruling challenged): a configured `correlation_id` let a retry adopt the oldest incident carrying it: another
+  run's, iteration's or tenant's. Ruling, replacing the first rulings' configured id: the `correlation_id` is always the
+  step's idempotency key; a step can't set it - cost if wrong: a team can't stamp its own id there (it goes in the
+  text or the fields).
+- M4: a create still under way on the instance past the client's 30-second read could be missed by a search 5 s later,
+  and created twice. Ruling: a create's retries wait 60 s, 120 s, then 240 s, past the Table API's 60-second
+  transaction limit (default quota rule); update, resolve and notes keep 5 s, 10 s, 20 s - cost if wrong: a create
+  answered 5xx waits a minute to try again.
+- L1: the instance URL and key rules lived only in pydantic validators, while the API checks a connection against the
+  manifest's JSON Schema (and a stored secret meets nothing else). Both are schema now: the URL a `pattern` (its last
+  label starting with a letter, so no IPv4 address), the key `minLength`, `maxLength` and a `pattern`, and each `not`
+  a newline (a schema pattern's `$` is Python's, which takes a final one).
+- L2: an update took any 200 as applied, though an ACL or a business rule can drop a field. It asks back each field it
+  set but the texts and compares (a reference's `value`): `servicenow.not_applied`, fatal. The create doesn't check
+  the stored `correlation_id`; the operator guide says the key's user must be able to write it.
+- L3: a note's `[code]...[/code]` renders as HTML where `glide.ui.security.allow_codetag` allows it (docs "Allow
+  embedded HTML code"; Community). Ruling: in a note, a `[` opening `[code]` or `[/code]` (any case, spaces allowed) is
+  sent as a full-width `［`, as Google Chat's `<` and `>` (3c-1) - cost if wrong: such text reads with a full-width
+  bracket.
+- L4: verify passed any 200; it expects the Table API's list now (`unexpected_answer` otherwise).
+- L5: query-special values (`NULL`, `javascript:`) in a configured id: gone with M3.
+- L6: a state of `06` was sent and then failed the check against `6`. Ruling: a state is `0` or 1 to 4 digits without a
+  leading zero - cost if wrong: none.
+- L7: resolving an incident already Closed or Canceled may move it back to Resolved where the instance allows it.
+  Ruling: left to the instance's own rules (their numbers aren't documented, and reading first costs a request); the
+  operator guide says so - cost if wrong: a late resolve reopens a closed incident's resolution.
+- L8: docstrings and the guide claimed every unreadable answer was retried (a note's is `outcome_unknown`), that
+  ServiceNow counts UTF-16 units (a ruling, not a fact) and that a retry never opens a second incident; corrected.
+
+### 3d-2 checkpoint (2026-10-08, at 6740070, local, not pushed)
+- Tasks 1-7 done: the connection type (f349c7c), the reconcilable create (f6f0028), update, resolve and notes with
+  their simulations (f0378aa), the RunGraph proof (0c35b57: the create's first answer lost after the record was stored,
+  the retry reconciling with no second incident, then a note and a resolve; simulated, nothing sent; its 7 wiring
+  mutants killed), the operator guide (99e6ade); the review's fixes (6740070).
+- Verified at 6740070: 2,283 tests across the SDK, the catalog, connections, the worker, every plugin, the API and the
+  CLI; ruff, format, mypy, import contracts; gitleaks over the branch's commits finds nothing; CodeQL's python
+  analysis finds nothing locally, with CI's CLI and query filter.
+- Not run: the full suite (about 10 minutes, asked first); a Compose proof; any real ServiceNow call (needs the
+  owner's say and a developer instance with an API key).
+- Awaiting the owner: sign-off of this section's rulings (the first ones, tasks 2-5's, and the review's M2, M3, M4,
+  L3, L6, L7; simulate's still departs from D13's exact request); the full suite; push and PR.
+
+A technical review of 1eafe63 (pasted by the owner, 2026-10-08): no High; one Medium, in M1's fix; no technical
+closure. Fixed test-first, its protection checked by removing it (`e5d3ff6e`):
+- M1 (continued): a 201 whose body nests deeper than the JSON decoder's limit raised `RecursionError`, not
+  `ValueError`: it escaped `_result()` and the create's handler, the worker took it for a retryable unexpected error,
+  and under a read restriction (the search empty) each retry created another incident (the review reproduced two
+  through RunGraph). Decoding now takes `ValueError` and `RecursionError` alike (`UNDECODABLE`), at both boundaries
+  (`_result()` and verify): such a 201 is `servicenow.created_unreadable`, fatal; a search, an update's or a resolve's
+  answer `servicenow.unexpected`, retried; a note's `outcome_unknown`; verify `unexpected_answer`. A unit test at each
+  boundary and a RunGraph regression (one POST, one incident, the step failed `servicenow.created_unreadable`); 4
+  mutants killed, the RunGraph test alone killing the create's.
+- Not changed: other plugins decode with `except ValueError` too (Mist's client, stream and verify), none
+  reconcilable, so there a deep body is an unexpected error retried or made `outcome_unknown` by the side-effect
+  rules, never a second effect; turning `RecursionError` into `ValueError` in the runtime's `HttpResponse.json()` would
+  cover every plugin, for the owner to decide.
+- A technical review only: no ruling sign-off or push authorization.
+- A closure review of 9cf5f21 (pasted by the owner, 2026-10-08): M1 technically closed, no new findings; its RunGraph
+  regression gives one POST and one incident, and removing either decoding fix brings the failure back. Technical
+  closure only: no ruling sign-off or push authorization.
+
+The owner signed off this section's rulings (2026-10-08: "I'm good"), the review's M2, M3, M4, L3, L6 and L7 included,
+simulate's departure from D13's exact request too; and authorized the full suite, push and PR.
+- Full suite at bfc8e3c (on `origin/main` 16666f6, which hadn't moved): 4,522 passed (`-n auto`), the CEL gates 398
+  passed and 8 skipped; gitleaks over the branch's commits finds nothing; CodeQL's python analysis finds nothing locally.

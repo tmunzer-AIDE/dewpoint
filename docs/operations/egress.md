@@ -126,6 +126,51 @@ region, which picks the host, and holds the integration key.
   whichever unit it counts); a title cut to fit is named too.
 - **Firewalls.** Allow the region's host on port 443.
 
+### ServiceNow
+
+A `servicenow` connection opens and changes incidents through an instance's Table API (plugins-3 D22). It names the
+instance and holds a REST API key.
+
+- **The instance.** `https://` and its host: `https://<instance>.service-now.com`, or the instance's custom URL. No
+  port, no path. Requests go to `/api/now/v2/table/incident` (version 2: a search matching nothing answers 200).
+- **The API key.** The runtime sends it as the `x-sn-apikey` header; a step never holds it. Basic auth isn't
+  offered (ServiceNow calls it legacy and restricts it on new instances), nor OAuth. An admin sets the key up:
+  1. activates the plugin "API Key and HMAC Authentication" (`com.glide.tokenbased_auth`);
+  2. creates an inbound authentication profile of the API Key type whose parameter is the `x-sn-apikey` header, its
+     prefix left empty;
+  3. creates a REST API Key record tied to an integration user; its token is the connection's key;
+  4. creates a REST API Access Policy for the Table API that names that profile (the global policy can't).
+  The user's roles decide what steps may do: itil (or sn_incident_write) creates, updates and resolves incidents. It
+  must be able to write and read an incident's `correlation_id`: a retried create finds its incident by it.
+- **Verify.** Reads one incident, and expects the Table API's list: `invalid_key` (401), `no_table_access` (403),
+  `unexpected_answer` (a 200 of another body), else `unexpected_status` or `unreachable`. A key that can read but not
+  write passes.
+- **Retrying a create.** A create's `correlation_id` is one derived from the run and the step (64 hex characters); a
+  step can't set it. A retried create waits past ServiceNow's 60-second Table API transaction limit (60 s, then 120 s,
+  then 240 s), then asks for that `correlation_id` and takes the incident carrying it. A search that answers only other
+  incidents didn't apply (an instance ignores a search part it can't read): the step ends `outcome_unknown` rather than
+  risk a second incident. A create answered 201 with a body it can't read fails (`servicenow.created_unreadable`): the
+  incident exists. An incident the user can't read is created again.
+- **Repeats.** Update and resolve set the same values when repeated. Update checks the answer kept each field it set
+  but the two texts (`servicenow.not_applied` otherwise: an ACL or a business rule dropped one). A note may arrive
+  twice, so a note that may have arrived is never sent again (`outcome_unknown`). Resolving an incident already Closed
+  or Canceled is left to the instance's own rules.
+- **Values.** Raw values: references (`caller_id`, `assignment_group`) are sys_ids, choices their values. Urgency and
+  impact follow the severity (critical 1, warning 2, info and success 3) unless set. Resolving sets `state` to 6
+  unless the step names the instance's own value, with a resolution code and notes, and fails
+  (`servicenow.not_resolved`) when the instance kept another state.
+- **Bounds.** A short description is one line of at most 160 characters, a description, resolution notes or a note at
+  most 4,000 (counted in UTF-16 units, Java's count and the stricter one: ServiceNow doesn't say which it uses);
+  longer values are cut and named in the step's output.
+- **Notes can't embed HTML.** An instance that allows `[code]` tags in journals (`glide.ui.security.allow_codetag`)
+  renders what's between them as HTML: in a note, a `[` opening `[code]` or `[/code]` is sent as a full-width `［`.
+- **Outcomes.** A 400 (`servicenow.invalid_request`), 401 (`servicenow.unauthorized`), 403 (`servicenow.forbidden`:
+  an ACL, a business rule or a data policy), 404 (`servicenow.not_found`) or another 4xx fails the step. Update and
+  resolve retry a 408, 425 or 5xx, or an answer they can't read, after 5 s, then 10 s, then 20 s; a create retries
+  them as above. A 429's `Retry-After` blocks the key's scope; a short one is waited out within the attempt by update
+  and resolve.
+- **Firewalls.** Allow the instance's host on port 443.
+
 ## The allowlist
 
 Only a platform admin can change the allowlist, through the `dewpoint_admin` database role. Every change is audited:
@@ -165,10 +210,12 @@ per tenant, so connections that share a credential share one budget.
 - **Email.** One scope a server host (`email.server`): bursts of 5, then 1 a second. Syslog has none.
 - **PagerDuty.** One scope an integration key (`pagerduty.integration`): bursts of 20, then 100 a minute, so never
   more than 120 events in any 60 s (PagerDuty's limit a key). Its account's own limits apply too.
+- **ServiceNow.** One scope a key on an instance (`servicenow.key`): bursts of 10, then 2 a second. An instance's own
+  hourly rate rules answer 429 with a `Retry-After`, which blocks the scope.
 - **When no token is available.** A step waits up to 10 s. After that it fails with `cooldown` and sends nothing.
 - **When the provider sends `Retry-After`.** That scope is blocked for every run, for up to an hour.
 - **Seeing a block.** `GET /api/v1/t/{tenant}/connections/{id}` lists each blocked scope's current cooldown, shown
   by its kind (`mist.org`, `mist.token`, `mist.stream`, `slack.tenant`, `teams.tenant`, `google_chat.space`,
-  `webhook.host`, `email.server`, `pagerduty.integration`). That end time is live: it moves if the provider extends
-  or lifts the block. A stream's opening refused with a 429 or 503 and a `Retry-After` blocks its stream scopes the
-  same way.
+  `webhook.host`, `email.server`, `pagerduty.integration`, `servicenow.key`). That end time is live: it moves if the
+  provider extends or lifts the block. A stream's opening refused with a 429 or 503 and a `Retry-After` blocks its
+  stream scopes the same way.
