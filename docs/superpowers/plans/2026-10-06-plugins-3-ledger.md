@@ -1095,7 +1095,8 @@ Rulings:
 - Ruling: Slack text is escaped (`&`, `<`, `>`) and sent in `mrkdwn` objects with `verbatim: true`; the title is a bold
   line, not a `header` block, whose `plain_text` isn't documented to ignore mentions; button labels are `plain_text`
   (Slack's only kind for them) - a value from run data never mentions `@here` or a channel, nor makes a link - cost if
-  wrong: a title loses the header's size.
+  wrong: a title loses the header's size. (Narrowed after the review of 1e71079, R4: no link labelled other than its URL;
+  a bare URL may link to itself.)
 - Ruling: Google Chat text replaces `<` and `>` with their full-width forms: no escape is documented, and `<users/all>`
   would notify the whole space - cost if wrong: a `<` in a message shows as `＜`.
 - Ruling: Teams cards are version 1.2 (the documented samples'), rich text only (was "text blocks only": changed in
@@ -1224,3 +1225,34 @@ fixed test-first, its protection checked by removing it (mutants named in each c
   receiver call (each needs the owner's say and a test channel).
 - Awaiting the owner: sign-off of this section's rulings (amended in tasks 4 and 6 and after the review, as marked);
   the full suite; push and PR.
+
+A technical review of 1e71079 (pasted by the owner, 2026-10-08): the six fixes above check out; four Low (R1-R4), no
+High or Medium. Each fixed test-first, its protection checked by removing it. A technical review: it grants no ruling
+acceptance or push permission.
+- R1 (`434db38`): `webhook.send_json` with a null body posted an empty request (httpx sends `json=None` as no body)
+  and reported it sent. Ruling: a workflow's body is never null - refused when validated and by the published schema
+  (`not: null`) - since sending `null` as content would need a content type a secret-URL request can't carry (task
+  2) - cost if wrong: a receiver that wants a bare `null` can't have it. A wire-level regression sends every falsy
+  body through the guarded transport to a local server: each arrives as its JSON with a JSON content type.
+- R2 (`61ef7ee`): Teams' bucket of 5 refilled at 25 per 300 s granted 30 posts in 300 s (29 in 288 s, measured on
+  the database bucket). Ruling (amends L3's): bursts of 5, then 20 in 300 s, so never more than 25 in any 300 s - a
+  work-unit test counts it exactly - cost if wrong: a tenant's Teams posts stay a little under the quota.
+- R3 (`4879091`): any Slack 200 was reported sent. Ruling: only a 200 whose body is exactly `ok` (the documented
+  acknowledgement) is sent; any other 200 is `slack.outcome_unknown`, never retried - cost if wrong: such a send
+  needs a person.
+- R4 (`86c9d9c`): Slack's top-level `text` (the escaped fallback) still turns "Regular URLs" into links unless `parse`
+  is `none` (`messaging/formatting-message-text`). Ruling (narrows Slack's and Google Chat's): run data never mentions
+  anyone nor makes a link labelled other than its own URL; a bare URL may become a link to itself. `parse: none`
+  isn't sent: it isn't documented for incoming webhooks, and an unknown field could make Slack refuse every send -
+  cost if wrong: a bare URL from run data is clickable, showing where it goes. Option for the owner: try `parse:
+  none` against a test channel (a real Slack call, on the owner's say). Docstrings and tests narrowed; a test pins
+  the fallback against a labelled link.
+- The creation-time vetting gap and the over-redaction note stand as separate owner decisions.
+
+### 3c-1 checkpoint, after the review of 1e71079 (2026-10-08, at 86c9d9c, local, not pushed)
+
+- Verified at 86c9d9c: 1,675 tests across the affected areas (as at c48eec0, plus the webhook's wire test); ruff,
+  format, mypy and import contracts; CodeQL's python analysis finds nothing locally.
+- Not run: the full suite (about 10 minutes, asked first); a Compose proof; any real provider call.
+- Awaiting the owner: technical closure of R1-R4; sign-off of this section's rulings (amended as marked); the full
+  suite; push and PR.
