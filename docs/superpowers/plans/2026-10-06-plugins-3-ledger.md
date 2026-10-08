@@ -1564,3 +1564,7 @@ attempt's and a plugin call's mail client is made lazily, after the scope lookup
 during either recorded nothing and the resumed send (or probe) made a fresh client and went on. Fixed test-first
 (`7616eb8`): both record their closure and refuse to make a client after it; each protection's removal fails a test.
 A technical review only: no ruling sign-off or push authorization.
+- The owner (2026-10-08): "ok, we're good. push and PR" (L1 technically closed; push and PR authorized), then signed
+  off this section's rulings. `origin/main` had moved (#60, #61, #62): merged into the branch (63c40ff, no conflicts,
+  no rebase, so every reviewed SHA stands); after it, 2,897 tests across both sides' areas pass, with ruff, mypy and
+  the import contracts.
