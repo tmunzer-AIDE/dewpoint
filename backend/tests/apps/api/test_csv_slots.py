@@ -5,6 +5,8 @@ so a process takes at most `csv_concurrency` of them at once (2 by default). One
 `csv_busy` with `Retry-After`, before an upload's body is read or a start opens its staged file: nothing is recorded,
 and the client asks again. A re-run that keeps its original's input (which may hold a CSV's rows) takes a slot too."""
 
+from typing import Any
+
 import pytest
 from sqlalchemy import text
 
@@ -89,3 +91,32 @@ async def test_a_start_without_a_csv_takes_no_slot(
         answer = await client.post(runs_url(ctx, wf), json={"input": INPUT, "mode": "live"},
                                    headers={"Idempotency-Key": "plain"})  # fmt: skip
     assert answer.status_code == 202, answer.text
+
+
+async def test_a_rerun_keeping_its_input_takes_its_slot_before_reading_that_input(
+    keyed_app, csv_ready, owner_sessionmaker, api_settings, monkeypatch  # noqa: F811
+) -> None:  # fmt: skip
+    """The fresh M3 review's I5: the original's input (a CSV's rows, perhaps) is decoded only in a slot, so a refused
+    re-run never holds it, and a client retrying every second never decodes it again and again."""
+    from dewpoint.apps.api.routes import run_requests
+
+    ctx, wf = csv_ready
+    client = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx)
+    upload = await uploaded(client, ctx, wf)
+    started = await client.post(runs_url(ctx, wf), json=csv_body(upload), headers={"Idempotency-Key": "first"})
+    read: list[str] = []
+    original = run_requests.original_input
+
+    async def counted(*args: Any, **kwargs: Any) -> Any:
+        read.append("input")
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(run_requests, "original_input", counted)
+    keyed_app.state.csv_slots = CsvSlots(1)
+    rerun_url = f"/api/v1/t/{ctx.tenant_id}/runs/{started.json()['id']}/rerun"
+    with keyed_app.state.csv_slots.held():
+        busy = await client.post(rerun_url, json={"mode": "live"}, headers={"Idempotency-Key": "again"})
+    assert (busy.status_code, read) == (503, [])
+    done = await client.post(rerun_url, json={"mode": "live"}, headers={"Idempotency-Key": "again"})
+    assert (done.status_code, read) == (202, ["input"]), done.text
+    assert keyed_app.state.csv_slots.held_now == 0

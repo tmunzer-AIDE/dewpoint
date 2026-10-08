@@ -114,11 +114,11 @@ async def admit(
     db: AsyncSession, keys: KeySource, ctx: TenantContext, workflow_id: uuid.UUID, source: str, body: StartIn, key: str,
     rerun: admission.Rerun | None = None, slots: CsvSlots | None = None,
 ) -> RunRequest:  # fmt: skip
-    """The request admitted. A CSV start, and a re-run keeping its original's input (which may hold a CSV's rows),
-    each hold one of the process's CSV slots while they're built (2b-4b M3): with every slot held, 503 `csv_busy`."""
-    rows = body.csv is not None or (rerun is not None and rerun.input is None)
+    """The request admitted. A CSV start holds one of the process's CSV slots while its rows are built (2b-4b M3):
+    with every slot held, 503 `csv_busy`. (A re-run keeping its original's input takes one in `rerun`, before it reads
+    that input.)"""
     try:
-        with slots.held() if slots is not None and rows else nullcontext():
+        with slots.held() if slots is not None and body.csv is not None else nullcontext():
             admitted = await admission.admit_request(
                 db, keys, tenant_id=ctx.tenant_id, workflow_id=workflow_id, source=source, actor_id=ctx.user.id,
                 mode=body.mode, idempotency_key=key, input=body.input, rerun=rerun,
@@ -258,13 +258,16 @@ async def rerun(
         start = StartIn(input=given.input or {}, mode=mode, csv=given.csv)
         return request_body(await admit(db, keys, ctx, workflow_id, "rerun", start, key, rerun=again, slots=slots))
     if given.input is not None:
-        value = given.input
-    elif old is None or not await retention.request_kept(db, await retention.cutoff(db, ctx.tenant_id), old):
+        start = StartIn(input=given.input, mode=mode)
+        return request_body(await admit(db, keys, ctx, workflow_id, "rerun", start, key, rerun=again))
+    if old is None or not await retention.request_kept(db, await retention.cutoff(db, ctx.tenant_id), old):
         raise HTTPException(410, detail={"error": INPUT_NOT_RETAINED})
-    else:
-        value = await original_input(db, keys, ctx.tenant_id, old)
-    start = StartIn(input=value, mode=mode)
-    return request_body(await admit(db, keys, ctx, workflow_id, "rerun", start, key, rerun=again, slots=slots))
+    try:
+        with slots.held():  # its original's input, a CSV's rows perhaps, read only in a slot (the fresh M3 review's I5)
+            start = StartIn(input=await original_input(db, keys, ctx.tenant_id, old), mode=mode)
+            return request_body(await admit(db, keys, ctx, workflow_id, "rerun", start, key, rerun=again))
+    except CsvBusyError:
+        raise HTTPException(503, detail=CSV_BUSY, headers={"Retry-After": "1"}) from None
 
 
 async def original_input(db: AsyncSession, keys: KeySource, tenant_id: uuid.UUID, old: RunRequest) -> dict[str, Any]:
