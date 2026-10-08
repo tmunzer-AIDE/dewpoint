@@ -1531,3 +1531,18 @@ fixed test-first, its protection checked by removing it (mutants named in each c
 - Not run: the full suite (about 10 minutes, asked first); a Compose proof; any real mail server or syslog receiver
   (each needs the owner's say and a test account or receiver).
 - Awaiting the owner: sign-off of this section's rulings; the full suite; push and PR.
+
+A technical review of c092eb9 (pasted by the owner, 2026-10-08): M1 still reproducible, and one more Low; no
+technical closure. Both fixed test-first, each protection checked by removing it (`a1cd3f4`):
+- M1: `wrap_socket` detaches the raw socket before its blocking handshake, so an abort closed a dead socket and the
+  handshake went on to deliver, for implicit TLS and STARTTLS, after a cancel, `aclose()` or a deadline that had
+  answered `NotSent` (a retry could duplicate the mail). The TLS socket is made without its handshake and is the
+  session's before it runs; a fence catches an abort that landed before. A test proxy holds the server's handshake
+  records, opening the window in every mode.
+- Found by stress runs of those tests (1 hang in 10 under load): an abort closed the socket from the event loop while
+  the session's thread was blocked in OpenSSL, which a close doesn't reliably wake, and the descriptor's number could
+  be reused by another socket; `SSLSocket.shutdown` also dropped the TLS object that thread used. Ruling: an abort only
+  shuts the descriptor down (the blocked call wakes, every later one fails); only the session's own thread closes its
+  socket, the live TLS one after a failed STARTTLS included - cost if wrong: none. 0 hangs in 80 stress runs after.
+- L1: a session was registered only after vetting, and a closed client took new sends. `aclose()` sets a closed state,
+  refused before vetting and checked after it, as the guarded websocket's fence; a closed client resolves nothing.
