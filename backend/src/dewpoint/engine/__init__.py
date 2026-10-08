@@ -8,5 +8,7 @@
 # (sub-flows' and failure handlers' too), and what a run sends Temporal, measured before it's sent: a loop's batch cut
 # by bytes, a continued run's state within 1.5 MiB, every command paced per workflow task; `cel.evaluate` on a queue of
 # the build's ABI. 6: 2b-1b's claims: a run's sensitive and large values held as handles, resolved in activities and
-# the evaluator; taint routing and declassified decisions; the exact workflow-id grammar.
-ENGINE_ABI = 6
+# the evaluator; taint routing and declassified decisions; the exact workflow-id grammar. 7: 2b-4b's engine blockers:
+# binding charged the bytes measuring its views serialized (#18); a value several CEL binding sets share claimed once
+# and sent as its handle (#26); a step's CEL requests stopped before the run's history passes 32 MiB.
+ENGINE_ABI = 7
