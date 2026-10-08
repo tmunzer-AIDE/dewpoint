@@ -149,3 +149,40 @@ async def test_a_tenants_next_due_request_is_the_dispatchers_alone_to_read(owner
         definer, config, acl = (await s.execute(query, {"f": function})).one()
         assert (definer, config) == (True, ["search_path=public, pg_temp"])
         assert not any(entry.startswith("=") for entry in acl.strip("{}").split(","))
+
+
+async def dispatch_failures(owner: Any, request_id: Any) -> int | None:
+    async with owner() as s:
+        found = await s.execute(text("select errors from work_failures where kind = 'dispatch' and item_id = :i"),
+                                {"i": request_id})  # fmt: skip
+        return found.scalar_one_or_none()
+
+
+async def test_a_request_left_waiting_or_to_another_dispatcher_keeps_its_failure_count(
+    stack, owner_sessionmaker, dispatch_sessionmaker, api_settings, monkeypatch
+) -> None:  # fmt: skip
+    """The fresh review 2's I1: only an outcome clears a request's dispatch failures (`failures.py`: a success clears
+    its kind's count). Waiting (its tenant's slots) or another dispatcher holding it neither counts nor clears, else a
+    request that fails after the slot check never reaches its hold while its tenant is at its limit."""
+    from tests.apps.dispatcher.test_fairness import at_its_limit
+
+    ctx, requests = await queued(stack, 1)
+    await at_its_limit(owner_sessionmaker, ctx.tenant_id)
+    failing = text("insert into work_failures (tenant_id, kind, item_id, errors, last_error, due_at) "
+                   "values (:t, 'dispatch', :i, 3, 'RuntimeError', now() - interval '1 second')")  # fmt: skip
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(failing, {"t": ctx.tenant_id, "i": requests[0].id})
+    client = FakeClient()
+    done = await dispatch.dispatch_once(dispatch_sessionmaker, client, KEYS, api_settings, BUILD, dispatch.Rotation())
+    assert done == {"no_slot": 1}
+    assert await dispatch_failures(owner_sessionmaker, requests[0].id) == 3
+
+    async def elsewhere(*_args: Any, **_kwargs: Any) -> None:
+        return None  # another dispatcher holds its row
+
+    monkeypatch.setattr(dispatch, "begin", elsewhere)
+    assert (
+        await dispatch.dispatch_once(dispatch_sessionmaker, client, KEYS, api_settings, BUILD, dispatch.Rotation())
+        == {}
+    )
+    assert await dispatch_failures(owner_sessionmaker, requests[0].id) == 3

@@ -239,7 +239,8 @@ current build from Temporal dispatches nothing (`dispatcher_observe_failed`), an
 that fails is logged (`dispatcher_cycle_failed`) and the process goes on. Each instance records its
 last cycle in `dispatcher_reports`.
 
-Each of a cycle's passes takes at most 50 items, those it tried least lately first, and no new one once it has run 10
+Each of a cycle's passes picks at most 50 items (the dispatch pass's further rounds, up to a second, pick again: only
+the tenants that just started one), those it tried least lately first, and takes no new one once it has run 10
 seconds, or once a call to Temporal took over a second, ran out its deadline or found Temporal unavailable (a
 prototype: its numbers aren't settled). An item it took runs to its end. A pass stopped that way is a degraded state,
 said in its report (`slow`; `deferred`, the items it picked but didn't take; `backlog`, its pick full, so more may

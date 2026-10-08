@@ -93,12 +93,22 @@ class Starting:
     start: RunInput
 
 
+# Why a request is left queued, no attempt counted: waiting isn't failing, nor a success that clears its failures
+WAITING = frozenset({"environment_not_recorded", "gate_off", RETENTION_UNHEALTHY, "tenant_erasing", "workers_not_ready",
+                     RETIRING, "no_slot", KEY_UNUSABLE})  # fmt: skip
+
+
 @dataclass(frozen=True)
 class Waiting:
     """A request left queued, no attempt counted: `gate_off`, `environment_not_recorded`, `retention_unhealthy` (a
-    production deployment's, §10.3), `tenant_erasing`, `workers_not_ready`, `no_slot` or `key_unusable`."""
+    production deployment's, §10.3), `tenant_erasing`, `workers_not_ready`, `retiring`, `no_slot` or `key_unusable`
+    (`WAITING`)."""
 
     reason: str
+
+    def __post_init__(self) -> None:
+        if self.reason not in WAITING:
+            raise ValueError(self.reason)
 
 
 class Target(Protocol):
@@ -586,8 +596,10 @@ async def dispatch_once(
 
 @dataclass
 class _Taken:
-    """A pass's candidates, taken a round at a time: what happened, counted, and those that went through. A request
-    is taken once a pass: one found again (still queued, whatever its start said) ends its tenant's rounds."""
+    """A pass's candidates, taken a round at a time: what happened, counted, and those with an outcome (`done`: their
+    dispatch failures cleared; one left waiting, or that another dispatcher had, neither counts nor clears: the fresh
+    M3 review 2's I1). A request is taken once a pass: one found again (still queued, whatever its start said) ends its
+    tenant's rounds."""
 
     sessionmaker: async_sessionmaker[AsyncSession]
     client: Client
@@ -618,9 +630,10 @@ class _Taken:
                 self.counts["error"] += 1
                 await failures.failed(self.sessionmaker, tenant_id, failures.DISPATCH, request_id, e)  # bounded (D10)
                 continue
-            self.done.append((tenant_id, request_id))
             if happened is not None:
                 self.counts[happened] += 1
+                if happened not in WAITING:
+                    self.done.append((tenant_id, request_id))
             if happened == "started":
                 started.append(tenant_id)
         return started
