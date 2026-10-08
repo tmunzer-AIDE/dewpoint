@@ -175,7 +175,7 @@ async def test_one_message_reaches_every_target_at_its_url_exactly(
         "json": {"sent": True, "status": 204},
     }  # fmt: skip
     kinds = sorted({k.split(":", 1)[0] for k in scopes})
-    assert kinds == ["google_chat.space", "slack.tenant", "teams.webhook", "webhook.host"]
+    assert kinds == ["google_chat.space", "slack.tenant", "teams.tenant", "webhook.host"]
     assert not [k for k in scopes for secret in SECRETS if secret in k]  # keyed by a MAC, never the URL's part
 
 

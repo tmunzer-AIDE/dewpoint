@@ -95,14 +95,15 @@ per tenant, so connections that share a credential share one budget.
   of 50, then 0.5 a second (1,800 an hour, under Mist's 2,000 connections an hour a token).
 - **Slack.** One scope a tenant (`slack.tenant`): bursts of 3, then 1 a second. A webhook URL names no documented
   workspace or channel, so a tenant's Slack webhooks share it.
-- **Teams.** One scope a webhook URL (`teams.webhook`): bursts of 5, then 25 posts in 300 s, Teams' limit for a flow
-  posting to a channel. Microsoft turns off a flow that stays throttled for 14 days.
+- **Teams.** One scope a tenant (`teams.tenant`): bursts of 5, then 25 posts in 300 s. That's Teams' limit for one
+  Teams connection posting as the flow bot; a webhook URL doesn't name the connection, so a tenant's flows share it.
+  Microsoft turns off a flow that stays throttled for 14 days.
 - **Google Chat.** One scope a space (`google_chat.space`), read from the URL: 1 a second, no burst, shared by all the
   space's webhooks.
 - **Webhook.** One scope a receiver's host (`webhook.host`): bursts of 5, then 1 a second.
 - **When no token is available.** A step waits up to 10 s. After that it fails with `cooldown` and sends nothing.
 - **When the provider sends `Retry-After`.** That scope is blocked for every run, for up to an hour.
 - **Seeing a block.** `GET /api/v1/t/{tenant}/connections/{id}` lists each blocked scope's current cooldown, shown
-  by its kind (`mist.org`, `mist.token`, `mist.stream`, `slack.tenant`, `teams.webhook`, `google_chat.space`,
+  by its kind (`mist.org`, `mist.token`, `mist.stream`, `slack.tenant`, `teams.tenant`, `google_chat.space`,
   `webhook.host`). That end time is live: it moves if the provider extends or lifts the block. A stream's opening
   refused with a 429 or 503 and a `Retry-After` blocks its stream scopes the same way.

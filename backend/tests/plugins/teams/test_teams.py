@@ -67,8 +67,16 @@ def test_the_plugin_validates_and_its_node_is_an_ambiguous_send() -> None:
     assert validate_plugin_manifest(PLUGIN.manifest()) == []
     assert SendMessage.side_effect == SideEffect.AMBIGUOUS and SendMessage.credentials == ("teams",)
     [scope] = TEAMS.rate_scopes
-    assert (scope.kind, scope.secret, scope.capacity) == ("teams.webhook", "webhook_url", 5)
+    assert (scope.kind, scope.secret, scope.capacity) == ("teams.tenant", None, 5)
     assert abs(scope.refill_per_s - 25 / 300) < 1e-9  # Teams' 25 flow-bot posts a connection per 300 s
+
+
+@pytest.mark.parametrize("other", [PLATFORM, LOGIC.replace(":443", ""), LOGIC.replace("0a1b2c", "9z8y7x")])
+def test_every_flow_of_a_tenant_shares_one_scope(other: str) -> None:
+    """The limit is a Teams connection's, which no URL names: flows sharing one would each get a budget if keyed by
+    URL, as would one flow's URL spelt two ways (the 3c-1 review, finding 3)."""
+    keys = [declared().scopes({}, {"webhook_url": url}, lambda v: f"mac({v})")[0].key for url in (LOGIC, other)]
+    assert keys == ["teams.tenant", "teams.tenant"]
 
 
 def test_the_body_is_an_adaptive_card_message() -> None:
