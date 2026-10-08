@@ -314,6 +314,7 @@ async def keys(ctx: Context) -> bool:
 
 # What the sweep deletes, in an order no key refuses, each `(table, its key)`: a run's steps go with it.
 SWEPT: tuple[tuple[str, str], ...] = (
+    ("work_failures", "kind, item_id"), ("recovery_items", "reason, item_id"), ("operator_commands", "id"),  # 0050's
     ("claim_grants", "claim_id, run_id"), ("step_outputs", "id"), ("run_secret_index", "root_run_id"),
     ("run_slots", "run_id"), ("execution_evidence", "id"), ("schedule_firings", "workflow_id, run_id"),
     ("schedule_incarnations", "temporal_id"), ("schedule_intervals", "id"), ("runs", "root_run_id"),

@@ -410,23 +410,28 @@ class GivingWay(logging.Handler):
             self.loop.call_soon_threadsafe(self.seen.set)
 
 
-HELD = {  # the table held and how; the writes probed meanwhile; the first migration that waits for it
-    "tenants": ("ROW EXCLUSIVE", ["UPDATE tenants SET status = status WHERE false"], "0037"),
+HELD = {  # the table held and how, from which revision; the writes probed meanwhile; the first migration that waits
+    "tenants": ("tenants", "ROW EXCLUSIVE", "0042", ["UPDATE tenants SET status = status WHERE false"], "0037"),
     # A long read of `runs`, which a concurrent index build doesn't wait for: 0035's steps on `runs` do (its unique key
     # attached, then the keys that take both their table and the one they reference)
-    "runs": ("ACCESS SHARE", ["UPDATE runs SET iterations = iterations WHERE false",
-                              "UPDATE run_steps SET attempt = attempt WHERE false"], "0035"),
+    "runs": ("runs", "ACCESS SHARE", "0042", ["UPDATE runs SET iterations = iterations WHERE false",
+                                              "UPDATE run_steps SET attempt = attempt WHERE false"], "0035"),
+    # 0050's tables (the owner's ruling on the 2b-4b M3 design, rev 2): new, but their keys reference `tenants`
+    "tenants, by 0050": ("tenants", "ROW EXCLUSIVE", "0049", ["UPDATE tenants SET status = status WHERE false"],
+                         "0050"),
 }  # fmt: skip
 
 
-@pytest.mark.parametrize("table", HELD)
-async def test_a_step_behind_a_held_lock_gives_way_until_it_is_released(cluster, templates, caplog, table) -> None:
+@pytest.mark.parametrize("case", HELD)
+async def test_a_step_behind_a_held_lock_gives_way_until_it_is_released(cluster, templates, caplog, case) -> None:
     """Behind a writer's open transaction, a step waits at most its budget, gives way, and tries again until the
     writer commits. A write queued behind the step meanwhile (any write waits for a pending lock that conflicts with
     it, a read only for an exclusive one) waits less than `deadlock_timeout`, never the writer's whole hold."""
     caplog.set_level(logging.INFO, logger="alembic.online")
     url = await copy(cluster, templates["0042"])
-    mode, probes, first = HELD[table]
+    table, mode, at, probes, first = HELD[case]
+    if at != "0042":
+        await asyncio.to_thread(upgrade, url, at)
     waits: list[float] = []
     stop = asyncio.Event()
 
