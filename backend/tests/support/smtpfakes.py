@@ -51,6 +51,15 @@ class SmtpServer:
     sessions: list[Received] = field(default_factory=list)
 
 
+async def _flood(writer: asyncio.StreamWriter, line: bytes, count: int) -> None:
+    """`count` lines, yielding after each: on a TLS stream whose client is gone, `drain()` neither yields nor fails, so
+    the loop would never learn of it, and the flood held the event loop the test's own send waits on (main's CI)."""
+    for _ in range(count):
+        writer.write(line)
+        await writer.drain()
+        await asyncio.sleep(0)  # the lost connection is noticed here: the next drain raises ConnectionResetError
+
+
 async def _session(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, script: Script, got: Received,
                    tls_up: bool) -> None:  # fmt: skip
     def say(code: int, *lines: str) -> None:
@@ -63,9 +72,7 @@ async def _session(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, s
             writer.write(b"2")
             await writer.drain()
             await asyncio.sleep(script.drip_s)
-    for _ in range(script.greeting_flood):
-        writer.write(b"220-" + b"x" * script.flood_width + b"\r\n")
-        await writer.drain()
+    await _flood(writer, b"220-" + b"x" * script.flood_width + b"\r\n", script.greeting_flood)
     say(script.greeting, "mail.test ESMTP")
     await writer.drain()
     if script.greeting != 220:
@@ -132,9 +139,7 @@ async def _session(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, s
                         return
                 except TimeoutError:
                     pass
-            for _ in range(script.end_flood):
-                writer.write(b"250-" + b"x" * 96 + b"\r\n")
-                await writer.drain()
+            await _flood(writer, b"250-" + b"x" * 96 + b"\r\n", script.end_flood)
             say(script.end, "queued")
         elif verb == "QUIT":
             got.quit = True

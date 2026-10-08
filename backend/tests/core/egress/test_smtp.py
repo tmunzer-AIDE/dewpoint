@@ -12,6 +12,7 @@ import asyncio
 import concurrent.futures
 import dataclasses
 import ipaddress
+import re
 import socket
 import ssl
 import time
@@ -41,6 +42,7 @@ from tests.support.netfakes import LOOPBACK_ENTRY, TENANT, guard, tls
 from tests.support.smtpfakes import Script, delaying_tls, serve_smtp
 
 NAMES = ("mail.test",)
+DEAD_WRITE = re.compile(r"socket\.send\(\) raised exception|SSL connection is closed")  # asyncio, past 5 dead writes
 MESSAGE = (b"From: alerts@example.com\r\nTo: ops@example.com\r\nSubject: Disk full\r\n\r\nDisk full on db-1\r\n"
            b".hidden dot line\r\n")  # fmt: skip
 
@@ -273,10 +275,14 @@ async def test_a_reply_past_its_bounds_is_refused_having_sent_nothing(script: Sc
     assert all(got.mail == [] for got in server.sessions)
 
 
-async def test_an_end_reply_past_its_bounds_may_have_delivered() -> None:
+async def test_an_end_reply_past_its_bounds_may_have_delivered(caplog: pytest.LogCaptureFixture) -> None:
     async with serve_smtp(Script(end_flood=100_000)) as server:
         with pytest.raises(MaybeSentError):
             await asyncio.wait_for(smtp().send(target(server.port), ["ops@example.com"], MESSAGE), 10)
+    # The server stops flooding once the client is gone. Writing on to the closed TLS stream held the event loop the
+    # send's answer waits on: 100,000 writes past the 10 s on a slow runner (main's CI at 0838e4f and 60cfe96).
+    dead = [r for r in caplog.records if r.name == "asyncio" and DEAD_WRITE.search(r.getMessage())]
+    assert dead == []
 
 
 async def test_a_session_has_a_deadline_however_slowly_the_server_drips() -> None:
