@@ -131,6 +131,15 @@ async def test_a_4xx_is_slacks_refusal(status: int, code: str) -> None:
     assert raised.value.code == code
 
 
+@pytest.mark.parametrize("raw", [b"", b"not_ok", b'{"ok": false, "error": "x"}', b"ok\n", b"OK", b"ok ok"])
+async def test_a_200_without_slacks_ok_is_unknown(raw: bytes) -> None:
+    """Slack documents its success as a 200 with the body `ok`: any other 200 doesn't establish the post, and isn't
+    retried (a review of 1e71079, R3)."""
+    with pytest.raises(OutcomeUnknownError) as raised:
+        await run(Reply(200, raw=raw))
+    assert raised.value.code == "slack.outcome_unknown"
+
+
 @pytest.mark.parametrize("status", [429, 500, 503, 302, 201])
 async def test_anything_else_after_sending_is_unknown(status: int) -> None:
     with pytest.raises(OutcomeUnknownError) as raised:

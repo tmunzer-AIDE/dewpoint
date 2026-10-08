@@ -12,8 +12,9 @@ buttons whose text is at most 75, the severity a context line. Every value is es
 `mrkdwn` objects with `verbatim: true` (`messaging/formatting-message-text`), so run data never mentions `@here` or a
 channel nor makes a link; a value past a limit is cut, before an escape rather than through one, and marked.
 
-A send is ambiguous (D20): a 200 is sent; a 4xx is Slack's refusal (400 `invalid_payload`, 403 `action_prohibited`,
-404 `channel_not_found`, 410 `channel_is_archived`); a 429, a 5xx or anything else after sending is unknown (D10)."""
+A send is ambiguous (D20): a 200 with the body `ok` is sent; a 4xx is Slack's refusal (400 `invalid_payload`, 403
+`action_prohibited`, 404 `channel_not_found`, 410 `channel_is_archived`); a 429, a 5xx, another 200 or anything else
+after sending is unknown (D10)."""
 
 import uuid
 from typing import Any
@@ -150,7 +151,7 @@ class SendMessage(Node):
         connection = await ctx.connection(config.connection)
         answer = await connection.http.request("POST", "", json=payload)
         status = answer.status_code
-        if status == 200:
+        if status == 200 and answer.content == b"ok":  # Slack's documented success; any other 200 proves nothing
             return SendOutput(sent=True, truncated=truncated)
         if status in REFUSALS:
             raise FatalError(*REFUSALS[status])
