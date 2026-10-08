@@ -197,8 +197,9 @@ development machine, **not production capacity**:
   25.6. **Before D9, a second dispatcher added almost nothing**: both took the same candidates in the same order, and
   the second waited for each endpoint's row the first held, to find its event matched. Since engine 2b-4b M3 (D9) the
   matcher takes the endpoint's row and then the tenant's counter row `SKIP LOCKED`: one held elsewhere passes its event
-  by (`busy`, counted in the cycle's report), never waited on, and a pass picks four batches' candidates so busy ones
-  give their places to the next. This control is measured again before these numbers are replaced;
+  by (`busy`, counted in the cycle's report), never waited on, and each pass goes on from where the last stopped (a
+  cursor that wraps around), so no run of busy events, however long, starves the ones after it. This control is
+  measured again before these numbers are replaced;
 - **each limit on its own** (`buckets`, `quotas`), at its default: every rate bucket accepted what its burst and rate
   allow over the time taken, within one call (an endpoint's events 1,029 of 1,030; its bytes 15.5 of 16.0 MiB; a
   tenant's events 5,000 of 5,030, in calls of 100 events, so the 30 refilled never made a whole one; its bytes 76 of

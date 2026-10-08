@@ -9,7 +9,8 @@ rechecked under them; the event's endpoint row; the tenant's counter row; and on
 SKIP LOCKED`, rechecked still pending and due (another dispatcher may have finished it). Holding the endpoint's row
 serializes ingress and matching on one endpoint. The endpoint's and the counter's rows are taken `SKIP LOCKED` too (D9):
 one held elsewhere passes the event by, `busy`, never waited on, so a second dispatcher takes other tenants' work; a
-pass picks `PAGES` batches' candidates, so busy ones give their places to the next, and tries one batch.
+pass picks `PAGES` batches' candidates after its rotation's cursor, tries one batch, and the next pass goes on from the
+last it visited, so no busy prefix starves the events after it (the owner's correction to D9).
 
 The event is opened with the tenant's private key and, for each enabled binding of its endpoint whose filter holds, in
 workflow-id order (§7.2), one request is admitted: source `webhook`, key `evt:<event id>:<workflow id>`, the event as
@@ -27,7 +28,8 @@ attempts untouched, so it never keeps the events after it out (the owner's revie
 import json
 import uuid
 from collections import Counter
-from datetime import timedelta
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 import structlog
 from cryptography.exceptions import InvalidTag
@@ -70,8 +72,8 @@ EVENT_NOT_JSON = "event_not_json"
 EVENT_NOT_OBJECT = "event_not_object"
 EVENT_ATTEMPTS = 5  # event-specific attempts before an unconfirmed failure is dead (§8.3)
 BACKOFF = timedelta(seconds=30)  # after the first event-specific failure, doubling (§15, provisional)
-PAGES = 4  # a pass picks this many batches' candidates: one busy (D9) gives its place to the next, so busy rows never
-# hold the first batch; a batch is still all it tries
+PAGES = 4  # a pass picks this many batches' candidates, after its rotation's cursor: one busy (D9) gives its place to
+# the next, and the next pass goes on from the last visited; a batch is still all it tries
 ERROR_BACKOFF = timedelta(minutes=1)  # after a match failed unexpectedly (a bug, an outage), its attempts untouched
 ROLLED_BACK = (GATE_OFF, ENVIRONMENT_NOT_RECORDED, TENANT_ERASING, SKIPPED, BUSY)
 ALERTS = "dewpoint.matching.alerts"  # in the session's `info`: alerts logged once its transaction commits
@@ -132,8 +134,22 @@ async def _backed_off(sessionmaker: async_sessionmaker[AsyncSession], tenant_id:
         log.error("event_match_unbacked", event_id=str(event_id), error=type(e).__name__)
 
 
+@dataclass
+class Rotation:
+    """Where the last pass stopped among the candidates, `(rank, received_at, event id)`: the next goes on from there,
+    and wraps around once a pick comes back short. So no prefix of busy events, however long, starves the ones after
+    it: every pending event is visited within a bounded number of passes (the owner's correction to D9)."""
+
+    after: tuple[int, datetime, uuid.UUID] | None = None
+
+
 async def match_once(
-    sessionmaker: async_sessionmaker[AsyncSession], keys: KeySource, verified: Verified, *, batch: int = BATCH
+    sessionmaker: async_sessionmaker[AsyncSession],
+    keys: KeySource,
+    verified: Verified,
+    *,
+    batch: int = BATCH,
+    rotation: Rotation | None = None,
 ) -> dict[str, int]:
     """One cycle's matching: nothing while the gate is off; otherwise each candidate in turn. What happened, counted.
     A match that fails (a bug, an outage) is logged by type and leaves its event as it was."""
@@ -141,14 +157,18 @@ async def match_once(
         waiting = gate_off(await s.get(PlatformSettings, 1))
         if waiting is not None:
             return {waiting: 1}
-        query = text("select tenant_id, event_id, endpoint_id from event_candidates(:n)")
-        picked = (await s.execute(query, {"n": batch * PAGES})).all()
+        rotation = rotation if rotation is not None else Rotation()
+        after = rotation.after or (None, None, None)
+        query = text("select tenant_id, event_id, endpoint_id, rank, received_at from event_candidates(:n, :r, :t, :e)")
+        picked = (await s.execute(query, {"n": batch * PAGES, "r": after[0], "t": after[1], "e": after[2]})).all()
     counts: Counter[str] = Counter()
-    tried = 0
+    tried, visited = 0, 0
     with budget.passing("matching") as admitted:
-        for tenant_id, event_id, endpoint_id in admitted(picked, key=lambda row: row[1]):
-            if tried >= batch:  # a batch tried: the candidates past it were for the busy ones' places (D9)
+        for tenant_id, event_id, endpoint_id, rank, received_at in admitted(picked):  # in the cursor's order
+            if tried >= batch:  # a batch tried: the next pass goes on from here (D9)
                 break
+            visited += 1
+            rotation.after = (rank, received_at, event_id)
             try:
                 outcome = await match_event(sessionmaker, keys, verified, tenant_id=tenant_id, event_id=event_id,
                                             endpoint_id=endpoint_id)  # fmt: skip
@@ -162,6 +182,8 @@ async def match_once(
                 counts["error"] += 1
                 if not unavailable(e):  # the database failing writes nothing; tried again next pass
                     await _backed_off(sessionmaker, tenant_id, event_id)
+    if visited == len(picked) and len(picked) < batch * PAGES:
+        rotation.after = None  # it reached the end: the next pass starts over
     admitted.reported(counts, full=len(picked) >= batch * PAGES)
     return dict(counts)
 

@@ -428,3 +428,23 @@ async def test_busy_events_never_hold_a_passes_batch(
         )
     assert counts.get(matching.BUSY) == 2 and counts.get("unmatched") == 1, counts
     assert (await event_state(owner_sessionmaker, later))["status"] == "unmatched"
+
+
+async def test_a_busy_prefix_of_any_length_never_starves_the_events_after_it(
+    dev, owner_sessionmaker, ingress_sessionmaker, dispatch_sessionmaker
+) -> None:  # fmt: skip
+    """The owner's correction to D9: four batches' candidates aren't paging, since a busy prefix longer than them
+    starved every event after it, pass after pass. Each pass now goes on from where the last stopped (its rotation, a
+    cursor wrapping around once a pick comes back short). Nine events of a busy endpoint first, a pass of one, pages of
+    four: the tenth, another endpoint's, is tried by the third pass."""
+    second = await endpoint(owner_sessionmaker, dev.tenant_id, dev.user_id)
+    await send(ingress_sessionmaker, dev, *[ALARM | {"id": f"a-{n}"} for n in range(9)])
+    [later] = await send(ingress_sessionmaker, dev, ALARM | {"id": "a-9"}, endpoint_id=second)
+    rotation, passes = matching.Rotation(), []
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text("select 1 from webhook_endpoints where id = :e for update"), {"e": dev.endpoint_id})
+        for _ in range(3):
+            passes.append(await asyncio.wait_for(matching.match_once(dispatch_sessionmaker, KEYS, matching.Verified(),
+                                                                     batch=1, rotation=rotation), 10))  # fmt: skip
+    assert [p.get(matching.BUSY, 0) for p in passes] == [4, 4, 1], passes
+    assert passes[2].get("unmatched") == 1 and (await event_state(owner_sessionmaker, later))["status"] == "unmatched"
