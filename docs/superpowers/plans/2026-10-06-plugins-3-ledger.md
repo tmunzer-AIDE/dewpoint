@@ -1105,7 +1105,7 @@ Rulings:
 - Ruling: a Teams 2xx is reported `{accepted: true}`, never `delivered`: the trigger's success status isn't documented,
   and a flow accepting a request doesn't prove the post - cost if wrong: none.
 - Ruling: Teams's quota scope is per URL, 25 posts in 300 s (the flow-bot limit), bursts of 5 - cost if wrong: a fast
-  workflow waits.
+  workflow waits. (Changed after the review: one a tenant, below.)
 - Ruling: Google Chat's scope is per space (D9: the URL's `spaces/{space}`), 1 a second, no burst - cost if wrong: none.
 - Ruling: a generic webhook's URL is any https URL the guard allows (http only to allowlisted addresses, D7: dropped
   in task 6, below), the answer's status its only output (a receiver's body could quote anything) - cost if wrong: a receiver's answer isn't
@@ -1157,7 +1157,8 @@ Rulings:
   allowlisted address isn't offered - cost if wrong: a plain-http receiver waits for a type that declares it.
 - Ruling (task 6, webhook): the URL is a lowercase host name or IPv4 address (no IPv6 literal, no trailing dot), a
   port 1 to 65535, a path of RFC 3986's characters with its query; no user, no fragment - so the host the scope is
-  keyed by is the host connected to - cost if wrong: an IPv6-literal or an uppercase URL is refused at creation.
+  keyed by is the host connected to - cost if wrong: an IPv6-literal or an uppercase URL is refused at creation. (The
+  review added: not a chat target's own webhook host, below.)
 - Ruling (task 6, webhook): one quota scope a host (`secret_pattern` on the URL's host), 1 a second with bursts of 5:
   a receiver's limit isn't known, and URLs to one receiver share its budget - cost if wrong: a fast workflow waits.
 - Ruling (task 6, webhook): no header of the node's (task 2), so a receiver that needs an authentication header
@@ -1172,3 +1173,54 @@ Rulings:
 - Ruling (task 6, webhook): its URL's path segments and query values of 8 characters or more join the secret index
   like any secret URL's (task 2), so an output naming one (a path word such as `incoming`) is redacted - cost if
   wrong: over-redaction of such words.
+
+Fresh-context review of 3c-1 (at e62f132, 2026-10-08): no High, no Medium, six Low and two notes. Each finding is
+fixed test-first, its protection checked by removing it (mutants named in each commit):
+- L1 (`c82364d`): a secret URL's pattern was checked as text only, so `https://x|http://.*` started with https yet
+  admitted plain http. Ruling: the runtime holds the rule - `secret()` takes a secret URL only if it starts with
+  `https://`, and `base_url()` reads none that doesn't - since a pattern's text can't prove what it matches - cost if
+  wrong: none.
+- L2 (`c82364d`): a `secret_pattern` whose group is optional or empty keyed a scope by nothing. A scope's part must
+  take part in the match and not be empty, where the secret is accepted and where scopes are keyed; else the secret
+  is refused before any request.
+- L3, a ruling challenge (`f6e6d4d`): Teams limits a flow bot's posts per Teams connection ("Non-Get requests per
+  connection", `connectors/teams`, read again 2026-10-08), which no Workflows URL names; keyed by URL, flows sharing
+  one connection each got a budget, as did one flow's URL spelt two ways. Ruling: Teams' scope is one a tenant
+  (`teams.tenant`), D9's fallback as Slack's - under-using the quota, never exceeding it - cost if wrong: a tenant's
+  Teams messages, every flow's together, queue at 25 in 300 s.
+- L4 (`7719a88`): the generic webhook accepted Slack's, Google Chat's and Teams' webhook URLs, and
+  `webhook.send_message` posts run data as it is, so a `<!channel>` would have reached Slack unescaped and the send
+  charged `webhook.host`. Ruling: the generic type refuses `hooks.slack.com`, `chat.googleapis.com` and any host
+  under `logic.azure.com`, `api.powerplatform.com` or `webhook.office.com`; those take their own type - cost if
+  wrong: a workflow that wanted the raw JSON shape on such a host can't have it.
+- L5 (`9c3728f`): the secret index held a URL's parts decoded only (a Chat token written `…%3D` was indexed as
+  `…=`). The raw path, raw segments and raw query values of 8 characters or more join it too.
+- L6 (`c48eec0`): httpx logs each request's whole URL at INFO; only the root's WARNING level kept it out. Configuring
+  the process sets `httpx` and `httpcore` to WARNING.
+- Note (docs): the webhook's docstring claimed a guard check at creation; the API's create path runs the type's
+  checks only, and the guard vets on every connect. Docstring corrected (`7719a88`). The gap against D7's and D8's
+  wording ("the API at connection creation") predates 3c-1; it's flagged for the owner as a separate task, not fixed
+  here.
+- Note (over-redaction): every secret-URL type's path segments and query values of 8 characters or more join the
+  index (task 2), so a provider's constant words (`services`, `messages`, `workflows`, `triggers`, `2016-06-01`,
+  `/triggers/manual/run`) are masked in every output of a run tree that uses such a connection, Mist's included.
+  Ruling: kept, fail-closed - cost if wrong: such words read redacted in those outputs. Recommendation for the owner,
+  not built: a type declares its URL's secret parts (named groups in its pattern: Teams' `sig`, Chat's `token`, a
+  Slack URL's last segment), the rest indexed only within the whole URL; it needs each provider's secret parts
+  verified first.
+
+### 3c-1 checkpoint (2026-10-08, at c48eec0, local, not pushed)
+
+- Built (tasks 1-9, test-first): SDK 0.6.0 with `SecretUrl`, `RateScope.secret_pattern` and the message model
+  (32b2d31); secret-URL connections at run time and at creation, exact URL only (616391e); Slack (5d56645); Teams
+  (4e34072); Google Chat (d34dd85); the generic webhook (684022d); simulate in each node; the RunGraph proof against
+  local fakes (fa26d8f); the operator guides (e62f132).
+- Fresh-context review: no High or Medium; L1-L6 fixed test-first, each protection checked by removing it; two notes
+  recorded above.
+- Verified at c48eec0: 1,656 tests across the SDK, the catalog, connections, egress, logs, the worker, the API's
+  connections and uvicorn logging, every plugin and the CLI; ruff, format, mypy and import contracts; CodeQL's
+  python analysis finds nothing locally, with CI's CLI and query filter.
+- Not run: the full suite (about 10 minutes, asked first); a Compose proof; any real Slack, Teams, Google Chat or
+  receiver call (each needs the owner's say and a test channel).
+- Awaiting the owner: sign-off of this section's rulings (amended in tasks 4 and 6 and after the review, as marked);
+  the full suite; push and PR.
