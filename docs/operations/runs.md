@@ -435,6 +435,14 @@ claims are.
 - **Sub-flows and failure handlers.** A sub-flow's input is checked against the child's input schema
   (`input_invalid` when it doesn't match) and claimed as a trigger is, and the child is granted the parent's claims it
   holds; a sub-flow grants its parent the claims in its outputs. A failure handler is granted what its trigger holds.
+- **How many claims one crossing carries (a present limit).** A sub-flow's input, a sub-flow's outputs and a loop
+  batch's items cross to another run with the claims they hold, granted in one activity with a one-minute timeout.
+  That activity still reads each claim, and checks its right to grant it, one at a time: measured on a test machine,
+  about 7 to 8 ms a claim for output claims held by grant, a tenth of them nesting another. So a crossing of about
+  7,500 such claims or more can time out: the step or loop that started it fails with `internal_error`, and a sub-flow
+  whose outputs hold that many fails itself. A list held as one claim crosses as one. Reading and checking them in
+  batches is planned (2b-4b M3); until a crossing of 10,000 realistic claims is shown to succeed end to end, none that
+  size is supported.
 - **The secret index.** Every string of 4 characters or more in a sensitive claim joins its run tree's index (the run,
   its sub-runs and its batches share one), stored encrypted, and so does a map key claimed with its map. Every
   message leaving an activity (a step's error, a CEL error, a `fail` node's message) and every row the projection
