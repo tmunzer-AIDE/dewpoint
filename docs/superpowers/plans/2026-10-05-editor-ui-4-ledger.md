@@ -1099,3 +1099,39 @@ M38. **The combined tree's checks** (be8bfc7, main 6e092b5 merged):
     - CodeQL, run locally as codeql.yml does, with CI's versions (CLI 2.27.1, python-queries 1.8.11,
       javascript-queries 2.4.6, read from main's run 37746611558): 0 findings in each language.
     - gitleaks 8.30.1 over f65c6f9..HEAD: no leaks.
+
+### Owner, 5c6d802 reviewed (2026-10-08, pasted)
+
+"The integration blockers are resolved at `5c6d802`." The owner accepted the revised cross-tenant summary tests and
+found no new blocking defect.
+- The owner ran 47 focused backend tests, matched the regenerated OpenAPI against the combined backend, and exercised
+  `/node-types` over all 310 node types from six shipped plugins, Mist included: identity and gzip answer identical
+  validated catalogs. Alembic has one head, 0047 → 0044, and main's migrations are untouched.
+- A minor correction: `test_migration_chain.py` wasn't database-independent. It inherited
+  `clean_db → owner_sessionmaker → pg_url`, which runs `alembic upgrade head` first, so a second head would fail setup,
+  not the assertion.
+- The qualifications to keep explicit:
+  - The browser failure's cause is unknown. Keep both runs, and synchronize the palette step on its focused input and
+    selected option rather than attribute the failure to load.
+  - Different query and SARIF-rule counts don't establish missing coverage, but matching pack versions alone doesn't
+    prove CI parity. Local CodeQL results don't satisfy GitHub's required checks.
+- 0048 for B4b and 0049 for B8 are "sensible replacement reservations, subject to the owner's explicit assignment";
+  0045 and 0046 are unchanged.
+
+### 4b, after the review of 5c6d802 (2026-10-08)
+
+M39. **The two corrections, and M38's wording withdrawn where it went too far.**
+    - `test_migration_chain.py` overrides `clean_db` with a no-op, so its setup plan touches no database. With 0047's
+      old parent briefly restored (0042), both assertions failed on their own terms (`['0044', '0047'] == ['0047']`,
+      `'0042' == '0044'`). With 0044 restored, both pass, and the file is unchanged.
+    - The foundations palette step now waits for its search to be visible and focused, for "secur" to be in it, and
+      for Security to be the selected option before Enter. The browser gate then passed 27 of 27, at a load average
+      of about 30.
+    - M38's first gate run: its cause is **unknown**. The run is kept as recorded (1 failed, 20 not run; the palette
+      went to Settings → Members), and so is the rerun (27 passed). M38's "A race between typing and the palette's
+      filtering is suspected" is withdrawn.
+    - CodeQL: the local runs (0 findings in each language) used CI's CLI and pack versions. That doesn't prove parity
+      with CI, and different query and rule counts don't establish missing coverage. They don't satisfy GitHub's
+      required checks, `analyze (python)` and `analyze (javascript-typescript)`, which must run on #60's head.
+    - Slots: 0048 (B4b) and 0049 (B8) are proposed replacements, not yet assigned; they wait for the owner's explicit
+      assignment. 0045 (B7) and 0046 (B9) are unchanged.

@@ -6,10 +6,17 @@ chained after the head it meets when it merges, never left on the head it was wr
 
 from pathlib import Path
 
+import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
 BACKEND = Path(__file__).resolve().parents[2]
+
+
+@pytest.fixture(autouse=True)
+def clean_db() -> None:
+    """No database here: the suite's own `clean_db` migrates one to head first, so a second head would fail that
+    setup and never reach these assertions (the owner's review of 5c6d802). These read Alembic's scripts alone."""
 
 
 def script() -> ScriptDirectory:

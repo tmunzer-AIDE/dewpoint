@@ -98,7 +98,15 @@ test.describe.serial("foundations", () => {
     await page.keyboard.press("Escape");
     await expect(palette).toBeHidden();
     await page.keyboard.press("ControlOrMeta+k");
+    // Enter goes to the option the palette has selected: each step waits for what it acts on (the owner's review of
+    // 5c6d802, after a run that went to Members; its cause unknown): the search focused, the letters in it, then
+    // Security the selected option.
+    const search = palette.getByRole("combobox");
+    await expect(search).toBeVisible();
+    await expect(search).toBeFocused();
     await page.keyboard.type("secur");
+    await expect(search).toHaveValue("secur");
+    await expect(palette.getByRole("option", { name: "Security", selected: true })).toBeVisible();
     await page.keyboard.press("Enter");
     await expect(page).toHaveURL(/\/account\/security/);
 
