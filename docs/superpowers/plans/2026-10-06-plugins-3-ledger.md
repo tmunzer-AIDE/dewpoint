@@ -1065,7 +1065,8 @@ Tasks (test-first, in order):
 4. Teams: a connection type and `teams.send_message` (an Adaptive Card through a Workflows webhook; a 2xx is the flow's
    acceptance, any other answer unknown).
 5. Google Chat: a connection type and `google_chat.send_message` (text, a scope per space).
-6. Webhook: a connection type and `webhook.send` (the message as JSON, or a body of the workflow's).
+6. Webhook: a connection type, `webhook.send_message` (the message as JSON) and `webhook.send_json` (a body of the
+   workflow's).
 7. Simulate: each node renders and reports what would be cut, sending nothing.
 8. Proof: a workflow posting to Slack, Google Chat, Teams and a webhook through RunGraph against local fakes; simulated,
    nothing is sent.
@@ -1074,7 +1075,8 @@ Tasks (test-first, in order):
 Rulings:
 - Ruling: 3c splits in two: 3c-1, the message model and its chat and webhook targets; 3c-2, SMTP (D20) and syslog
   (D21) - HTTP and socket transports share little, and 3b split the same way - cost if wrong: one more PR.
-- Ruling: one plugin a target (`slack`, `teams`, `google_chat`, `webhook`), each with its connection type and node; the
+- Ruling: one plugin a target (`slack`, `teams`, `google_chat`, `webhook`), each with its connection type and node (the
+  webhook two: task 6, below); the
   message model is the SDK's (`dewpoint.sdk.messages`), so any plugin can render it - a type key starts with its
   plugin's name - cost if wrong: none.
 - Ruling: a secret-URL connection sends to its URL exactly, with no path, query or header of the node's; the URL's
@@ -1105,8 +1107,8 @@ Rulings:
 - Ruling: Teams's quota scope is per URL, 25 posts in 300 s (the flow-bot limit), bursts of 5 - cost if wrong: a fast
   workflow waits.
 - Ruling: Google Chat's scope is per space (D9: the URL's `spaces/{space}`), 1 a second, no burst - cost if wrong: none.
-- Ruling: a generic webhook's URL is any https URL the guard allows (http only to allowlisted addresses, D7), the
-  answer's status its only output (a receiver's body could quote anything) - cost if wrong: a receiver's answer isn't
+- Ruling: a generic webhook's URL is any https URL the guard allows (http only to allowlisted addresses, D7: dropped
+  in task 6, below), the answer's status its only output (a receiver's body could quote anything) - cost if wrong: a receiver's answer isn't
   readable.
 - Ruling (task 1): a secret URL's pattern is declared on the type (`SecretUrl(field, pattern)`), matched whole
   (`re.fullmatch`) wherever the secret is read, not put on the secret field: pydantic's default regex engine has no
@@ -1147,3 +1149,26 @@ Rulings:
 - Ruling (task 5, Google Chat): only a 200 is sent (Google answers the created message); a 4xx but 429 is
   `google_chat.refused`, naming the status only, never the answer's message (it could quote anything); any other
   answer is unknown - cost if wrong: as Slack's.
+- Ruling (task 6, webhook): two nodes, `webhook.send_message` (the message model as JSON, the chat targets'
+  configuration, so a workflow changes target without reshaping it) and `webhook.send_json` (D18's template body: a
+  JSON value of the workflow's), not one node with a union, whose configuration would take two shapes - cost if
+  wrong: one more node type.
+- Ruling (task 6, webhook): https only: a secret URL's pattern starts with https (task 1), so D7's http to an
+  allowlisted address isn't offered - cost if wrong: a plain-http receiver waits for a type that declares it.
+- Ruling (task 6, webhook): the URL is a lowercase host name or IPv4 address (no IPv6 literal, no trailing dot), a
+  port 1 to 65535, a path of RFC 3986's characters with its query; no user, no fragment - so the host the scope is
+  keyed by is the host connected to - cost if wrong: an IPv6-literal or an uppercase URL is refused at creation.
+- Ruling (task 6, webhook): one quota scope a host (`secret_pattern` on the URL's host), 1 a second with bursts of 5:
+  a receiver's limit isn't known, and URLs to one receiver share its budget - cost if wrong: a fast workflow waits.
+- Ruling (task 6, webhook): no header of the node's (task 2), so a receiver that needs an authentication header
+  isn't reachable yet; the URL's own token is the credential - cost if wrong: such a receiver waits for a type that
+  declares the header as a secret.
+- Ruling (task 6, webhook): a 2xx is sent, its status the output; a 4xx but 429 is `webhook.refused`, naming the
+  status only; a 3xx (no redirect is followed), a 429, a 5xx or anything else is unknown; simulated, the status is
+  none - cost if wrong: as Slack's.
+- Ruling (task 6, webhook): a workflow's body is at most 1 MiB as sent and never NaN, checked when the configuration
+  is validated, before anything is sent; the message's size is its model's bound - cost if wrong: a larger body
+  needs a larger bound.
+- Ruling (task 6, webhook): its URL's path segments and query values of 8 characters or more join the secret index
+  like any secret URL's (task 2), so an output naming one (a path word such as `incoming`) is redacted - cost if
+  wrong: over-redaction of such words.
