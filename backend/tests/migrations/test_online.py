@@ -432,6 +432,7 @@ async def test_a_step_behind_a_held_lock_gives_way_until_it_is_released(cluster,
     table, mode, at, probes, first = HELD[case]
     if at != "0042":
         await asyncio.to_thread(upgrade, url, at)
+        caplog.clear()  # the setup's own steps (0035 to 0040 for 0049) may give way on their budget on a loaded machine
     waits: list[float] = []
     stop = asyncio.Event()
 
