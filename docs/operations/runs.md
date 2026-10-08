@@ -279,7 +279,9 @@ The 7th failure in a row, about an hour after the first, **holds** the item. It'
 the item and the last error's type: `dispatch_held`, `reconcile_starting_held`, `reconcile_open_held`,
 `reconcile_slot_held`, `cancel_held`, `match_held` or `subrun_held`. No pass tries it again until an operator releases
 it ([below](#the-operators-commands)). A success clears its kind's count; a reconciliation's clears its request's count
-in every phase.
+in every phase; an uncertain answer (Temporal not answering, or the history gone) neither counts nor clears. Once an
+item settles (a request no longer queued, starting or open, a slot released, a cancel sent or its run ended, an event no
+longer pending, a sub-run ended), the leader clears its counts, holds and recovery reasons within a cycle.
 
 What isn't counted keeps its own handling:
 

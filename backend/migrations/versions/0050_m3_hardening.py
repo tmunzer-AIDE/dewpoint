@@ -302,6 +302,54 @@ $$""",
     "TO dewpoint_api",
     f"GRANT INSERT ({OPERATOR_COLUMNS}, evidence) ON operator_commands TO dewpoint_api",
 ]  # fmt: skip
+# An item's count, hold or recovery reason goes once the item settles (the owner's ruling on the M3 checkpoint): its
+# row stays only while the item is in the state its kind of work, or its recovery, acts on (as each candidate function
+# picks it), a bounded number a call, each table's
+_LIVE_WORK = """CASE w.kind
+          WHEN 'dispatch' THEN EXISTS (SELECT 1 FROM run_requests q WHERE q.id = w.item_id AND q.tenant_id = w.tenant_id
+                                         AND q.status = 'queued')
+          WHEN 'reconcile_starting' THEN EXISTS (SELECT 1 FROM run_requests q WHERE q.id = w.item_id
+                                                   AND q.tenant_id = w.tenant_id AND q.status = 'starting')
+          WHEN 'reconcile_open' THEN EXISTS (SELECT 1 FROM run_requests q JOIN runs u ON u.id = q.id
+                                               WHERE q.id = w.item_id AND q.tenant_id = w.tenant_id
+                                                 AND q.status = 'started' AND u.status = 'running')
+          WHEN 'reconcile_slot' THEN EXISTS (SELECT 1 FROM run_slots t WHERE t.run_id = w.item_id
+                                               AND t.tenant_id = w.tenant_id)
+          WHEN 'cancel' THEN EXISTS (SELECT 1 FROM run_requests q JOIN runs u ON u.id = q.id
+                                       WHERE q.id = w.item_id AND q.tenant_id = w.tenant_id AND q.status = 'started'
+                                         AND q.cancel_requested_at IS NOT NULL AND q.cancel_sent_at IS NULL
+                                         AND u.status = 'running')
+          WHEN 'match' THEN EXISTS (SELECT 1 FROM inbound_events e WHERE e.id = w.item_id AND e.tenant_id = w.tenant_id
+                                      AND e.status = 'pending')
+          WHEN 'subrun' THEN EXISTS (SELECT 1 FROM runs u WHERE u.id = w.item_id AND u.tenant_id = w.tenant_id
+                                       AND u.status = 'running')
+          ELSE true END"""
+_LIVE_REASON = """CASE i.reason
+          WHEN 'run_history_missing' THEN EXISTS (SELECT 1 FROM runs u WHERE u.id = i.item_id
+                                                    AND u.tenant_id = i.tenant_id AND u.status = 'running')
+          WHEN 'subrun_history_missing' THEN EXISTS (SELECT 1 FROM runs u WHERE u.id = i.item_id
+                                                       AND u.tenant_id = i.tenant_id AND u.status = 'running')
+          WHEN 'slot_history_missing' THEN EXISTS (SELECT 1 FROM run_slots t WHERE t.run_id = i.item_id
+                                                     AND t.tenant_id = i.tenant_id)
+          ELSE EXISTS (SELECT 1 FROM run_requests q WHERE q.id = i.item_id AND q.tenant_id = i.tenant_id
+                         AND q.status = 'starting') END"""
+SETTLED = [
+    f"""CREATE FUNCTION work_settled_clear(max_rows integer) RETURNS integer
+LANGUAGE sql SECURITY DEFINER SET search_path = public, pg_temp SET row_security = off AS $$
+  WITH failures AS (
+    DELETE FROM work_failures f WHERE (f.tenant_id, f.item_id, f.kind) IN (
+      SELECT w.tenant_id, w.item_id, w.kind FROM work_failures w WHERE NOT ({_LIVE_WORK}) LIMIT max_rows)
+    RETURNING 1
+  ), reasons AS (
+    DELETE FROM recovery_items r WHERE (r.tenant_id, r.item_id, r.reason) IN (
+      SELECT i.tenant_id, i.item_id, i.reason FROM recovery_items i WHERE NOT ({_LIVE_REASON}) LIMIT max_rows)
+    RETURNING 1
+  )
+  SELECT ((SELECT count(*) FROM failures) + (SELECT count(*) FROM reasons))::integer
+$$""",
+    "REVOKE ALL ON FUNCTION work_settled_clear(integer) FROM PUBLIC",
+    "GRANT EXECUTE ON FUNCTION work_settled_clear(integer) TO dewpoint_dispatch",
+]
 ACCESS = [
     "GRANT SELECT, INSERT, UPDATE, DELETE ON work_failures, recovery_items TO dewpoint_dispatch",
     "GRANT SELECT ON operator_commands TO dewpoint_dispatch",
@@ -325,7 +373,9 @@ def upgrade() -> None:
              done=exists("function", "recovery_items_clear(text[], uuid[], uuid[])"))  # fmt: skip
         step(conn, "0050 the operator's functions", *ungranted(*OPERATOR),
              done=exists("function", "recovery_items_listed(integer)"))  # fmt: skip
-        step(conn, "0050 grants", *grants(*CURSOR), *grants(*CLEAR), *grants(*OPERATOR), *ACCESS)
+        step(conn, "0050 settled entries cleared", *ungranted(*SETTLED),
+             done=exists("function", "work_settled_clear(integer)"))  # fmt: skip
+        step(conn, "0050 grants", *grants(*CURSOR), *grants(*CLEAR), *grants(*OPERATOR), *grants(*SETTLED), *ACCESS)
 
 
 def downgrade() -> None:
@@ -333,6 +383,7 @@ def downgrade() -> None:
         op.execute(prior.replace("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION", 1))
     for table in ("work_failures", "recovery_items"):
         op.execute(f"DROP FUNCTION {table}_clear(text[], uuid[], uuid[])")
+    op.execute("DROP FUNCTION work_settled_clear(integer)")
     for function in ("pending_commands(integer)", "platform_admin_active(uuid)", "work_failure_release(text, uuid)",
                      "work_failures_held(integer)", "recovery_items_listed(integer)"):  # fmt: skip
         op.execute(f"DROP FUNCTION {function}")

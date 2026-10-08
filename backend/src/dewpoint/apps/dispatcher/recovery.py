@@ -54,3 +54,18 @@ async def resolved(
             await s.execute(_RESOLVED, {"r": list(reasons), "t": [t for t, _ in pairs], "i": [i for _, i in pairs]})
     except (DBAPIError, OSError) as e:  # a reason left over: the next pass that settles the item clears it
         log.error("recovery_unresolved", error=type(e).__name__)
+
+
+SETTLED = 500  # an item's entries cleared a cycle at most, each table's
+_SETTLED = text("SELECT work_settled_clear(:n)")
+
+
+async def settled(sessionmaker: async_sessionmaker[AsyncSession]) -> int:
+    """The failure counts, holds and recovery reasons of items that have settled, cleared (the owner's ruling on the
+    M3 checkpoint): how many. The database failing clears none: the next cycle does."""
+    try:
+        async with sessionmaker() as s, s.begin():
+            return int((await s.execute(_SETTLED, {"n": SETTLED})).scalar_one())
+    except (DBAPIError, OSError) as e:
+        log.error("settled_entries_uncleared", error=type(e).__name__)
+        return 0
