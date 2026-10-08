@@ -3,11 +3,13 @@
 
 from dewpoint.sdk.calls import CallContext, Option, OptionsQuery, ReadOnly
 from dewpoint.sdk.connections import (
+    MAIL_ADDRESS,
     ConnectionType,
     HeaderAuth,
     HostMap,
     RateScope,
     SecretUrl,
+    SmtpServer,
     StreamEndpoint,
     UrlField,
     VerifyResult,
@@ -18,7 +20,9 @@ from dewpoint.sdk.errors import FatalError, NodeError, OutcomeUnknownError, Retr
 from dewpoint.sdk.fields import connection_field, literal_only, options_field, sensitive, value_kinds
 from dewpoint.sdk.manifest import ManifestError, Plugin, dump_output, node_manifest
 from dewpoint.sdk.net import (
+    AuthUnavailable,
     Connection,
+    ConnectionSmtp,
     ConnectionUnavailable,
     ConnectionWs,
     Cooldown,
@@ -27,6 +31,7 @@ from dewpoint.sdk.net import (
     HttpClient,
     HttpResponse,
     InvalidRequest,
+    MailRefused,
     MaybeSent,
     Net,
     NetStream,
@@ -37,6 +42,7 @@ from dewpoint.sdk.net import (
     ResponseUnreadable,
     SimulationSendsNothing,
     StreamLost,
+    TlsUnavailable,
     TlsVerificationFailed,
     TransportError,
     WebSocket,
@@ -46,9 +52,12 @@ from dewpoint.sdk.triggers import Trigger
 from dewpoint.sdk.version import SDK_VERSION
 
 __all__ = [
+    "MAIL_ADDRESS",
     "SDK_VERSION",
+    "AuthUnavailable",
     "CallContext",
     "Connection",
+    "ConnectionSmtp",
     "ConnectionType",
     "ConnectionUnavailable",
     "ConnectionWs",
@@ -63,6 +72,7 @@ __all__ = [
     "HttpClient",
     "HttpResponse",
     "InvalidRequest",
+    "MailRefused",
     "ManifestError",
     "MaybeSent",
     "Net",
@@ -84,12 +94,14 @@ __all__ = [
     "RetryDefaults",
     "RetryableError",
     "SecretUrl",
+    "SmtpServer",
     "SideEffect",
     "SimulationSendsNothing",
     "StepContext",
     "StepLogger",
     "StreamEndpoint",
     "StreamLost",
+    "TlsUnavailable",
     "TlsVerificationFailed",
     "TransportError",
     "Trigger",

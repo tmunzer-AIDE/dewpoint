@@ -66,6 +66,38 @@ connection's secret.
   `outcome_unknown` and is never retried automatically. A Teams 2xx means the flow accepted the message (`accepted`),
   not that it was posted.
 
+### Mail (SMTP)
+
+An `email` connection names an SMTP server, which the runtime speaks itself (plugins-3 D20): a step names neither the
+server nor the sender, and never holds the password.
+
+- **Security.** `starttls` (port 587, RFC 6409): the server must offer STARTTLS, or nothing more is sent. `tls` (port
+  465, RFC 8314): TLS from the first byte. `none`: only to an allowlisted address, and never with a password. TLS is
+  1.2 or later, the certificate checked against the server's name.
+- **Signing in.** With a username and password, the runtime signs in once TLS is up, with PLAIN or else LOGIN (never
+  CRAM-MD5); both must be ASCII. A server offering neither fails the step, having sent nothing.
+- **What's sent.** The connection's sender, 1 to 50 recipients, each once, and a plain-text message the runtime puts on
+  the wire whole: a message with a bare CR or LF, a NUL or a line past 998 octets is refused before connecting. EHLO
+  names the sender's domain, never the worker's host name.
+- **Outcomes.** A server's refusal before the message's end sends nothing: a 4yz is retried, a 5yz fails. After it, a
+  250 is sent and a 4yz or 5yz is the server's definite refusal (RFC 5321 §4.2.5); a connection lost before the
+  server's answer leaves the step `outcome_unknown`, never retried. Recipients refused while others were accepted are
+  named in the step's output.
+- **Bounds.** A server's reply is at most 100 lines and 64 KiB, and a session at most 120 s (aborted past it). Mail
+  sessions run on a pool of 8 threads of their own, so a slow server never delays the rest of the worker's egress;
+  when all 8 are busy, further sends wait. A cancelled step aborts its send wherever it is.
+- **Verify.** Connects, greets, secures and signs in, then quits; it never sends MAIL.
+- **Firewalls.** Allow the server's host on its port (587 or 465; 25 for an allowlisted relay).
+
+### Syslog
+
+A `syslog` connection names a receiver (plugins-3 D21): `tls` (the default, port 6514, octet counting, TLS 1.2 or
+later, the certificate checked; RFC 5425), `udp` (port 514, one message a datagram; RFC 5426) or `tcp` (octet counting,
+or LF framing for legacy receivers; RFC 6587). UDP and TCP are plaintext: their receiver needs an allowlist entry.
+There are no client certificates. A message is at most 2048 octets over UDP and 8192 over TCP and TLS, cut to fit.
+Syslog has no acknowledgement: a sent message was handed over, not necessarily received, and a send is never retried
+once a byte may have left.
+
 ## The allowlist
 
 Only a platform admin can change the allowlist, through the `dewpoint_admin` database role. Every change is audited:
@@ -102,9 +134,10 @@ per tenant, so connections that share a credential share one budget.
 - **Google Chat.** One scope a space (`google_chat.space`), read from the URL: 1 a second, no burst, shared by all the
   space's webhooks.
 - **Webhook.** One scope a receiver's host (`webhook.host`): bursts of 5, then 1 a second.
+- **Email.** One scope a server host (`email.server`): bursts of 5, then 1 a second. Syslog has none.
 - **When no token is available.** A step waits up to 10 s. After that it fails with `cooldown` and sends nothing.
 - **When the provider sends `Retry-After`.** That scope is blocked for every run, for up to an hour.
 - **Seeing a block.** `GET /api/v1/t/{tenant}/connections/{id}` lists each blocked scope's current cooldown, shown
   by its kind (`mist.org`, `mist.token`, `mist.stream`, `slack.tenant`, `teams.tenant`, `google_chat.space`,
-  `webhook.host`). That end time is live: it moves if the provider extends or lifts the block. A stream's opening
-  refused with a 429 or 503 and a `Retry-After` blocks its stream scopes the same way.
+  `webhook.host`, `email.server`). That end time is live: it moves if the provider extends or lifts the block. A
+  stream's opening refused with a 429 or 503 and a `Retry-After` blocks its stream scopes the same way.

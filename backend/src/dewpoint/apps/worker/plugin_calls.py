@@ -35,7 +35,9 @@ from dewpoint.apps.worker.network import (
 )
 from dewpoint.core.claims.cipher import ClaimCipher
 from dewpoint.core.db import tenant_scope, unavailable
+from dewpoint.core.egress.guard import InvalidRequestError
 from dewpoint.core.egress.http import GuardedHttp
+from dewpoint.core.egress.smtp import GuardedSmtp
 from dewpoint.core.egress.ws import GuardedWebsocket
 from dewpoint.core.plugins import calls
 from dewpoint.core.tenancy import lifecycle
@@ -88,6 +90,8 @@ class CallNetwork:
     def __init__(self, network: Network, claimed: calls.Claimed, allowed: frozenset[str]) -> None:
         self.network, self.tenant_id, self._claimed, self._allowed = network, claimed.tenant_id, claimed, allowed
         self._http: GuardedHttp | None = None
+        self._smtp: GuardedSmtp | None = None
+        self._closed = False  # once the call ended: no mail client is made after (the review of 82ae00b)
         self.secrets: list[str] = []  # every string of the secrets this call opened: never in its answer
         self.changed = False  # the connection changed since the API read it
 
@@ -110,6 +114,18 @@ class CallNetwork:
 
     def core_ws(self) -> GuardedWebsocket:
         raise ReadOnly()  # a plugin call opens no stream (D3, D26); `ConnectionWs` refuses before asking
+
+    def core_smtp(self) -> GuardedSmtp:
+        """A mail server's probe (D3's read-only adapter): connect, greet, secure, sign in, QUIT; `ConnectionSmtp`
+        refuses a send before asking."""
+        if self._closed:  # a probe that waited for its scopes or a token while the call ended starts nothing
+            raise InvalidRequestError("closed")
+        if self._smtp is None:
+            self._smtp = GuardedSmtp(
+                self.network.guard, self.tenant_id, ssl_context=self.network.ssl_context,
+                limits=self.network.smtp_limits,
+            )  # fmt: skip
+        return self._smtp
 
     @property
     def http(self) -> Any:
@@ -135,6 +151,9 @@ class CallNetwork:
         return unsealed.opened(self, lambda: credential_key(self.network, self.tenant_id))
 
     async def aclose(self) -> None:
+        self._closed = True
+        if self._smtp is not None:
+            await self._smtp.aclose()
         if self._http is not None:
             await self._http.aclose()
 

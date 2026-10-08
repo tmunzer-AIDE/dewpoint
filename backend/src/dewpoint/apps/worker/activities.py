@@ -102,12 +102,14 @@ from dewpoint.engine.runtime.execution import INTERNAL_ERROR, VERSION_UNUSABLE
 from dewpoint.engine.runtime.ids import tenant_of
 from dewpoint.engine.runtime.projection import REDACTED, location
 from dewpoint.sdk import (
+    AuthUnavailable,
     ConnectionUnavailable,
     Cooldown,
     EgressRefused,
     FatalError,
     HandshakeRejected,
     InvalidRequest,
+    MailRefused,
     MaybeSent,
     Node,
     NodeError,
@@ -123,6 +125,7 @@ from dewpoint.sdk import (
     SideEffect,
     SimulationSendsNothing,
     StreamLost,
+    TlsUnavailable,
     TlsVerificationFailed,
     TransportError,
     dump_output,
@@ -227,12 +230,14 @@ def _declared(e: NodeError, node: type[Node]) -> tuple[str, str]:
 # are retried, the others fail.
 # A stream (D26): a refused handshake sent nothing a node answers for, retried only when the provider asked to wait or
 # failed (429, 5xx); a lost stream may have carried a message the node sent, as `MaybeSent`.
+# Mail (D20): a mail server's refusal delivered nothing, retried when it's transient (4yz); no TLS or no usable
+# sign-in fails, having sent nothing.
 _SENT_MAYBE = (MaybeSent, RateLimited, RedirectRefused, ResponseTooLarge, ResponseUnreadable, StreamLost)
 _RETRIED = (NotSent, Cooldown, MaybeSent, RateLimited, StreamLost)
 _TRANSPORT = (
     EgressRefused, TlsVerificationFailed, InvalidRequest, ConnectionUnavailable, SimulationSendsNothing, NotSent,
     Cooldown, MaybeSent, RateLimited, RedirectRefused, ResponseTooLarge, ResponseUnreadable, HandshakeRejected,
-    StreamLost,
+    StreamLost, MailRefused, TlsUnavailable, AuthUnavailable,
 )  # fmt: skip
 
 
@@ -260,6 +265,9 @@ def _transport_failed(e: TransportError, node: type[Node]) -> _StepFailed:
     if isinstance(e, HandshakeRejected):
         status = e.status if type(e.status) is int else 0  # a plugin's subclass can't make it retryable otherwise
         return _StepFailed(kind.code, kind.message, retryable=status == 429 or 500 <= status < 600)
+    if isinstance(e, MailRefused):
+        reply = e.reply if type(e.reply) is int else 0  # a plugin's subclass can't make it retryable otherwise
+        return _StepFailed(kind.code, kind.message, retryable=400 <= reply < 500)
     return _StepFailed(kind.code, kind.message, retryable=isinstance(e, _RETRIED))
 
 

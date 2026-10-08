@@ -31,10 +31,12 @@ dependencies = [
 dewpoint = "dewpoint.apps.cli.main:app"
 
 [project.entry-points."dewpoint.plugins"]
+email = "dewpoint.plugins.email:PLUGIN"
 flow = "dewpoint.plugins.flow:PLUGIN"
 google_chat = "dewpoint.plugins.google_chat:PLUGIN"
 mist = "dewpoint.plugins.mist:PLUGIN"
 slack = "dewpoint.plugins.slack:PLUGIN"
+syslog = "dewpoint.plugins.syslog:PLUGIN"
 teams = "dewpoint.plugins.teams:PLUGIN"
 webhook = "dewpoint.plugins.webhook:PLUGIN"
 

@@ -1328,3 +1328,243 @@ acceptance or push permission.
   parts, the fake key is a run of `k` of the same length. Code is identical; the three test files alone differ, and
   gitleaks finds nothing in the range. The pre-rewrite branch is kept as `backup/plugins-3c1-pre-rewrite` (c2a3127).
   Every SHA this section names is a pre-rewrite one; the map, in order: ebf932b -> b71326b, 32b2d31 -> dd4bc7b, 616391e -> 7bd65f3, 5d56645 -> 0bde4a3, 4e34072 -> dd7b68b, d34dd85 -> 4914391, 684022d -> f985277, fa26d8f -> 8545b6e, e62f132 -> c63ac2d, c82364d -> eaf909f, f6e6d4d -> ae87c81, 7719a88 -> 548d5d4, 9c3728f -> 78fc369, c48eec0 -> 1efdda9, 1e71079 -> 3f74d5d, 434db38 -> 06ad7fb, 61ef7ee -> de3e9a8, 4879091 -> 8201fab, 86c9d9c -> a505157, 2ee0d8c -> 48069a7, cf69a8d -> b8fc955, be0e579 -> cba7847, 9e9881b -> e7efe68, c2a3127 -> 5eccfed.
+- 3c-1 MERGED by the owner (#58, merge 6e092b5, 2026-10-08), CI green.
+
+## 3c-2 Messaging: SMTP and syslog
+
+Branch `feat/plugins-3c2` from `origin/main` 6e092b5 (#58), started 2026-10-08 on the owner's "3c-2". A go to build;
+this section's rulings await the owner's sign-off. No migration expected. No real mail or syslog server is contacted:
+tests and the proof run against local fakes.
+
+Facts checked (official sources, read 2026-10-08 by a research subagent, the key ones spot-checked; the stdlib read
+from the installed CPython 3.12.3; never from memory):
+- `smtplib` (CPython 3.12.3 source, docs.python.org/3.12): `SMTP.connect()` calls `_get_socket(host, port, timeout)`,
+  which a subclass may replace; `_host`, the name `starttls()` and `SMTP_SSL` check the certificate against
+  (`server_hostname=self._host`), is set only in `__init__`; `starttls()` raises `SMTPNotSupportedError` when the
+  server doesn't advertise it and discards the extensions after the handshake; `login()` tries CRAM-MD5, PLAIN, LOGIN
+  in that order; `sendmail()` returns the refused recipients when at least one is accepted, raises
+  `SMTPRecipientsRefused` when all are, `SMTPSenderRefused` on MAIL, `SMTPDataError` on DATA or after the payload;
+  `data()` dot-stuffs and writes the payload, then reads the final reply; `timeout` bounds each blocking operation.
+- `email` (CPython 3.12.3, tried; docs `email.policy`): `EmailMessage` refuses a header value holding CR or LF
+  (`ValueError`), To included; `email.policy.SMTP` writes CRLF and folds lines to 78; `make_msgid()` defaults to the
+  local host name (`socket.getfqdn()`), so a domain must be passed; `headerregistry.Address` refuses spaces, CR/LF and
+  angle brackets in an addr-spec.
+- RFC 5321: end of data "tells the SMTP server to now process the stored recipients" (§3.3); a 250 to it hands over
+  responsibility (§2.1, §4.1.1.4); after a 4yz or 5yz to it the server "MUST NOT make a subsequent attempt to deliver"
+  and the client retains responsibility (§4.2.5); a connection failure is treated "as if a 451 response had been
+  received" (§3.8), while a spurious timeout after the data "would typically result in delivery of multiple copies"
+  (§4.5.3.2.6); 4yz transient, 5yz permanent (§4.2.1); 421 may answer any command (§4.2.2); text lines at most 1000
+  octets with CRLF (§4.5.3.1.6); at least 100 recipients must be buffered (§4.5.3.1.8); dot-stuffing (§4.5.2). No
+  sentence says outright that a message goes to the accepted recipients only; it follows from the buffer model
+  (§3.3, §4.1.1.3).
+- RFC 3207: after the TLS handshake the client MUST discard prior knowledge and SHOULD re-issue EHLO (§4.2); 454 is a
+  temporary failure (§4); deleting "250 STARTTLS" is a man-in-the-middle attack (§6), and TLS can be required for
+  selected hosts (§6). RFC 8314: implicit TLS on 465 (§3.3), preferred to STARTTLS (§1); MUAs MUST validate the server
+  certificate per RFC 7817 (§5.3). RFC 8997: TLS 1.2 minimum. RFC 6409: submission on 587 (§3.1). RFC 4954: 235
+  success, 535 invalid credentials, 534 too weak, 454 temporary, 530 required (§6); PLAIN over TLS (§4), and no PLAIN
+  after a failed certificate check (§14). RFC 5322: Date and From required, Message-ID SHOULD (§3.6); lines at most
+  998 characters (§2.1.1). RFC 3834: `Auto-Submitted: auto-generated` SHOULD mark mail from automatic processes, and
+  responders SHOULD NOT answer it (§2, §5.2).
+- RFC 5424: `<PRI>1 TIMESTAMP HOSTNAME APP-NAME PROCID MSGID SD MSG`; PRI = facility × 8 + severity, no leading zero
+  (§6.2.1); facilities 0-23, severities 0 Emergency to 7 Debug (Tables 1, 2); HOSTNAME 255, APP-NAME 48, PROCID 128,
+  MSGID 32 characters of `%d33-126`, `-` for none; TIMESTAMP RFC 3339 with upper-case T and Z, at most 6 fraction
+  digits (§6.2.3); in an SD-PARAM value `"`, `\` and `]` MUST be escaped (§6.3.3); a UTF-8 MSG MUST start with the BOM
+  (§6.4); receivers MUST accept 480 octets and SHOULD accept 2048 (§6.1).
+- RFC 5425 (updated by RFC 9662): TLS on 6514, `MSG-LEN SP SYSLOG-MSG` framing (§4.3), receivers SHOULD handle 8192
+  octets (§4.3.1), the sender sends close_notify (§4.4), the host name matched against the certificate (§5.2); RFC
+  9662: TLS 1.2 mandatory, TLS 1.3 preferred if implemented, ECDHE-GCM preferred. RFC 5426: one message per datagram
+  (§3.1), no acknowledgement (§3.2), port 514 (§3.3), receivers SHOULD accept 2048 octets (§3.2), TLS outside managed
+  networks (§4.3); 65,507 is derived (65,535 less the headers), not written. RFC 6587 (Historic): octet counting, or
+  LF framing that splits a message holding an LF (§3.4.2); no standard port; not recommended for new deployments
+  (§4).
+- CEF, "Implementing ArcSight Common Event Format (CEF) - Version 27" (OpenText, SmartConnectors 25.1 docs): header
+  `CEF:Version|Vendor|Product|Version|Device Event Class ID|Name|Severity|Extension`; in the header `|` and `\` are
+  escaped with `\`; in the extension `=` and `\` are escaped and newlines written `\n`; UTF-8; Severity 0-10 (1-3 Low,
+  4-6 Medium, 7-8 High, 9-10 Very-High) or names; Vendor and Product 63, Version 31, event class 1023, Name 512; `msg`
+  1023; carried after a syslog header.
+
+Tasks (test-first, in order):
+1. SDK 0.7.0: a connection type may declare an SMTP server (`SmtpServer`: its config fields for host, port, security
+   and sender, an optional username field and password secret field); `connection.smtp` sends a message to recipients
+   and returns the refused ones, or probes (connect, EHLO, STARTTLS, AUTH, QUIT); `MailRefused` names the stage and
+   reply code of a definite refusal; the catalog checks the declaration as data.
+2. Core SMTP (`core/egress/smtp.py`): `smtplib` in a thread over a socket connected to an address the guard vetted,
+   `_host` the configured name; implicit TLS or required STARTTLS (TLS 1.2+, the certificate checked), plaintext only
+   to an allowlisted address; AUTH PLAIN or LOGIN only over TLS; the outcome classified (task 3's rulings).
+3. The runtime's `connection.smtp`: tokens from the type's scopes; a definite refusal leaves the attempt clean, a
+   connection lost after the payload doesn't; heartbeats while the thread works; refused when simulated; a plugin call
+   may probe only.
+4. Email: an `email` connection type (verify by probe) and `email.send_message`, the message model as a plain-text
+   email to its recipients.
+5. Syslog: a `syslog` connection type and `syslog.send_message`, RFC 5424 (or a CEF payload) over TLS, UDP or TCP.
+6. Simulate: each node renders and reports what it would cut, sending nothing.
+7. Proof: a workflow mailing and logging through RunGraph against a local SMTP server (STARTTLS) and local syslog
+   receivers (TLS, UDP); simulated, nothing is sent.
+8. Docs: the operator egress guide (SMTP modes and ports, syslog transports, the hosts to allow), the lifecycle guide.
+
+Rulings:
+- Ruling: 3c-2 is one slice, SMTP and syslog, as the owner named it - cost if wrong: a larger review.
+- Ruling: SMTP goes through stdlib `smtplib` in a worker thread (D20's choice; no new dependency), on a socket the
+  runtime connects to the guard's vetted address; `_host` is set to the configured name, which STARTTLS and implicit
+  TLS check the certificate against - cost if wrong: one thread a send.
+- Ruling: three security modes: `starttls` (required: not offered, refused or failed, nothing more is sent - RFC 3207
+  names a missing `STARTTLS` an attack), `tls` (implicit, RFC 8314), `none` (only to an allowlisted address, D7, and
+  never with a password, RFC 4954); TLS 1.2 or later (RFC 8997), the certificate validated against the configured
+  host (RFC 8314 §5.3) - cost if wrong: a server without TLS needs an allowlist entry and no authentication.
+- Ruling: the runtime authenticates (D4's `smtp_login`; the plugin never holds the password), with PLAIN, else LOGIN,
+  only once TLS is up; never CRAM-MD5, `smtplib`'s first choice - cost if wrong: a server offering CRAM-MD5 alone
+  can't be used.
+- Ruling: nothing can be delivered until the payload is written (RFC 5321 §3.3), so a failure before it sends nothing:
+  a 4yz, a 421 or a network failure is retryable, a 5yz fatal. After the end of data, a 250 is sent; a 4yz or 5yz is a
+  definite non-delivery (§4.2.5) and leaves the attempt clean (4yz retryable, 5yz fatal); a connection lost or timed
+  out after the payload is unknown (§4.5.3.2.6 warns of duplicates) - cost if wrong: a server that delivers after a
+  4yz duplicates on retry.
+- Ruling: when some recipients are refused, the message goes to the others (RFC 5321's buffer model; `smtplib`
+  returns the refused); the step succeeds and names the refused recipients; all refused is a refusal - cost if wrong:
+  a workflow must read `refused`.
+- Ruling: the envelope and header sender are the connection's (`from_address`), never the node's, so a workflow can't
+  send as anyone else - cost if wrong: one connection a sender.
+- Ruling: recipients are `to` only, 1 to 50 (under RFC 5321's 100), ASCII addresses matched whole (no quoted local
+  part, no SMTPUTF8); no cc or bcc, so every recipient sees the others - cost if wrong: hidden recipients wait for a
+  later version.
+- Ruling: the email is plain text, UTF-8 (`email.policy.SMTP`): From, To, Subject (the title, else the text's first
+  line, at most 200 characters), Date, a Message-ID on the sender's domain (never the worker's host name),
+  `Auto-Submitted: auto-generated` (RFC 3834); the body is the text, the fields as `label: value`, the links as
+  `label: url` and the severity; no HTML - cost if wrong: no rich formatting.
+- Ruling: EHLO names the sender's domain, never the worker's host name - cost if wrong: a server checking EHLO against
+  reverse DNS may refuse.
+- Ruling: one quota scope a server host (`email.server`, from the config's host): bursts of 5, then 1 a second; no
+  quota is documented (D9's fallback) - cost if wrong: a fast workflow waits.
+- Ruling: verify probes (D3's read-only adapter): connect, EHLO, STARTTLS, AUTH, QUIT, never MAIL - cost if wrong:
+  none.
+- Ruling: one session a send (connect to QUIT); 60 s for each socket operation; a timeout after the payload is
+  unknown - cost if wrong: a slow server's success reads unknown.
+- Ruling: syslog is RFC 5424 only: a UTF-8 MSG with the BOM; STRUCTURED-DATA, PROCID and MSGID nil (an SD-ID of ours
+  needs a registered enterprise number); HOSTNAME and APP-NAME the connection's (`-` and `dewpoint` by default);
+  TIMESTAMP UTC to the microsecond - cost if wrong: fields only in the MSG.
+- Ruling: a syslog message is one line: the title, the text, `label: value` fields and `label <url>` links joined by
+  ` | `; CR and LF become spaces - LF framing would split it, and receivers show lines - cost if wrong: multi-line
+  text is flattened.
+- Ruling: severities map info 6 (Informational), success 5 (Notice), warning 4 (Warning), critical 2 (Critical); the
+  facility is the connection's, 0 to 23, 1 (user-level) by default - cost if wrong: none.
+- Ruling: transports are `tls` (the default, 6514, octet counting, TLS 1.2 or later, the certificate checked, no
+  client certificate: RFC 5425, 9662, D21), `udp` (514, one message a datagram, RFC 5426) and `tcp` (octet counting,
+  or LF framing for legacy receivers, RFC 6587); plain transports only to allowlisted addresses (D7) - cost if wrong:
+  an unlisted plain receiver is refused.
+- Ruling: a UDP message is at most 2048 octets (receivers SHOULD accept 2048: RFC 5424 §6.1, RFC 5426 §3.2), a TCP or
+  TLS one at most 8192 (RFC 5425 §4.3.1); the MSG is cut to fit, marked and reported - cost if wrong: a datagram
+  fragmented on a small-MTU path may be lost.
+- Ruling: the CEF option's MSG is `CEF:0|Dewpoint|Dewpoint|<version>|<event class>|<name>|<severity>|msg=…`, escaped
+  as CEF v27 says; the Name the title (else the text's start) at most 512, `msg` the rest at most 1023; severity info
+  3, success 1, warning 6, critical 10 - cost if wrong: a SIEM wanting other keys maps them itself.
+- Ruling: every syslog send is ambiguous (D21): `sent` means the frame was handed over, never that it was received
+  (UDP has no acknowledgement); a failure once a byte may have left is unknown - cost if wrong: none.
+- Ruling: syslog has no quota scope (none is documented) and no secret (no client certificates in v1) - cost if
+  wrong: a runaway workflow isn't slowed by the plugin.
+- Ruling (task 2): the SMTP session is staged by hand (EHLO, STARTTLS, AUTH, MAIL, RCPT, DATA, payload) rather than
+  through `smtplib.sendmail`, so the payload's first byte is the boundary between a refusal (nothing delivered) and
+  `MaybeSent`; the session wraps the socket in TLS itself, the certificate checked against the configured name -
+  cost if wrong: none.
+- Ruling (task 2): only a 250 answers the message's end as sent; another 2yz is unknown, as is anything unreadable
+  (RFC 5321 answers the end with 250) - cost if wrong: a server answering 251 there needs a person.
+- Ruling (task 2): when every recipient is refused, a transient refusal among them makes the whole refusal transient
+  (a retry may reach them), else it's permanent; a 421 to any RCPT ends the send - cost if wrong: a retry repeats
+  permanent refusals.
+- Ruling (task 2): the runtime puts a message on the wire whole or not at all: a bare CR or LF (how a second message
+  is smuggled past a server), a NUL or a line past 998 octets is refused before connecting, as is a message past 10
+  MiB - cost if wrong: a plugin's message must be well formed (`email.policy.SMTP` makes it so).
+- Ruling (task 2): the username and password are printable ASCII (`smtplib` signs in with ASCII), at most 256 and
+  1024 characters - cost if wrong: a non-ASCII password can't be used.
+- Ruling (task 3): a probe takes a token from the type's scopes (it reaches the server) and never counts as a send
+  (it sends no MAIL); a send heartbeats every 10 s while its thread works - cost if wrong: none.
+- Ruling (task 4): the body is quoted-printable UTF-8, so every line on the wire is ASCII and short whatever the
+  server's 8BITMIME; control characters in the subject and the sender's name become spaces; simulated, the email
+  renders from a placeholder sender (the connection isn't opened) - cost if wrong: none.
+- Ruling (task 4): verify names what failed: `auth_failed` (535 at AUTH), `refused`, `tls_unavailable`,
+  `auth_unavailable`, `tls_verification_failed`, `egress_refused`, else `unreachable` - cost if wrong: none.
+- Ruling (task 5): a syslog node sends through the step's guarded network (`ctx.net`) to the connection's host and
+  port only, read from the connection's validated config; no SDK change: syslog has no credentials to apply - cost if
+  wrong: none.
+- Ruling (task 5): a CEF payload is sent without the BOM (RFC 5424's MSG-ANY): CEF readers expect `CEF:` first; its
+  Device Version is the plugin's - cost if wrong: a strict receiver reads its encoding as unspecified.
+- Ruling (task 5): simulated, a syslog message is cut for the default transport, TLS (8192 octets): the connection
+  isn't opened, so its transport isn't known - cost if wrong: a UDP connection cuts more than the simulation shows.
+
+Fresh-context review of 3c-2 (at a468385, 2026-10-08): one High, one Medium, four Low; no ruling challenge. Each is
+fixed test-first, its protection checked by removing it (mutants named in each commit):
+- H1 (`d47941d`): `smtplib` reads a reply's continuation lines without end, and sessions ran on the event loop's
+  default executor, which the guard resolves names on: a tenant's own server (no allowlist entry, no certificate
+  needed before STARTTLS) could flood a greeting until the worker ran out of memory, or drip a byte a minute and
+  hold threads until DNS stalled for every guarded request. Ruling: a reply is at most 100 lines and 64 KiB; a
+  session at most 120 s, aborted past it (unknown once the payload may have left, else nothing sent); sessions run on
+  a pool of 8 threads of their own - cost if wrong: a send to a server slower than 120 s fails, and when 8 sessions
+  are under way across the worker's tenants, further sends wait.
+- M1 (`d47941d`): a cancel during `create_connection` or the implicit-TLS handshake closed nothing, and the session
+  went on to deliver, or to the next address. An abort now sets a flag `_connect` checks before each address and
+  after connecting; once a socket is open, closing it ends the session at its next read or write. An attempt and a
+  plugin call keep one mail client and abort its sessions when they close.
+- L3 (`97b345a`): an encoded word (`=?utf-8?b?...?=@x.il`) passed as an address, and a mail reader decoded the To
+  header into recipients the envelope never had. Ruling: `MAIL_ADDRESS` refuses `=?` in a local part, and the To
+  header is built from `Address` objects - cost if wrong: such an address, valid in RFC 5322, can't be mailed.
+- L4 (`97b345a`): a CEF line over UDP reached 2155 octets. The name and the message are fitted, by octets, into what
+  the header leaves, cut before an escape; an event class that leaves no room fails `syslog.too_large` before
+  sending.
+- L5 (`97b345a`): duplicate recipients muddled what was refused. Ruling: each recipient once (compared without case),
+  refused by the runtime and the node - cost if wrong: a workflow must dedupe its list.
+- L6 (`97b345a`): U+2028 and its like in a title crashed rendering, and the ambiguous node ended `outcome_unknown`
+  though nothing was sent. Every line break `str.splitlines()` knows becomes a space in a header, and any rendering
+  failure is `email.invalid_message`, fatal, before anything is sent.
+- Also: `SmtpTarget`'s repr leaves the password out; `smtp_problems` reports an enum with an unhashable item rather
+  than raising.
+
+### 3c-2 checkpoint (2026-10-08, at bce79ea, local, not pushed)
+
+- Built (tasks 1-8, test-first; the runtime's and syslog's tests were written before their code but run after it,
+  while a mutation run held the tree, so their mutants are the proof): SDK 0.7.0 (afc0466); guarded SMTP (109344e);
+  the runtime's `connection.smtp` (6d3eb25); email (abbc7ee); syslog (bb9a222); a host-less type opens with no HTTP,
+  found by the proof (c926c49); the RunGraph proof (3781f48); the operator guides (a468385).
+- Fresh-context review: H1, M1 and L3-L6 fixed test-first, each protection checked by removing it (d47941d, 97b345a,
+  ledger bce79ea).
+- Verified at bce79ea: 1,935 tests across the SDK, the catalog, connections, egress, logs, the worker, the API's
+  connections and plugin calls, every plugin and the CLI; ruff, format, mypy, import contracts; gitleaks over the
+  branch's commits finds nothing; CodeQL's python analysis finds nothing locally.
+- Not run: the full suite (about 10 minutes, asked first); a Compose proof; any real mail server or syslog receiver
+  (each needs the owner's say and a test account or receiver).
+- Awaiting the owner: sign-off of this section's rulings; the full suite; push and PR.
+
+A technical review of c092eb9 (pasted by the owner, 2026-10-08): M1 still reproducible, and one more Low; no
+technical closure. Both fixed test-first, each protection checked by removing it (`a1cd3f4`):
+- M1: `wrap_socket` detaches the raw socket before its blocking handshake, so an abort closed a dead socket and the
+  handshake went on to deliver, for implicit TLS and STARTTLS, after a cancel, `aclose()` or a deadline that had
+  answered `NotSent` (a retry could duplicate the mail). The TLS socket is made without its handshake and is the
+  session's before it runs; a fence catches an abort that landed before. A test proxy holds the server's handshake
+  records, opening the window in every mode.
+- Found by stress runs of those tests (1 hang in 10 under load): an abort closed the socket from the event loop while
+  the session's thread was blocked in OpenSSL, which a close doesn't reliably wake, and the descriptor's number could
+  be reused by another socket; `SSLSocket.shutdown` also dropped the TLS object that thread used. Ruling: an abort only
+  shuts the descriptor down (the blocked call wakes, every later one fails); only the session's own thread closes its
+  socket, the live TLS one after a failed STARTTLS included - cost if wrong: none. 0 hangs in 80 stress runs after.
+- L1: a session was registered only after vetting, and a closed client took new sends. `aclose()` sets a closed state,
+  refused before vetting and checked after it, as the guarded websocket's fence; a closed client resolves nothing.
+- CodeQL then flagged a test wrapping a socket with the test CA's context (`py/insecure-protocol`, no TLS floor it
+  could see): the tests' client context now requires TLS 1.2, as the platform's (`d6da745`); CodeQL finds nothing.
+
+### 3c-2 checkpoint, after the review of c092eb9 (2026-10-08, at d6da745, local, not pushed)
+
+- Verified at d6da745: the whole backend suite, 4,478 passed and 8 skipped in 9 minutes with `-n auto`, the CEL gate
+  tests among them (run by a mistake: a shell glob emptied the intended file list, so pytest ran everything; not the
+  owner's authorized run, and CI keeps the gates apart); 1,950 tests across the affected areas at d0ec07a; ruff,
+  format, mypy, import contracts; gitleaks over the branch's commits; CodeQL's python analysis finds nothing.
+- Not run: a Compose proof; any real mail server or syslog receiver.
+- Awaiting the owner: technical closure of M1 and L1; sign-off of this section's rulings (the review's new ones
+  marked); push and PR.
+
+A technical review of 82ae00b (pasted by the owner, 2026-10-08): M1 technically closed; L1 only partly: the
+attempt's and a plugin call's mail client is made lazily, after the scope lookup and the quota wait, so a closure
+during either recorded nothing and the resumed send (or probe) made a fresh client and went on. Fixed test-first
+(`7616eb8`): both record their closure and refuse to make a client after it; each protection's removal fails a test.
+A technical review only: no ruling sign-off or push authorization.
+- The owner (2026-10-08): "ok, we're good. push and PR" (L1 technically closed; push and PR authorized), then signed
+  off this section's rulings. `origin/main` had moved (#60, #61, #62): merged into the branch (63c40ff, no conflicts,
+  no rebase, so every reviewed SHA stands); after it, 2,897 tests across both sides' areas pass, with ruff, mypy and
+  the import contracts.

@@ -16,6 +16,7 @@ from jsonschema import Draft202012Validator, FormatChecker
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dewpoint.core.egress.smtp import SmtpTarget
 from dewpoint.core.models.plugins import PluginManifest
 from dewpoint.core.ratelimit.buckets import Scope
 from dewpoint.sdk.connections import fill
@@ -71,6 +72,7 @@ class DeclaredType:
     verify: bool
     hash: str = ""
     stream: Mapping[str, Any] | None = None  # its websocket (plugins-3 D26): a host map, a path, its own scopes
+    smtp: Mapping[str, Any] | None = None  # its mail server (D20): the config and secret fields naming it
 
     @classmethod
     def from_manifest(cls, plugin: str, m: Mapping[str, Any]) -> "DeclaredType":
@@ -86,6 +88,7 @@ class DeclaredType:
             verify=bool(m.get("verify")),
             hash=declaration_hash(m),
             stream=m.get("stream"),
+            smtp=m.get("smtp"),
         )
 
     def _checked(self, schema: Mapping[str, Any], value: Any) -> dict[str, Any]:
@@ -127,6 +130,25 @@ class DeclaredType:
             host = self.host["hosts"].get(value) if isinstance(value, str) else None
             return f"https://{host}" if host else None
         return value if isinstance(value, str) else None
+
+    def smtp_target(self, config: Mapping[str, Any], secret: Mapping[str, Any]) -> SmtpTarget | None:
+        """The type's mail server, as the stored config and secret name it (plugins-3 D20), or None for a type without
+        one. EHLO names the sender's domain. An empty username or password is none; the values are checked where
+        they're used (`core.egress.smtp`), so a wrong one sends nothing."""
+        if self.smtp is None:
+            return None
+        s = self.smtp
+        host: Any = config.get(s["host"])  # each value is checked where it's used: any of another kind sends nothing
+        port: Any = config.get(s["port"])
+        security: Any = config.get(s["security"])
+        sender: Any = config.get(s["sender"])
+        domain = sender.rsplit("@", 1)[-1].lower() if isinstance(sender, str) else ""
+        username = config.get(s["username"]) if s["username"] else None
+        password = secret.get(s["password"]) if s["password"] else None
+        return SmtpTarget(
+            host=host, port=port, security=security, sender=sender, username=username or None,
+            password=password or None, ehlo_name=domain,
+        )  # fmt: skip
 
     def credentials(self, secret: Mapping[str, Any]) -> dict[str, str]:
         """The header the runtime sends (plugins-3 D4); the plugin never sees it."""

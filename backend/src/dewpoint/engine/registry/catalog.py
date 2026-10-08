@@ -18,6 +18,7 @@ from dewpoint.sdk.connections import (
     SCOPE_KIND_RE,
     TYPE_KEY_RE,
     secret_pattern_problem,
+    smtp_problems,
     template_parts,
     url_pattern_problem,
 )
@@ -429,6 +430,8 @@ def _connection_type_problems(plugin: str, t: Any, seen: set[str]) -> list[str]:
     expected = {"key", "label", "config_schema", "secret_schema", "auth", "host", "rate_scopes", "verify"}
     if "stream" in t:  # only when set
         expected.add("stream")
+    if "smtp" in t:  # only when set
+        expected.add("smtp")
     if set(t) != expected:
         out.append(f"{name}: needs exactly {sorted(expected)}")
     label = t.get("label")
@@ -456,6 +459,10 @@ def _connection_type_problems(plugin: str, t: Any, seen: set[str]) -> list[str]:
         out.append(f"{name}: verify must be true or false")
     if "stream" in t:
         out += _stream_problems(name, key, t["stream"], config_fields, secret_fields)
+    if "smtp" in t:
+        if t.get("host") is not None or t.get("auth") is not None or "stream" in t:
+            out.append(f"{name}: an SMTP type has no HTTP host, auth header or stream")
+        out += smtp_problems(name, t["smtp"], t.get("config_schema"), t.get("secret_schema"))
     out += _required_problems(name, t)
     return out
 
