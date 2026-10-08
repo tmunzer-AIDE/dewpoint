@@ -241,7 +241,8 @@ class DbConnections:
 
 def secret_strings(secret: Mapping[str, Any], minimum: int = MIN_SECRET) -> list[str]:
     """Every string of a secret the index must know (D5): each value at least `minimum` long, and a secret URL's path
-    and long parts. A plugin call's answer is checked against every non-empty one (`minimum=1`)."""
+    and long parts, decoded and as written. A plugin call's answer is checked against every non-empty one
+    (`minimum=1`)."""
     out: list[str] = []
     for text in secret.values():
         if not isinstance(text, str) or len(text) < minimum:
@@ -252,8 +253,12 @@ def secret_strings(secret: Mapping[str, Any], minimum: int = MIN_SECRET) -> list
                 url = httpx.URL(text)
             except (httpx.InvalidURL, ValueError):
                 continue
-            parts = [url.path, *url.path.split("/"), *(v for _, v in url.params.multi_items())]
-            out.extend(p for p in parts if len(p) >= URL_PART)
+            raw_path, _, raw_query = url.raw_path.decode("ascii", "replace").partition("?")
+            parts = [
+                url.path, *url.path.split("/"), *(v for _, v in url.params.multi_items()),
+                raw_path, *raw_path.split("/"), *(pair.partition("=")[2] for pair in raw_query.split("&")),
+            ]  # fmt: skip
+            out.extend(p for p in parts if len(p) >= URL_PART)  # decoded and as written: an output could repeat either
     return sorted(set(out))
 
 
