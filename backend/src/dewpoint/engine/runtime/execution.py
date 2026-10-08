@@ -356,6 +356,7 @@ class Execution:
             tasks[("step", inst)] = asyncio.create_task(self._timer(inst, self._timers[inst]))
         self._resume = []
         clock = asyncio.create_task(asyncio.sleep(max(0.0, (self.deadline - workflow.now()).total_seconds())))
+        closing = False
         try:
             while self.sched.ended is None:
                 self._serve_budget()
@@ -448,15 +449,23 @@ class Execution:
                     effect = task.result()
                     if effect is not None and key[0] != "cancelled":
                         self._apply(key, effect)
+        except GeneratorExit:
+            # Closed, not cancelled: a stopping worker evicts none of the runs it cached, so this coroutine outlives
+            # it, and whatever closes it later (the garbage collector) may do so while another run's workflow task is
+            # active on its thread, where a workflow call acts in that run. It ends here, acting on nothing: awaiting
+            # would have raised "coroutine ignored GeneratorExit", taken for a bug (the 2b-4b M2 suite's #16 failure).
+            closing = True
+            raise
         finally:
-            clock.cancel()
-            for key, task in tasks.items():
-                if key[0] not in ("project", "cancelled"):
-                    task.cancel()
-            # Each outstanding unit reports back first, a cancelled child included. A cancel of this execution meanwhile
-            # mustn't reach them again: Temporal refuses a second cancel of the same child, and then this workflow
-            # task could never complete. An end already decided stands.
-            await _landed(asyncio.gather(*tasks.values(), return_exceptions=True))
+            if not closing:
+                clock.cancel()
+                for key, task in tasks.items():
+                    if key[0] not in ("project", "cancelled"):
+                        task.cancel()
+                # Each outstanding unit reports back first, a cancelled child included. A cancel of this execution
+                # meanwhile mustn't reach them again: Temporal refuses a second cancel of the same child, and then this
+                # workflow task could never complete. An end already decided stands.
+                await _landed(asyncio.gather(*tasks.values(), return_exceptions=True))
         return None
 
     def _drain_due(self) -> bool:

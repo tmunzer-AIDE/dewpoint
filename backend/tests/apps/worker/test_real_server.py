@@ -4,15 +4,18 @@ reaches its parent, which settles its whole grant and writes its end; and Tempor
 the drain. Time runs for real here: waits are short, and a sleeping child is terminated, not waited for."""
 
 import asyncio
+import gc
+import inspect
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
 from temporalio.api.enums.v1 import EventType
-from temporalio.client import Client, WorkflowHandle
+from temporalio.client import Client, WorkflowHandle, WorkflowHistory
 from temporalio.testing import WorkflowEnvironment
-from temporalio.worker import Worker
+from temporalio.worker import Replayer, Worker
 
 from dewpoint.apps.worker.activities import cel_activity
 from dewpoint.apps.worker.deployment import set_current
@@ -20,6 +23,7 @@ from dewpoint.apps.worker.main import engine_worker
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.engine.runtime.activities import cel_queue
 from dewpoint.engine.runtime.execution import SUBFLOW_GRANT
+from dewpoint.engine.runtime.workflow import LoopBatch, RunGraph
 from tests.apps.worker.harness import MemoryStore, in_process, run_id_of, start
 from tests.apps.worker.test_deployment import build
 from tests.apps.worker.test_main import settings
@@ -393,3 +397,89 @@ async def test_an_execution_drains_by_its_historys_bytes_whatever_the_server_sug
     assert result.status == "succeeded", result
     sizes, failures = await continued_inputs(client, handle)
     assert sizes and failures == []
+
+
+async def suspended(handle: WorkflowHandle[Any, Any]) -> None:
+    """Until the run waits on a durable timer (in real time): its workflow task is done, and its worker caches it."""
+    for _ in range(200):
+        async for e in handle.fetch_history_events():
+            if e.event_type == EventType.EVENT_TYPE_TIMER_STARTED:
+                return
+        await asyncio.sleep(0.1)
+    raise AssertionError(f"{handle.id} never waited on a timer")
+
+
+def left_behind(run_id: str, workflow_type: str) -> Any:
+    """The run's own coroutine (or its batch's), still in memory after its worker stopped: suspended where its drive
+    loop waits."""
+    found = [
+        o
+        for o in gc.get_objects()
+        if inspect.iscoroutine(o)
+        and o.cr_code.co_qualname == f"{workflow_type}.run"
+        and o.cr_frame is not None
+        and getattr(o.cr_frame.f_locals.get("self"), "run_id", None) == run_id
+    ]
+    assert len(found) == 1, found
+    return found[0]
+
+
+def sleeping_batch() -> G:
+    """A loop past one batch (as `test_a_terminated_batch_fails_its_loop...`): its batch, a child, sleeps."""
+    g = graph().node("l", "flow.loop@1", {"items": list(range(101))}).node("d", "flow.delay@1", {"duration_s": 3600})
+    return g.edge("l", "d", "body")
+
+
+@pytest.mark.parametrize("workflow_type", ["RunGraph", "LoopBatch"])
+async def test_a_run_a_stopped_worker_left_in_memory_never_acts_in_another_run(
+    dev_env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, workflow_type: str
+) -> None:  # fmt: skip
+    """The trigger of the `fdb30fb` suite's #16 failure (2b-4b M2). A worker's shutdown evicts none of the runs it
+    cached: each stays in memory, its coroutine suspended in the drive loop. Closed later (by the garbage collector, on
+    whichever thread it ran, here at once) while another run's workflow task was active, the drive loop's cleanup
+    awaited, the close raised "coroutine ignored GeneratorExit", and the run took that for a bug of its own: it logged
+    `run_internal_error` and projected an end through the workflow APIs, which acted in the active run. That run's
+    history then held a command its own replay never makes, and its next replay failed (nondeterminism). A run being
+    closed now ends at once: nothing logged, nothing sent, the active run's history its own. A batch the same."""
+    from temporalio import workflow
+
+    from dewpoint.engine.runtime import execution
+
+    client, stale_store, store = dev_env.client, MemoryStore(), MemoryStore()
+    async with serving(client, stale_store):
+        if workflow_type == "RunGraph":
+            stale = await start(client, stale_store, sleeper(), {})
+            await suspended(stale)
+        else:
+            stale = await start(client, stale_store, sleeping_batch(), {})
+            await suspended(client.get_workflow_handle(await child_started(stale)))
+    zombie = left_behind(run_id_of(stale), workflow_type)
+    raised: list[str] = []
+    real = execution.Execution._queue_settled
+
+    def settled(self: Any) -> Any:
+        if not raised and workflow.info().workflow_type == "RunGraph":  # inside the active run's workflow task
+            raised.append("closed")
+            try:
+                zombie.close()
+            except BaseException as e:  # noqa: BLE001  # what closing it raised, if anything: the finding
+                raised.append(type(e).__name__)
+        return real(self)
+
+    monkeypatch.setattr(execution.Execution, "_queue_settled", settled)
+    g = graph(v=ref("steps.e.output.value")).node("e", "testkit.echo@1", {"value": 1})
+    caplog.set_level(logging.WARNING)
+    async with serving(client, store):
+        handle = await start(client, store, g, {})
+        result = await asyncio.wait_for(handle.result(), 60)
+    assert (result.status, result.outputs) == ("succeeded", {"v": 1}), result
+    history = await handle.fetch_history()
+    replayer = Replayer(workflows=[RunGraph, LoopBatch], data_converter=FIXTURE_CONVERTER)
+    try:
+        await replayer.replay_workflow(WorkflowHistory.from_json(handle.id, history.to_json()))
+        replayed = "clean"
+    except Exception as e:  # noqa: BLE001  # how its replay failed: the finding
+        replayed = type(e).__name__
+    logged = [r.getMessage().split(" ", 1)[0] for r in caplog.records if "_internal_error" in r.getMessage()]
+    found = {"closing": raised, "logged": logged, "stale_rows": run_id_of(stale) in store.runs, "replay": replayed}
+    assert found == {"closing": ["closed"], "logged": [], "stale_rows": False, "replay": "clean"}
