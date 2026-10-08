@@ -1888,3 +1888,6 @@ closure. Fixed test-first, its protection checked by removing it (`e5d3ff6e`):
   rules, never a second effect; turning `RecursionError` into `ValueError` in the runtime's `HttpResponse.json()` would
   cover every plugin, for the owner to decide.
 - A technical review only: no ruling sign-off or push authorization.
+- A closure review of 9cf5f21 (pasted by the owner, 2026-10-08): M1 technically closed, no new findings; its RunGraph
+  regression gives one POST and one incident, and removing either decoding fix brings the failure back. Technical
+  closure only: no ruling sign-off or push authorization.
