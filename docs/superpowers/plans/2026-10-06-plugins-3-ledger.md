@@ -1256,3 +1256,8 @@ acceptance or push permission.
 - Not run: the full suite (about 10 minutes, asked first); a Compose proof; any real provider call.
 - Awaiting the owner: technical closure of R1-R4; sign-off of this section's rulings (amended as marked); the full
   suite; push and PR.
+- The review of the fixes (pasted by the owner, 2026-10-08): R1-R4 technically closed at 2ee0d8c, against the amended
+  contracts, no new findings (264 existing tests and 52 closure checks run independently; no real provider call). R1
+  and R4 change the promised behaviour rather than preserve it. A technical closure only: the revised null-body and
+  link rulings, and every other 3c-1 ruling, still await the owner's sign-off; the creation-time vetting gap and the
+  over-redaction note stay separate decisions.
