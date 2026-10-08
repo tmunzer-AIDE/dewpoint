@@ -366,3 +366,30 @@ async def test_a_fan_out_sharing_cant_shrink_fails_its_step_before_temporals_his
     sent = await request_bytes(handle)
     print(f"backstop: {len(sent)} requests, {sum(sent):,} bytes sent")
     assert sum(sent) <= execution.HISTORY_GUARD
+
+
+async def test_an_execution_drains_by_its_historys_bytes_whatever_the_server_suggests(
+    dev_env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:  # fmt: skip
+    """The review of the M2 checkpoint (M6): the history guard's margin relied on Temporal's suggestion to continue as
+    new (a server setting, about 4 MB by default) to stop an execution's other sends; the engine drained by events
+    only. It drains once an execution has added `DRAIN_BYTES` of history too (its carried-in state counted out, so a
+    continued run never drains at once): lowered to 200 KB, a chain of 20 steps carrying 20 KB each continues as new,
+    far below the event thresholds, and ends."""
+    from dewpoint.engine.runtime import execution
+
+    monkeypatch.setattr(execution, "DRAIN_BYTES", 200_000)
+    client, store = dev_env.client, MemoryStore()
+    g = graph(last=ref("steps.x19.output.value"))
+    previous = None
+    for n in range(20):
+        g.node(f"x{n}", "testkit.echo@1", {"value": "v" * 20_000})
+        if previous:
+            g.edge(previous, f"x{n}")
+        previous = f"x{n}"
+    async with serving(client, store):
+        handle = await start(client, store, g)
+        result = await asyncio.wait_for(handle.result(), 120)
+    assert result.status == "succeeded", result
+    sizes, failures = await continued_inputs(client, handle)
+    assert sizes and failures == []

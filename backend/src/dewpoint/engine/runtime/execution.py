@@ -132,6 +132,10 @@ REQUEST_TOO_LARGE = "The values this expression reads are too large to send to t
 # for the rest of the execution to end, its continued run's input included
 HISTORY_GUARD = 32 * 1024 * 1024
 HISTORY_FULL = "The run's history can't hold more of this step's requests to the CEL evaluator (over 32 MiB)."
+# Drain once an execution has added this much history, whatever Temporal suggests (the review of the M2 checkpoint, M6):
+# its own suggestion is a server setting, about 4 MB by default, which an operator may raise; HISTORY_GUARD's margin
+# rests on draining well before it (a continued run starts with at most SNAPSHOT_MAX of state)
+DRAIN_BYTES = 8 * 1024 * 1024
 FILTER_INLINE = 1_000  # a filter's items the workflow may evaluate itself; a larger list goes to cel.evaluate (spec §6)
 SUBFLOW_GRANT = 1_000  # a sub-flow's initial grant (spec §6)
 MAX_DEPTH = 5  # sub-flows nest at most this deep (spec §6; publish checks it too)
@@ -277,6 +281,7 @@ class Execution:
         self._yield = YieldBudget()  # the local evaluations of the current workflow task (spec §5.6)
         self._yield_task = -1  # the history length that workflow task started with
         self._startup_task = workflow.info().get_current_history_length()  # this execution's first: it starts it
+        self._history_from = workflow.info().get_current_history_size()  # its input (a continued run's state) and all
         self._yield_timer: asyncio.Task[None] | None = None  # the one yield point every waiter shares
         self._rows: dict[tuple[str, str, int], StepRow] = {}  # queued for the next projection, per attempt
         self._started: dict[Instance, str] = {}
@@ -455,10 +460,16 @@ class Execution:
         return None
 
     def _drain_due(self) -> bool:
-        """Past `drain_events`, or Temporal suggests continuing. The drive loop wakes for it too, so a drain begins at
-        the first workflow task past the threshold, not at the next unit's end."""
+        """Past `drain_events`, past `DRAIN_BYTES` of history added since this execution began (its state carried in
+        is counted out, so a continued run never drains at once), or Temporal suggests continuing. The drive loop
+        wakes for it too, so a drain begins at the first workflow task past the threshold, not at the next unit's
+        end."""
         info = workflow.info()
-        return info.get_current_history_length() >= self.drain_events or info.is_continue_as_new_suggested()
+        return (
+            info.get_current_history_length() >= self.drain_events
+            or info.get_current_history_size() - self._history_from >= DRAIN_BYTES
+            or info.is_continue_as_new_suggested()
+        )
 
     def _units(self, tasks: Mapping[tuple[Any, ...], asyncio.Task[Any]]) -> dict[str, int]:
         """What's outstanding, by kind: activities, children, timers, values (CEL, filters), collects, the
