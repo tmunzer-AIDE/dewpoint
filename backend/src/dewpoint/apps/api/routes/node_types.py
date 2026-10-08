@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps.api.deps import get_keyring
-from dewpoint.apps.api.responses import OptionsOut, TriggerTypeOut
+from dewpoint.apps.api.responses import NodeTypeOut, OptionsOut, TriggerTypeOut
 from dewpoint.core.authz.permissions import ROLE_PERMISSIONS, P
 from dewpoint.core.connections.declared import declared_types
 from dewpoint.core.crypto.keyring import Keyring
@@ -77,27 +77,40 @@ async def catalog_answer(request: Request, content: Any) -> Response:
     return Response(await asyncio.to_thread(render), media_type="application/json", headers=headers)
 
 
-@router.get("/node-types", dependencies=[Depends(active_session)], response_model=list[dict[str, object]])
+NODE_TYPES = TypeAdapter(list[NodeTypeOut])
+
+
+@router.get("/node-types", dependencies=[Depends(active_session)], response_model=list[NodeTypeOut])
 async def node_types(request: Request, db: AsyncSession = Depends(get_db, scope="function")) -> Response:
-    """The editor's palette: node types that new versions may use (active) or still carry (deprecated)."""
-    return await catalog_answer(request, [
+    """The editor's palette: node types that new versions may use (active) or still carry (deprecated). A raw Response
+    skips FastAPI's response model, so each row is checked against NodeTypeOut here, as /trigger-types does (the owner's
+    review of #60), off the event loop as the compression is: the catalog runs to megabytes."""
+    rows = [
         {
             "ref": row.ref,
             "type": row.type,
             "version": row.version,
             "kind": row.kind,
             "state": row.state,
-            "title": row.manifest.get("title"),
+            "title": row.manifest["title"],
             "description": row.manifest.get("description", ""),
             "icon": row.manifest.get("icon"),
             "ports": row.manifest.get("ports", []),
             "dynamic_ports": row.manifest.get("dynamic_ports"),
-            "config_schema": row.manifest.get("config_schema"),
-            "output_schema": row.manifest.get("output_schema"),
+            "config_schema": row.manifest.get("config_schema") or {},
+            "output_schema": row.manifest.get("output_schema") or {},
             "options": row.manifest.get("options", []),
+            # How a step of this type runs (B5): every manifest carries these since the SDK's first commit.
+            "side_effect": row.manifest["side_effect"],
+            "credentials": row.manifest["credentials"],
+            "capabilities": row.manifest["capabilities"],
+            "retry": row.manifest["retry"],
+            "timeout_s": row.manifest["timeout_s"],
         }
         for row in await registry.list_node_types(db)
-    ])  # fmt: skip
+    ]  # fmt: skip
+    checked = await asyncio.to_thread(lambda: NODE_TYPES.dump_python(NODE_TYPES.validate_python(rows), mode="json"))
+    return await catalog_answer(request, checked)
 
 
 TRIGGER_TYPES = TypeAdapter(list[TriggerTypeOut])

@@ -1,0 +1,24 @@
+{
+  "format": "dewpoint.workflow",
+  "format_version": 1,
+  "name": "Report",
+  "graph": {
+    "graph_format": 1,
+    "nodes": [
+      {
+        "id": "5f0c6e2a-2b2b-4e2b-9c2b-2b2b2b2b2b2b",
+        "key": "t",
+        "type": "flow.transform@1",
+        "config": { "fields": { "answer": { "$value": { "kind": "cel", "expr": "1 + 1" } } } },
+        "options": { "on_error": "fail" },
+        "position": { "x": 0, "y": 140 }
+      }
+    ],
+    "edges": [],
+    "settings": {
+      "input_schema": { "type": "object" },
+      "outputs": { "answer": { "$value": { "kind": "cel", "expr": "has(steps.t.output) ? steps.t.output.answer : 0" } } }
+    }
+  },
+  "bindings": []
+}

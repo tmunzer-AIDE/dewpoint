@@ -22,6 +22,13 @@ async function renderAt(path: string) {
     createRoute({ getParentRoute: () => root, path: "/t/$tenantId/connections", component: page("connections page") }),
     createRoute({ getParentRoute: () => root, path: "/account/security", component: page("security page") }),
     createRoute({ getParentRoute: () => root, path: "/tenants", component: page("tenants page") }),
+    createRoute({
+      getParentRoute: () => root,
+      path: "/t/$tenantId/workflows",
+      component: page("workflows page"),
+      validateSearch: (s: Record<string, unknown>) => (s.new === true || s.new === "true" ? { new: true } : {}),
+    }),
+    createRoute({ getParentRoute: () => root, path: "/t/$tenantId/workflows/$workflowId", component: page("editor page") }),
   ];
   const router = createRouter({ routeTree: root.addChildren(routes), history: createMemoryHistory({ initialEntries: [path] }) });
   render(
@@ -68,9 +75,9 @@ it("goes where the chosen item points, then closes", async () => {
   const router = await renderAt("/t/t1/connections");
   fireEvent.keyDown(document, { key: "k", metaKey: true });
   await screen.findByRole("option", { name: /Acme Lab/ });
-  await userEvent.type(screen.getByRole("combobox"), "acme lab{Enter}");
-  await screen.findByText("connections page");
-  expect(router.state.location.pathname).toBe("/t/t2/connections");
+  await userEvent.type(screen.getByRole("combobox"), "secur{Enter}");
+  await screen.findByText("security page");
+  expect(router.state.location.pathname).toBe("/account/security");
   expect(dialog().hasAttribute("open")).toBe(false);
 });
 
@@ -87,4 +94,36 @@ it("offers a tenant's pages only once a tenant is chosen", async () => {
   fireEvent.keyDown(document, { key: "k", metaKey: true });
   await screen.findByRole("option", { name: /Acme Lab/ });
   expect(screen.queryByRole("option", { name: "Connections" })).toBeNull();
+});
+
+it("lists the tenant's workflows, opens one, and starts a new one", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+    const path = new URL((input as Request).url).pathname;
+    const body = path === "/api/v1/t/t1/workflows" ? [{ id: "w1", name: "Nightly report" }] : TENANTS;
+    return Promise.resolve(new Response(JSON.stringify(body)));
+  });
+  const router = await renderAt("/t/t1/connections");
+  fireEvent.keyDown(document, { key: "k", metaKey: true });
+  await userEvent.click(await screen.findByRole("option", { name: "Nightly report" }));
+  expect(router.state.location.pathname).toBe("/t/t1/workflows/w1");
+  fireEvent.keyDown(document, { key: "k", metaKey: true });
+  await userEvent.click(await screen.findByRole("option", { name: "New workflow" }));
+  expect(router.state.location.pathname).toBe("/t/t1/workflows");
+  expect(router.state.location.search).toEqual({ new: true });
+});
+
+it("offers New workflow only where the role can create one", async () => {
+  const viewing = TENANTS.map((t) => ({ ...t, role: "viewer" }));
+  vi.spyOn(globalThis, "fetch").mockImplementation(() => Promise.resolve(new Response(JSON.stringify(viewing))));
+  await renderAt("/t/t1/connections");
+  fireEvent.keyDown(document, { key: "k", metaKey: true });
+  expect(await screen.findByRole("option", { name: "Workflows" })).toBeTruthy();
+  expect(screen.queryByRole("option", { name: "New workflow" })).toBeNull();
+});
+
+it("opens a tenant on its workflows", async () => {
+  const router = await renderAt("/account/security");
+  fireEvent.keyDown(document, { key: "k", metaKey: true });
+  await userEvent.click(await screen.findByRole("option", { name: /Acme Lab/ }));
+  expect(router.state.location.pathname).toBe("/t/t2/workflows");
 });

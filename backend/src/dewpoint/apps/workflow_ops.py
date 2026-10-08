@@ -239,11 +239,23 @@ _DECLASSIFY_FORBIDDEN = Diagnostic(
 
 
 async def publish(
-    s: AsyncSession, ctx: TenantContext, wf: Workflow, *, expected_revision: int, settings: Settings
+    s: AsyncSession,
+    ctx: TenantContext,
+    wf: Workflow,
+    *,
+    expected_revision: int,
+    settings: Settings,
+    expected_latest_version: int | None = None,
 ) -> Published:
-    """Validate the draft and insert it as the new active version. `wf` must be locked FOR UPDATE."""
+    """Validate the draft and insert it as the new active version. `wf` must be locked FOR UPDATE. With
+    `expected_latest_version`, publish only if the newest version is still that one (0: none), so the number a
+    confirmation named is the number published (4b ruling 17); else VersionChangedError."""
     if wf.draft_revision != expected_revision:
         raise service.DraftConflictError(wf.draft_revision)
+    if expected_latest_version is not None:
+        latest = await service.latest_version_number(s, wf.id)
+        if latest != expected_latest_version:
+            raise service.VersionChangedError(latest)
     checked = await check_draft(s, ctx.tenant_id, wf.draft, settings)
     errors = [d for d in checked.diagnostics if d.severity == "error"]
     warnings = [d for d in checked.diagnostics if d.severity == "warning"]
