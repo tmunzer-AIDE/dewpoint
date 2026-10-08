@@ -202,6 +202,68 @@ async def test_closing_the_attempt_aborts_a_send_left_running(owner_sessionmaker
     assert server.sessions[0].client_closed
 
 
+def paused(monkeypatch: pytest.MonkeyPatch, where: str) -> asyncio.Event:
+    """Holds a send or probe in its scope lookup (`scopes`) or its quota wait (`tokens`) until released."""
+    release = asyncio.Event()
+    if where == "tokens":
+        real_take = worker_network.take_tokens
+
+        async def take(*args: Any) -> None:
+            await release.wait()
+            await real_take(*args)
+
+        monkeypatch.setattr(worker_network, "take_tokens", take)
+    else:
+        real_scopes = worker_network.ConnectionSmtp._scopes
+
+        async def scopes(self: Any) -> Any:
+            await release.wait()
+            return await real_scopes(self)
+
+        monkeypatch.setattr(worker_network.ConnectionSmtp, "_scopes", scopes)
+    return release
+
+
+@pytest.mark.parametrize("where", ["scopes", "tokens"])
+async def test_a_send_waiting_when_the_attempt_closes_never_starts(owner_sessionmaker, worker_sessionmaker,
+                                                                   monkeypatch, where: str) -> None:  # fmt: skip
+    """The attempt's mail client is made lazily: closed before it was, the attempt recorded nothing, and the waiting
+    send made a fresh one and delivered (the owner's review of 82ae00b)."""
+    release = paused(monkeypatch, where)
+    async with serve_smtp() as server:
+        seeded, cid = await _setup(owner_sessionmaker, server.port)
+        a = attempt(worker_sessionmaker, seeded)
+        conn = await a.connection(cid)
+        task = asyncio.create_task(conn.smtp.send(["ops@example.com"], MESSAGE))
+        await asyncio.sleep(0.1)
+        await a.aclose()
+        release.set()
+        with pytest.raises(InvalidRequest):
+            await asyncio.wait_for(task, 5)
+    assert server.sessions == [] and not a.uncertain
+
+
+@pytest.mark.parametrize("where", ["scopes", "tokens"])
+async def test_a_probe_waiting_when_the_call_closes_never_starts(owner_sessionmaker, worker_sessionmaker,
+                                                                  monkeypatch, where: str) -> None:  # fmt: skip
+    release = paused(monkeypatch, where)
+    async with serve_smtp() as server:
+        seeded, cid = await _setup(owner_sessionmaker, server.port)
+        net = network(worker_sessionmaker, seeded.tenant)
+        stored = await net.connections.load(seeded.tenant, cid)
+        assert stored is not None
+        claimed = SimpleNamespace(tenant_id=seeded.tenant, connection_id=cid, revision=stored.revision)
+        call = CallNetwork(net, claimed, frozenset({"mailkit"}))  # type: ignore[arg-type]
+        conn = await call.connection(cid)
+        task = asyncio.create_task(conn.smtp.probe())
+        await asyncio.sleep(0.1)
+        await call.aclose()
+        release.set()
+        with pytest.raises(InvalidRequest):
+            await asyncio.wait_for(task, 5)
+    assert server.sessions == []
+
+
 async def test_an_attempt_keeps_one_mail_client_so_closing_reaches_every_send(owner_sessionmaker, worker_sessionmaker):
     seeded, _ = await _setup(owner_sessionmaker, 2525)
     a = attempt(worker_sessionmaker, seeded)

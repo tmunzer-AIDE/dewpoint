@@ -817,6 +817,7 @@ class AttemptNetwork:
         self._net: GuardedNet | None = None
         self._ws: GuardedWebsocket | None = None
         self._smtp: GuardedSmtp | None = None
+        self._closed = False  # once the attempt ended: no mail client is made after (the review of 82ae00b)
         self._named: frozenset[uuid.UUID] | None = None
 
     @property
@@ -877,6 +878,8 @@ class AttemptNetwork:
         return self._net
 
     def core_smtp(self) -> GuardedSmtp:
+        if self._closed:  # a send that waited for its scopes or a token while the attempt ended starts nothing
+            raise InvalidRequestError("closed")
         if self._smtp is None:  # one for the attempt: closing it aborts any session still under way
             self._smtp = GuardedSmtp(
                 self.network.guard, self.tenant_id, ssl_context=self.network.ssl_context,
@@ -923,6 +926,7 @@ class AttemptNetwork:
         return unsealed.opened(self, self._credential_key)
 
     async def aclose(self) -> None:
+        self._closed = True
         if self._smtp is not None:
             await self._smtp.aclose()
         if self._ws is not None:
