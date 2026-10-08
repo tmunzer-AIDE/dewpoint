@@ -811,3 +811,44 @@ M34. **The checks on the corrected head** (37c764b, frontend only since 6d7766e)
       - The second run overlapped a stack rebuild.
       - No backend or deploy file changed between those heads and 37c764b.
     - The backend's parallel suite didn't rerun: no backend file changed since M23.
+
+### Owner, 315e19f reviewed (2026-10-08, pasted)
+
+"M26 is accepted as built, but final acceptance remains held at `315e19f` for one reproduced exit race. No push or PR
+approval yet."
+- The mutation-boundary, edge-placement and narrow-panel corrections hold. In Chromium, both climbing-join controls
+  take pointer clicks, and cards and the panel's equivalents stay at least 24 px at the minimum zoom.
+- At 320 × 720, Problems leaves a 260 × 150 px canvas, and Go to visibly focuses its step.
+- The remaining correction: a router exit waiting on a save, joined by a sign-out through `mayLeave()`, then sent
+  back here, released both holds. `agreedBy` recorded only the first caller.
+  - "Record every participating exit before sharing the decision."
+  - A router return releases only the router's hold. Sign-out keeps its own until it fails or is cancelled, or the
+    editor unmounts.
+  - Cover both arrival orders, with one shared question and no second prompt after logout.
+- The serial CEL evidence covers the final head (no backend or deployment file changed). The outage test and M25
+  stand as ruled.
+- Visual approval is still pending: the six comparison images didn't reach the owner's conversation.
+
+### 4b, after the review of 315e19f (2026-10-08)
+
+M35. **Every exit that joins a decision holds the document in its own right** (the owner's correction).
+    - `decide(by)` records its caller in `joined` before it shares the decision in flight. A consent adds every
+      joined exit to `holders`.
+    - `withdraw(exit)` removes only that exit, and the document is editable again only when none holds it:
+      - the router's return (`onResolved` here) withdraws "router";
+      - a failed sign-out (`stayed`) withdraws "guard";
+      - the editor unmounting ends them all.
+    - Tests, in both orders (router first, sign-out first), with the save held so the exits overlap:
+      - the router sent back leaves sign-out's hold, and the navigation after logout asks nothing;
+      - a failed sign-out gives the document back.
+    - Another test: a failed save asks its one question once for both exits; leaving still holds after the router's
+      return.
+    - The router-first cases failed before the fix; sign-out first already held, its caller having been the one
+      recorded.
+    - Checks:
+      - Frontend: 543 tests in 46 files; lint, types, `check:api`, licences and self-tests clean.
+      - Build: the editor's chunk 295.47 kB (96.18 kB gzipped), index 557.70 kB.
+      - Browser gate, on a freshly reset stack: 27 passed. The list and sign-in load 591,680 bytes; opening a workflow
+        adds 307,602.
+      - No backend or deploy file changed.
+    - The owner's review. - An exit kind beyond these two would need its own name in `holders`.

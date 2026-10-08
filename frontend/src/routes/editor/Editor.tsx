@@ -163,13 +163,17 @@ function Editor({
   // it through `leaving`. Exits that overlap share the decision in flight, so one answer settles every one of them.
   // Once an exit is agreed to, the document is held (`agreed`, `held`) until the exit completes (the editor unmounts)
   // or is withdrawn (`stayed`: a sign-out that failed): no edit can land after the consent and be discarded under it,
-  // and the navigation that follows sign-out doesn't ask again.
+  // and the navigation that follows sign-out doesn't ask again. Every exit that joins a decision holds the document
+  // in its own right (`holders`): one withdrawn gives it back only when no other still holds it (the owner's review of
+  // 315e19f: a router exit sent back here must not release a sign-out that joined it).
   const [leaveQuestion, setLeaveQuestion] = useState<((leave: boolean) => void) | null>(null);
   const deciding = useRef<Promise<boolean> | null>(null);
   const agreed = useRef(false);
-  const agreedBy = useRef<"router" | "guard" | null>(null); // which kind of exit the consent was for
+  const holders = useRef(new Set<"router" | "guard">()); // the exits the consent stands for
+  const joined = useRef(new Set<"router" | "guard">()); // the exits waiting on the decision in flight
   const decide = useRef<(by: "router" | "guard") => Promise<boolean>>(() => Promise.resolve(true));
   decide.current = (by) => {
+    joined.current.add(by); // recorded before it shares the decision, whichever exit came first
     if (deciding.current) return deciding.current;
     const run = (async () => {
       const s = saver.current;
@@ -182,8 +186,10 @@ function Editor({
       }
     })().then((leave) => {
       deciding.current = null;
+      const exits = [...joined.current];
+      joined.current = new Set();
       if (leave) {
-        agreedBy.current ??= by;
+        for (const exit of exits) holders.current.add(exit);
         agreed.current = true;
         setHeld(true);
       }
@@ -192,16 +198,19 @@ function Editor({
     deciding.current = run;
     return run;
   };
+  /** An exit that didn't happen gives up its own hold; the document is the person's again once none holds it. */
+  function withdraw(exit: "router" | "guard") {
+    holders.current.delete(exit);
+    if (holders.current.size > 0) return;
+    agreed.current = false;
+    setHeld(false);
+  }
   useEffect(
     () =>
       guardLeaving({
         unsaved: () => saver.current?.unsaved ?? false,
         decide: () => decide.current("guard"),
-        stayed: () => {
-          agreed.current = false; // the sign-out it agreed to failed: the document is the person's again
-          agreedBy.current = null;
-          setHeld(false);
-        },
+        stayed: () => withdraw("guard"), // the sign-out it agreed to failed
       }),
     [],
   );
@@ -224,10 +233,8 @@ function Editor({
     () =>
       router.subscribe("onResolved", () => {
         const at = router.state.matches.at(-1);
-        if (agreedBy.current !== "router" || !at || !isHome(at.routeId, at.params)) return;
-        agreed.current = false;
-        agreedBy.current = null;
-        setHeld(false);
+        if (!holders.current.has("router") || !at || !isHome(at.routeId, at.params)) return;
+        withdraw("router");
       }),
     [router],
   );

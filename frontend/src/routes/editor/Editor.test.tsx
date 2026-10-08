@@ -809,6 +809,60 @@ describe("a conflict that arrives while an action is open", () => {
   });
 });
 
+// Exits that share one decision each keep their own consent (the owner's review of 315e19f): a router exit sent back
+// here releases only its own; a sign-out that joined keeps the document held until it fails or the editor goes.
+describe("a sign-out and a router exit sharing one decision", () => {
+  const saved = () => json({ draft_revision: 2, unpublished_changes: true, graph_hash: "h2", active_version_id: null, active_version_number: null });
+  async function overlapping(order: "router first" | "sign-out first", answer: () => Response) {
+    let release: ((r: Response) => void) | undefined;
+    answers.set(`PUT ${BASE}/draft`, () => new Promise<Response>((r) => (release = r)));
+    const { router } = await show();
+    await addTransform();
+    let signOut!: Promise<boolean>;
+    if (order === "router first") {
+      act(() => router.history.push("/away")); // waits for the save, then is sent back here
+      signOut = mayLeave();
+    } else {
+      signOut = mayLeave();
+      act(() => router.history.push("/away"));
+    }
+    await vi.waitFor(() => expect(release).toBeDefined(), { timeout: 3000 });
+    release!(answer());
+    return { router, signOut };
+  }
+
+  it.each(["router first", "sign-out first"] as const)("keeps sign-out's hold when the router exit comes back (%s)", async (order) => {
+    const { router, signOut } = await overlapping(order, saved);
+    expect(await signOut).toBe(true);
+    await vi.waitFor(() => expect(router.state.location.pathname).toBe("/t/t1/workflows/w1"));
+    await act(() => new Promise((r) => setTimeout(r, 50)));
+    expect(steps().dataset.editable).toBe("false"); // the sign-out may still be logging out: no edit may land
+    // The navigation that follows the logout asks nothing again.
+    act(() => router.history.push("/t/t1/workflows"));
+    await vi.waitFor(() => expect(router.state.location.pathname).toBe("/t/t1/workflows"));
+    expect(screen.queryByRole("dialog", { name: "Your latest changes aren't saved" })).toBeNull();
+  });
+
+  it.each(["router first", "sign-out first"] as const)("gives the document back when that sign-out fails (%s)", async (order) => {
+    const { router, signOut } = await overlapping(order, saved);
+    expect(await signOut).toBe(true);
+    await vi.waitFor(() => expect(router.state.location.pathname).toBe("/t/t1/workflows/w1"));
+    act(() => cancelLeaving());
+    await vi.waitFor(() => expect(steps().dataset.editable).toBe("true"));
+  });
+
+  it("asks its one question once, for both, and the router's return still leaves sign-out's hold", async () => {
+    const { router, signOut } = await overlapping("router first", () => json({ error: "http_error" }, 500));
+    const ask = await screen.findByRole("dialog", { name: "Your latest changes aren't saved" });
+    await userEvent.click(within(ask).getByRole("button", { name: "Leave without saving" }));
+    expect(await signOut).toBe(true);
+    await vi.waitFor(() => expect(router.state.location.pathname).toBe("/t/t1/workflows/w1"));
+    await act(() => new Promise((r) => setTimeout(r, 50)));
+    expect(steps().dataset.editable).toBe("false");
+    expect(screen.queryByRole("dialog", { name: "Your latest changes aren't saved" })).toBeNull();
+  });
+});
+
 // When editing stops, focus held by a control only editing draws goes somewhere drawn (the final checkpoint's second
 // review): never to the page.
 describe("focus when editing stops under it", () => {
