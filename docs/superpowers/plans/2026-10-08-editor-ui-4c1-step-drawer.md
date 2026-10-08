@@ -2,27 +2,35 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Revision 1 (2026-10-09).** For the owner's review. Nothing is built before the owner approves this plan. Nothing is
+**Revision 2 (2026-10-09).** For the owner's review. It answers the review of revision 1 (02fe8a6) pasted in chat on
+2026-10-09; "Changes from revision 1" below says how. Nothing is built before the owner approves this plan. Nothing is
 pushed and no PR is opened without the owner's OK in chat.
 
 **Goal:** A person who may edit a workflow opens a step and sets it up in a drawer generated from its type's schema:
 the required fields on Setup, the rest on Options, and its error handling in a chip. They choose connections,
 workflows and live options, write formulas where the engine takes them, and rename the step. Every edit is saved like
-any other and undone one field at a time, and every problem the server finds shows at its field.
+any other and undone one field at a time. Text typed but not yet applied is never lost in silence. Every problem the
+server finds shows at its field.
 
 **Architecture:**
 - **Pure layers first (milestone 1).**
   - `lib/schemaForm.ts` reads a type's config schema as a form. It gives each field's place (Setup or Options), label,
-    widget and allowed kinds of value, by the engine's own markers.
-  - `lib/config.ts` changes a step's config, options and key as documents. A port a change removes takes its edges
-    with it. A renamed key carries every structured reference along.
+    widget and allowed kinds of value, by the engine's own markers. A schema that repeats itself, or nests too deep,
+    stops at JSON.
+  - `lib/config.ts` changes a step's config, options and key as documents, and checks a document against the graph's
+    admission rules. A port a change removes takes its edges with it. A renamed key carries every structured
+    reference along.
+  - `lib/unapplied.ts` models text typed but not in the draft (JSON, a name, a number that doesn't parse), and
+    applies it when it can.
   - `lib/history.ts` coalesces one field's typing into one undo step.
-- **One field, then the drawer (milestone 2).**
+- **One field, the drawer, then what isn't applied (milestone 2).**
   - A field is a frame (label, control, hint, problems) around a control chosen by its widget, fixed or a formula.
   - The drawer replaces 4b's read-only step panel in the side column:
     - a header with the step's key, its type and the error-handling chip;
     - Setup and Options tabs (Radix Tabs, outline §4);
     - the 4b actions kept below.
+  - The editor owns unapplied text. Its save state counts it. Its exits, publication, export and version view apply
+    what they can, and ask about the rest.
   - Lists and maps come last.
 - **References and behaviour (milestone 3).**
   - Connection, workflow and live-options pickers.
@@ -55,8 +63,48 @@ any other and undone one field at a time, and every problem the server finds sho
   - `backend/src/dewpoint/sdk/fields.py`: the markers;
   - `engine/graph/schemas.py`: `literal_on_path`, `allowed_kinds`, `contains_literal`;
   - `engine/graph/values.py`: envelopes and reference paths;
-  - `engine/graph/model.py`: the graph format a save checks;
-  - `engine/graph/validate.py`: where a node's problems point.
+  - `engine/graph/model.py`: the graph format a save checks, and `_admission_problems`;
+  - `engine/graph/validate.py`: where a node's problems point;
+  - `engine/registry/catalog.py`: `_schema_contract`, which keeps titles out of a type's contract.
+
+## Changes from revision 1
+
+Revision 2 answers each correction in the review pasted on 2026-10-09:
+1. **Sensitive containers.**
+   - A whole holding a sensitive part shows no default hint.
+   - It is never offered as JSON.
+   - Switching it to a formula starts the formula empty: a hidden value is never copied into one (rulings 6 and 15;
+     Tasks 1 and 6).
+2. **Unapplied edits.** These are text a control holds that isn't in the draft. A new ruling, 18, gives them an owner
+   and a lifetime:
+   - the editor keeps them, never the control;
+   - its save state counts them;
+   - tabs, toggles and a closed drawer keep them;
+   - leaving, signing out, publishing, exporting and viewing a version apply what they can and ask about the rest;
+   - a list's move or removal, a mode switch and a JSON toggle apply the edits beneath them first, or wait;
+   - a canceled port question leaves its edit unapplied, said at its control.
+   Tasks 3, 6, 7 and 8 carry it, and Tasks 9, 12 and 13 use it.
+3. **Literal envelopes.** A `literal` envelope is edited as its payload and saved as a literal again: its kind changes
+   only through Fixed/Formula, Replace or Clear (ruling 15; Tasks 3 and 6).
+4. **Numbers and admission.**
+   - JSON that parses to a number which isn't finite, or to a whole number past 2^53, is refused before it reaches
+     the draft.
+   - Every drawer write is checked against the graph's admission rules: nesting at most 64 deep, and at most 2,000
+     references, templates and formulas (rulings 7 and 15; Tasks 2, 3 and 6).
+5. **Bounded schemas and the unsupported mode.**
+   - A schema that repeats itself, or a field more than 8 parts deep, is shown as JSON, or as a notice when it holds
+     a sensitive part (ruling 5; Task 1).
+   - A field taking only references or templates offers neither a fixed value nor a formula. It says it can't be set
+     in this drawer (ruling 6; Task 6).
+6. **Live choices.** Shown choices belong to their scope: tenant, type, field, and the connection's id and revision. A
+   changed scope drops them, and an answer for an older scope is ignored. Another click is needed (ruling 14; Task 11).
+7. **Rename.**
+   - An open rename is disabled when the draft can't change.
+   - A rename refused by the editor says so, and never succeeds by its shape.
+   - The drawer no longer counts formulas "that name the old key". It says how many formulas *mention* the old key as
+     a word, and only until the next edit (ruling 11; Tasks 2 and 13).
+8. **Titles.** Ruling 4's versioning justification is withdrawn: `_schema_contract` drops titles from a type's contract
+   (Spec, above). The drawer uses the titles as they are.
 
 ## Global Constraints
 
@@ -86,14 +134,14 @@ any other and undone one field at a time, and every problem the server finds sho
   - Live options load only when asked, never in the browser flows.
 - **No backend change** in 4c-1, and so no migration and no OpenAPI change: `check:api` stays clean.
 - **Secrets.**
-  - A sensitive field's fixed value is never shown, nor its default, nor any value holding a sensitive part as JSON
-    (ledger M25).
+  - A sensitive field's fixed value is never shown. Nor is a default holding a sensitive part, nor a value holding
+    one as JSON or as a formula made from it (ledger M25).
   - Logs name an exception's type only.
-  - No secret in a URL, a log or browser storage. The client keeps no draft and no sample in browser storage.
+  - No secret in a URL, a log or browser storage. The client keeps no draft, no unapplied text and no sample in
+    browser storage.
 - **The API decides every write.**
   - The client hides what a role can't do, but never relies on hiding it.
-  - The browser checks only required fields and types (D19), plus the graph format rules a save would refuse: a key,
-    a port's name, the attempts and timeout bounds. A draft breaking those isn't saved at all (4b ruling 9).
+  - The browser checks only required fields and types (D19), plus the graph format rules a save would refuse.
   - Every other rule is the server's.
 - **Verify, don't remember.** Check every library API against the installed package before relying on it (Radix
   Tabs' parts and props in `node_modules/@radix-ui/react-tabs/dist/index.d.ts`), and every API path and body against
@@ -106,42 +154,70 @@ any other and undone one field at a time, and every problem the server finds sho
 These are the inputs and conditions most likely to bite a person using this. Each is pinned by the tests named, in
 the task that owns it.
 
-- **A value the drawer can't edit.**
-  - The cases: a reference or a template written elsewhere (an import, the API); a type this server doesn't know; a
-    fixed value in a sensitive field; an envelope the engine can't read.
-  - Each is kept byte for byte until the person replaces it on purpose. The sensitive value is never shown.
+- **A value the drawer can't edit, or mustn't show.**
+  - The cases:
+    - a reference or a template written elsewhere;
+    - a type this server doesn't know;
+    - a sensitive field's fixed value, or a whole holding a sensitive part;
+    - a `literal` envelope, which holds data;
+    - a field taking only references;
+    - a schema that repeats itself.
+  - Each is kept byte for byte until the person changes it on purpose, never changes kind on its own, and a sensitive
+    value never shows.
   - Tests:
+    - Task 1: `shows a schema that repeats itself, or one nested too deep, as JSON`, `hints no default that holds a
+      sensitive part`;
     - Task 2: `keeps what it doesn't touch`;
-    - Task 5: `shows a reference read only, and keeps it until it's replaced`, `never shows a sensitive field's fixed
-      value`;
-    - Task 6: `keeps an unknown type's settings as they are`.
-- **Typing fast, across fields, then undo.**
-  - One undo step per field per focus, never per keystroke. Saves coalesce as in 4b.
-  - Undo outside a field undoes the whole field's edit; inside a text control, the browser's own text undo stays.
+    - Task 6: `shows a reference read only, and keeps it until it's replaced`, `never shows a sensitive field's fixed
+      value`, `never shows a sensitive part as JSON, a default or a formula`, `edits a literal as its payload, and
+      keeps it a literal`, `offers neither a fixed value nor a formula where the engine takes only references`;
+    - Task 7: `keeps an unknown type's settings as they are`.
+- **Text typed, then the person moves on.**
+  - The cases:
+    - a fast typist's undo;
+    - a tab change, a JSON toggle, a closed drawer;
+    - a list reordered under an unapplied edit;
+    - a canceled port question;
+    - leaving, signing out, publishing, exporting, viewing a version.
+  - One undo step per field per focus. Nothing typed disappears without the person discarding it.
   - Tests:
-    - Task 3: `makes one step of a field's edits while it keeps its mark`, `starts a new step for another mark, an
-      unmarked change, or after an undo`;
-    - Task 5: `makes one mark of a field's typing while it keeps focus`;
-    - Task 6: `makes a field's typing one undo step`.
-- **An edit that removes a port with edges** (a switch case removed, errors no longer routed to a port, a JSON edit).
-  - It asks first, deletes exactly those edges, and one undo restores both the setting and the edges.
-  - A case's port renamed in place keeps its edges.
+    - Task 3: `keeps an edit that takes ports away for its question`;
+    - Task 4: `makes one step of a field's edits while it keeps its mark`;
+    - Task 6: `makes one mark of a field's typing while it keeps focus`, `keeps unapplied JSON through a change of
+      view, applying what's valid first`;
+    - Task 7: `makes a field's typing one undo step`, `keeps an unapplied edit when the tab changes or the drawer
+      closes`;
+    - Task 8: `applies what it can before publishing, and asks about the rest`, `asks before leaving with an edit it
+      can't apply`;
+    - Task 9: `moves an item only once the edits inside it are applied`.
+- **Numbers and nesting the server would refuse or change.**
+  - The cases: `1e400`, `9007199254740993`, nesting past 64 levels, more than 2,000 computed values.
+  - Each is refused in the browser with its reason, before it can make a save fail or a value change.
+  - Tests:
+    - Task 2: `refuses a number JSON.parse would change`, `finds what the graph's format refuses`;
+    - Task 6: `says a JSON number too large to keep, and keeps it out of the draft`.
+- **An edit that removes a port with edges.**
+  - The cases: a switch case removed, errors no longer routed to a port, a JSON edit.
+  - It asks first, deletes exactly those edges, and one undo restores both. A case's port renamed in place keeps its
+    edges.
   - Tests:
     - Task 2: `drops only the lost ports' edges`, `keeps a renamed case's edges`;
-    - Task 6: `asks before an edit takes a port with edges away`, `undoes the edit and its edges together`;
-    - Task 7: `renames a case's port in place, its edges following`, `asks before removing a case with edges`;
-    - Task 10: `asks before errors stop going to a port`.
-- **Renaming a key that other steps read.**
-  - Every reference and template part follows, in every step and in the workflow's outputs.
-  - Formulas aren't rewritten: the drawer says how many still name the old key, and the server flags each.
+    - Task 7: `asks before an edit takes a port with edges away`, `undoes the edit and its edges together`;
+    - Task 9: `renames a case's port in place, its edges following`, `asks before removing a case with edges`;
+    - Task 12: `asks before errors stop going to a port`.
+- **What changes under an open control.**
+  - The cases:
+    - the connection under shown choices;
+    - the editor turning read only under an open rename;
+    - formulas that mention a renamed key.
+  - Choices from another scope never show; a refused rename never looks done; a word about formulas is said only
+    while it's true.
   - Tests:
-    - Task 2: `renames every structured reference`, `counts the formulas that still name it`;
-    - Task 11: `says how many formulas still name the old key`.
-- **Live options that can't load, or need a connection first.**
-  - No request without the step's connection when its type takes one, and never a request on render.
-  - Each failure is said in words; a value the person typed is kept as typed.
-  - Tests, all in Task 9: `never loads on render`, `asks for a connection before loading`, `says why choices couldn't
-    load, keeping a typed value`.
+    - Task 2: `counts the formulas that mention it`;
+    - Task 11: `never loads on render`, `asks for a connection before loading`, `drops choices when their connection
+      changes, and ignores an answer for the old one`;
+    - Task 13: `disables an open rename when the draft can't change, and never says it renamed`, `says which formulas
+      mention the old key, until the next edit`.
 
 ## Rulings this plan proposes
 
@@ -157,9 +233,9 @@ These join the ledger as rulings 96 onward when the slice is approved.
    - Why: each is a 4b-sized piece with its own review. The cost: three plan reviews instead of one.
 2. **The drawer replaces the step panel in the side column.**
    - Its header holds:
-     - the key, renamable (Task 11);
+     - the key, renamable (Task 13);
      - the type's title and reference, and how the step runs;
-     - the error-handling chip (Task 10).
+     - the error-handling chip (Task 12).
    - Then come the problems that belong to no field, then the Setup and Options tabs.
    - Below the tabs:
      - how the step's formulas run (4b's list, kept);
@@ -175,9 +251,10 @@ These join the ledger as rulings 96 onward when the slice is approved.
    - A tab's label counts the problems in its fields ("Options · 2 problems").
    - Why: §10.3's "required fields only". The cost: a plugin can't order fields except through its schema.
 4. **A field's label is its schema `title`, or its name when there's none.**
-   - The flow plugin's generated titles ("Duration S", "Workflow Id") stay as they are: a title is part of a type's
-     contract hash (`engine/registry/catalog.py`), so changing one means a new type version, not a UI change.
-   - Why: plugins own their wording. The cost: some labels read stiffly until their plugin versions them.
+   - Titles are display annotations: `_schema_contract` keeps them out of a type's contract hash, so a plugin may
+     improve one within a version.
+   - The drawer shows the titles as the plugins write them ("Duration S").
+   - Why: plugins own their wording. The cost: some labels read stiffly until their plugin improves them.
 5. **The widget comes from `x-widget`, then the engine's markers, then the field's type.**
    - From `x-widget`: `cel` gives a formula; `pill-text` gives text in 4c-1 and pills in 4c-2; `connection` gives the
      connection picker.
@@ -195,7 +272,9 @@ These join the ledger as rulings 96 onward when the slice is approved.
      - anything else, an untyped field or a union, is JSON.
    - A plugin widget the drawer doesn't have (`mist.api-operation`, `message-blocks`, `nested-update`: 4f) falls back
      to its type's widget.
-   - Why: §3.3; D24. The cost: none for today's manifests (only `cel` is in use).
+   - **The form is bounded.** A field whose `$ref` repeats one above it, or one more than 8 parts deep, is shown as
+     JSON. One that holds a sensitive part shows a notice instead. A schema can't make the drawer expand forever.
+   - Why: §3.3; D24. The cost: a deep or recursive value is edited as JSON.
 6. **A value is fixed, or a formula, where the engine takes it.** These are the engine's own rules (`allowed_kinds`,
    `literal_on_path`, `contains_literal`, `sensitive.literal`):
    - A field whose path carries `x-dewpoint-literal` takes a fixed value only, and so does a whole that holds such a
@@ -203,22 +282,31 @@ These join the ledger as rulings 96 onward when the slice is approved.
    - A field whose `x-dewpoint-kinds` lacks `literal` takes no fixed value; one whose kinds lack `cel` takes no
      formula.
    - A field marked `x-sensitive` takes no fixed value.
+   - **A field that takes neither** (its kinds are only `ref` or `template`) offers neither. It shows its value read
+     only and says it can't be set in this drawer.
    - Where both are allowed, a "Fixed / Formula" choice switches between them. A formula field, an untyped one or a
      JSON one starts as a formula.
+   - Switching a fixed value to a formula writes the formula that gives it. When the value holds a sensitive part, the
+     formula starts empty: a hidden value is never copied into visible text (M25).
    - A formula is the CEL formula mode of D19: a monospace text area, with the server's diagnostics and how it runs
      (inline, or as a separate step with the reason).
    - A reference or a template already in the draft shows read only, with "Replace with a fixed value" or "Replace
-     with a formula": editing those is 4c-2's pills.
+     with a formula", each offered only where its kind is allowed: editing those is 4c-2's pills.
    - A sensitive field holding a fixed value says so, never shows it, and offers to clear it or replace it with a
      formula (M25).
    - Why: D19. The cost: until 4c-2, references are typed as formulas.
 7. **The browser checks only required fields, types, and what a save would refuse.**
    - A required field the person empties says "Required".
-   - A number that doesn't parse says so and isn't saved, and so does JSON that doesn't parse.
-   - A key, a port's name, and the attempts and timeout bounds are checked before saving: the graph's format refuses
-     a draft that breaks them, so it wouldn't be saved at all (4b ruling 9).
+   - A number that doesn't parse says so and isn't saved, and so does JSON that doesn't parse. So does a number
+     JSON.parse would change: one too large to be finite, or a whole number past 2^53.
+   - These are checked before any write, since the graph's format refuses a draft that breaks them and it wouldn't be
+     saved at all (4b ruling 9; `_admission_problems`):
+     - a key, a port's name, and the attempts and timeout bounds;
+     - finite numbers, nesting at most 64 levels, at most 2,000 references, templates and formulas.
+   - The API's request size cap (`max_request_body_bytes`) is a deployment setting the browser doesn't know. A save
+     it refuses shows in the toolbar as an unsaved edit, as in 4b.
    - Emptying a field removes it from the config, so its default applies. An optional field with a value offers
-     "Clear".
+     "Clear", which also discards any unapplied text in it.
    - Everything else is the server's diagnostics, shown at the field whose pointer they name.
    - Why: D19; ruling 81 (the server's own messages). The cost: none.
 8. **One undo step per field per focus.**
@@ -232,6 +320,7 @@ These join the ledger as rulings 96 onward when the slice is approved.
    - An edit that takes ports away deletes the edges that left them, after asking, as deleting a step does (ruling
      79). The edits that can: removing a switch case, no longer routing errors to a port, a JSON edit of the cases.
      One undo restores the setting and the edges.
+   - A canceled question leaves a JSON edit unapplied, its reason at its control (ruling 18).
    - A case's port renamed in place keeps its edges. Its name applies when focus leaves or on Enter.
    - A port name the graph's format refuses, or one another port of the step has, is refused there: edges hang on
      port names.
@@ -252,8 +341,11 @@ These join the ledger as rulings 96 onward when the slice is approved.
       characters). It isn't one of CEL's words (`in`, `true`, `false`, `null`), and it's unique.
     - Every reference and template part reading `steps.<key>` or `loops.<key>` follows: in every step's config and in
       the workflow's outputs.
-    - Formulas aren't rewritten (CEL text isn't parsed here): the drawer says how many still name the old key, and
-      the server flags each.
+    - Formulas aren't rewritten (CEL text isn't parsed here). After a rename, the drawer says how many formulas
+      mention the old key as a word ("1 formula mentions fetch and keeps its text: check it"), until the next edit to
+      the draft. It doesn't claim each is a reference, nor that the server flags each.
+    - An open rename's controls are disabled while the draft can't change. A rename the editor refuses says so,
+      never as if it had worked.
     - It's one undo step.
     - Why: keys are how steps read each other. The cost: a formula needs its own fix.
 12. **The connection picker.**
@@ -272,14 +364,19 @@ These join the ledger as rulings 96 onward when the slice is approved.
       text typed.
     - When the type takes a connection and the step has none, the field asks for one first and sends nothing.
     - Each failure is said in words, and a typed value is kept as typed: the list helps, it doesn't gate.
+    - **Choices belong to their scope**: the tenant, the step's type, the field, and the connection's id and revision.
+      When the scope changes, the shown choices go, an answer still on its way for the old scope is ignored, and
+      another click is needed.
     - Why: an options call reaches the plugin's service (for Mist, Mist itself), so it is the person's act, never a
-      side effect of opening a drawer (D24). The cost: one click.
+      side effect of opening a drawer (D24). The cost: one click, again after a change of connection.
 15. **JSON is the value as the engine reads it.**
     - A `{"$value": …}` object in it is computed, as in an imported file, and its hint says so.
     - It applies when focus leaves.
     - "Edit as JSON" is offered on groups, lists and maps without a sensitive part. Untyped fields and unions are JSON
       always.
     - A map's entry can't be named `$value`: the engine would read the whole map as computed.
+    - **A `literal` envelope stays a literal.** It's edited as its payload, its hint saying it's kept as data, and
+      saved wrapped again. Its kind changes only through Fixed/Formula, Replace or Clear.
     - Why: D19; one reading of `$value` everywhere. The cost: none.
 16. **A problem focuses its field** (ruling 83, the part that waited for 4c).
     - "Go to" on a problem whose field is inside the step opens the step's drawer on that field's tab and focuses the
@@ -288,27 +385,44 @@ These join the ledger as rulings 96 onward when the slice is approved.
     - A problem about the step as a whole (no field, or its whole config) focuses the step, as in 4b.
     - Why: ruling 83. The cost: none.
 17. **One new dependency, `@radix-ui/react-tabs` 1.1.21**, for the drawer's tabs, on the outline's approved list.
-    - Its first browser check is at the end of Task 6, before lists, maps and pickers are built.
+    - Its first browser check is at the end of Task 7, before lists, maps and pickers are built.
     - A CSP violation stops the work for the owner.
     - Why: D23. The cost: none.
+18. **Unapplied edits are the editor's, never lost in silence.**
+    - What counts: text a control holds that isn't in the draft. That is JSON being typed or refused; a map entry's
+      name, a port's name or a key being typed or refused; a number or a limit that doesn't parse; a formula the
+      graph's format refuses.
+    - The editor keeps each, by its step, its field and its kind, never the control. A tab change, a JSON toggle, a
+      closed and reopened drawer, or an undo keeps it. It shows at its control, with its reason and a "Discard".
+    - The toolbar's save state counts them ("1 edit not applied") beside the draft's own state.
+    - Leaving the editor (the router, sign-out, an ended session), publishing, exporting and viewing a version first
+      apply every one that can be applied, as one undo step. Those that can't (refused, or taking ports away) are
+      listed in a question: "Discard them and …" or "Go back to them". Leaving folds them into 4b's leave question.
+    - A change to what holds an unapplied edit first applies the edits beneath it, as one step with the change: a
+      list item's move or removal, a map entry's removal, Fixed/Formula, a JSON toggle. When one can't be applied,
+      the change waits, and the edit's control says why.
+    - Clear and deleting a step discard the unapplied edits beneath them, on purpose. The delete question says so.
+    - Why: the review of revision 1; nothing a person typed disappears without their decision. The cost: one more
+      state in the editor, and one more question at its exits.
 
 ## File Structure
 
 New, in `frontend/src/`:
-- `lib/schemaForm.ts`: a config schema read as a form: fields, widgets, kinds, pointers, tabs.
-- `lib/config.ts`: values and envelopes; a step's config, options and key changed as documents.
+- `lib/schemaForm.ts`: a config schema read as a form: fields, widgets, kinds, pointers, tabs; bounded.
+- `lib/config.ts`: values and envelopes; JSON text; admission; a step's config, options, ports and key changed as
+  documents.
+- `lib/unapplied.ts`: unapplied edits: what each is, and applying them.
 - `components/Tabs.tsx`: the token-styled Radix Tabs.
-- `routes/editor/drawer/context.ts`: what a drawer's fields share; a field's problems; focus sessions.
+- `routes/editor/drawer/context.ts`: what a drawer's fields share and may do; a field's problems; focus sessions.
 - `routes/editor/drawer/FieldFrame.tsx`: a field's label, control, hint and problems; a group's fieldset.
 - `routes/editor/drawer/scalars.tsx`: the controls for text, numbers, booleans, enums and JSON.
-- `routes/editor/drawer/Formula.tsx`: the formula, the Fixed/Formula choice, a reference and a hidden sensitive
-  value.
-- `routes/editor/drawer/FieldView.tsx`: one field: its mode, its control, its problems.
+- `routes/editor/drawer/Formula.tsx`: the formula, the Fixed/Formula choice, a reference, a hidden sensitive value.
+- `routes/editor/drawer/FieldView.tsx`: one field: its mode, its control, its problems, its unapplied edit.
 - `routes/editor/drawer/structured.tsx`: groups, lists, maps, and a dynamic port's name.
 - `routes/editor/drawer/StepDrawer.tsx`: the drawer.
-- `routes/editor/drawer/ErrorHandling.tsx`: the chip and its section.
+- `routes/editor/drawer/ErrorHandling.tsx`: the chip's words and its section.
 - `routes/editor/drawer/pickers.tsx`: the connection and workflow pickers.
-- `routes/editor/drawer/LiveOptions.tsx`: options on request.
+- `routes/editor/drawer/LiveOptions.tsx`: options on request, in their scope.
 - `routes/editor/drawer/KeyField.tsx`: the header's rename.
 - `routes/editor/drawer/harness.tsx`: fields on their own, for tests only.
 - `test/nodeTypes.ts`: node types for tests: the flow plugin's schemas and a made-up service's.
@@ -320,10 +434,12 @@ Changed:
 - `lib/history.ts`: `record` with a coalescing mark.
 - `components/Field.tsx`: `controlClass` exported.
 - `routes/editor/Editor.tsx`:
-  - `change` with a mark, and silent;
-  - the drawer in place of `StepPanel`;
+  - `change` with a mark, silent, saying whether it landed;
+  - the drawer in place of `StepPanel`, with its actions;
+  - unapplied edits, through its exits, publication, export and version view;
   - edits that drop edges ask first;
   - a problem's field.
+- `routes/editor/SaveState.tsx`: the count of unapplied edits.
 - `routes/editor/ProblemsPanel.tsx`: "Go to" passes the field.
 - `routes/editor/StepPanel.tsx`: removed, its parts moved into the drawer.
 - Tests: `routes/editor/Editor.test.tsx`, `routes/editor/ProblemsPanel.test.tsx`.
@@ -333,11 +449,12 @@ Changed:
 
 ## Milestones
 
-- **Milestone 1 (Tasks 1–3): the pure layers.** No screen changes.
-- **Milestone 2 (Tasks 4–7): Tabs, one field, the drawer, lists and maps.** **Pause:** screenshots of the drawer
-  beside 1c, light and dark, at 1280 and 320 px, for the owner's review before references and behaviour are built.
-- **Milestone 3 (Tasks 8–12): pickers, live options, error handling, key rename, a problem's field.**
-- **Milestone 4 (Task 13): end to end, every check, the ledger, the final checkpoint.** **Pause:** a fresh reviewer,
+- **Milestone 1 (Tasks 1–4): the pure layers.** No screen changes.
+- **Milestone 2 (Tasks 5–9): Tabs, one field, the drawer, unapplied edits, lists and maps.** **Pause:** screenshots
+  of the drawer beside 1c, light and dark, at 1280 and 320 px, for the owner's review before references and behaviour
+  are built.
+- **Milestone 3 (Tasks 10–14): pickers, live options, error handling, key rename, a problem's field.**
+- **Milestone 4 (Task 15): end to end, every check, the ledger, the final checkpoint.** **Pause:** a fresh reviewer,
   screenshots, the summary; then stop.
 
 ## How to run things
@@ -383,7 +500,8 @@ Changed:
     "integer" | "boolean" | "group" | "list" | "map" | "json"`.
   - `interface FieldSpec { name; path: Path; pointer: string; schema: Schema; root: Schema; type: NodeType; label;
     hint: string | null; required; entry; widget: Widget; base: Widget; literalOnly; holdsLiteral; holdsSensitive;
-    kinds: Kind[] | null; sensitive; untyped; port }` (booleans unless typed).
+    kinds: Kind[] | null; sensitive; untyped; port; cut; refs: string[] }` (booleans unless typed). `cut`: shown as
+    JSON, its schema repeating itself or nested more than 8 parts deep (ruling 5).
   - `isObject(v: unknown): v is Schema`, `pointerOf(path: Path): string`, `deref(schema: unknown, root: Schema):
     Schema`.
   - `fieldsOf(type: NodeType): FieldSpec[]`, `propertiesOf(f: FieldSpec): FieldSpec[]`, `itemOf(f: FieldSpec, index:
@@ -565,6 +683,30 @@ describe("fieldsOf", () => {
     const secret = typeWith({ type: "object", properties: { key: { type: "string", default: "s3cr3t", "x-sensitive": true } } });
     expect(fieldsOf(secret)[0]!.hint).toBeNull();
   });
+
+  it("hints no default that holds a sensitive part", () => {
+    const holder = typeWith({
+      type: "object",
+      properties: { auth: { type: "object", default: { key: "s3cr3t" }, properties: { key: { type: "string", "x-sensitive": true } } } },
+    });  // prettier-ignore
+    expect(fieldsOf(holder)[0]!.hint).toBeNull();
+  });
+
+  it("shows a schema that repeats itself, or one nested too deep, as JSON", () => {
+    const tree = typeWith({
+      $defs: { Node: { type: "object", properties: { name: { type: "string" }, child: { $ref: "#/$defs/Node" } } } },
+      type: "object", properties: { root: { $ref: "#/$defs/Node" } },
+    });  // prettier-ignore
+    const root = fieldsOf(tree)[0]!;
+    expect([root.widget, root.cut]).toEqual(["group", false]);
+    const child = propertiesOf(root).find((f) => f.name === "child")!;
+    expect([child.widget, child.base, child.cut]).toEqual(["json", "json", true]); // never a group within a group within…
+    const nest = (n: number): Record<string, unknown> => (n === 0 ? { type: "string" } : { type: "object", properties: { x: nest(n - 1) } });
+    let deep = fieldsOf(typeWith({ type: "object", properties: { a: nest(9) } }))[0]!;
+    for (let i = 0; i < 7; i++) deep = propertiesOf(deep)[0]!;
+    expect([deep.path.length, deep.cut]).toEqual([8, false]);
+    expect(propertiesOf(deep)[0]!.cut).toBe(true); // the 9th part down
+  });
 });
 
 it("puts the required fields on Setup and the rest on Options", () => {
@@ -583,6 +725,11 @@ describe("the kinds of value a field takes", () => {
   it("takes no formula for a whole that holds a literal-only part", () => {
     expect(canFormula(field(SWITCH, "cases"))).toBe(false);
     expect(canFormula(itemOf(field(SWITCH, "cases"), 0))).toBe(false);
+  });
+
+  it("takes neither a fixed value nor a formula where the engine takes only references", () => {
+    const source = fieldsOf(typeWith({ type: "object", properties: { source: { type: "string", "x-dewpoint-kinds": ["ref", "template"] } } }))[0]!;
+    expect([canFixed(source), canFormula(source)]).toEqual([false, false]);
   });
 
   it("follows x-dewpoint-kinds: a predicate takes only a formula", () => {
@@ -656,11 +803,14 @@ export interface FieldSpec {
   sensitive: boolean; // `x-sensitive`: never a fixed value, never shown
   untyped: boolean; // any JSON
   port: boolean; // a dynamic port's name (a switch case's `port`): edges hang on it
+  cut: boolean; // shown as JSON: its `$ref` repeats one above it, or it's more than 8 parts deep (ruling 5)
+  refs: string[]; // the `$ref`s followed down to it: what makes a repetition visible
 }
 
 const KINDS: ReadonlySet<string> = new Set(["literal", "ref", "template", "cel"]);
 const BLANK_IS_TEXT: ReadonlySet<Widget> = new Set(["text", "datetime", "enum", "options"]);
 const DATE_TIME = "A date and time in ISO 8601, like 2026-10-08T09:00:00Z.";
+const MAX_FORM_DEPTH = 8; // a field further down is shown as JSON: no schema can make the form expand forever
 
 export const isObject = (v: unknown): v is Schema => typeof v === "object" && v !== null && !Array.isArray(v);
 const without = (s: Schema, key: string): Schema => Object.fromEntries(Object.entries(s).filter(([k]) => k !== key));
@@ -741,64 +891,73 @@ function widgetOf(s: Schema, name: string, top: boolean, type: NodeType): Widget
   return byType(s);
 }
 
-function hintOf(s: Schema, widget: Widget, sensitive: boolean): string | null {
+function hintOf(s: Schema, widget: Widget, holdsSensitive: boolean): string | null {
   const parts: string[] = [];
   if (typeof s.description === "string" && s.description.trim() !== "") parts.push(s.description.trim());
   if (widget === "datetime") parts.push(DATE_TIME);
-  // A default is said, unless it's a sensitive one (ledger M25: a secret is never repeated).
-  if (!sensitive && s.default !== undefined && s.default !== null) {
+  // A default is said, unless it is or holds a sensitive value (ledger M25: a secret is never repeated).
+  if (!holdsSensitive && s.default !== undefined && s.default !== null) {
     parts.push(`If empty: ${typeof s.default === "string" ? s.default : JSON.stringify(s.default)}.`);
   }
   return parts.length > 0 ? parts.join(" ") : null;
 }
 
-function make(type: NodeType, root: Schema, name: string, path: Path, raw: unknown, required: boolean, entry: boolean, literalAbove: boolean): FieldSpec {
+function make(
+  type: NodeType, root: Schema, name: string, path: Path, raw: unknown, required: boolean, entry: boolean,
+  literalAbove: boolean, refsAbove: string[],
+): FieldSpec {  // prettier-ignore
   const own = isObject(raw) ? raw : {};
+  const ref = typeof own.$ref === "string" ? own.$ref : null;
+  const cut = (ref !== null && refsAbove.includes(ref)) || path.length > MAX_FORM_DEPTH;
   const schema = deref(own, root);
-  const widget = widgetOf(schema, name, path.length === 1, type);
+  const widget = cut ? "json" : widgetOf(schema, name, path.length === 1, type);
   const sensitive = own["x-sensitive"] === true || schema["x-sensitive"] === true;
+  const holdsSensitive = holds("x-sensitive", own, root);
   const kinds = own["x-dewpoint-kinds"] ?? schema["x-dewpoint-kinds"];
   return {
     name, path, pointer: pointerOf(path), schema, root, type,
     label: typeof schema.title === "string" && schema.title.trim() !== "" ? schema.title : name,
-    hint: hintOf(schema, widget, sensitive),
-    required, entry, widget, base: byType(schema),
+    hint: hintOf(schema, widget, holdsSensitive),
+    required, entry, widget, base: cut ? "json" : byType(schema),
     literalOnly: literalAbove || own["x-dewpoint-literal"] === true || schema["x-dewpoint-literal"] === true,
     holdsLiteral: holds("x-dewpoint-literal", own, root),
-    holdsSensitive: holds("x-sensitive", own, root),
+    holdsSensitive,
     kinds: Array.isArray(kinds) ? (kinds as unknown[]).filter((k): k is Kind => typeof k === "string" && KINDS.has(k)) : null,
     sensitive,
     untyped: !["type", "enum", "const", "properties", "items"].some((k) => k in schema),
     port: type.dynamic_ports !== null && path.length === 3 && path[0] === type.dynamic_ports && typeof path[1] === "number" && path[2] === "port",
+    cut,
+    refs: ref === null ? refsAbove : [...refsAbove, ref],
   };  // prettier-ignore
 }
 
-function propertiesIn(type: NodeType, root: Schema, schema: Schema, base: Path, literalAbove: boolean): FieldSpec[] {
+function propertiesIn(type: NodeType, root: Schema, schema: Schema, base: Path, literalAbove: boolean, refs: string[]): FieldSpec[] {
   const props = isObject(schema.properties) ? schema.properties : {};
   const required = Array.isArray(schema.required) ? (schema.required as unknown[]) : [];
   return Object.entries(props).map(([name, raw]) =>
-    make(type, root, name, [...base, name], raw, required.includes(name), false, literalAbove),
+    make(type, root, name, [...base, name], raw, required.includes(name), false, literalAbove, refs),
   );
 }
 
 /** A type's settings: its config schema's top-level properties, in the schema's order. */
 export function fieldsOf(type: NodeType): FieldSpec[] {
   const root = isObject(type.config_schema) ? type.config_schema : {};
-  return propertiesIn(type, root, deref(root, root), [], false);
+  return propertiesIn(type, root, deref(root, root), [], false, []);
 }
 
 /** A group's parts: its properties. */
-export const propertiesOf = (f: FieldSpec): FieldSpec[] => propertiesIn(f.type, f.root, f.schema, f.path, f.literalOnly);
+export const propertiesOf = (f: FieldSpec): FieldSpec[] =>
+  f.cut ? [] : propertiesIn(f.type, f.root, f.schema, f.path, f.literalOnly, f.refs);
 
 /** A list's item, labelled by its place ("Cases, item 1"). */
 export const itemOf = (f: FieldSpec, index: number): FieldSpec => ({
-  ...make(f.type, f.root, String(index), [...f.path, index], f.schema.items, true, true, f.literalOnly),
+  ...make(f.type, f.root, String(index), [...f.path, index], f.schema.items, true, true, f.literalOnly, f.refs),
   label: `${f.label}, item ${index + 1}`,
 });
 
 /** A map's entry: its value takes the map's `additionalProperties`, or any JSON. */
 export const entryOf = (f: FieldSpec, name: string): FieldSpec =>
-  make(f.type, f.root, name, [...f.path, name], isObject(f.schema.additionalProperties) ? f.schema.additionalProperties : {}, true, true, f.literalOnly);  // prettier-ignore
+  make(f.type, f.root, name, [...f.path, name], isObject(f.schema.additionalProperties) ? f.schema.additionalProperties : {}, true, true, f.literalOnly, f.refs);  // prettier-ignore
 
 /** Setup holds the required top-level fields, Options the rest, each in the schema's order (ruling 3). */
 export const tabsOf = (fields: FieldSpec[]) => ({
@@ -825,7 +984,7 @@ export const emptyOf = (f: FieldSpec): unknown => (f.entry ? (BLANK_IS_TEXT.has(
 - [ ] **Step 5: Run the tests to see them pass**
 
 Run: `npx -y pnpm@12.6.0 exec vitest run src/lib/schemaForm.test.ts`
-Expected: PASS, 13 tests.
+Expected: PASS, 16 tests.
 
 - [ ] **Step 6: Typecheck and lint**
 
@@ -839,7 +998,7 @@ git add frontend/src/lib/schemaForm.ts frontend/src/lib/schemaForm.test.ts front
 git commit -m "feat(editor): read a step type's config schema as a form (4c-1)"
 ```
 
-### Task 2: A step's values, config, options and key as documents
+### Task 2: A step's values, JSON text, admission, config, options and key as documents
 
 **Files:**
 - Create: `frontend/src/lib/config.ts`
@@ -854,8 +1013,12 @@ git commit -m "feat(editor): read a step type's config schema as a form (4c-1)"
     - `ENVELOPE = "$value"`, `MAX_FORMULA = 16_384`, `CEL_WORDS: ReadonlySet<string>`;
     - `type ValueKind = "literal" | "ref" | "template" | "cel"`;
     - `kindOf(value): ValueKind | "unknown" | null`;
-    - `formula(expr: string)`, `formulaOf(value): string`, `fixedOf(value): unknown`, `referenceText(value): string`,
-      `isPlainRef(value): boolean`.
+    - `formula(expr: string)`, `literal(value)`, `formulaOf(value): string`, `fixedOf(value): unknown`,
+      `referenceText(value): string`, `isPlainRef(value): boolean`.
+  - JSON text and admission (ruling 7):
+    - `parseJson(text): { value: unknown } | { problem: string }`: empty text is `{ value: undefined }`;
+    - `MAX_DEPTH = 64`, `MAX_VALUES = 2_000`, `admission(doc: GraphDoc): string | null`, the server's
+      `_admission_problems` mirrored.
   - Paths: `valueAt(root, path: Path): unknown`, `setAt(root, path: Path, value): unknown`. An undefined value
     removes a property or splices a list's item.
   - Changes:
@@ -864,9 +1027,10 @@ git commit -m "feat(editor): read a step type's config schema as a form (4c-1)"
     - `setConfig(doc, nodeId, path, value, type: NodeType | undefined): Changed`;
     - `setOptions(doc, nodeId, options: StepOptions, type: NodeType | undefined): Changed`;
     - `renamePort(doc, nodeId, index: number, name: string, type: NodeType): { doc: GraphDoc } | { problem: string }`;
+    - `renameEntry(doc, nodeId, path: Path, from: string, to: string): { doc: GraphDoc } | { problem: string }`;
     - `freePort(node: GraphNode, type: NodeType): string`.
-  - Keys: `keyProblem(doc, nodeId, key): string | null`, `renameKey(doc, nodeId, key): { doc: GraphDoc; formulas:
-    number }`.
+  - Keys: `keyProblem(doc, nodeId, key): string | null`, `renameKey(doc, nodeId, key): { doc: GraphDoc; mentions:
+    number }`: `mentions` counts the formulas whose text mentions the old key as a word (ruling 11).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -877,8 +1041,8 @@ Create `frontend/src/lib/config.test.ts`:
 import { describe, expect, it } from "vitest";
 import { IF, SWITCH } from "../test/nodeTypes";
 import {
-  CEL_WORDS, fixedOf, formula, formulaOf, freePort, isPlainRef, keyProblem, kindOf, referenceText, renameKey,
-  renamePort, setAt, setConfig, setOptions, valueAt,
+  CEL_WORDS, admission, fixedOf, formula, formulaOf, freePort, isPlainRef, keyProblem, kindOf, parseJson, referenceText,
+  renameEntry, renameKey, renamePort, setAt, setConfig, setOptions, valueAt,
 } from "./config";  // prettier-ignore
 import type { GraphDoc } from "./workflows";
 
@@ -915,6 +1079,35 @@ describe("values", () => {
     expect(referenceText({ $value: { kind: "template", parts: [{ text: "Hi " }, { ref: "trigger.name" }] } })).toBe("Hi {trigger.name}");
     expect(isPlainRef({ $value: { kind: "ref", path: "steps.a.output" } })).toBe(true);
     expect(isPlainRef({ $value: { kind: "ref", path: "steps.a.output", default: 0 } })).toBe(false);
+  });
+});
+
+describe("JSON text", () => {
+  it("refuses a number JSON.parse would change", () => {
+    expect(parseJson('{"n": 1e400}')).toEqual({ problem: "A number here is too large to keep, so it isn't saved." });
+    expect(parseJson("[9007199254740993]")).toEqual({
+      problem: "A whole number here is too large to keep exactly, so it isn't saved.",
+    });
+    // A string's digits, the largest safe whole number and an exponent are kept as they are.
+    expect(parseJson('{"id": "9007199254740993", "n": 9007199254740991, "x": 1.5e3}')).toEqual({
+      value: { id: "9007199254740993", n: 9007199254740991, x: 1500 },
+    });
+    expect(parseJson("{")).toEqual({ problem: "This isn't valid JSON, so it isn't saved." });
+    expect(parseJson("  ")).toEqual({ value: undefined });
+  });
+
+  it("finds what the graph's format refuses", () => { // nesting past 64 levels, more than 2,000 computed values
+    const nested = (n: number): unknown => (n === 0 ? 1 : [nested(n - 1)]);
+    const holding = (value: unknown): GraphDoc => ({
+      graph_format: 1,
+      nodes: [{ id: A, key: "a", type: "flow.transform@1", config: { fields: { x: value } } }],
+    });
+    // The graph is level 1, its nodes 2, a node 3, its config 4, `fields` 5: `x`'s arrays start at 6.
+    expect(admission(holding(nested(59)))).toBeNull();
+    expect(admission(holding(nested(60)))).toBe("Values can be nested at most 64 levels deep.");
+    const many = Object.fromEntries(Array.from({ length: 2001 }, (_, i) => [`f${i}`, formula("1")]));
+    expect(admission(holding(many))).toBe("A workflow can hold at most 2,000 references, templates and formulas.");
+    expect(admission(holding(Number.POSITIVE_INFINITY))).toBe("A number in the draft isn't finite, so it couldn't be saved.");
   });
 });
 
@@ -971,6 +1164,21 @@ describe("ports", () => {
       problem: "A port's name starts with a lowercase letter, then lowercase letters, digits or _, up to 31 characters.",
     });
     expect(renamePort(switchDoc(), A, 0, "default", SWITCH)).toEqual({ problem: "Another port of this step is already called default." });
+  });
+
+  it("renames a map's entry in place, never to $value, an empty name or a taken one", () => {
+    const doc: GraphDoc = {
+      graph_format: 1,
+      nodes: [{ id: A, key: "t", type: "flow.transform@1", config: { fields: { x: 1, y: 2 } } }],
+    };
+    const renamed = renameEntry(doc, A, ["fields"], "x", "constructor"); // a name, not Object's own
+    if ("problem" in renamed) throw new Error(renamed.problem);
+    expect(Object.entries(renamed.doc.nodes![0]!.config!.fields as object)).toEqual([["constructor", 1], ["y", 2]]);
+    expect(renameEntry(doc, A, ["fields"], "x", "$value")).toEqual({
+      problem: "A name can't be $value: the engine would read the whole value as computed.",
+    });
+    expect(renameEntry(doc, A, ["fields"], "x", "")).toEqual({ problem: "A name can't be empty." });
+    expect(renameEntry(doc, A, ["fields"], "x", "y")).toEqual({ problem: "There's already one called y." });
   });
 
   it("names a new case's port after the first free case_N", () => {
@@ -1034,16 +1242,18 @@ describe("keys", () => {
     expect(renameKey(doc, A, "route").doc.nodes![1]).toBe(doc.nodes![1]);
   });
 
-  it("counts the formulas that still name it", () => {
+  it("counts the formulas that mention it", () => {
+    // A mention, not a reference: CEL isn't parsed here, so `steps["pick"]` and the text "pick" count, `picker` doesn't.
     const doc: GraphDoc = {
       graph_format: 1,
       nodes: [
         { id: A, key: "pick", type: "flow.if@1" },
         { id: B, key: "x", type: "flow.if@1", config: { condition: formula("steps.pick.output.n > 1 && loops.pick.index == 0") } },
-        { id: C, key: "y", type: "flow.if@1", config: { condition: formula("steps.picker.output") } },
+        { id: C, key: "y", type: "flow.if@1", config: { condition: formula('steps["pick"].output == "pick"') } },
+        { id: "00000000-0000-4000-8000-00000000000d", key: "z", type: "flow.if@1", config: { condition: formula("steps.picker.output") } },
       ],
     };  // prettier-ignore
-    expect(renameKey(doc, A, "route").formulas).toBe(1);
+    expect(renameKey(doc, A, "route").mentions).toBe(2);
   });
 });
 ```
@@ -1091,6 +1301,8 @@ export function kindOf(value: unknown): ValueKind | "unknown" | null {
 }
 
 export const formula = (expr: string) => ({ [ENVELOPE]: { kind: "cel", expr } });
+/** A fixed value written the long way: data, whatever it holds, `$value` included (ruling 15). */
+export const literal = (value: unknown) => ({ [ENVELOPE]: { kind: "literal", value } });
 
 export function formulaOf(value: unknown): string {
   const expr = bodyOf(value).expr;
@@ -1112,6 +1324,76 @@ export function referenceText(value: unknown): string {
 
 /** A reference with no default: the same path reads the same value as a formula. */
 export const isPlainRef = (value: unknown): boolean => kindOf(value) === "ref" && !("default" in bodyOf(value));
+
+/** Whole numbers past 2^53 in JSON text, outside strings: JSON.parse rounds them, so what's saved would differ from
+ * what was typed. */
+function roundsAWholeNumber(text: string): boolean {
+  const number = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]!;
+    if (c === '"') {
+      for (i++; i < text.length && text[i] !== '"'; i++) if (text[i] === "\\") i++;
+    } else if (c === "-" || (c >= "0" && c <= "9")) {
+      number.lastIndex = i;
+      const token = number.exec(text)?.[0];
+      if (!token) continue;
+      if (!/[.eE]/.test(token) && !Number.isSafeInteger(Number(token))) return true;
+      i += token.length - 1;
+    }
+  }
+  return false;
+}
+
+/** Whether a value holds a number that isn't finite: what JSON.parse makes of `1e400`. */
+function holdsNonFinite(value: unknown): boolean {
+  const stack = [value];
+  while (stack.length > 0) {
+    const at = stack.pop();
+    if (typeof at === "number" && !Number.isFinite(at)) return true;
+    if (Array.isArray(at)) stack.push(...(at as unknown[]));
+    else if (isObject(at)) stack.push(...Object.values(at));
+  }
+  return false;
+}
+
+/** JSON text as a value the draft can keep (rulings 7 and 15): refused when it doesn't parse, or when parsing would
+ * change a number, as the server stores numbers exactly. Empty text is no value. */
+export function parseJson(text: string): { value: unknown } | { problem: string } {
+  if (text.trim() === "") return { value: undefined };
+  let value: unknown;
+  try {
+    value = JSON.parse(text) as unknown;
+  } catch {
+    return { problem: "This isn't valid JSON, so it isn't saved." };
+  }
+  if (holdsNonFinite(value)) return { problem: "A number here is too large to keep, so it isn't saved." };
+  if (roundsAWholeNumber(text)) return { problem: "A whole number here is too large to keep exactly, so it isn't saved." };
+  return { value };
+}
+
+export const MAX_DEPTH = 64; // engine/graph/model.py: containers nested from the graph down, the graph being level 1
+export const MAX_VALUES = 2_000; // and its envelopes: references, templates, formulas, literals
+
+/** Why the graph's format would refuse the document (engine/graph/model.py's `_admission_problems`), or null: a
+ * number that isn't finite, a container nested past 64 levels, more than 2,000 envelopes. The save would fail whole,
+ * so the drawer writes nothing that breaks them (ruling 7). */
+export function admission(doc: GraphDoc): string | null {
+  let values = 0;
+  const stack: [unknown, number][] = [[doc, 1]];
+  while (stack.length > 0) {
+    const [value, depth] = stack.pop()!;
+    if (typeof value === "number" && !Number.isFinite(value)) return "A number in the draft isn't finite, so it couldn't be saved.";
+    if (typeof value !== "object" || value === null) continue;
+    if (depth > MAX_DEPTH) return `Values can be nested at most ${MAX_DEPTH} levels deep.`;
+    if (Array.isArray(value)) {
+      for (const item of value as unknown[]) stack.push([item, depth + 1]);
+    } else {
+      if (ENVELOPE in value) values++;
+      for (const item of Object.values(value)) stack.push([item, depth + 1]);
+    }
+  }
+  return values > MAX_VALUES ? "A workflow can hold at most 2,000 references, templates and formulas." : null;
+}
 
 export function valueAt(root: unknown, path: Path): unknown {
   let at = root;
@@ -1197,6 +1479,19 @@ export function renamePort(doc: GraphDoc, nodeId: string, index: number, name: s
   };
 }
 
+/** A map's entry renamed in place, keeping its order; refused, with the reason, when the name is empty, `$value`
+ * (ruling 15) or another entry's. */
+export function renameEntry(doc: GraphDoc, nodeId: string, path: Path, from: string, to: string): { doc: GraphDoc } | { problem: string } {
+  const node = findNode(doc, nodeId);
+  const map = node ? valueAt(node.config ?? {}, path) : undefined;
+  if (!node || !isObject(map) || from === to) return { doc };
+  if (to === "") return { problem: "A name can't be empty." };
+  if (to === ENVELOPE) return { problem: "A name can't be $value: the engine would read the whole value as computed." };
+  if (Object.hasOwn(map, to)) return { problem: `There's already one called ${to}.` };
+  const renamed = Object.fromEntries(Object.entries(map).map(([k, v]) => [k === from ? to : k, v]));
+  return { doc: withNode(doc, nodeId, { ...node, config: setAt(node.config ?? {}, path, renamed) as Record<string, unknown> }) };
+}
+
 /** The first `case_N` no port of the step has: a new case's port. */
 export function freePort(node: GraphNode, type: NodeType): string {
   const taken = new Set(portsOf(node, type));
@@ -1212,15 +1507,16 @@ export function keyProblem(doc: GraphDoc, nodeId: string, key: string): string |
 }
 
 /** A step's key changed, with every structured reference to it (`steps.<key>`, `loops.<key>`) in every step's config
- * and the workflow's outputs. Formulas aren't parsed here: they keep the old key, and `formulas` counts the ones that
- * name it. A fixed value's data is data, never rewritten. */
-export function renameKey(doc: GraphDoc, nodeId: string, key: string): { doc: GraphDoc; formulas: number } {
+ * and the workflow's outputs. Formulas aren't parsed here: they keep their text, and `mentions` counts those whose
+ * text mentions the old key as a word, a reference or not (ruling 11). A fixed value's data is data, never
+ * rewritten. */
+export function renameKey(doc: GraphDoc, nodeId: string, key: string): { doc: GraphDoc; mentions: number } {
   const node = findNode(doc, nodeId);
-  if (!node || node.key === key) return { doc, formulas: 0 };
+  if (!node || node.key === key) return { doc, mentions: 0 };
   const old = node.key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const path = new RegExp(`^((?:steps|loops)\\.)${old}(?=$|[.[])`);
-  const named = new RegExp(`(?<![\\w.])(?:steps|loops)\\.${old}(?!\\w)`);
-  let formulas = 0;
+  const mentioned = new RegExp(`(?<![\\w$])${old}(?![\\w$])`);
+  let mentions = 0;
   const rename = (p: unknown) => (typeof p === "string" && path.test(p) ? p.replace(path, `$1${key}`) : p);
   const walk = (v: unknown): unknown => {
     if (Array.isArray(v)) {
@@ -1244,7 +1540,7 @@ export function renameKey(doc: GraphDoc, nodeId: string, key: string): { doc: Gr
       return parts.every((p, i) => p === before[i]) ? v : { [ENVELOPE]: { ...body, parts } };
     }
     if (kind === "cel") {
-      if (typeof body.expr === "string" && named.test(body.expr)) formulas++;
+      if (typeof body.expr === "string" && mentioned.test(body.expr)) mentions++;
       return v;
     }
     if (kind !== null) return v; // a literal's value, or an envelope the engine can't read: kept as written
@@ -1258,14 +1554,14 @@ export function renameKey(doc: GraphDoc, nodeId: string, key: string): { doc: Gr
   });
   const outputs = doc.settings?.outputs === undefined ? undefined : (walk(doc.settings.outputs) as Record<string, unknown>);
   const settings = doc.settings && outputs !== doc.settings.outputs ? { ...doc.settings, outputs } : doc.settings;
-  return { doc: { ...doc, nodes, ...(settings ? { settings } : {}) }, formulas };
+  return { doc: { ...doc, nodes, ...(settings ? { settings } : {}) }, mentions };
 }
 ```
 
 - [ ] **Step 4: Run the tests to see them pass**
 
 Run: `npx -y pnpm@12.6.0 exec vitest run src/lib/config.test.ts`
-Expected: PASS, 16 tests.
+Expected: PASS, 19 tests.
 
 - [ ] **Step 5: Typecheck and lint**
 
@@ -1276,10 +1572,360 @@ Expected: no errors.
 
 ```bash
 git add frontend/src/lib/config.ts frontend/src/lib/config.test.ts
-git commit -m "feat(editor): change a step's config, options and key as documents, its edges and references following (4c-1)"
+git commit -m "feat(editor): a step's config, options and key as documents, checked against the graph's admission (4c-1)"
 ```
 
-### Task 3: One undo step per field
+### Task 3: Edits not applied yet, as data
+
+**Files:**
+- Create: `frontend/src/lib/unapplied.ts`
+- Test: `frontend/src/lib/unapplied.test.ts`
+
+**Interfaces:**
+- Consumes:
+  - from Task 1: `Path`;
+  - from Task 2: `admission`, `formula`, `literal`, `parseJson`, `keyProblem`, `renameKey`, `renamePort`, `renameEntry`,
+    `setConfig`, `setOptions`, `Changed`;
+  - from `lib/graph.ts`: `findNode`, `idKey`, `portOf`, `sameId`.
+- Produces, from `lib/unapplied.ts` (ruling 18):
+  - Types:
+    - `type UnappliedKind = "json" | "number" | "formula" | "port" | "name" | "key" | "limit"`;
+    - `interface Unapplied { id; node; kind; pointer; path: Path; label; text; why: string | null; entry?; literal?;
+      whole?; from? }`;
+    - `type Holding = Omit<Unapplied, "id" | "node" | "kind" | "pointer">`: what a control supplies;
+    - `interface Applied extends Changed { said: string | null; note: string | null }`;
+    - `type Limit = "max_attempts" | "timeout_s"`.
+  - Functions:
+    - `unappliedId(node, kind, pointer): string`;
+    - `within(node, pointer): (u: Unapplied) => boolean`: a part and what's below it; `""` is the whole step;
+    - `parseNumber(text, whole): { value: number | undefined } | { problem: string }`;
+    - `limitProblem(name: Limit, text: string): string | null`: empty text is the type's default, so null;
+    - `applyUnapplied(doc, u, type): Applied | { problem: string }`;
+    - `applyAll(doc, held: Iterable<Unapplied>, typeOf: (node: GraphNode) => NodeType | undefined, take: (u) =>
+      boolean): { doc; applied: Unapplied[]; left: Unapplied[]; note: string | null }`;
+    - `droppedWhy(dropped: GraphEdge[], doc): string`.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `frontend/src/lib/unapplied.test.ts`:
+
+```ts
+// SPDX-License-Identifier: Apache-2.0
+import { describe, expect, it } from "vitest";
+import { IF, SWITCH, TRANSFORM } from "../test/nodeTypes";
+import { formula, literal } from "./config";
+import type { Path } from "./schemaForm";
+import {
+  applyAll, applyUnapplied, parseNumber, unappliedId, within, type Unapplied, type UnappliedKind,
+} from "./unapplied";  // prettier-ignore
+import type { GraphDoc, GraphNode, NodeType } from "./workflows";
+
+const A = "00000000-0000-4000-8000-00000000000a";
+const B = "00000000-0000-4000-8000-00000000000b";
+const TYPES: Record<string, NodeType> = { "flow.switch@1": SWITCH, "flow.if@1": IF, "flow.transform@1": TRANSFORM };
+const typeOf = (n: GraphNode) => TYPES[n.type];
+
+/** An edit held for step A. */
+const held = (kind: UnappliedKind, pointer: string, path: Path, text: string, more: Partial<Unapplied> = {}): Unapplied => ({
+  id: unappliedId(A, kind, pointer), node: A, kind, pointer, path, label: pointer, text, why: null, ...more,
+});  // prettier-ignore
+/** Step A, `fetch`, a transform with this config. */
+const fetch = (config: Record<string, unknown>): GraphDoc => ({
+  graph_format: 1,
+  nodes: [{ id: A, key: "fetch", type: "flow.transform@1", config }],
+});
+
+const applied = (result: ReturnType<typeof applyUnapplied>) => {
+  if ("problem" in result) throw new Error(result.problem);
+  return result;
+};
+
+it("keeps a number exactly as typed, or says why not", () => {
+  expect(parseNumber("2.", false)).toEqual({ value: 2 });
+  expect(parseNumber(" ", false)).toEqual({ value: undefined });
+  expect(parseNumber("2.5", true)).toEqual({ problem: "A whole number, like 42." });
+  expect(parseNumber("1x", false)).toEqual({ problem: "A number, like 42 or 2.5." });
+  expect(parseNumber("1e400", false)).toEqual({ problem: "A number this large can't be kept." });
+  expect(parseNumber("9007199254740993", true)).toEqual({ problem: "A whole number this large can't be kept exactly." });
+});
+
+it("applies JSON, and keeps a literal envelope a literal", () => {
+  const text = '{"x": {"$value": {"kind": "ref", "path": "trigger.x"}}}';
+  const result = applied(applyUnapplied(fetch({}), held("json", "/fields", ["fields"], text, { literal: true }), TRANSFORM));
+  expect(result.doc.nodes![0]!.config).toEqual({ fields: literal({ x: { $value: { kind: "ref", path: "trigger.x" } } }) });
+  expect(result.said).toBeNull(); // a field's own edit is never announced (ruling 8)
+});
+
+it("refuses what the graph's format would, with its reason", () => {
+  expect(applyUnapplied(fetch({}), held("json", "/fields", ["fields"], '{"n": 1e400}'), TRANSFORM)).toEqual({
+    problem: "A number here is too large to keep, so it isn't saved.",
+  });
+  const crowded = fetch({ fields: Object.fromEntries(Array.from({ length: 2000 }, (_, i) => [`f${i}`, formula("1")])) });
+  expect(applyUnapplied(crowded, held("formula", "/fields/more", ["fields", "more"], "2"), TRANSFORM)).toEqual({
+    problem: "A workflow can hold at most 2,000 references, templates and formulas.",
+  });
+  expect(applyUnapplied(fetch({}), held("limit", "/options/max_attempts", ["max_attempts"], "25"), TRANSFORM)).toEqual({
+    problem: "A whole number from 1 to 20.",
+  });
+});
+
+it("renames a key, saying which formulas mention the old one", () => {
+  const doc: GraphDoc = {
+    graph_format: 1,
+    nodes: [
+      { id: A, key: "fetch", type: "flow.transform@1" },
+      { id: B, key: "use", type: "flow.if@1", config: { condition: formula("steps.fetch.output.n > 1") } },
+    ],
+  };  // prettier-ignore
+  const result = applied(applyUnapplied(doc, held("key", "", [], "load"), TRANSFORM));
+  expect(result.doc.nodes![0]!.key).toBe("load");
+  expect(result.note).toBe("1 formula mentions fetch and keeps its text: check it.");
+  expect(result.said).toBe("Renamed fetch to load. 1 formula mentions fetch and keeps its text: check it.");
+  expect(applyUnapplied(doc, held("key", "", [], "use"), TRANSFORM)).toEqual({ problem: "Another step is already called use." });
+});
+
+it("keeps an edit that takes ports away for its question", () => {
+  const doc: GraphDoc = {
+    graph_format: 1,
+    nodes: [
+      { id: A, key: "pick", type: "flow.switch@1", config: { cases: [{ port: "a", when: formula("true") }, { port: "b", when: formula("false") }] } },
+      { id: B, key: "right", type: "flow.transform@1" },
+    ],
+    edges: [{ from: { node: A, port: "b" }, to: { node: B } }],
+  };  // prettier-ignore
+  const cut = held("json", "/cases", ["cases"], '[{"port": "a", "when": {"$value": {"kind": "cel", "expr": "true"}}}]');
+  const { doc: next, applied: done, left } = applyAll(doc, [cut], typeOf, () => true);
+  expect(next).toBe(doc);
+  expect(done).toEqual([]);
+  expect(left.map((u) => u.why)).toEqual(["Not applied: it removes the port b and its edge to right."]);
+});
+
+it("applies each held edit in turn, as one document, and keeps those it can't", () => {
+  const edits = [
+    held("number", "/n", ["n"], "12", { whole: true }),
+    held("number", "/m", ["m"], "1x"),
+    held("limit", "/options/max_attempts", ["max_attempts"], "5"),
+  ];
+  const { doc: next, applied: done, left } = applyAll(fetch({}), edits, typeOf, () => true);
+  expect(next.nodes![0]).toMatchObject({ config: { n: 12 }, options: { max_attempts: 5 } });
+  expect(done.map((u) => u.pointer)).toEqual(["/n", "/options/max_attempts"]);
+  expect(left.map((u) => [u.pointer, u.why])).toEqual([["/m", "A number, like 42 or 2.5."]]);
+});
+
+describe("which edits a change covers", () => {
+  it("covers a part and what's below it, never a sibling that shares its prefix", () => {
+    const at = (pointer: string) => held("json", pointer, [], "");
+    expect([at("/fields"), at("/fields/x"), at("/fieldsx")].map(within(A, "/fields"))).toEqual([true, true, false]);
+    expect(within(B, "/fields")(at("/fields"))).toBe(false);
+    expect(within(A, "")(held("key", "", [], "load"))).toBe(true); // the whole step: a deletion's
+  });
+
+  it("says when an edit's step is gone", () => {
+    expect(applyUnapplied(fetch({}), { ...held("json", "/x", ["x"], "1"), node: B }, TRANSFORM)).toEqual({
+      problem: "Its step is no longer in the draft.",
+    });
+  });
+});
+```
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `npx -y pnpm@12.6.0 exec vitest run src/lib/unapplied.test.ts`
+Expected: FAIL. The module `./unapplied` doesn't exist.
+
+- [ ] **Step 3: Write the module**
+
+Create `frontend/src/lib/unapplied.ts`:
+
+```ts
+// SPDX-License-Identifier: Apache-2.0
+// Edits typed but not yet in the draft (4c-1, ruling 18): JSON being typed or refused; a map entry's, a port's or the
+// key's name; a number or a limit that doesn't parse; a formula the graph's format refuses. The editor keeps them,
+// never the control, so a tab, a toggle or a closed drawer can't lose them. Each is applied when it can be, and said,
+// with its reason, while it can't.
+import {
+  admission, formula, keyProblem, literal, parseJson, renameEntry, renameKey, renamePort, setConfig, setOptions,
+  type Changed,
+} from "./config";  // prettier-ignore
+import { findNode, idKey, portOf, sameId } from "./graph";
+import type { Path } from "./schemaForm";
+import type { GraphDoc, GraphEdge, GraphNode, NodeType } from "./workflows";
+
+export type UnappliedKind = "json" | "number" | "formula" | "port" | "name" | "key" | "limit";
+
+export interface Unapplied {
+  id: string; // unappliedId(node, kind, pointer)
+  node: string; // the step's id, as the draft writes it
+  kind: UnappliedKind;
+  pointer: string; // where it goes: in the step's config; "/options/<name>" for a limit; "" for the key
+  path: Path; // the same as a path: a limit's is [its name]; a name's is its map's; the key's is []
+  label: string; // the field's label, for the question that lists it
+  text: string;
+  why: string | null; // why it isn't in the draft; null while it's being typed
+  entry?: boolean; // emptied, a list's item or a map's entry blanks to null rather than going
+  literal?: boolean; // its value is a `literal` envelope's payload, written back as one (ruling 15)
+  whole?: boolean; // a number: whole
+  from?: string; // a map entry's name in the draft
+}
+
+/** What a control supplies; the editor adds its step, its kind and where it goes. */
+export type Holding = Omit<Unapplied, "id" | "node" | "kind" | "pointer">;
+
+export interface Applied extends Changed {
+  said: string | null; // what to announce: a field's own edit says nothing (ruling 8)
+  note: string | null; // what the drawer says after it, until the next edit: a rename's formulas (ruling 11)
+}
+
+export const unappliedId = (node: string, kind: UnappliedKind, pointer: string): string => `${idKey(node)}|${kind}|${pointer}`;
+
+/** The edits of a step at a part and below it: what a change to that part applies first. "" is the whole step. */
+export const within = (node: string, pointer: string) => (u: Unapplied): boolean =>
+  sameId(u.node, node) && (pointer === "" || u.pointer === pointer || u.pointer.startsWith(`${pointer}/`));
+
+/** A number typed (rulings 7 and 18). What the draft keeps must be what was typed: never an infinity, never a whole
+ * number rounded past 2^53. Empty text is no value. */
+export function parseNumber(text: string, whole: boolean): { value: number | undefined } | { problem: string } {
+  const t = text.trim();
+  if (t === "") return { value: undefined };
+  const n = Number(t);
+  if (Number.isNaN(n) || (whole && Number.isFinite(n) && !Number.isInteger(n))) {
+    return { problem: whole ? "A whole number, like 42." : "A number, like 42 or 2.5." };
+  }
+  if (!Number.isFinite(n)) return { problem: "A number this large can't be kept." };
+  if (/^-?\d+$/.test(t) && !Number.isSafeInteger(n)) return { problem: "A whole number this large can't be kept exactly." };
+  return { value: n };
+}
+
+/** The graph's bounds on a step's own limits (engine/graph/model.py's Options): a draft breaking one isn't saved. */
+const LIMITS = {
+  max_attempts: { ok: (n: number) => Number.isInteger(n) && n >= 1 && n <= 20, problem: "A whole number from 1 to 20." },
+  timeout_s: { ok: (n: number) => n > 0 && n <= 86_400, problem: "A number of seconds above 0, up to 86,400." },
+} as const;
+export type Limit = keyof typeof LIMITS;
+
+/** Why a limit's text isn't one the graph takes, or null: empty text leaves it to the type's default. */
+export function limitProblem(name: Limit, text: string): string | null {
+  const parsed = parseNumber(text, false);
+  if ("problem" in parsed) return LIMITS[name].problem;
+  return parsed.value === undefined || LIMITS[name].ok(parsed.value) ? null : LIMITS[name].problem;
+}
+
+/** A typed value as the draft writes it: emptied, it goes, or blanks in a list or a map; a literal's payload is wrapped
+ * again (ruling 15). */
+function written(value: unknown, u: Unapplied): unknown {
+  if (value === undefined) return u.entry ? null : undefined;
+  return u.literal ? literal(value) : value;
+}
+
+const quiet = (changed: Changed | { problem: string }): Applied | { problem: string } =>
+  "problem" in changed ? changed : { ...changed, said: null, note: null };
+
+function attempt(doc: GraphDoc, node: GraphNode, u: Unapplied, type: NodeType | undefined): Applied | { problem: string } {
+  switch (u.kind) {
+    case "json": {
+      const parsed = parseJson(u.text);
+      return "problem" in parsed ? parsed : quiet(setConfig(doc, u.node, u.path, written(parsed.value, u), type));
+    }
+    case "number": {
+      const parsed = parseNumber(u.text, u.whole ?? false);
+      return "problem" in parsed ? parsed : quiet(setConfig(doc, u.node, u.path, written(parsed.value, u), type));
+    }
+    case "formula":
+      return quiet(setConfig(doc, u.node, u.path, u.text.trim() === "" ? written(undefined, u) : formula(u.text), type));
+    case "port": {
+      if (!type) return { problem: "This step's type isn't on this server." };
+      const name = u.text.trim();
+      const renamed = renamePort(doc, u.node, u.path[1] as number, name, type);
+      if ("problem" in renamed) return renamed;
+      return { doc: renamed.doc, dropped: [], said: `The port is now ${name}; its edges follow it.`, note: null };
+    }
+    case "name": {
+      const renamed = renameEntry(doc, u.node, u.path, u.from ?? "", u.text.trim());
+      return "problem" in renamed ? renamed : { doc: renamed.doc, dropped: [], said: null, note: null };
+    }
+    case "key": {
+      const key = u.text.trim();
+      const problem = keyProblem(doc, u.node, key);
+      if (problem) return { problem };
+      const { doc: next, mentions } = renameKey(doc, u.node, key);
+      // A mention, not a reference: CEL isn't parsed here (ruling 11).
+      const note =
+        mentions === 0 ? null
+        : mentions === 1 ? `1 formula mentions ${node.key} and keeps its text: check it.`
+        : `${mentions} formulas mention ${node.key} and keep their text: check them.`;  // prettier-ignore
+      return { doc: next, dropped: [], said: `Renamed ${node.key} to ${key}.${note ? ` ${note}` : ""}`, note };
+    }
+    case "limit": {
+      const name = u.path[0] as Limit;
+      const problem = limitProblem(name, u.text);
+      if (problem !== null) return { problem };
+      const value = u.text.trim() === "" ? undefined : Number(u.text.trim());
+      return quiet(setOptions(doc, u.node, { ...(node.options ?? {}), [name]: value }, type));
+    }
+  }
+}
+
+/** The draft with the edit applied, or why it can't be: its own rule, or the graph's admission (ruling 7). */
+export function applyUnapplied(doc: GraphDoc, u: Unapplied, type: NodeType | undefined): Applied | { problem: string } {
+  const node = findNode(doc, u.node);
+  if (!node) return { problem: "Its step is no longer in the draft." };
+  const result = attempt(doc, node, u, type);
+  if ("problem" in result) return result;
+  const refused = admission(result.doc);
+  return refused === null ? result : { problem: refused };
+}
+
+/** Why an edit that takes ports away waits for its question (ruling 9). */
+export function droppedWhy(dropped: GraphEdge[], doc: GraphDoc): string {
+  const ports = [...new Set(dropped.map(portOf))];
+  const targets = [...new Set(dropped.map((e) => findNode(doc, e.to.node)?.key ?? "a step"))];
+  return `Not applied: it removes ${ports.length === 1 ? "the port" : "the ports"} ${ports.join(", ")} and ${
+    dropped.length === 1 ? "its edge" : "their edges"} to ${targets.join(", ")}.`;  // prettier-ignore
+}
+
+/** Each held edit `take` covers, applied in turn to one document: what they make, those applied, and those that stay
+ * with their reasons. One that takes ports away stays: that is asked one edit at a time (ruling 9). */
+export function applyAll(
+  doc: GraphDoc, held: Iterable<Unapplied>, typeOf: (node: GraphNode) => NodeType | undefined, take: (u: Unapplied) => boolean,
+): { doc: GraphDoc; applied: Unapplied[]; left: Unapplied[]; note: string | null } {  // prettier-ignore
+  let next = doc;
+  let note: string | null = null;
+  const applied: Unapplied[] = [];
+  const left: Unapplied[] = [];
+  for (const u of held) {
+    if (!take(u)) continue;
+    const node = findNode(next, u.node);
+    const result = applyUnapplied(next, u, node ? typeOf(node) : undefined);
+    if ("problem" in result) left.push({ ...u, why: result.problem });
+    else if (result.dropped.length > 0) left.push({ ...u, why: droppedWhy(result.dropped, next) });
+    else {
+      next = result.doc;
+      note = result.note ?? note;
+      applied.push(u);
+    }
+  }
+  return { doc: next, applied, left, note };
+}
+```
+
+- [ ] **Step 4: Run the tests to see them pass**
+
+Run: `npx -y pnpm@12.6.0 exec vitest run src/lib/unapplied.test.ts`
+Expected: PASS, 8 tests.
+
+- [ ] **Step 5: Typecheck and lint**
+
+Run: `npx -y pnpm@12.6.0 typecheck && npx -y pnpm@12.6.0 lint`
+Expected: no errors. The `switch` over `UnappliedKind` covers every kind, so `attempt` needs no default.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add frontend/src/lib/unapplied.ts frontend/src/lib/unapplied.test.ts
+git commit -m "feat(editor): edits typed but not applied, as data, applied when they can be (4c-1)"
+```
+
+### Task 4: One undo step per field
 
 **Files:**
 - Modify: `frontend/src/lib/history.ts`
@@ -1359,9 +2005,9 @@ git add frontend/src/lib/history.ts frontend/src/lib/history.test.ts
 git commit -m "feat(editor): coalesce one field's typing into one undo step (4c-1)"
 ```
 
-# Milestone 2: Tabs, one field, the drawer, lists and maps
+# Milestone 2: Tabs, one field, the drawer, unapplied edits, lists and maps
 
-### Task 4: Radix Tabs
+### Task 5: Radix Tabs
 
 **Files:**
 - Modify: `frontend/package.json`, `frontend/pnpm-lock.yaml`
@@ -1510,7 +2156,7 @@ Then build and read the notices the build writes:
 - `grep -n "^@radix-ui/react-tabs" dist/third-party-notices.txt`
 
 Expected: the build succeeds, and the grep prints `@radix-ui/react-tabs 1.1.21`. The browser runs this check at the
-end of Task 6.
+end of Task 7.
 
 - [ ] **Step 9: Commit**
 
@@ -1519,7 +2165,7 @@ git add frontend/package.json frontend/pnpm-lock.yaml frontend/src/components/Ta
 git commit -m "feat(ui): token-styled Radix Tabs 1.1.21, pinned, in the notices (4c-1)"
 ```
 
-### Task 5: One field
+### Task 6: One field
 
 **Files:**
 - Modify: `frontend/src/components/Field.tsx` (export `controlClass`)
@@ -1536,28 +2182,39 @@ git commit -m "feat(ui): token-styled Radix Tabs 1.1.21, pinned, in the notices 
 - Consumes:
   - from Task 1: `FieldSpec`, `Path`, `Widget`, `canFixed`, `canFormula`, `emptyOf`, `startsAsFormula`,
     `propertiesOf`, `pointerOf`;
-  - from Task 2: `valueAt`, `setAt`, `kindOf`, `fixedOf`, `formula`, `formulaOf`, `isPlainRef`, `referenceText`,
-    `MAX_FORMULA`.
+  - from Task 2: `valueAt`, `setConfig`, `setOptions`, `admission`, `kindOf`, `fixedOf`, `formula`, `literal`,
+    `formulaOf`, `isPlainRef`, `referenceText`, `MAX_FORMULA`, `Changed`, `StepOptions`;
+  - from Task 3: `Unapplied`, `UnappliedKind`, `Holding`, `unappliedId`, `within`, `applyUnapplied`, `applyAll`,
+    `droppedWhy`, `parseNumber`.
 - Produces:
   - `controlClass(invalid: boolean): string` (`components/Field.tsx`).
   - From `context.ts`:
-    - `interface Drawer { node: GraphNode; type: NodeType; editable: boolean; tenantId: string; workflowId:
-      string; problems: Diagnostic[]; expressions: Expression[]; set: (path: Path, value: unknown, mark?: string) =>
-      void }`;
+    - `interface DrawerActions`, each answering why nothing was written, or null:
+      - `set(path, value, mark?)`;
+      - `options(options: StepOptions, mark?)`;
+      - `held(kind, pointer): Unapplied | undefined`, `hold(kind, pointer, holding: Holding)`, `release(kind,
+        pointer)`, `discard(pointer)`, `apply(kind, pointer)`;
+      - `restructure(pointer, change?: { path: Path; make: (current: unknown) => unknown })`.
+    - `interface Drawer extends DrawerActions { node: GraphNode; type: NodeType | undefined; editable: boolean;
+      tenantId: string; workflowId: string; problems: Diagnostic[]; expressions: Expression[] }`;
     - `DrawerContext`, `useDrawer(): Drawer`;
-    - `segment(name): string`, `problemsAt(all: Diagnostic[], pointer: string, shown: ReadonlySet<string> | null):
-      Diagnostic[]`;
-    - `useSession(prefix: string): { mark: () => string; onFocus: (e) => void }`.
+    - `segment(name): string`, `problemsAt(all, pointer, shown: ReadonlySet<string> | null): Diagnostic[]`;
+    - `useSession(prefix): { mark: () => string; onFocus: (e) => void }`.
   - From `FieldFrame.tsx`: `interface Described { id; describedBy; invalid }`, `FieldFrame`, `GroupFrame`.
-  - From `scalars.tsx`: `interface ControlProps extends Described { spec; value; disabled; onChange: (value: unknown,
-    typed: boolean) => void; onLocal: (problem: string | null) => void }`, `useText`, `TextControl`,
-    `NumberControl`, `BooleanControl`, `EnumControl`, `JsonControl`, `JSON_NOTE`.
+  - From `scalars.tsx`:
+    - `interface ControlProps extends Described { spec; value; literal: boolean; disabled; onChange: (value:
+      unknown, typed: boolean) => string | null }`;
+    - `useText(value, show, means, held?)`;
+    - `TextControl`, `NumberControl`, `BooleanControl`, `EnumControl`, `JsonControl`;
+    - `JSON_NOTE`, `LITERAL_NOTE`, `CUT_NOTE`.
   - From `Formula.tsx`: `type Mode = "fixed" | "formula"`, `FormulaControl`, `ModeSwitch`, `ReferenceView`,
     `SensitiveView`, `runsText(x: Expression | undefined): string | null`.
   - From `structured.tsx`: `isContainer(widget): boolean`, `partNames(spec): string[]`, `ContainerParts({ spec })`.
   - From `FieldView.tsx`: `FieldView({ spec }: { spec: FieldSpec })`.
-  - From `harness.tsx` (tests only): `NODE_ID`, `type Edit`, `showFields(type, options?) → { edits, config() }`,
-    `problem(field, message): Diagnostic`.
+  - From `harness.tsx` (tests only):
+    - `NODE_ID`, `type Edit`;
+    - `showFields(type, options?, children?)`, which returns `{ edits, config(), node(), held() }`;
+    - `problem(field, message): Diagnostic`.
 
 - [ ] **Step 1: Export the control's classes**
 
@@ -1573,19 +2230,23 @@ and in `Frame`, replace `` className: `${CONTROL} ${error ? "border-danger" : "b
 
 - [ ] **Step 2: Write the harness the tests drive**
 
-Create `frontend/src/routes/editor/drawer/harness.tsx`:
+Create `frontend/src/routes/editor/drawer/harness.tsx`. It's a one-step draft that each write changes as the editor
+would: checked against the graph's admission, unapplied edits held beside it.
 
 ```tsx
 // SPDX-License-Identifier: Apache-2.0
-// A step's fields on their own, for tests (4c-1): each edit changes the step's config as the editor would, and is kept
-// with its mark. Imported by tests only: the build never reaches it.
+// A step's fields on their own, for tests (4c-1): a one-step draft each write changes as the editor would, checked
+// against the graph's admission (ruling 7), with the edits typed but not applied held beside it (ruling 18), and
+// every write kept with its mark. An edit that takes ports away is refused here: the editor asks (Task 7). Imported
+// by tests only: the build never reaches it.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render } from "@testing-library/react";
-import { useState } from "react";
-import { setAt } from "../../../lib/config";
+import { useState, type ReactNode } from "react";
+import { admission, setConfig, setOptions, valueAt, type Changed, type StepOptions } from "../../../lib/config";
 import { fieldsOf, type Path } from "../../../lib/schemaForm";
-import type { Diagnostic, Expression, GraphNode, NodeType } from "../../../lib/workflows";
-import { DrawerContext } from "./context";
+import { applyAll, applyUnapplied, droppedWhy, unappliedId, within, type Unapplied, type UnappliedKind } from "../../../lib/unapplied";
+import type { Diagnostic, Expression, GraphDoc, NodeType } from "../../../lib/workflows";
+import { DrawerContext, type Drawer } from "./context";
 import { FieldView } from "./FieldView";
 
 export const NODE_ID = "00000000-0000-4000-8000-000000000001";
@@ -1593,42 +2254,107 @@ export type Edit = { path: Path; value: unknown; mark: string | undefined };
 
 interface Options {
   config?: Record<string, unknown>;
+  options?: StepOptions;
   problems?: Diagnostic[];
   expressions?: Expression[];
   editable?: boolean;
 }
 
-function Fields({ type, options, edits, state }: {
-  type: NodeType; options: Options; edits: Edit[]; state: { config: Record<string, unknown> };
-}) {  // prettier-ignore
-  const [node, setNode] = useState<GraphNode>({ id: NODE_ID, key: "step", type: type.ref, config: state.config });
-  const set = (path: Path, value: unknown, mark?: string) => {
-    edits.push({ path, value, mark });
-    state.config = setAt(state.config, path, value) as Record<string, unknown>;
-    setNode((n) => ({ ...n, config: state.config }));
-  };
-  const drawer = {
-    node, type, editable: options.editable ?? true, tenantId: "t1", workflowId: "w1",
-    problems: options.problems ?? [], expressions: options.expressions ?? [], set,
-  };  // prettier-ignore
-  return (
-    <DrawerContext.Provider value={drawer}>
-      {fieldsOf(type).map((f) => <FieldView key={f.pointer} spec={f} />)}
-    </DrawerContext.Provider>
-  );
+interface State {
+  doc: GraphDoc;
+  held: ReadonlyMap<string, Unapplied>;
 }
 
-/** The type's fields, shown; `config()` is the step's config after the edits so far. */
-export function showFields(type: NodeType, options: Options = {}) {
+function Harness({ type, options, edits, state, children }: {
+  type: NodeType; options: Options; edits: Edit[]; state: State; children: ReactNode;
+}) {  // prettier-ignore
+  const [, setVersion] = useState(0); // the draft and what's held live in `state`, which tests read; this redraws
+  const redraw = () => setVersion((v) => v + 1);
+  const id = (kind: UnappliedKind, pointer: string) => unappliedId(NODE_ID, kind, pointer);
+  const keep = (u: Unapplied) => {
+    state.held = new Map(state.held).set(u.id, u);
+    redraw();
+  };
+  const drop = (ids: string[]) => {
+    const next = new Map(state.held);
+    for (const each of ids) next.delete(each);
+    state.held = next;
+    redraw();
+  };
+  const write = ({ doc, dropped }: Changed, release: string[] = []): string | null => {
+    const refused = admission(doc);
+    if (refused !== null) return refused;
+    if (dropped.length > 0) return droppedWhy(dropped, doc);
+    state.doc = doc;
+    drop(release);
+    return null;
+  };
+  const drawer: Drawer = {
+    node: state.doc.nodes![0]!,
+    type,
+    editable: options.editable ?? true,
+    tenantId: "t1",
+    workflowId: "w1",
+    problems: options.problems ?? [],
+    expressions: options.expressions ?? [],
+    set: (path, value, mark) => {
+      edits.push({ path, value, mark });
+      return write(setConfig(state.doc, NODE_ID, path, value, type));
+    },
+    options: (next) => write(setOptions(state.doc, NODE_ID, next, type)),
+    held: (kind, pointer) => state.held.get(id(kind, pointer)),
+    hold: (kind, pointer, holding) => keep({ ...holding, id: id(kind, pointer), node: NODE_ID, kind, pointer }),
+    release: (kind, pointer) => drop([id(kind, pointer)]),
+    discard: (pointer) => drop([...state.held.values()].filter(within(NODE_ID, pointer)).map((u) => u.id)),
+    apply: (kind, pointer) => {
+      const u = state.held.get(id(kind, pointer));
+      if (!u) return null;
+      const result = applyUnapplied(state.doc, u, type);
+      const why = "problem" in result ? result.problem : write(result, [u.id]);
+      if (why !== null) keep({ ...u, why });
+      return why;
+    },
+    restructure: (pointer, change) => {
+      const { doc, applied, left } = applyAll(state.doc, state.held.values(), () => type, within(NODE_ID, pointer));
+      for (const u of left) keep(u);
+      if (left.length > 0) return left[0]!.why;
+      let changed: Changed = { doc, dropped: [] };
+      if (change) {
+        const current = valueAt(doc.nodes![0]!.config ?? {}, change.path);
+        const made = change.make(current);
+        if (made !== current) changed = setConfig(doc, NODE_ID, change.path, made, type);
+      }
+      return changed.doc === state.doc ? null : write(changed, applied.map((u) => u.id));
+    },
+  };
+  return <DrawerContext.Provider value={drawer}>{children}</DrawerContext.Provider>;
+}
+
+/** The type's fields, or `children`, in a drawer of one step. `config()`, `node()` and `held()` read what the edits
+ * made of it. */
+export function showFields(type: NodeType, options: Options = {}, children?: ReactNode) {
   const edits: Edit[] = [];
-  const state = { config: options.config ?? {} };
+  const state: State = {
+    doc: {
+      graph_format: 1,
+      nodes: [{ id: NODE_ID, key: "step", type: type.ref, config: options.config ?? {}, ...(options.options ? { options: options.options } : {}) }],
+    },
+    held: new Map(),
+  };
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
-      <Fields type={type} options={options} edits={edits} state={state} />
+      <Harness type={type} options={options} edits={edits} state={state}>
+        {children ?? fieldsOf(type).map((f) => <FieldView key={f.pointer} spec={f} />)}
+      </Harness>
     </QueryClientProvider>,
   );
-  return { edits, config: () => state.config };
+  return {
+    edits,
+    config: () => state.doc.nodes![0]!.config ?? {},
+    node: () => state.doc.nodes![0]!,
+    held: () => [...state.held.values()],
+  };
 }
 
 /** A problem the server found at a field of the step. */
@@ -1646,7 +2372,7 @@ Create `frontend/src/routes/editor/drawer/FieldView.test.tsx`:
 import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, it } from "vitest";
-import { formula } from "../../../lib/config";
+import { formula, literal } from "../../../lib/config";
 import { FILTER, IF, REMOTE, typeWith } from "../../../test/nodeTypes";
 import { NODE_ID, problem, showFields } from "./harness";
 
@@ -1664,6 +2390,19 @@ const PLAIN = typeWith({
   },
 });  // prettier-ignore
 
+/** A group holding a secret, with a default that holds one too. */
+const HOLDER = typeWith({
+  type: "object",
+  properties: {
+    auth: {
+      type: "object", title: "Auth", default: { key: "d3fault-s3cr3t" },
+      properties: { key: { type: "string", title: "Key", "x-sensitive": true } },
+    },
+  },
+});  // prettier-ignore
+
+const typedValues = () => [...document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input, textarea")].map((f) => f.value);
+
 it("labels a field by its title, its hint and the server's problems described by it", () => {
   showFields(PLAIN, { problems: [problem("/name", "Too short.")] });
   const name = screen.getByLabelText("Name");
@@ -1673,16 +2412,25 @@ it("labels a field by its title, its hint and the server's problems described by
   expect(name.getAttribute("aria-required")).toBe("true");
 });
 
-it("writes a number as typed, and says when the text isn't one", async () => {
-  const { config } = showFields(PLAIN);
+it("writes a number as typed, and holds what isn't one, with why", async () => {
+  const { config, held } = showFields(PLAIN);
   await userEvent.type(screen.getByLabelText("Count"), "12");
   expect(config()).toEqual({ count: 12 });
   await userEvent.type(screen.getByLabelText("Count"), ".5");
   expect(screen.getByText("A whole number, like 42.")).toBeTruthy();
   expect(config()).toEqual({ count: 12 });
+  expect(held().map((u) => [u.kind, u.text])).toEqual([["number", "12.5"]]);
   await userEvent.type(screen.getByLabelText("Ratio"), "2.");
   expect(screen.getByLabelText<HTMLInputElement>("Ratio").value).toBe("2."); // as typed, while it means 2
   expect(config()).toEqual({ count: 12, ratio: 2 });
+});
+
+it("discards an edit not applied, on purpose", async () => {
+  const { held } = showFields(PLAIN, { config: { count: 4 } });
+  await userEvent.type(screen.getByLabelText("Count"), "x");
+  await userEvent.click(screen.getByRole("button", { name: "Discard the edit to Count" }));
+  expect(screen.getByLabelText<HTMLInputElement>("Count").value).toBe("4");
+  expect(held()).toEqual([]);
 });
 
 it("removes an emptied field, so its default applies, and says a required one is needed", async () => {
@@ -1722,21 +2470,62 @@ it("shows a group's parts, and a problem in a part it doesn't show at the group"
   expect(within(group).getByText("Not one of its fields.")).toBeTruthy();
 });
 
-it("edits a group as JSON, the engine's reading, saved when focus leaves", async () => {
-  const { config, edits } = showFields(PLAIN, { config: { query: { limit: 5 } } });
+it("edits a group as JSON, the engine's reading, applied when focus leaves", async () => {
+  const { config, held } = showFields(PLAIN, { config: { query: { limit: 5 } } });
   await userEvent.click(screen.getByRole("button", { name: "Edit as JSON" }));
   const json = screen.getByLabelText<HTMLTextAreaElement>("Query");
   expect(JSON.parse(json.value)).toEqual({ limit: 5 });
   await userEvent.clear(json);
   await userEvent.paste('{"limit": {"$value": {"kind": "ref", "path": "trigger.n"}}}');
-  expect(edits).toEqual([]); // nothing while typing
+  expect(config()).toEqual({ query: { limit: 5 } }); // held while it's typed
+  expect(held()).toHaveLength(1);
   await userEvent.tab();
   expect(config()).toEqual({ query: { limit: { $value: { kind: "ref", path: "trigger.n" } } } }); // never wrapped
-  await userEvent.click(json);
-  await userEvent.paste("}");
-  await userEvent.tab();
+  expect(held()).toEqual([]);
+});
+
+it("keeps unapplied JSON through a change of view, applying what's valid first", async () => {
+  const { config, held } = showFields(PLAIN, { config: { query: { limit: 5 } } });
+  const toggle = () => screen.getByRole("button", { name: "Edit as JSON" });
+  await userEvent.click(toggle());
+  await userEvent.clear(screen.getByLabelText("Query"));
+  await userEvent.paste('{"limit": ');
+  await userEvent.click(toggle()); // focus leaves (applied: refused), then the toggle waits for it
   expect(screen.getByText("This isn't valid JSON, so it isn't saved.")).toBeTruthy();
-  expect(edits).toHaveLength(1);
+  expect(screen.getByLabelText<HTMLTextAreaElement>("Query").value).toBe('{"limit": '); // kept, still shown
+  expect(held()).toHaveLength(1);
+  await userEvent.click(screen.getByLabelText("Query"));
+  await userEvent.paste("7}");
+  await userEvent.click(toggle()); // valid now: applied, then the form
+  expect(config()).toEqual({ query: { limit: 7 } });
+  expect(within(screen.getByRole("group", { name: "Query" })).getByLabelText<HTMLInputElement>("Limit").value).toBe("7");
+  expect(held()).toEqual([]);
+});
+
+it("says a JSON number too large to keep, and keeps it out of the draft", async () => {
+  const { config } = showFields(PLAIN);
+  await userEvent.click(within(screen.getByRole("group", { name: "How Extra is set" })).getByRole("button", { name: "Fixed" }));
+  await userEvent.click(screen.getByLabelText("Extra"));
+  await userEvent.paste("[1e400]");
+  await userEvent.tab();
+  expect(screen.getByText("A number here is too large to keep, so it isn't saved.")).toBeTruthy();
+  expect(config()).toEqual({});
+});
+
+it("edits a literal as its payload, and keeps it a literal", async () => {
+  const data = { limit: { $value: { kind: "ref", path: "trigger.n" } } }; // data, not a reference
+  const { config } = showFields(PLAIN, { config: { name: literal("hi"), query: literal(data) } });
+  await userEvent.type(screen.getByLabelText("Name"), "!");
+  const json = screen.getByLabelText<HTMLTextAreaElement>("Query"); // a literal's parts are its payload's: JSON
+  expect(JSON.parse(json.value)).toEqual(data);
+  expect(screen.getAllByText(/Written as a literal: kept as data/)).toHaveLength(2); // the name's hint and the JSON's
+  await userEvent.clear(json);
+  await userEvent.paste('{"limit": {"$value": {"kind": "ref", "path": "trigger.m"}}}');
+  await userEvent.tab();
+  expect(config()).toEqual({
+    name: literal("hi!"),
+    query: literal({ limit: { $value: { kind: "ref", path: "trigger.m" } } }),
+  });
 });
 
 it("keeps a formula, says how it runs, and turns a fixed value into the formula that gives it", async () => {
@@ -1759,6 +2548,15 @@ it("offers no fixed value where the engine takes only a formula", () => {
   expect(screen.getByLabelText("Predicate").tagName).toBe("TEXTAREA");
 });
 
+it("offers neither a fixed value nor a formula where the engine takes only references", () => {
+  const refs = typeWith({ type: "object", properties: { source: { type: "string", title: "Source", "x-dewpoint-kinds": ["ref"] } } });
+  showFields(refs, { config: { source: { $value: { kind: "ref", path: "trigger.site" } } } });
+  expect(screen.getByLabelText("Source").textContent).toBe("trigger.site");
+  expect(screen.getByText(/takes only references or text with references, which can't be set in this drawer/)).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /Fixed|Formula|Replace/ })).toBeNull();
+  expect(screen.queryByRole("textbox")).toBeNull();
+});
+
 it("shows a reference read only, and keeps it until it's replaced", async () => {
   const ref = { $value: { kind: "ref", path: "steps.fetch.output.name" } };
   const { config, edits } = showFields(PLAIN, { config: { name: ref } });
@@ -1770,23 +2568,23 @@ it("shows a reference read only, and keeps it until it's replaced", async () => 
 
 it("never shows a sensitive field's fixed value", async () => {
   const { config } = showFields(REMOTE, { config: { token: "s3cr3t-value" } });
-  const shown = () => [...document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input, textarea")].map((f) => f.value);
   expect(document.body.textContent).not.toContain("s3cr3t");
-  expect(shown().some((v) => v.includes("s3cr3t"))).toBe(false);
+  expect(typedValues().some((v) => v.includes("s3cr3t"))).toBe(false);
   expect(screen.getByLabelText("Token").textContent).toBe("A fixed value is written here, which a sensitive field can't keep.");
   await userEvent.click(screen.getByRole("button", { name: "Replace with a formula" }));
   expect(config()).toEqual({});
   expect(screen.getByLabelText("Token").tagName).toBe("TEXTAREA");
 });
 
-it("never offers a value with a sensitive part as JSON", () => {
-  const holder = typeWith({
-    type: "object",
-    properties: { auth: { type: "object", title: "Auth", properties: { key: { type: "string", title: "Key", "x-sensitive": true } } } },
-  });  // prettier-ignore
-  showFields(holder, { config: { auth: {} } });
+it("never shows a sensitive part as JSON, a default or a formula", async () => {
+  const { config } = showFields(HOLDER, { config: { auth: { key: "s3cr3t-value" } } });
   expect(screen.getByRole("group", { name: "Auth" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Edit as JSON" })).toBeNull();
+  await userEvent.click(within(screen.getByRole("group", { name: "How Auth is set" })).getByRole("button", { name: "Formula" }));
+  expect(config()).toEqual({}); // the formula starts empty: nothing copied out of the hidden value
+  expect(screen.getByLabelText<HTMLTextAreaElement>("Auth").value).toBe("");
+  expect(document.body.textContent).not.toMatch(/s3cr3t/);
+  expect(typedValues().some((v) => v.includes("s3cr3t"))).toBe(false);
 });
 
 it("disables every control for a person who can't edit", () => {
@@ -1802,28 +2600,48 @@ it("disables every control for a person who can't edit", () => {
 Run: `npx -y pnpm@12.6.0 exec vitest run src/routes/editor/drawer/FieldView.test.tsx`
 Expected: FAIL. The harness can't import `./context` and `./FieldView`.
 
-- [ ] **Step 5: Write what a drawer's fields share**
+- [ ] **Step 5: Write what a drawer's fields share and may do**
 
 Create `frontend/src/routes/editor/drawer/context.ts`:
 
 ```ts
 // SPDX-License-Identifier: Apache-2.0
 // What a step drawer's fields share (4c-1): the step, its type, whether it may be edited, the server's problems and
-// formulas for it, and how a value is written; which problems a field shows (D19); and focus sessions (ruling 8).
+// formulas for it; what they may do to the draft, through the editor, which owns the document and the edits typed but
+// not applied (ruling 18); which problems a field shows (D19); and focus sessions (ruling 8).
 import { createContext, useContext, useRef, type FocusEvent } from "react";
+import type { StepOptions } from "../../../lib/config";
 import { pointerOf, type Path } from "../../../lib/schemaForm";
+import type { Holding, Unapplied, UnappliedKind } from "../../../lib/unapplied";
 import type { Diagnostic, Expression, GraphNode, NodeType } from "../../../lib/workflows";
 
-export interface Drawer {
+/** What a drawer may do to its step. Each write answers why nothing was written, or null. */
+export interface DrawerActions {
+  /** Writes `value` at `path` in the step's config (undefined removes it); edits sharing a mark are one undo step. */
+  set: (path: Path, value: unknown, mark?: string) => string | null;
+  /** Writes the step's options: what a failure does, its attempts and its timeout. */
+  options: (options: StepOptions, mark?: string) => string | null;
+  /** What's typed for a field but not in the draft (ruling 18), by its kind and pointer. */
+  held: (kind: UnappliedKind, pointer: string) => Unapplied | undefined;
+  hold: (kind: UnappliedKind, pointer: string, holding: Holding) => void;
+  release: (kind: UnappliedKind, pointer: string) => void;
+  /** Drops every unapplied edit at `pointer` and below, on purpose: what Clear does. */
+  discard: (pointer: string) => void;
+  /** Applies what's typed for a field now: when focus leaves it, on Enter. */
+  apply: (kind: UnappliedKind, pointer: string) => string | null;
+  /** Applies every unapplied edit at `pointer` and below; then, with `change`, writes what `make` makes of the value
+   * at `path`, as one undo step. An edit that can't be applied stops it, its control saying why. */
+  restructure: (pointer: string, change?: { path: Path; make: (current: unknown) => unknown }) => string | null;
+}
+
+export interface Drawer extends DrawerActions {
   node: GraphNode;
-  type: NodeType;
+  type: NodeType | undefined;
   editable: boolean;
   tenantId: string;
   workflowId: string;
   problems: Diagnostic[]; // the step's, from a current check
   expressions: Expression[]; // how its formulas run
-  /** Write `value` at `path` in the step's config (undefined removes it); edits sharing a mark are one undo step. */
-  set: (path: Path, value: unknown, mark?: string) => void;
 }
 
 export const DrawerContext = createContext<Drawer | null>(null);
@@ -1956,27 +2774,34 @@ Create `frontend/src/routes/editor/drawer/scalars.tsx`:
 ```tsx
 // SPDX-License-Identifier: Apache-2.0
 // The controls for a fixed value (4c-1, ruling 5): text, a number, a yes or no, one of a list, and JSON as the engine
-// reads it (ruling 15). Each reports a new value, `undefined` when emptied. One whose text doesn't parse says why and
-// reports nothing, so nothing unsaved looks saved (D19).
+// reads it (ruling 15). Each writes through its field. What it can't write yet (a number that doesn't parse, JSON
+// still being typed) the editor holds (ruling 18): nothing unsaved looks saved (D19), and nothing typed is lost to a
+// tab or a toggle.
 import { useState } from "react";
 import { controlClass } from "../../../components/Field";
 import type { FieldSpec } from "../../../lib/schemaForm";
+import { parseNumber } from "../../../lib/unapplied";
+import { useDrawer } from "./context";
 import type { Described } from "./FieldFrame";
 
 export interface ControlProps extends Described {
   spec: FieldSpec;
-  value: unknown; // a `literal` envelope's own value, or the value as written
+  value: unknown; // a `literal` envelope's payload, or the value as written
+  literal: boolean; // the value is a literal's payload: written back as one (ruling 15)
   disabled: boolean;
-  onChange: (value: unknown, typed: boolean) => void; // `typed`: part of the field's typing (ruling 8)
-  onLocal: (problem: string | null) => void;
+  /** Writes a new value (undefined: emptied); `typed` makes it part of the field's typing (ruling 8). Why it wasn't
+   * written, or null. */
+  onChange: (value: unknown, typed: boolean) => string | null;
 }
 
 export const JSON_NOTE = 'As the engine reads it: an object with a "$value" key is computed.';
+export const LITERAL_NOTE = 'Written as a literal: kept as data, "$value" included.';
+export const CUT_NOTE = "Shown as JSON: its schema repeats itself, or nests too deep for a form.";
 
 /** A control's own text, kept while it still means the value it shows ("2." while 2.5 is typed), and replaced when
- * the value changes elsewhere (an undo, a replace). */
-export function useText(value: unknown, show: (v: unknown) => string, means: (text: string, v: unknown) => boolean) {
-  const [text, setText] = useState(() => show(value));
+ * the value changes elsewhere (an undo, a replace). It starts from what the editor holds for it, if anything. */
+export function useText(value: unknown, show: (v: unknown) => string, means: (text: string, v: unknown) => boolean, held?: string) {
+  const [text, setText] = useState(() => held ?? show(value));
   const [seen, setSeen] = useState(value);
   if (!Object.is(seen, value)) {
     setSeen(value);
@@ -1998,22 +2823,18 @@ export function TextControl({ spec, value, id, describedBy, invalid, disabled, o
   );  // prettier-ignore
 }
 
-function parseNumber(text: string, whole: boolean): { value: number | undefined } | { problem: string } {
-  const t = text.trim();
-  if (t === "") return { value: undefined };
-  const n = Number(t);
-  if (!Number.isFinite(n) || (whole && !Number.isInteger(n))) {
-    return { problem: whole ? "A whole number, like 42." : "A number, like 42 or 2.5." };
-  }
-  return { value: n };
-}
-
-export function NumberControl({ spec, value, id, describedBy, invalid, disabled, onChange, onLocal }: ControlProps) {
+export function NumberControl({ spec, value, literal, id, describedBy, invalid, disabled, onChange }: ControlProps) {
+  const drawer = useDrawer();
   const whole = spec.base === "integer";
-  const [text, setText] = useText(value, asText, (t, v) => {
-    const parsed = parseNumber(t, whole);
-    return "value" in parsed && (parsed.value === undefined ? v === undefined || v === null : parsed.value === v);
-  });
+  const [text, setText] = useText(
+    value,
+    asText,
+    (t, v) => {
+      const parsed = parseNumber(t, whole);
+      return "value" in parsed && (parsed.value === undefined ? v === undefined || v === null : parsed.value === v);
+    },
+    drawer.held("number", spec.pointer)?.text,
+  );
   return (
     <input
       id={id} type="text" value={text} disabled={disabled} spellCheck={false}
@@ -2021,8 +2842,13 @@ export function NumberControl({ spec, value, id, describedBy, invalid, disabled,
       onChange={(e) => {
         setText(e.target.value);
         const parsed = parseNumber(e.target.value, whole);
-        onLocal("problem" in parsed ? parsed.problem : null);
-        if ("value" in parsed) onChange(parsed.value, true);
+        if ("problem" in parsed) {
+          const holding = { path: spec.path, label: spec.label, text: e.target.value, why: parsed.problem, whole, literal, entry: spec.entry };
+          drawer.hold("number", spec.pointer, holding);
+          return;
+        }
+        drawer.release("number", spec.pointer);
+        onChange(parsed.value, true);
       }}
       className={controlClass(invalid)}
     />
@@ -2060,35 +2886,24 @@ export function EnumControl({ spec, value, id, describedBy, invalid, disabled, o
   );  // prettier-ignore
 }
 
-function parseJson(text: string): { value: unknown } | { problem: string } {
-  if (text.trim() === "") return { value: undefined };
-  try {
-    return { value: JSON.parse(text) as unknown };
-  } catch {
-    return { problem: "This isn't valid JSON, so it isn't saved." };
-  }
-}
-
-const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
-
-/** JSON as the engine reads it (ruling 15): a `{"$value": …}` in it is computed. It applies when focus leaves: a
- * half-typed edit never saves, and one that takes ports away asks once (ruling 9). */
-export function JsonControl({ value, id, describedBy, invalid, disabled, onChange, onLocal }: ControlProps) {
-  const show = (v: unknown) => (v === undefined ? "" : JSON.stringify(v, null, 2));
-  const [text, setText] = useText(value, show, (t, v) => {
-    const parsed = parseJson(t);
-    return "value" in parsed && same(parsed.value, v);
-  });
+/** JSON as the engine reads it (ruling 15). What's typed is the editor's until focus leaves, then applied (ruling
+ * 18): a half-typed edit never saves, one that takes ports away asks once (ruling 9), and a tab or a toggle keeps it. */
+export function JsonControl({ spec, value, literal, id, describedBy, invalid, disabled }: ControlProps) {
+  const drawer = useDrawer();
+  const held = drawer.held("json", spec.pointer);
+  const shown = value === undefined ? "" : JSON.stringify(value, null, 2);
+  const text = held?.text ?? shown;
   return (
     <textarea
       id={id} value={text} disabled={disabled} spellCheck={false} autoCapitalize="off"
       rows={Math.min(12, Math.max(3, text.split("\n").length))}
       aria-describedby={describedBy} aria-invalid={invalid}
-      onChange={(e) => setText(e.target.value)}
+      onChange={(e) => {
+        if (e.target.value === shown) drawer.release("json", spec.pointer);
+        else drawer.hold("json", spec.pointer, { path: spec.path, label: spec.label, text: e.target.value, why: null, literal, entry: spec.entry });
+      }}
       onBlur={() => {
-        const parsed = parseJson(text);
-        onLocal("problem" in parsed ? parsed.problem : null);
-        if ("value" in parsed && !same(parsed.value, value)) onChange(parsed.value, false);
+        if (held) drawer.apply("json", spec.pointer);
       }}
       className={`${controlClass(invalid)} py-2 font-mono text-small`}
     />
@@ -2105,25 +2920,34 @@ Create `frontend/src/routes/editor/drawer/Formula.tsx`:
 // A value computed when the step runs (4c-1, ruling 6; D19's formula mode): CEL in a monospace area, and how the
 // server says it runs; the choice between a fixed value and a formula; a reference or text with references written
 // elsewhere, shown as it is until it's replaced (pills come with 4c-2); and a sensitive field's fixed value, which is
-// never shown (M25).
+// never shown (M25). A formula the graph's format refuses is held by the editor, with why (ruling 18).
 import { Button } from "../../../components/Button";
 import { controlClass } from "../../../components/Field";
 import { MAX_FORMULA, formula, formulaOf, kindOf, referenceText } from "../../../lib/config";
 import type { Expression } from "../../../lib/workflows";
+import { useDrawer } from "./context";
 import type { Described } from "./FieldFrame";
 import { useText, type ControlProps } from "./scalars";
 
 export type Mode = "fixed" | "formula";
 
-export function FormulaControl({ value, id, describedBy, invalid, disabled, onChange }: ControlProps) {
-  const [text, setText] = useText(value, formulaOf, (t, v) => (t.trim() === "" ? kindOf(v) !== "cel" : formulaOf(v) === t));
+export function FormulaControl({ spec, value, id, describedBy, invalid, disabled, onChange }: ControlProps) {
+  const drawer = useDrawer();
+  const [text, setText] = useText(
+    value,
+    formulaOf,
+    (t, v) => (t.trim() === "" ? kindOf(v) !== "cel" : formulaOf(v) === t),
+    drawer.held("formula", spec.pointer)?.text,
+  );
   return (
     <textarea
       id={id} value={text} rows={3} maxLength={MAX_FORMULA} spellCheck={false} autoCapitalize="off" disabled={disabled}
       aria-describedby={describedBy} aria-invalid={invalid}
       onChange={(e) => {
         setText(e.target.value);
-        onChange(e.target.value.trim() === "" ? undefined : formula(e.target.value), true);
+        const why = onChange(e.target.value.trim() === "" ? undefined : formula(e.target.value), true);
+        if (why === null) drawer.release("formula", spec.pointer);
+        else drawer.hold("formula", spec.pointer, { path: spec.path, label: spec.label, text: e.target.value, why, entry: spec.entry });
       }}
       className={`${controlClass(invalid)} py-2 font-mono text-small`}
     />
@@ -2227,21 +3051,26 @@ Create `frontend/src/routes/editor/drawer/FieldView.tsx`:
 ```tsx
 // SPDX-License-Identifier: Apache-2.0
 // One field of a step's settings (4c-1): its label; how its value is set, fixed or by a formula where the engine takes
-// both (ruling 6); its control, chosen by its widget (ruling 5); and the server's problems at it, with how a formula
-// runs (D19). Its typing while it keeps focus is one undo step (ruling 8).
+// it, or neither (ruling 6); its control, chosen by its widget (ruling 5); the server's problems at it, with how a
+// formula runs (D19); and what's typed in it but not applied, with its reason and a Discard (ruling 18). Its typing
+// while it keeps focus is one undo step (ruling 8).
 import { useState, type ReactNode } from "react";
 import { Button } from "../../../components/Button";
-import { fixedOf, formula, isPlainRef, kindOf, referenceText, valueAt } from "../../../lib/config";
+import { fixedOf, formula, isPlainRef, kindOf, literal, referenceText, valueAt } from "../../../lib/config";
 import { canFixed, canFormula, emptyOf, startsAsFormula, type FieldSpec, type Widget } from "../../../lib/schemaForm";
+import type { UnappliedKind } from "../../../lib/unapplied";
 import { problemsAt, useDrawer, useSession } from "./context";
 import { FieldFrame, GroupFrame, type Described } from "./FieldFrame";
 import { FormulaControl, ModeSwitch, ReferenceView, SensitiveView, runsText, type Mode } from "./Formula";
 import {
-  BooleanControl, EnumControl, JSON_NOTE, JsonControl, NumberControl, TextControl, type ControlProps,
+  BooleanControl, CUT_NOTE, EnumControl, JSON_NOTE, JsonControl, LITERAL_NOTE, NumberControl, TextControl,
+  type ControlProps,
 } from "./scalars";  // prettier-ignore
 import { ContainerParts, isContainer, partNames } from "./structured";
 
 type Control = (props: ControlProps) => ReactNode;
+const OWN: UnappliedKind[] = ["json", "number", "formula", "port"]; // what a field's own control may hold
+const NEITHER = "This field takes only references or text with references, which can't be set in this drawer.";
 
 /** The control for a fixed value of this widget, or null when the drawer has none: its type's is used then. */
 function controlFor(widget: Widget): Control | null {
@@ -2263,6 +3092,8 @@ function controlFor(widget: Widget): Control | null {
   }
 }
 
+const joined = (...parts: (string | null)[]): string | null => parts.filter((p) => p !== null).join(" ") || null;
+
 const startMode = (spec: FieldSpec, value: unknown): Mode =>
   kindOf(value) === "cel" ? "formula"
   : value !== undefined && value !== null ? "fixed"
@@ -2274,9 +3105,10 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
   const kind = kindOf(value);
   const empty = value === undefined || value === null;
   const [chosen, setChosen] = useState<Mode>(() => startMode(spec, value));
-  const [local, setLocal] = useState<string | null>(null);
+  const [local, setLocal] = useState<string | null>(null); // why the last write didn't happen
   const [touched, setTouched] = useState(false);
   const [asJson, setAsJson] = useState(false);
+  const [generation, setGeneration] = useState(0); // a Discard starts the control afresh, from the draft
   const [seen, setSeen] = useState(value);
   if (!Object.is(seen, value)) {
     // Set elsewhere (an undo, a replace): a formula or a fixed value decides the mode; emptied, the field keeps its own.
@@ -2286,81 +3118,118 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
     else if (!empty) setChosen("fixed");
   }
   const { mark, onFocus } = useSession(`${drawer.node.id}${spec.pointer}`);
+  const held = OWN.map((k) => drawer.held(k, spec.pointer)).find((u) => u !== undefined);
   const disabled = !drawer.editable;
   const fixedOk = canFixed(spec);
   const formulaOk = canFormula(spec);
   const mode: Mode = fixedOk && formulaOk ? chosen : fixedOk ? "fixed" : "formula"; // the engine decides (ruling 6)
-  const set = (next: unknown, typed: boolean) => {
+  const write = (next: unknown, typed: boolean): string | null => {
     setTouched(true);
-    drawer.set(spec.path, next === undefined ? emptyOf(spec) : next, typed ? mark() : undefined);
+    const why = drawer.set(spec.path, next === undefined ? emptyOf(spec) : next, typed ? mark() : undefined);
+    setLocal(why);
+    return why;
+  };
+  // A literal's payload is written back as a literal: its kind changes only on purpose (ruling 15).
+  const writeFixed = (next: unknown, typed: boolean) => write(next !== undefined && kind === "literal" ? literal(next) : next, typed);
+  /** A change to the whole value: what's typed beneath it is applied first, or the change waits (ruling 18). */
+  const reshape = (make: (current: unknown) => unknown, then: () => void) => {
+    const why = drawer.restructure(spec.pointer, { path: spec.path, make });
+    setLocal(why);
+    if (why === null) then();
   };
   const computed = kind === "ref" || kind === "template";
   const hidden = spec.sensitive && !empty && kind !== "cel"; // a fixed value in a sensitive field: never shown (M25)
   const fixed = fixedOf(value);
-  // A literal envelope or one the engine can't read is shown as JSON: its parts aren't where a form writes them.
+  // A literal's or an unreadable envelope's parts aren't where a form writes them: shown as JSON.
   const json = asJson || kind === "unknown" || (kind === "literal" && isContainer(spec.base));
-  const container = mode === "fixed" && !computed && !hidden && !json && isContainer(spec.base);
+  const container = mode === "fixed" && fixedOk && !computed && !hidden && !json && isContainer(spec.base);
   const problems = problemsAt(drawer.problems, spec.pointer, container ? new Set(partNames(spec)) : null);
   const required = spec.required && !spec.entry && spec.path.length > 1;
   const missing = spec.required && touched && (empty || value === "") ? "Required" : null;
-  const switchTo = (next: Mode) => {
-    setChosen(next);
-    setLocal(null);
-    // A fixed value becomes the formula that gives it; a formula leaves an empty fixed value.
-    if (next === "formula" && !empty) set(formula(JSON.stringify(fixed)), false);
-    if (next === "fixed" && kind === "cel") set(undefined, false);
+  const switchTo = (next: Mode) =>
+    reshape(
+      (current) => {
+        if (next === "fixed") return kindOf(current) === "cel" ? emptyOf(spec) : current;
+        const was = fixedOf(current);
+        // A fixed value becomes the formula that gives it, unless it holds a sensitive part: never copied into visible
+        // text (M25), the formula starts empty.
+        return was === undefined || was === null || spec.holdsSensitive ? emptyOf(spec) : formula(JSON.stringify(was));
+      },
+      () => setChosen(next),
+    );
+  const toggleJson = () => {
+    const why = drawer.restructure(spec.pointer); // what's typed in one view is applied before the other shows
+    setLocal(why);
+    if (why === null) setAsJson(!asJson);
+  };
+  const clear = () => {
+    drawer.discard(spec.pointer); // Clear drops what's typed in it too, on purpose (ruling 18)
+    setGeneration((g) => g + 1);
+    write(undefined, false);
   };
   const actions = (
     <>
       {fixedOk && formulaOk && !computed && !hidden && (
         <ModeSwitch label={spec.label} mode={mode} disabled={disabled} onChange={switchTo} />
       )}
-      {mode === "fixed" && !computed && !hidden && isContainer(spec.base) && !spec.holdsSensitive && kind !== "unknown" && kind !== "literal" && (
-        <Button size="sm" aria-pressed={asJson} onClick={() => setAsJson(!asJson)}>Edit as JSON</Button>
+      {mode === "fixed" && fixedOk && !computed && !hidden && kind === null && isContainer(spec.base) && !spec.holdsSensitive && (
+        <Button size="sm" aria-pressed={asJson} onClick={toggleJson}>Edit as JSON</Button>
+      )}
+      {!disabled && held && (
+        <Button
+          size="sm"
+          aria-label={`Discard the edit to ${spec.label}`}
+          onClick={() => {
+            drawer.release(held.kind, spec.pointer);
+            setGeneration((g) => g + 1);
+            setLocal(null);
+          }}
+        >
+          Discard
+        </Button>
       )}
       {!disabled && !spec.required && !spec.entry && value !== undefined && (
-        <Button size="sm" aria-label={`Clear ${spec.label}`} onClick={() => set(undefined, false)}>Clear</Button>
+        <Button size="sm" aria-label={`Clear ${spec.label}`} onClick={clear}>Clear</Button>
       )}
     </>
   );
   const frame = (control: (c: Described) => ReactNode, hint: string | null = spec.hint, below?: ReactNode) => (
-    <FieldFrame label={spec.label} required={required} hint={hint} local={local ?? missing} problems={problems} actions={actions} below={below}>
+    <FieldFrame label={spec.label} required={required} hint={hint} local={held?.why ?? local ?? missing} problems={problems} actions={actions} below={below}>
       {control}
     </FieldFrame>
   );
-  const Control: Control = json
-    ? JsonControl
-    : (controlFor(spec.widget === "formula" ? spec.base : spec.widget) ?? controlFor(spec.base) ?? JsonControl);
+  const Control: Control = json ? JsonControl : (controlFor(spec.widget === "formula" ? spec.base : spec.widget) ?? controlFor(spec.base) ?? JsonControl);
   let body: ReactNode;
   if (hidden) {
     body = frame((c) => (
       <SensitiveView
         {...c} toFormula={formulaOk} disabled={disabled}
-        onClear={() => set(undefined, false)}
-        onFormula={() => {
-          setChosen("formula");
-          set(undefined, false);
-        }}
+        onClear={clear}
+        onFormula={() => reshape(() => emptyOf(spec), () => setChosen("formula"))}
       />
     ));  // prettier-ignore
+  } else if (!fixedOk && !formulaOk) {
+    // Only references or templates (4c-2's pills): what's there is shown, nothing is offered (ruling 6).
+    body = frame(
+      (c) => (
+        <output id={c.id} aria-describedby={c.describedBy} className="block break-all font-mono text-small">
+          {computed ? referenceText(value) : empty ? "Not set" : "A value this field doesn't take"}
+        </output>
+      ),
+      joined(spec.hint, NEITHER),
+    );
   } else if (computed) {
     body = frame((c) => (
       <ReferenceView
         {...c} value={value} fixed={fixedOk} toFormula={formulaOk} disabled={disabled}
-        onFixed={() => {
-          setChosen("fixed");
-          set(undefined, false);
-        }}
-        onFormula={() => {
-          setChosen("formula");
-          set(isPlainRef(value) ? formula(referenceText(value)) : undefined, false);
-        }}
+        onFixed={() => reshape(() => emptyOf(spec), () => setChosen("fixed"))}
+        onFormula={() => reshape(() => (isPlainRef(value) ? formula(referenceText(value)) : emptyOf(spec)), () => setChosen("formula"))}
       />
     ));  // prettier-ignore
   } else if (mode === "formula") {
     const runs = runsText(drawer.expressions.find((x) => x.field === spec.pointer));
     body = frame(
-      (c) => <FormulaControl {...c} spec={spec} value={value} disabled={disabled} onChange={set} onLocal={setLocal} />,
+      (c) => <FormulaControl key={generation} {...c} spec={spec} value={value} literal={false} disabled={disabled} onChange={write} />,
       spec.hint,
       runs && <p className="text-small text-muted">{runs}</p>,
     );
@@ -2377,8 +3246,13 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
       </output>
     ));
   } else {
-    const hint = Control === JsonControl ? [spec.hint, JSON_NOTE].filter(Boolean).join(" ") : spec.hint;
-    body = frame((c) => <Control {...c} spec={spec} value={fixed} disabled={disabled} onChange={set} onLocal={setLocal} />, hint);
+    const note = kind === "literal" ? LITERAL_NOTE : Control === JsonControl ? (spec.cut ? `${CUT_NOTE} ${JSON_NOTE}` : JSON_NOTE) : null;
+    body = frame(
+      (c) => (
+        <Control key={generation} {...c} spec={spec} value={fixed} literal={kind === "literal"} disabled={disabled} onChange={writeFixed} />
+      ),
+      joined(spec.hint, note),
+    );
   }
   return (
     <div data-pointer={spec.pointer} onFocus={onFocus}>
@@ -2388,10 +3262,12 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
 }
 ```
 
+`Control` names both a type and a value: TypeScript keeps them apart, and JSX takes the value.
+
 - [ ] **Step 11: Run the tests to see them pass**
 
 Run: `npx -y pnpm@12.6.0 exec vitest run src/routes/editor/drawer/FieldView.test.tsx`
-Expected: PASS, 13 tests.
+Expected: PASS, 18 tests.
 
 - [ ] **Step 12: Run every frontend test, then typecheck and lint**
 
@@ -2403,35 +3279,40 @@ Expected: all pass.
 
 ```bash
 git add frontend/src/components/Field.tsx frontend/src/routes/editor/drawer
-git commit -m "feat(editor): a step's field, fixed or a formula, with its problems; references and sensitive values kept (4c-1)"
+git commit -m "feat(editor): a step's field, fixed or a formula, its unapplied text held; references, literals and secrets kept (4c-1)"
 ```
 
-### Task 6: The drawer
+### Task 7: The drawer, and the editor's side of its writes
 
 **Files:**
 - Create: `frontend/src/routes/editor/drawer/StepDrawer.tsx`
-- Create: `frontend/src/routes/editor/drawer/ErrorHandling.tsx` (`chipText` only; Task 10 adds the section)
+- Create: `frontend/src/routes/editor/drawer/ErrorHandling.tsx` (`chipText` only; Task 12 adds the section)
 - Modify: `frontend/src/routes/editor/Editor.tsx`
 - Delete: `frontend/src/routes/editor/StepPanel.tsx`
 - Test: `frontend/src/routes/editor/Editor.test.tsx`
 
 **Interfaces:**
 - Consumes:
-  - from Task 2: `setConfig`, `Changed`;
-  - from Task 3: `record(h, next, mark)`;
-  - from Task 4: `Tabs`;
-  - from Task 5: `FieldView`, `DrawerContext`, `problemsAt`, `segment`.
+  - from Task 2: `setConfig`, `setOptions`, `admission`, `valueAt`, `Changed`;
+  - from Task 3: `Unapplied`, `UnappliedKind`, `unappliedId`, `within`, `applyUnapplied`, `applyAll`, `droppedWhy`;
+  - from Task 4: `record(h, next, mark)`;
+  - from Task 5: `Tabs`;
+  - from Task 6: `FieldView`, `DrawerContext`, `DrawerActions`, `problemsAt`, `segment`.
 - Produces:
   - `StepDrawer` props: `{ node; type: NodeType | undefined; tenantId; workflowId; ports: string[]; problems:
-    Diagnostic[] | null; expressions: Expression[]; editable; adds; onAdd; onDelete; onConnectPort; onPlace; onNudge;
-    onClose; onConfig: (path: Path, value: unknown, mark?: string) => void }`. Later tasks add props.
+    Diagnostic[] | null; expressions: Expression[]; editable; adds; actions: DrawerActions; onAdd; onDelete;
+    onConnectPort; onPlace; onNudge; onClose }`. Later tasks add props.
   - `type Nudge` (moved from `StepPanel.tsx`).
   - `chipText(node: GraphNode, type: NodeType | undefined): string`.
   - In `Editor.tsx`:
-    - `change(next, message: string | null, then?, mark?)`;
-    - `settle(next, dropped, mark?)`, which asks before an edit drops edges;
-    - the `{ kind: "ports" }` question;
-    - the heading's id `step-drawer-title`.
+    - `change(next, message: string | null, then?, mark?): boolean`: whether it landed;
+    - the unapplied edits: `unapplied` (state), `unappliedRef`, `keep(u)`, `drop(ids)`;
+    - `writeDraft(changed, how?: { mark?; release?: string[]; said?: string | null }): string | null`;
+    - `applyEdit(id): string | null`;
+    - `restructureStep(nodeId, pointer, then?)`;
+    - `actionsFor(nodeId): DrawerActions`;
+    - the `{ kind: "ports" }` question, which carries the unapplied edits it applies;
+    - the heading's id, `step-drawer-title`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2526,6 +3407,25 @@ it("asks before an edit takes a port with edges away", async () => {
   await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
   expect(drawn.at(-1)!.doc.edges).toHaveLength(1);
   expect(stepConfig("route")).toEqual({ routes: [{ port: "a" }, { port: "b" }] });
+  // Canceled, the edit stays the person's: unapplied, its reason at its control (ruling 18).
+  expect(JSON.parse(screen.getByLabelText<HTMLTextAreaElement>("Routes").value)).toEqual([{ port: "a" }]);
+  expect(screen.getByText("Not applied: it removes the port b and its edge to transform.")).toBeTruthy();
+});
+
+it("keeps an unapplied edit when the tab changes or the drawer closes", async () => {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, DELAY]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.delay@1", {}) }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "wait" }));
+  await userEvent.type(screen.getByLabelText("Duration S"), "1x");
+  await userEvent.click(screen.getByRole("tab", { name: "Options" }));
+  await userEvent.click(screen.getByRole("tab", { name: "Setup" }));
+  expect(screen.getByLabelText<HTMLInputElement>("Duration S").value).toBe("1x");
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
+  await userEvent.click(screen.getByRole("button", { name: "wait" }));
+  expect(screen.getByLabelText<HTMLInputElement>("Duration S").value).toBe("1x");
+  expect(screen.getByText("A whole number, like 42.")).toBeTruthy();
+  expect(stepConfig("wait")).toEqual({ duration_s: 1 }); // "1" was a number; "1x" never reached the draft
 });
 
 it("undoes the edit and its edges together", async () => {
@@ -2544,7 +3444,7 @@ it("undoes the edit and its edges together", async () => {
 
 Run: `npx -y pnpm@12.6.0 exec vitest run src/routes/editor/Editor.test.tsx`
 Expected: FAIL. The 4b panel has no tabs and no fields: "Unable to find a label with the text of: Duration S", no tab
-"Options", and no dialog "Remove a port". The 4b tests still pass.
+"Options", no dialog "Remove a port". The 4b tests still pass.
 
 - [ ] **Step 3: Write the chip's words**
 
@@ -2580,15 +3480,15 @@ here from `StepPanel.tsx` unchanged:
 // a failure does. Then the problems that belong to no field. Then its settings on two tabs, generated from its type's
 // schema, the required ones on Setup and the rest on Options (ruling 3). Then how its formulas run, and, for an
 // editor, 4b's actions: its "+" twins (WCAG 2.5.8), where it sits (2.5.7), its edges. Escape closes it and gives focus
-// back to the step.
+// back to the step. What its fields do to the draft goes through `actions`, the editor's (ruling 18).
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "../../../components/Button";
 import { Tabs } from "../../../components/Tabs";
-import { fieldsOf, tabsOf, type FieldSpec, type Path } from "../../../lib/schemaForm";
+import { fieldsOf, tabsOf, type FieldSpec } from "../../../lib/schemaForm";
 import type { Diagnostic, Expression, GraphNode, NodeType } from "../../../lib/workflows";
 import type { ItemAction } from "../items";
 import { SIDE } from "../side";
-import { DrawerContext, problemsAt, segment } from "./context";
+import { DrawerContext, problemsAt, segment, type DrawerActions } from "./context";
 import { chipText } from "./ErrorHandling";
 import { FieldView } from "./FieldView";
 
@@ -2619,13 +3519,13 @@ const counted = (problems: Diagnostic[], fields: FieldSpec[]) =>
 const tabLabel = (label: string, n: number) => (n === 0 ? label : `${label} · ${n} ${n === 1 ? "problem" : "problems"}`);
 
 export function StepDrawer({
-  node, type, tenantId, workflowId, ports, problems, expressions, editable, adds,
-  onAdd, onDelete, onConnectPort, onPlace, onNudge, onClose, onConfig,
+  node, type, tenantId, workflowId, ports, problems, expressions, editable, adds, actions,
+  onAdd, onDelete, onConnectPort, onPlace, onNudge, onClose,
 }: {
   node: GraphNode; type: NodeType | undefined; tenantId: string; workflowId: string; ports: string[];
   problems: Diagnostic[] | null; expressions: Expression[]; editable: boolean; adds: { label: string; action: ItemAction }[];
-  onAdd: (action: ItemAction) => void; onDelete: () => void; onConnectPort: (port: string) => void; onPlace: () => void;
-  onNudge: (key: Nudge) => void; onClose: () => void; onConfig: (path: Path, value: unknown, mark?: string) => void;
+  actions: DrawerActions; onAdd: (action: ItemAction) => void; onDelete: () => void; onConnectPort: (port: string) => void;
+  onPlace: () => void; onNudge: (key: Nudge) => void; onClose: () => void;
 }) {  // prettier-ignore
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => heading.current?.focus(), [node.id]);
@@ -2636,57 +3536,58 @@ export function StepDrawer({
   const top = new Set(fields.map((f) => segment(f.name)));
   // A problem no field shows: about the step as a whole, or a part its schema doesn't name (ruling 16).
   const general = mine.filter((d) => d.field === null || problemsAt([d], "", top).length > 0);
+  const drawer = { ...actions, node, type, editable, tenantId, workflowId, problems: mine, expressions };
   return (
-    <aside
-      aria-labelledby="step-drawer-title"
-      onKeyDown={(e) => {
-        if (e.key === "Escape") {
-          e.stopPropagation();
-          onClose();
-        }
-      }}
-      className={`${SIDE} gap-5`}
-    >
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex min-w-0 flex-col gap-1">
-          <h2 id="step-drawer-title" ref={heading} tabIndex={-1} className="truncate font-mono text-body-lg font-semibold">
-            {node.key}
-          </h2>
-          <p className="text-small text-muted">{type ? `${type.title} · ${type.ref}` : `Unknown step type ${node.type}`}</p>
-          {type && (
-            <p className="text-small text-muted">
-              {type.kind === "control" ? "Runs in the engine" : `Runs as its own step · ${EFFECTS[type.side_effect]}`}
-            </p>
-          )}
-          <p className="text-small">{chipText(node, type)}</p>
+    <DrawerContext.Provider value={drawer}>
+      <aside
+        aria-labelledby="step-drawer-title"
+        onKeyDown={(e) => {
+          if (e.key === "Escape") {
+            e.stopPropagation();
+            onClose();
+          }
+        }}
+        className={`${SIDE} gap-5`}
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex min-w-0 flex-col gap-1">
+            <h2 id="step-drawer-title" ref={heading} tabIndex={-1} className="truncate font-mono text-body-lg font-semibold">
+              {node.key}
+            </h2>
+            <p className="text-small text-muted">{type ? `${type.title} · ${type.ref}` : `Unknown step type ${node.type}`}</p>
+            {type && (
+              <p className="text-small text-muted">
+                {type.kind === "control" ? "Runs in the engine" : `Runs as its own step · ${EFFECTS[type.side_effect]}`}
+              </p>
+            )}
+            <p className="text-small">{chipText(node, type)}</p>
+          </div>
+          <Button size="sm" onClick={onClose}>Close</Button>
         </div>
-        <Button size="sm" onClick={onClose}>Close</Button>
-      </div>
-      {problems === null ? (
-        <p className="text-small text-muted">Not checked for what&apos;s on the screen.</p>
-      ) : (
-        general.length > 0 && (
-          <section aria-labelledby="step-problems" className="flex flex-col gap-1.5">
-            <h3 id="step-problems" tabIndex={-1} className="text-small font-semibold">Problems with this step</h3>
-            <ul className="flex flex-col gap-1.5">
-              {general.map((d, i) => (
-                <li key={`${d.code}:${d.field}:${i}`} className="text-small">
-                  <span className={d.severity === "error" ? "text-danger" : "text-warn-ink"}>{d.message}</span>
-                  {d.fix && <span className="block text-muted">{d.fix}</span>}
-                </li>
-              ))}
-            </ul>
-          </section>
-        )
-      )}
-      {!type ? (
-        <p className="text-small">
-          This server doesn&apos;t know this step&apos;s type, so its settings can&apos;t be shown. They&apos;re kept as they are.
-        </p>
-      ) : fields.length === 0 ? (
-        <p className="text-small text-muted">This step has nothing to set up.</p>
-      ) : (
-        <DrawerContext.Provider value={{ node, type, editable, tenantId, workflowId, problems: mine, expressions, set: onConfig }}>
+        {problems === null ? (
+          <p className="text-small text-muted">Not checked for what&apos;s on the screen.</p>
+        ) : (
+          general.length > 0 && (
+            <section aria-labelledby="step-problems" className="flex flex-col gap-1.5">
+              <h3 id="step-problems" tabIndex={-1} className="text-small font-semibold">Problems with this step</h3>
+              <ul className="flex flex-col gap-1.5">
+                {general.map((d, i) => (
+                  <li key={`${d.code}:${d.field}:${i}`} className="text-small">
+                    <span className={d.severity === "error" ? "text-danger" : "text-warn-ink"}>{d.message}</span>
+                    {d.fix && <span className="block text-muted">{d.fix}</span>}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )
+        )}
+        {!type ? (
+          <p className="text-small">
+            This server doesn&apos;t know this step&apos;s type, so its settings can&apos;t be shown. They&apos;re kept as they are.
+          </p>
+        ) : fields.length === 0 ? (
+          <p className="text-small text-muted">This step has nothing to set up.</p>
+        ) : (
           <Tabs
             label="Settings"
             value={tab}
@@ -2713,53 +3614,54 @@ export function StepDrawer({
               },
             ]}
           />
-        </DrawerContext.Provider>
-      )}
-      {expressions.length > 0 && (
-        <section className="flex flex-col gap-2">
-          <h3 className="text-small font-semibold">How its formulas run</h3>
-          <ul className="flex flex-col gap-1.5 text-small">
-            {expressions.map((x) => (
-              <li key={x.field}>
-                <span className="font-mono text-meta">{x.field}</span>{" "}
-                {x.mode === "local" ? "Runs inline" : `Runs as a separate step: ${x.reason ?? "no reason given"}`}
-              </li>
+        )}
+        {expressions.length > 0 && (
+          <section className="flex flex-col gap-2">
+            <h3 className="text-small font-semibold">How its formulas run</h3>
+            <ul className="flex flex-col gap-1.5 text-small">
+              {expressions.map((x) => (
+                <li key={x.field}>
+                  <span className="font-mono text-meta">{x.field}</span>{" "}
+                  {x.mode === "local" ? "Runs inline" : `Runs as a separate step: ${x.reason ?? "no reason given"}`}
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+        {editable && adds.length > 0 && (
+          // Each "+" this step has on the canvas, at full size whatever the zoom (WCAG 2.5.8: their equivalents).
+          <div role="group" aria-label="Add a step" className="flex flex-col items-start gap-2">
+            {adds.map((a) => (
+              <Button key={a.label} size="sm" onClick={() => onAdd(a.action)}>{a.label}</Button>
             ))}
-          </ul>
-        </section>
-      )}
-      {editable && adds.length > 0 && (
-        // Each "+" this step has on the canvas, at full size whatever the zoom (WCAG 2.5.8: their equivalents).
-        <div role="group" aria-label="Add a step" className="flex flex-col items-start gap-2">
-          {adds.map((a) => (
-            <Button key={a.label} size="sm" onClick={() => onAdd(a.action)}>{a.label}</Button>
-          ))}
-        </div>
-      )}
-      {editable && (
-        <div role="group" aria-label={`Where ${node.key} sits`} className="flex flex-wrap items-center gap-2">
-          <Button size="sm" onClick={onPlace}>Place on the canvas…</Button>
-          {NUDGES.map((n) => (
-            <Button key={n.key} size="sm" aria-label={`Move ${node.key} ${n.word}`} onClick={() => onNudge(n.key)}>
-              {n.glyph}
-            </Button>
-          ))}
-        </div>
-      )}
-      {editable && (
-        <div className="flex flex-wrap gap-2">
-          {ports.map((port) => (
-            <Button key={port} size="sm" onClick={() => onConnectPort(port)}>
-              Connect {port === "out" ? "" : `${port} `}to…
-            </Button>
-          ))}
-          <Button size="sm" variant="danger-outline" onClick={onDelete}>Delete step</Button>
-        </div>
-      )}
-    </aside>
+          </div>
+        )}
+        {editable && (
+          <div role="group" aria-label={`Where ${node.key} sits`} className="flex flex-wrap items-center gap-2">
+            <Button size="sm" onClick={onPlace}>Place on the canvas…</Button>
+            {NUDGES.map((n) => (
+              <Button key={n.key} size="sm" aria-label={`Move ${node.key} ${n.word}`} onClick={() => onNudge(n.key)}>
+                {n.glyph}
+              </Button>
+            ))}
+          </div>
+        )}
+        {editable && (
+          <div className="flex flex-wrap gap-2">
+            {ports.map((port) => (
+              <Button key={port} size="sm" onClick={() => onConnectPort(port)}>
+                Connect {port === "out" ? "" : `${port} `}to…
+              </Button>
+            ))}
+            <Button size="sm" variant="danger-outline" onClick={onDelete}>Delete step</Button>
+          </div>
+        )}
+      </aside>
+    </DrawerContext.Provider>
   );
 }
 ```
+
 
 - [ ] **Step 5: Wire the drawer into the editor**
 
@@ -2767,18 +3669,28 @@ In `frontend/src/routes/editor/Editor.tsx`:
 
 (a) Imports:
 - Replace `import { StepPanel } from "./StepPanel";` with `import { StepDrawer } from "./drawer/StepDrawer";`.
-- Add `import { setConfig } from "../../lib/config";` and `import type { Path } from "../../lib/schemaForm";`.
-- Add `portOf` to the `../../lib/graph` import.
+- Add:
+
+```ts
+import { admission, setConfig, setOptions, valueAt, type Changed } from "../../lib/config";
+import type { Path } from "../../lib/schemaForm";
+import {
+  applyAll, applyUnapplied, droppedWhy, unappliedId, within, type Unapplied, type UnappliedKind,
+} from "../../lib/unapplied";  // prettier-ignore
+import type { DrawerActions } from "./drawer/context";
+```
+
+- Add `portOf` to the `../../lib/graph` import, and `type GraphNode` to the `../../lib/workflows` import.
 
 (b) Above `export function EditorPage`, add:
 
 ```ts
 /** What the editor asks before doing: deleting a step or an edge, or a settings change that takes ports away, with the
- * document it makes (ruling 9). */
+ * document it makes and the unapplied edits it applies (rulings 9 and 18). */
 type Asking =
   | { kind: "node"; id: string }
   | { kind: "edge"; edge: GraphEdge }
-  | { kind: "ports"; next: GraphDoc; dropped: GraphEdge[] };
+  | { kind: "ports"; next: GraphDoc; dropped: GraphEdge[]; release: string[] };
 
 /** Which ports a change takes away, and where their edges led (ruling 9). */
 function portsQuestion(dropped: GraphEdge[], keyOf: (id: string) => string): string {
@@ -2788,43 +3700,119 @@ function portsQuestion(dropped: GraphEdge[], keyOf: (id: string) => string): str
   return `${one ? "The port" : "The ports"} ${ports.join(", ")} ${one ? "goes" : "go"} with this change, and ${
     dropped.length === 1 ? "its edge" : "their edges"} to ${targets.join(", ")} ${dropped.length === 1 ? "is" : "are"} deleted.`;
 }
+
+const CANT = "Not written: the draft can't be changed now."; // a conflict, an exit agreed to, a version view
 ```
 
 and change the `asking` state to `useState<Asking | null>(null)`.
 
-(c) Replace `change`:
+(c) After the `asking` state, add the unapplied edits:
+
+```ts
+  // What's typed in the drawer but not in the draft (ruling 18): the editor's, never a control's, so a tab, a toggle
+  // or a closed drawer keeps it. The ref serves decisions made after a render (an exit's, Task 8).
+  const [unapplied, setUnapplied] = useState<ReadonlyMap<string, Unapplied>>(new Map());
+  const unappliedRef = useRef(unapplied);
+  unappliedRef.current = unapplied;
+  const keep = (u: Unapplied) => setUnapplied((m) => new Map(m).set(u.id, u));
+  const drop = (ids: string[]) =>
+    setUnapplied((m) => {
+      if (!ids.some((id) => m.has(id))) return m;
+      const next = new Map(m);
+      for (const id of ids) next.delete(id);
+      return next;
+    });
+  const typeOf = (n: GraphNode) => typeMap.get(n.type);
+```
+
+(d) Replace `change`, and add the drawer's writes after it:
 
 ```ts
   /** One edit: recorded (edits sharing a field's mark are one undo step, ruling 8), saved, and said, unless `message`
-   * is null: a field's edits aren't announced, its control says what it holds. */
-  function change(next: GraphDoc, message: string | null, then?: string, mark?: string) {
-    if (!mayEdit()) return; // read only now: a conflict, an exit agreed to, a version view, a publication
+   * is null: a field's edits aren't announced, its control says what it holds. Whether it landed. */
+  function change(next: GraphDoc, message: string | null, then?: string, mark?: string): boolean {
+    if (!mayEdit()) return false; // read only now: a conflict, an exit agreed to, a version view, a publication
     setHistory((h) => record(h, next, mark));
     saver.current?.change(next);
     if (message !== null) announce(message);
     if (then) focus(then);
+    return true;
   }
 
-  /** A change to a step's settings. One that takes ports away asks first, as deleting a step does (ruling 9). */
-  function settle(next: GraphDoc, dropped: GraphEdge[], mark?: string) {
-    if (dropped.length > 0) setAsking({ kind: "ports", next, dropped });
-    else change(next, null, undefined, mark);
+  /** A drawer's change to the draft. Refused when the graph's format would refuse it (ruling 7); asked first when it
+   * takes ports away (ruling 9); else recorded, and the unapplied edits it carries released. Why it wasn't made, or
+   * null (made, or asked). */
+  function writeDraft(changed: Changed, how: { mark?: string; release?: string[]; said?: string | null } = {}): string | null {
+    const refused = admission(changed.doc);
+    if (refused !== null) return refused;
+    if (changed.dropped.length > 0) {
+      setAsking({ kind: "ports", next: changed.doc, dropped: changed.dropped, release: how.release ?? [] });
+      return null;
+    }
+    if (!change(changed.doc, how.said ?? null, undefined, how.mark)) return CANT;
+    drop(how.release ?? []);
+    return null;
   }
 
-  function onConfig(nodeId: string, path: Path, value: unknown, mark?: string) {
-    const node = findNode(doc, nodeId);
-    if (!node) return;
-    const { doc: next, dropped } = setConfig(doc, nodeId, path, value, typeMap.get(node.type));
-    settle(next, dropped, mark);
+  /** One unapplied edit applied now (focus left its control, Enter): why it stays unapplied, or null. */
+  function applyEdit(id: string): string | null {
+    const u = unappliedRef.current.get(id);
+    if (!u) return null;
+    const node = findNode(doc, u.node);
+    const result = applyUnapplied(doc, u, node ? typeOf(node) : undefined);
+    // Asked before it takes ports away: until the answer, and after a Cancel, its control says why (ruling 9).
+    const why =
+      "problem" in result ? result.problem
+      : result.dropped.length > 0 ? (writeDraft(result, { release: [id] }) ?? droppedWhy(result.dropped, result.doc))
+      : writeDraft(result, { release: [id], said: result.said });  // prettier-ignore
+    if (why !== null) keep({ ...u, why });
+    return why;
+  }
+
+  /** The unapplied edits at `pointer` and below in a step applied; then, with `then`, what `make` makes of the value
+   * at `path` written: one undo step (ruling 18). An edit that can't be applied stops it, said at its control. */
+  function restructureStep(nodeId: string, pointer: string, then?: { path: Path; make: (current: unknown) => unknown }): string | null {
+    const { doc: settled, applied, left } = applyAll(doc, unappliedRef.current.values(), typeOf, within(nodeId, pointer));
+    for (const u of left) keep(u);
+    if (left.length > 0) return left[0]!.why;
+    let changed: Changed = { doc: settled, dropped: [] };
+    const node = findNode(settled, nodeId);
+    if (then && node) {
+      const current = valueAt(node.config ?? {}, then.path);
+      const made = then.make(current);
+      if (made !== current) changed = setConfig(settled, nodeId, then.path, made, typeOf(node));
+    }
+    if (changed.doc === doc) return null;
+    return writeDraft(changed, { release: applied.map((u) => u.id) });
+  }
+
+  /** What the open step's drawer may do. Every write goes through `change`, so through 4b's guards (`mayEdit`). */
+  function actionsFor(nodeId: string): DrawerActions {
+    const id = (kind: UnappliedKind, pointer: string) => unappliedId(nodeId, kind, pointer);
+    const stepType = () => {
+      const node = findNode(doc, nodeId);
+      return node ? typeOf(node) : undefined;
+    };
+    return {
+      set: (path, value, mark) => writeDraft(setConfig(doc, nodeId, path, value, stepType()), { mark }),
+      options: (options, mark) => writeDraft(setOptions(doc, nodeId, options, stepType()), { mark }),
+      held: (kind, pointer) => unapplied.get(id(kind, pointer)),
+      hold: (kind, pointer, holding) => keep({ ...holding, id: id(kind, pointer), node: nodeId, kind, pointer }),
+      release: (kind, pointer) => drop([id(kind, pointer)]),
+      discard: (pointer) => drop([...unappliedRef.current.values()].filter(within(nodeId, pointer)).map((u) => u.id)),
+      apply: (kind, pointer) => applyEdit(id(kind, pointer)),
+      restructure: (pointer, then) => restructureStep(nodeId, pointer, then),
+    };
   }
 ```
 
-(d) In `confirmDelete`, before the `if (asking.kind === "node")` branch, add:
+(e) In `confirmDelete`, before the `if (asking.kind === "node")` branch, add:
 
 ```ts
     if (asking.kind === "ports") {
       const ports = [...new Set(asking.dropped.map(portOf))].join(", ");
-      change(asking.next, `Removed ${ports} and ${asking.dropped.length === 1 ? "its edge" : `${asking.dropped.length} edges`}`);
+      const edges = asking.dropped.length === 1 ? "its edge" : `${asking.dropped.length} edges`;
+      if (change(asking.next, `Removed ${ports} and ${edges}`)) drop(asking.release);
       setAsking(null);
       // What asked is gone with its port (a Remove, a JSON edit): focus lands on the drawer, after the dialog has
       // given it back (WCAG 2.4.3).
@@ -2833,7 +3821,7 @@ and change the `asking` state to `useState<Asking | null>(null)`.
     }
 ```
 
-(e) Replace the `<StepPanel … />` element with:
+(f) Replace the `<StepPanel … />` element with:
 
 ```tsx
           <StepDrawer
@@ -2849,6 +3837,7 @@ and change the `asking` state to `useState<Asking | null>(null)`.
             expressions={(viewing ? viewing.expressions : (trusted?.expressions ?? [])).filter((x) => x.node !== null && sameId(x.node, open.id))}
             editable={editable}
             adds={editable ? addsOf(doc, open, portMap.get(idKey(open.id)) ?? []) : []}
+            actions={actionsFor(open.id)}
             onAdd={onItem}
             onDelete={() => setAsking({ kind: "node", id: open.id })}
             onConnectPort={(port) => setConnecting({ node: open.id, port })}
@@ -2861,16 +3850,15 @@ and change the `asking` state to `useState<Asking | null>(null)`.
               setSide(null);
               focus(item.node(open.id));
             }}
-            onConfig={(path, value, mark) => onConfig(open.id, path, value, mark)}
           />
 ```
 
-(f) In the delete `ConfirmDialog`:
+(g) In the delete `ConfirmDialog`:
 - `title={asking?.kind === "edge" ? "Delete an edge" : asking?.kind === "ports" ? "Remove a port" : "Delete a step"}`;
 - `confirmLabel={asking?.kind === "ports" ? "Remove" : "Delete"}`;
 - as its last child, `{asking?.kind === "ports" && portsQuestion(asking.dropped, keyOf)}`.
 
-(g) Delete `frontend/src/routes/editor/StepPanel.tsx`: `git rm frontend/src/routes/editor/StepPanel.tsx`.
+(h) Delete `frontend/src/routes/editor/StepPanel.tsx`: `git rm frontend/src/routes/editor/StepPanel.tsx`.
 
 - [ ] **Step 6: Run the editor's tests to see them pass**
 
@@ -2902,28 +3890,284 @@ A CSP violation from the tabs stops the work: report it to the owner, who choose
 
 ```bash
 git add frontend/src/routes/editor
-git commit -m "feat(editor): the step drawer: a step's settings on Setup and Options, edits that take ports away asked first (4c-1)"
+git commit -m "feat(editor): the step drawer: settings on Setup and Options, unapplied text kept by the editor, port losses asked first (4c-1)"
 ```
 
-### Task 7: Lists, maps and a case's port
+### Task 8: Unapplied edits at the editor's exits
+
+**Files:**
+- Modify: `frontend/src/routes/editor/SaveState.tsx`
+- Modify: `frontend/src/routes/editor/Editor.tsx`
+- Test: `frontend/src/routes/editor/Editor.test.tsx`
+
+**Interfaces:**
+- Consumes:
+  - from Task 3: `applyAll`, `within`, `Unapplied`;
+  - from Task 7: `unapplied`, `unappliedRef`, `keep`, `drop`, `change(): boolean`, `typeOf`, the `Asking` union,
+    `confirmDelete`.
+- Produces (ruling 18):
+  - `SaveState({ state, unapplied? })`: the count beside the draft's state;
+  - in `Editor.tsx`:
+    - `settleAll(): Unapplied[]`: every edit that can be applied, as one undo step; the rest returned;
+    - `whenSettled(action: string, then: () => void)`;
+    - the `{ kind: "unapplied"; action; left: Unapplied[]; then }` question;
+    - `goBack(u: Unapplied)`: Task 14 makes it focus the field;
+  - the leave decision, `guardLeaving` and the page's `beforeunload` count unapplied edits as unsaved work.
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `frontend/src/routes/editor/Editor.test.tsx`:
+
+```tsx
+/** The `wait` step's drawer, its duration holding text that isn't a number: an edit that can't be applied. */
+async function unappliedDuration() {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, DELAY]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.delay@1", { duration_s: 5 }) }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "wait" }));
+  await userEvent.type(screen.getByLabelText("Duration S"), "x");
+}
+
+it("counts the edits not applied beside the save state", async () => {
+  await unappliedDuration();
+  expect(screen.getByText(/· 1 edit not applied/)).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Discard the edit to Duration S" }));
+  expect(screen.queryByText(/edit not applied/)).toBeNull();
+});
+
+it("applies what it can before publishing, and asks about the rest", async () => {
+  await unappliedDuration();
+  await userEvent.click(await screen.findByRole("button", { name: "Publish v1" }));
+  const ask = screen.getByRole("dialog", { name: "Edits not applied" });
+  expect(ask.textContent).toContain("wait · Duration S: A whole number, like 42.");
+  await userEvent.click(within(ask).getByRole("button", { name: "Discard and publish" }));
+  expect(screen.getByRole("dialog", { name: "Publish version 1" })).toBeTruthy();
+  expect(screen.queryByText(/edit not applied/)).toBeNull();
+  expect(stepConfig("wait")).toEqual({ duration_s: 5 });
+});
+
+it("applies a JSON edit still being typed when the person leaves", async () => {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, ROUTER]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("acme.router@1", { routes: [{ port: "a" }] }, "route") }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "route" }));
+  await userEvent.clear(screen.getByLabelText("Routes"));
+  await userEvent.paste('[{"port": "a"}, {"port": "c"}]'); // focus stays: nothing has applied it yet
+  await act(async () => {
+    expect(await mayLeave()).toBe(true); // what the shell's Sign out asks
+  });
+  expect(stepConfig("route")).toEqual({ routes: [{ port: "a" }, { port: "c" }] });
+  act(() => cancelLeaving());
+});
+
+it("asks before leaving with an edit it can't apply", async () => {
+  await unappliedDuration();
+  const decision = mayLeave();
+  const ask = await screen.findByRole("dialog", { name: "Your latest changes aren't saved" });
+  expect(ask.textContent).toContain("wait · Duration S: A whole number, like 42.");
+  await userEvent.click(within(ask).getByRole("button", { name: "Stay" }));
+  expect(await decision).toBe(false);
+  expect(screen.getByLabelText<HTMLInputElement>("Duration S").value).toBe("5x"); // still there to fix
+});
+
+it("goes back to an edit not applied, in its step's drawer", async () => {
+  await unappliedDuration();
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
+  await userEvent.click(screen.getByRole("button", { name: "Export" }));
+  await userEvent.click(within(screen.getByRole("dialog", { name: "Edits not applied" })).getByRole("button", { name: "Go back to them" }));
+  expect(within(screen.getByRole("complementary", { name: "wait" })).getByLabelText<HTMLInputElement>("Duration S").value).toBe("5x");
+  expect(downloads).toEqual([]);
+});
+
+it("discards a deleted step's edits not applied, and says so", async () => {
+  await unappliedDuration();
+  await userEvent.click(screen.getByRole("button", { name: "Delete step" }));
+  const ask = screen.getByRole("dialog", { name: "Delete a step" });
+  expect(ask.textContent).toContain("Its edits not applied yet are discarded too.");
+  await userEvent.click(within(ask).getByRole("button", { name: "Delete" }));
+  expect(screen.queryByText(/edit not applied/)).toBeNull();
+});
+```
+
+- [ ] **Step 2: Run them to see them fail**
+
+Run: `npx -y pnpm@12.6.0 exec vitest run src/routes/editor/Editor.test.tsx`
+Expected: FAIL:
+- the save state says nothing of the unapplied edit;
+- Publish opens its own question at once;
+- leaving goes on, or asks without naming the edit;
+- the delete question says nothing of it.
+
+- [ ] **Step 3: Count them in the save state**
+
+In `frontend/src/routes/editor/SaveState.tsx`, change the signature and the returned element:
+
+```tsx
+export function SaveState({ state, unapplied = 0 }: { state: SyncState; unapplied?: number }) {
+```
+
+```tsx
+  // What's typed but not applied isn't saved either (ruling 18): said beside the draft's own state, never hidden by it.
+  return (
+    <span className={`text-small ${tone}`}>
+      {text}
+      {unapplied > 0 && (
+        <span className="text-warn-ink"> · {unapplied === 1 ? "1 edit not applied" : `${unapplied} edits not applied`}</span>
+      )}
+    </span>
+  );
+```
+
+- [ ] **Step 4: Settle them at every exit**
+
+In `frontend/src/routes/editor/Editor.tsx`:
+
+(a) Add to `Asking`:
+
+```ts
+  // edits that can't be applied, before what needs the draft settled: an export, a publication, a version view
+  | { kind: "unapplied"; action: string; left: Unapplied[]; then: () => void };
+```
+
+(b) After `actionsFor`, add:
+
+```ts
+  /** Every unapplied edit that can be applied, applied as one undo step; those that can't, returned with their reasons
+   * (ruling 18). */
+  function settleAll(): Unapplied[] {
+    const all = [...unappliedRef.current.values()];
+    const { doc: next, applied, left } = applyAll(doc, all, typeOf, () => true);
+    for (const u of left) keep(u);
+    if (applied.length === 0) return left;
+    if (!change(next, applied.length === 1 ? "Applied an edit" : `Applied ${applied.length} edits`)) return all;
+    drop(applied.map((u) => u.id));
+    return left;
+  }
+
+  /** `then`, once every unapplied edit is in the draft; when one can't be, the person decides first (ruling 18). */
+  function whenSettled(action: string, then: () => void) {
+    const left = settleAll();
+    if (left.length === 0) then();
+    else setAsking({ kind: "unapplied", action, left, then });
+  }
+
+  /** Back to an unapplied edit: its step's drawer. */
+  function goBack(u: Unapplied) {
+    setSide({ kind: "step", node: u.node });
+  }
+
+  const describe = (u: Unapplied) => `${keyOf(u.node)} · ${u.label}: ${u.why ?? "still being typed"}`;
+```
+
+(c) In `decide.current`'s `run`, replace the body before `.then(` with:
+
+```ts
+    const run = (async () => {
+      if (agreed.current) return true;
+      // What's typed but not applied goes in first, where it can (ruling 18); what can't makes leaving a question.
+      const left = settleAll();
+      const s = saver.current;
+      if (left.length === 0 && !s?.unsaved) return true;
+      if (left.length === 0 && s && (await s.flush().then(() => true, () => false))) return true;
+      return new Promise<boolean>((resolve) => setLeaveQuestion(() => resolve));
+    })().then((leave) => {
+```
+
+(d) Unsaved work counts unapplied edits, for sign-out and for the page itself:
+- in `guardLeaving({ … })`, `unsaved: () => (saver.current?.unsaved ?? false) || unappliedRef.current.size > 0,`;
+- in `useBlocker({ … })`, `enableBeforeUnload: () => (saver.current?.unsaved ?? false) || unappliedRef.current.size > 0,`.
+
+(e) The actions that need the draft settled go through `whenSettled`:
+- the toolbar's Export: `onClick={() => whenSettled("export", () => void exportFile())}`;
+- the toolbar's Publish:
+  `onClick={() => { if (latest !== null) whenSettled("publish", () => setConfirm({ kind: "publish", expected: latest })); }}`;
+- `VersionsPanel`'s `onView`: `onView={(v) => whenSettled("view the version", () => void view(v))}`.
+
+(f) In `confirmDelete`:
+- first, before the `ports` branch:
+
+```ts
+    if (asking.kind === "unapplied") {
+      drop(asking.left.map((u) => u.id)); // discarded, on purpose
+      setAsking(null);
+      asking.then();
+      return;
+    }
+```
+
+- in the `node` branch, before `change(…)`, discard the step's own:
+  `drop([...unappliedRef.current.values()].filter(within(asking.id, "")).map((u) => u.id));`.
+
+(g) The delete `ConfirmDialog`:
+- `title`: `"Edits not applied"` for `unapplied`, before the other kinds;
+- `confirmLabel`: `` `Discard and ${asking.action}` `` for `unapplied`;
+- `cancelLabel={asking?.kind === "unapplied" ? "Go back to them" : "Cancel"}`;
+- `onCancel`:
+
+```tsx
+        onCancel={() => {
+          if (asking?.kind === "unapplied") goBack(asking.left[0]!);
+          setAsking(null);
+        }}
+```
+
+- its children add:
+
+```tsx
+        {asking?.kind === "unapplied" &&
+          `${asking.left.length === 1 ? "This edit isn't applied, so it would be left out" : "These edits aren't applied, so they would be left out"}: ${asking.left.map(describe).join("; ")}.`}
+```
+
+- in the `node` case's text, after "Other steps that read its output will show a problem.", add:
+  `{[...unapplied.values()].some(within(asking.id, "")) && " Its edits not applied yet are discarded too."}`.
+
+(h) The leave question's body names the unapplied edits:
+
+```tsx
+        {sync.status === "conflict"
+          ? "This draft was changed elsewhere, so your changes since then can't be saved here. "
+          : sync.status !== "saved" ? "They couldn't be saved. Stay to try again, or keep a copy before you leave. " : ""}
+        {unapplied.size > 0 &&
+          `${unapplied.size === 1 ? "An edit isn't applied" : "Some edits aren't applied"}: ${[...unapplied.values()].map(describe).join("; ")}. Stay to fix ${unapplied.size === 1 ? "it" : "them"}. `}
+        <Button size="sm" onClick={downloadMine}>Download my version</Button>
+```
+
+(i) Pass the count to the save state: `<SaveState state={sync} unapplied={unapplied.size} />`.
+
+- [ ] **Step 5: Run the tests to see them pass**
+
+Run: `npx -y pnpm@12.6.0 exec vitest run src/routes/editor`
+Expected: PASS, every test. 4b's leave, sign-out and publish tests keep passing: with nothing unapplied, `settleAll`
+returns at once and changes nothing.
+
+- [ ] **Step 6: Run every check**
+
+Run: `npx -y pnpm@12.6.0 test && npx -y pnpm@12.6.0 typecheck && npx -y pnpm@12.6.0 lint`
+Expected: all pass.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add frontend/src/routes/editor
+git commit -m "feat(editor): unapplied edits applied or asked about before leaving, publishing, exporting or viewing a version (4c-1)"
+```
+
+### Task 9: Lists, maps and a case's port
 
 **Files:**
 - Modify: `frontend/src/routes/editor/drawer/structured.tsx`
-- Modify: `frontend/src/routes/editor/drawer/context.ts` (`renamePort` on `Drawer`)
 - Modify: `frontend/src/routes/editor/drawer/FieldView.tsx` (two call sites, and the port's control)
-- Modify: `frontend/src/routes/editor/drawer/harness.tsx` (`renamePort`)
-- Modify: `frontend/src/routes/editor/drawer/StepDrawer.tsx` (`onRenamePort`)
-- Modify: `frontend/src/routes/editor/Editor.tsx` (`onRenamePort`)
 - Test: `frontend/src/routes/editor/drawer/FieldView.test.tsx`, `frontend/src/routes/editor/Editor.test.tsx`
 
 **Interfaces:**
 - Consumes:
   - from Task 1: `itemOf`, `entryOf`, `isObject`, `emptyOf`;
-  - from Task 2: `ENVELOPE`, `freePort`, `renamePort`.
-- Produces:
-  - `Drawer.renamePort: (index: number, name: string) => string | null`: the reason a name is refused, or null;
-  - `isContainer` (group, list, map), `partNames(spec, value)`, `ContainerParts({ spec, value })`, `PortControl`;
-  - StepDrawer prop `onRenamePort: (index: number, name: string) => string | null`.
+  - from Task 2: `freePort`;
+  - from Task 6: `DrawerActions.restructure`, `hold`, `release`, `apply`, `held`.
+- Produces: `isContainer` (group, list, map), `partNames(spec, value)`, `ContainerParts({ spec, value })`,
+  `PortControl`. Every change to a list's or a map's shape goes through `restructure`, so the edits typed inside are
+  applied first (ruling 18). A port's and an entry's name are held while typed, and applied when focus leaves or on
+  Enter.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2945,6 +4189,19 @@ it("adds, moves and removes a list's items", async () => {
   await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Add to Tags" })));
 });
 
+it("moves an item only once the edits inside it are applied", async () => {
+  const sizes = typeWith({ type: "object", properties: { sizes: { type: "array", title: "Sizes", items: { type: "integer" } } } });
+  const { config } = showFields(sizes, { config: { sizes: [1, 2] } });
+  await userEvent.type(screen.getByLabelText("Sizes, item 2"), "x");
+  await userEvent.click(screen.getByRole("button", { name: "Move up: Sizes, item 2" }));
+  expect(config()).toEqual({ sizes: [1, 2] }); // it waits: "2x" can't be applied
+  expect(screen.getByText("A whole number, like 42.")).toBeTruthy();
+  await userEvent.clear(screen.getByLabelText("Sizes, item 2"));
+  await userEvent.type(screen.getByLabelText("Sizes, item 2"), "5");
+  await userEvent.click(screen.getByRole("button", { name: "Move up: Sizes, item 2" }));
+  expect(config()).toEqual({ sizes: [5, 1] });
+});
+
 it("adds a case with the first free port name", async () => {
   const { config } = showFields(SWITCH);
   await userEvent.click(screen.getByRole("button", { name: "Add to Cases" }));
@@ -2955,12 +4212,13 @@ it("adds a case with the first free port name", async () => {
 });
 
 it("sets a map's entries, renamed in place, never as $value", async () => {
-  const { config } = showFields(TRANSFORM);
+  const { config, held } = showFields(TRANSFORM);
   await userEvent.click(screen.getByRole("button", { name: "Add to Fields" }));
   await userEvent.type(screen.getByLabelText("field_1"), "1 + 1"); // an entry starts as a formula
   const name = screen.getByLabelText("Name: field_1");
   await userEvent.clear(name);
   await userEvent.type(name, "total");
+  expect(held().map((u) => [u.kind, u.text])).toEqual([["name", "total"]]); // held while it's typed
   await userEvent.tab();
   expect(config()).toEqual({ fields: { total: formula("1 + 1") } });
   const renamed = screen.getByLabelText("Name: total");
@@ -3015,49 +4273,28 @@ it("asks before removing a case with edges", async () => {
 - [ ] **Step 2: Run them to see them fail**
 
 Run: `npx -y pnpm@12.6.0 exec vitest run src/routes/editor`
-Expected: FAIL. A list and a map show as JSON, so there is no "Add to Tags" button, no "Cases, item 2" group, and no
-"Add to Fields" button.
+Expected: FAIL. A list and a map show as JSON, so there's no "Add to Tags", no "Cases, item 2" group and no "Add to
+Fields".
 
-- [ ] **Step 3: Let a field rename its port**
-
-In `frontend/src/routes/editor/drawer/context.ts`, add to `Drawer`:
-
-```ts
-  /** A dynamic port renamed (a switch case's `port`), its edges following; the reason it's refused, or null. */
-  renamePort: (index: number, name: string) => string | null;
-```
-
-In `frontend/src/routes/editor/drawer/harness.tsx`, add to the `drawer` object:
-
-```ts
-    // As the editor does, without edges: the name is written where the case sits.
-    renamePort: (index: number, name: string) => {
-      set([type.dynamic_ports ?? "", index, "port"], name);
-      return null;
-    },
-```
-
-In `frontend/src/routes/editor/drawer/StepDrawer.tsx`:
-- add the prop `onRenamePort: (index: number, name: string) => string | null` to the destructuring and its type;
-- add `renamePort: onRenamePort` to the `DrawerContext.Provider`'s value.
-
-- [ ] **Step 4: Write lists, maps and the port's control**
+- [ ] **Step 3: Write lists, maps and the port's control**
 
 Replace `frontend/src/routes/editor/drawer/structured.tsx` with:
 
 ```tsx
 // SPDX-License-Identifier: Apache-2.0
 // A value made of parts (4c-1, ruling 5): a group's properties, a list's items, a map's entries, each a field of its
-// own; and a dynamic port's name, which edges hang on (ruling 9).
-import { useRef, useState, useId } from "react";
+// own; and a dynamic port's name, which edges hang on (ruling 9). A change to a list's or a map's shape applies the
+// edits typed inside it first, or waits for them (ruling 18). A name is held while typed, applied when focus leaves or
+// on Enter.
+import { useId, useRef } from "react";
 import { Button } from "../../../components/Button";
 import { controlClass } from "../../../components/Field";
-import { ENVELOPE, freePort } from "../../../lib/config";
-import { emptyOf, entryOf, isObject, itemOf, propertiesOf, type FieldSpec, type Widget } from "../../../lib/schemaForm";
+import { freePort } from "../../../lib/config";
+import { emptyOf, entryOf, isObject, itemOf, pointerOf, propertiesOf, type FieldSpec, type Widget } from "../../../lib/schemaForm";
 import type { GraphNode } from "../../../lib/workflows";
 import { segment, useDrawer } from "./context";
 import { FieldView } from "./FieldView";
-import { useText, type ControlProps } from "./scalars";
+import type { ControlProps } from "./scalars";
 
 /** The widgets shown as their parts rather than as one control. */
 export const isContainer = (widget: Widget): boolean => widget === "group" || widget === "list" || widget === "map";
@@ -3078,20 +4315,29 @@ function newItem(item: FieldSpec, node: GraphNode): unknown {
   return item.base === "group" || item.base === "map" ? {} : item.base === "list" ? [] : emptyOf(item);
 }
 
+const asList = (v: unknown): unknown[] => (Array.isArray(v) ? [...(v as unknown[])] : []);
+
 function ListItems({ spec, value }: { spec: FieldSpec; value: unknown }) {
   const drawer = useDrawer();
   const add = useRef<HTMLButtonElement>(null);
-  const items = Array.isArray(value) ? (value as unknown[]) : [];
-  const move = (from: number, to: number) => {
-    const next = [...items];
-    next.splice(to, 0, ...next.splice(from, 1));
-    drawer.set(spec.path, next);
-  };
+  const items = asList(value);
+  // Each changes the list's shape: the edits typed inside are applied first, or it waits (ruling 18).
+  const move = (from: number, to: number) =>
+    drawer.restructure(spec.pointer, {
+      path: spec.path,
+      make: (list) => {
+        const next = asList(list);
+        next.splice(to, 0, ...next.splice(from, 1));
+        return next;
+      },
+    });
   const remove = (index: number) => {
-    drawer.set([...spec.path, index], undefined);
+    if (drawer.restructure(spec.pointer, { path: [...spec.path, index], make: () => undefined }) !== null) return;
     // Its controls are gone: focus goes to Add. A removal that asks first lands on the drawer's heading instead.
     requestAnimationFrame(() => add.current?.focus());
   };
+  const append = () =>
+    drawer.restructure(spec.pointer, { path: spec.path, make: (list) => [...asList(list), newItem(itemOf(spec, asList(list).length), drawer.node)] });
   return (
     <>
       {items.length === 0 && <p className="text-small text-muted">None yet.</p>}
@@ -3113,34 +4359,40 @@ function ListItems({ spec, value }: { spec: FieldSpec; value: unknown }) {
         );
       })}
       {drawer.editable && (
-        <Button ref={add} size="sm" className="self-start" onClick={() => drawer.set([...spec.path, items.length], newItem(itemOf(spec, items.length), drawer.node))}>
-          Add to {spec.label}
-        </Button>
+        <Button ref={add} size="sm" className="self-start" onClick={append}>Add to {spec.label}</Button>
       )}
     </>
   );
 }
 
-/** A map entry's name: it applies when focus leaves or on Enter, refused when empty, `$value` (ruling 15) or taken. */
-function NameField({ name, disabled, onRename }: { name: string; disabled: boolean; onRename: (to: string) => string | null }) {
+/** A map entry's name: held while typed, applied when focus leaves or on Enter; refused when empty, `$value` (ruling
+ * 15) or another entry's, said here. */
+function NameField({ map, name }: { map: FieldSpec; name: string }) {
+  const drawer = useDrawer();
   const id = useId();
-  const [text, setText] = useText(name, (v) => String(v), (t, v) => t === v);
-  const [problem, setProblem] = useState<string | null>(null);
-  const commit = () => setProblem(onRename(text.trim()));
+  const pointer = pointerOf([...map.path, name]);
+  const held = drawer.held("name", pointer);
+  const why = held?.why ?? null;
+  const commit = () => {
+    if (held) drawer.apply("name", pointer);
+  };
   return (
     <div className="flex min-w-0 flex-col gap-1.5">
       <label htmlFor={id} className="text-small font-semibold">Name</label>
       <input
-        id={id} type="text" value={text} disabled={disabled} spellCheck={false} aria-label={`Name: ${name}`}
-        aria-invalid={problem !== null} aria-describedby={problem !== null ? `${id}-p` : undefined}
-        onChange={(e) => setText(e.target.value)}
+        id={id} type="text" value={held?.text ?? name} disabled={!drawer.editable} spellCheck={false} aria-label={`Name: ${name}`}
+        aria-invalid={why !== null} aria-describedby={why !== null ? `${id}-p` : undefined}
+        onChange={(e) => {
+          if (e.target.value === name) drawer.release("name", pointer);
+          else drawer.hold("name", pointer, { path: map.path, label: `${map.label}, the name ${name}`, text: e.target.value, why: null, from: name });
+        }}
         onBlur={commit}
         onKeyDown={(e) => {
           if (e.key === "Enter") commit();
         }}
-        className={`${controlClass(problem !== null)} font-mono`}
+        className={`${controlClass(why !== null)} font-mono`}
       />
-      {problem !== null && <p id={`${id}-p`} className="text-small text-danger">{problem}</p>}
+      {why !== null && <p id={`${id}-p`} className="text-small text-danger">{why}</p>}
     </div>
   );  // prettier-ignore
 }
@@ -3149,20 +4401,16 @@ function MapEntries({ spec, value }: { spec: FieldSpec; value: unknown }) {
   const drawer = useDrawer();
   const add = useRef<HTMLButtonElement>(null);
   const entries = isObject(value) ? Object.entries(value) : [];
-  const rename = (from: string, to: string): string | null => {
-    if (to === from) return null;
-    if (to === "") return "A name can't be empty.";
-    if (to === ENVELOPE) return "A name can't be $value: the engine would read the whole value as computed.";
-    if (entries.some(([k]) => k === to)) return `There's already one called ${to}.`;
-    drawer.set(spec.path, Object.fromEntries(entries.map(([k, v]) => [k === from ? to : k, v]))); // in place
-    return null;
-  };
-  const addOne = () => {
-    const taken = new Set(entries.map(([k]) => k));
-    let n = 1;
-    while (taken.has(`field_${n}`)) n++;
-    drawer.set([...spec.path, `field_${n}`], null);
-  };
+  const append = () =>
+    drawer.restructure(spec.pointer, {
+      path: spec.path,
+      make: (map) => {
+        const own = isObject(map) ? map : {};
+        let n = 1;
+        while (Object.hasOwn(own, `field_${n}`)) n++;
+        return { ...own, [`field_${n}`]: null };
+      },
+    });
   return (
     <>
       {entries.length === 0 && <p className="text-small text-muted">None yet.</p>}
@@ -3170,14 +4418,15 @@ function MapEntries({ spec, value }: { spec: FieldSpec; value: unknown }) {
         const entry = entryOf(spec, name);
         return (
           <div key={i} className="flex min-w-0 flex-col gap-2">
-            <NameField name={name} disabled={!drawer.editable} onRename={(to) => rename(name, to)} />
+            <NameField map={spec} name={name} />
             <FieldView spec={entry} />
             {drawer.editable && (
               <Button
                 size="sm" variant="danger-outline" className="self-start" aria-label={`Remove: ${name}`}
                 onClick={() => {
-                  drawer.set(entry.path, undefined);
-                  requestAnimationFrame(() => add.current?.focus());
+                  if (drawer.restructure(spec.pointer, { path: entry.path, make: () => undefined }) === null) {
+                    requestAnimationFrame(() => add.current?.focus());
+                  }
                 }}
               >
                 Remove
@@ -3187,7 +4436,7 @@ function MapEntries({ spec, value }: { spec: FieldSpec; value: unknown }) {
         );  // prettier-ignore
       })}
       {drawer.editable && (
-        <Button ref={add} size="sm" className="self-start" onClick={addOne}>Add to {spec.label}</Button>
+        <Button ref={add} size="sm" className="self-start" onClick={append}>Add to {spec.label}</Button>
       )}
     </>
   );
@@ -3199,19 +4448,24 @@ export function ContainerParts({ spec, value }: { spec: FieldSpec; value: unknow
   return propertiesOf(spec).map((part) => <FieldView key={part.pointer} spec={part} />);
 }
 
-/** A dynamic port's name (a switch case's `port`): edges hang on it, so it applies when focus leaves or on Enter, and
- * its edges follow it; a name the graph's format refuses, or another port's, is refused there (ruling 9). */
-export function PortControl({ spec, value, id, describedBy, invalid, disabled, onLocal }: ControlProps) {
+/** A dynamic port's name (a switch case's `port`): edges hang on it, so it's held while typed and applied when focus
+ * leaves or on Enter, its edges following; a name the graph's format refuses, or another port's, is refused there
+ * (ruling 9). */
+export function PortControl({ spec, value, id, describedBy, invalid, disabled }: ControlProps) {
   const drawer = useDrawer();
-  const [text, setText] = useText(value, (v) => (typeof v === "string" ? v : ""), (t, v) => t === v);
+  const held = drawer.held("port", spec.pointer);
+  const now = typeof value === "string" ? value : "";
   const commit = () => {
-    if (text.trim() !== value) onLocal(drawer.renamePort(spec.path[1] as number, text.trim()));
+    if (held) drawer.apply("port", spec.pointer);
   };
   return (
     <input
-      id={id} type="text" value={text} disabled={disabled} spellCheck={false}
+      id={id} type="text" value={held?.text ?? now} disabled={disabled} spellCheck={false}
       aria-describedby={describedBy} aria-invalid={invalid} aria-required
-      onChange={(e) => setText(e.target.value)}
+      onChange={(e) => {
+        if (e.target.value === now) drawer.release("port", spec.pointer);
+        else drawer.hold("port", spec.pointer, { path: spec.path, label: spec.label, text: e.target.value, why: null });
+      }}
       onBlur={commit}
       onKeyDown={(e) => {
         if (e.key === "Enter") commit();
@@ -3222,7 +4476,7 @@ export function PortControl({ spec, value, id, describedBy, invalid, disabled, o
 }
 ```
 
-- [ ] **Step 5: Use them in the field**
+- [ ] **Step 4: Use them in the field**
 
 In `frontend/src/routes/editor/drawer/FieldView.tsx`:
 - import `PortControl` from `./structured`;
@@ -3238,45 +4492,25 @@ In `frontend/src/routes/editor/drawer/FieldView.tsx`:
       : (controlFor(spec.widget === "formula" ? spec.base : spec.widget) ?? controlFor(spec.base) ?? JsonControl);
 ```
 
-- [ ] **Step 6: Rename a port in the editor**
-
-In `frontend/src/routes/editor/Editor.tsx`:
-- add `renamePort` to the `../../lib/config` import;
-- add, after `onConfig`:
-
-```ts
-  /** A case's port renamed in place: its edges follow (ruling 9). The reason a name is refused, or null. */
-  function onRenamePort(nodeId: string, index: number, name: string): string | null {
-    const node = findNode(doc, nodeId);
-    const type = node ? typeMap.get(node.type) : undefined;
-    if (!node || !type) return null;
-    const result = renamePort(doc, nodeId, index, name, type);
-    if ("problem" in result) return result.problem;
-    if (result.doc !== doc) change(result.doc, `The port is now ${name}; its edges follow it`);
-    return null;
-  }
-```
-
-- pass `onRenamePort={(index, name) => onRenamePort(open.id, index, name)}` to `StepDrawer`.
-
-- [ ] **Step 7: Run the tests to see them pass**
+- [ ] **Step 5: Run the tests to see them pass**
 
 Run: `npx -y pnpm@12.6.0 exec vitest run src/routes/editor`
-Expected: PASS, every test. Task 6's JSON test keeps passing: its `routes` field is untyped, so it's still JSON.
+Expected: PASS, every test. Task 7's JSON tests keep passing: the router's `routes` field is untyped, so it's still
+JSON.
 
-- [ ] **Step 8: Run every check**
+- [ ] **Step 6: Run every check**
 
 Run: `npx -y pnpm@12.6.0 test && npx -y pnpm@12.6.0 typecheck && npx -y pnpm@12.6.0 lint`
 Expected: all pass.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add frontend/src/routes/editor
-git commit -m "feat(editor): lists, maps and a switch case's port in the step drawer, its edges following (4c-1)"
+git commit -m "feat(editor): lists, maps and a switch case's port in the step drawer, their edits applied before a move (4c-1)"
 ```
 
-- [ ] **Step 10: Milestone 2 pause (the owner's review)**
+- [ ] **Step 8: Milestone 2 pause (the owner's review)**
 
 Take screenshots with the session's `compose-shots.mjs`, against the isolated stack after a reset, of these drawers:
 - an `if` step's Setup with a formula;
@@ -3284,6 +4518,7 @@ Take screenshots with the session's `compose-shots.mjs`, against the isolated st
 - a switch with two cases;
 - a transform's map with a formula entry;
 - a group as JSON;
+- a field with an edit not applied, and the save state counting it;
 - the same drawer read only, for a viewer.
 
 Take each in light and dark, at 1280 and 320 px. Put them beside frame 1c's drawer in the session's checkpoint page
@@ -3292,7 +4527,7 @@ owner's word.
 
 # Milestone 3: references and behaviour
 
-### Task 8: The connection and workflow pickers
+### Task 10: The connection and workflow pickers
 
 **Files:**
 - Create: `frontend/src/routes/editor/drawer/pickers.tsx`
@@ -3305,12 +4540,12 @@ owner's word.
   - `client`, `ok`, `Schemas` (`lib/client.ts`);
   - `workflowsQuery` (`lib/workflows.ts`);
   - `sameId` (`lib/graph.ts`);
-  - from Task 5: `ControlProps`, `useDrawer`, `controlClass`.
+  - from Task 6: `ControlProps`, `useDrawer`, `controlClass`.
 - Produces:
   - `connectionsQuery(tenantId)` (key `["connections", tenantId]`, the Connections page's own);
   - `ConnectionControl`, `WorkflowControl`;
-  - harness: `fakeApi(answers: Record<string, () => Response>): { method; path; body }[]`, `json(body, status?)`, and
-    `showFields(type, { routed: true })` inside a router.
+  - harness: `fakeApi(answers: Record<string, () => Response | Promise<Response>>): { method; path; body }[]`,
+    `json(body, status?)`, and `showFields(type, { routed: true })` inside a router.
 
 - [ ] **Step 1: Read the API's shapes**
 
@@ -3324,12 +4559,14 @@ In `frontend/src/routes/editor/drawer/harness.tsx`:
 - add the imports `import { RouterProvider, createMemoryHistory, createRootRoute, createRouter } from
   "@tanstack/react-router";` and `import { vi } from "vitest";`;
 - add `routed?: boolean; // inside a router: a link to another page needs one` to `Options`;
-- replace the `render(…)` in `showFields` with:
+- in `showFields`, replace the `render(…)` call with:
 
 ```tsx
   const fields = (
     <QueryClientProvider client={client}>
-      <Fields type={type} options={options} edits={edits} state={state} />
+      <Harness type={type} options={options} edits={edits} state={state}>
+        {children ?? fieldsOf(type).map((f) => <FieldView key={f.pointer} spec={f} />)}
+      </Harness>
     </QueryClientProvider>
   );
   if (!options.routed) render(fields);
@@ -3344,9 +4581,9 @@ and add at the end:
 ```tsx
 export const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 
-/** The API's answers, by "METHOD /path" (the path decoded); anything else is a 404, never the network. Each request is
- * kept. */
-export function fakeApi(answers: Record<string, () => Response>) {
+/** The API's answers, by "METHOD /path" (the path decoded); anything else is a 404, never the network. An answer may
+ * be a promise the test settles. Each request is kept. */
+export function fakeApi(answers: Record<string, () => Response | Promise<Response>>) {
   const sent: { method: string; path: string; body: unknown }[] = [];
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const request = input as Request;
@@ -3361,7 +4598,7 @@ export function fakeApi(answers: Record<string, () => Response>) {
 ```
 
 In `frontend/src/routes/editor/drawer/FieldView.test.tsx`, so its pickers never reach the network:
-- add `afterEach` and `beforeEach` to the vitest import, and `fakeApi` to the harness import;
+- add `afterEach` and `beforeEach` to the vitest import (it has `vi` since Task 9), and `fakeApi` to the harness import;
 - add, after the imports:
 
 ```tsx
@@ -3585,7 +4822,7 @@ git add frontend/src/routes/editor/drawer
 git commit -m "feat(editor): choose a step's connection and sub-workflow from the tenant's own (4c-1)"
 ```
 
-### Task 9: Live options, on request
+### Task 11: Live options, on request, in their scope
 
 **Files:**
 - Create: `frontend/src/routes/editor/drawer/LiveOptions.tsx`
@@ -3594,11 +4831,12 @@ git commit -m "feat(editor): choose a step's connection and sub-workflow from th
 
 **Interfaces:**
 - Consumes:
-  - `ApiError`, `client`, `ok`, `Schemas` (`lib/client.ts`);
+  - `ApiError`, `client`, `ok`, `Schemas` (`lib/client.ts`), and `idKey`, `sameId` (`lib/graph.ts`);
   - from Task 1: `fieldsOf`;
   - from Task 2: `valueAt`;
-  - from Task 8: `fakeApi`, `json`.
-- Produces: `OptionsControl`.
+  - from Task 10: `connectionsQuery`, `fakeApi`, `json`.
+- Produces: `OptionsControl`. Its choices belong to a scope: tenant, type, field, and the connection's id and
+  revision (ruling 14).
 
 - [ ] **Step 1: Read the API's shape**
 
@@ -3627,20 +4865,23 @@ afterEach(() => {
 });
 
 const C1 = "00000000-0000-4000-8000-0000000000c1";
+const C2 = "00000000-0000-4000-8000-0000000000c2";
 const CONNECTIONS = "GET /api/v1/t/t1/connections";
 const OPTIONS = "POST /api/v1/t/t1/node-types/acme.sites@1/options";
-const prod = () =>
-  json([{ id: C1, name: "Prod", type: "acme", status: "ok", revision: 1, config: {}, secret_set: true, status_detail: "", privilege: null, last_verified_at: null }]);
+const connection = (id: string, name: string) => ({
+  id, name, type: "acme", status: "ok", revision: 1, config: {}, secret_set: true, status_detail: "", privilege: null, last_verified_at: null,
+});  // prettier-ignore
+const both = () => json([connection(C1, "Prod"), connection(C2, "Lab")]);
 
 it("never loads on render", async () => {
-  const sent = fakeApi({ [CONNECTIONS]: prod });
+  const sent = fakeApi({ [CONNECTIONS]: both });
   showFields(REMOTE, { config: { connection: C1 } });
   await screen.findByRole("option", { name: "Prod · verified" }); // what loads by itself has loaded
   expect(sent.map((r) => `${r.method} ${r.path}`)).toEqual([CONNECTIONS]);
 });
 
 it("asks for a connection before loading", () => {
-  fakeApi({ [CONNECTIONS]: prod });
+  fakeApi({ [CONNECTIONS]: both });
   showFields(REMOTE);
   expect(screen.getByRole<HTMLButtonElement>("button", { name: "Show choices" }).disabled).toBe(true);
   expect(screen.getByText("Choose the step's connection first: the choices come from it.")).toBeTruthy();
@@ -3648,10 +4889,11 @@ it("asks for a connection before loading", () => {
 
 it("loads the choices on request, with the connection and the text typed, and sets the one chosen", async () => {
   const sent = fakeApi({
-    [CONNECTIONS]: prod,
+    [CONNECTIONS]: both,
     [OPTIONS]: () => json({ options: [{ value: "s1", label: "HQ" }, { value: "s2", label: "Lab" }] }),
   });
   const { config } = showFields(REMOTE, { config: { connection: C1 } });
+  await screen.findByRole("option", { name: "Prod · verified" }); // its revision known: the scope is settled
   await userEvent.type(screen.getByLabelText("Site"), "h");
   await userEvent.click(screen.getByRole("button", { name: "Show choices" }));
   const choices = await screen.findByLabelText<HTMLSelectElement>("Choices for Site");
@@ -3661,12 +4903,35 @@ it("loads the choices on request, with the connection and the text typed, and se
 });
 
 it("says why choices couldn't load, keeping a typed value", async () => {
-  fakeApi({ [CONNECTIONS]: prod, [OPTIONS]: () => json({ error: "plugin_calls_busy" }, 503) });
+  fakeApi({ [CONNECTIONS]: both, [OPTIONS]: () => json({ error: "plugin_calls_busy" }, 503) });
   const { config } = showFields(REMOTE, { config: { connection: C1 } });
+  await screen.findByRole("option", { name: "Prod · verified" });
   await userEvent.type(screen.getByLabelText("Site"), "hq-1");
   await userEvent.click(screen.getByRole("button", { name: "Show choices" }));
   expect(await screen.findByText("Too many requests right now. Try again in a moment.")).toBeTruthy();
   expect(config().site_id).toBe("hq-1");
+});
+
+it("drops choices when their connection changes, and ignores an answer for the old one", async () => {
+  let settle: (answer: Response) => void = () => undefined;
+  let calls = 0;
+  const sent = fakeApi({
+    [CONNECTIONS]: both,
+    [OPTIONS]: () => (++calls === 1 ? json({ options: [{ value: "s1", label: "HQ" }] }) : new Promise<Response>((resolve) => (settle = resolve))),
+  });
+  const { config } = showFields(REMOTE, { config: { connection: C1 } });
+  await screen.findByRole("option", { name: "Prod · verified" });
+  await userEvent.click(screen.getByRole("button", { name: "Show choices" }));
+  await screen.findByLabelText("Choices for Site"); // Prod's
+  await userEvent.selectOptions(await screen.findByLabelText("Connection"), "Lab · verified");
+  expect(screen.queryByLabelText("Choices for Site")).toBeNull(); // Prod's choices went with Prod
+  await userEvent.click(screen.getByRole("button", { name: "Show choices" })); // Lab's, still on their way
+  await userEvent.selectOptions(screen.getByLabelText("Connection"), "Prod · verified");
+  settle(json({ options: [{ value: "s9", label: "Lab only" }] }));
+  await vi.waitFor(() => expect(screen.getByRole<HTMLButtonElement>("button", { name: "Show choices" }).disabled).toBe(false));
+  expect(screen.queryByLabelText("Choices for Site")).toBeNull(); // Lab's answer never shows under Prod
+  expect(sent.filter((r) => r.path.endsWith("/options")).map((r) => (r.body as { connection_id: string }).connection_id)).toEqual([C1, C2]);
+  expect(config().connection).toBe(C1);
 });
 ```
 
@@ -3683,14 +4948,19 @@ Create `frontend/src/routes/editor/drawer/LiveOptions.tsx`:
 // SPDX-License-Identifier: Apache-2.0
 // A field whose choices the step's type lists (4c-1, ruling 14; plugins-3 D3). The value is typed freely, and its
 // choices load only when the person asks, through the step's connection: an options call reaches the plugin's
-// service, so it's never a side effect of opening a drawer (D24). The choices help; they never gate what's typed.
+// service, so it's never a side effect of opening a drawer (D24). Choices belong to their scope (tenant, type, field,
+// the connection's id and revision): a new scope drops them, and an answer for an older one is ignored. They help;
+// they never gate what's typed.
+import { useQuery } from "@tanstack/react-query";
 import { useRef, useState } from "react";
 import { Button } from "../../../components/Button";
 import { controlClass } from "../../../components/Field";
 import { ApiError, client, ok, type Schemas } from "../../../lib/client";
 import { valueAt } from "../../../lib/config";
+import { idKey, sameId } from "../../../lib/graph";
 import { fieldsOf } from "../../../lib/schemaForm";
 import { useDrawer } from "./context";
+import { connectionsQuery } from "./pickers";
 import type { ControlProps } from "./scalars";
 
 type Option = Schemas["OptionOut"];
@@ -3724,25 +4994,37 @@ function said(choices: Choices): string {
 
 export function OptionsControl({ spec, value, id, describedBy, invalid, disabled, onChange }: ControlProps) {
   const drawer = useDrawer();
-  const [choices, setChoices] = useState<Choices>({ status: "idle" });
-  const asked = useRef(0); // the newest request: an older one's answer says nothing
-  const field = fieldsOf(drawer.type).find((f) => f.widget === "connection");
+  const type = spec.type;
+  const takes = type.credentials.length > 0;
+  const field = fieldsOf(type).find((f) => f.widget === "connection");
   const connection = field ? valueAt(drawer.node.config ?? {}, field.path) : undefined;
-  const blocked = drawer.type.credentials.length > 0 && typeof connection !== "string";
+  const chosen = typeof connection === "string" ? connection : null;
+  // The connection's revision: a connection changed elsewhere is another scope. Read from the tenant's list, which
+  // the connection picker loads too: a local read, never the service.
+  const listed = useQuery({ ...connectionsQuery(drawer.tenantId), enabled: takes && chosen !== null });
+  const revision = chosen === null ? null : (listed.data?.find((c) => sameId(c.id, chosen))?.revision ?? null);
+  const scope = JSON.stringify([drawer.tenantId, type.ref, spec.name, chosen === null ? null : idKey(chosen), revision]);
+  const current = useRef(scope);
+  current.current = scope;
+  const [choices, setChoices] = useState<{ scope: string; state: Choices }>({ scope, state: { status: "idle" } });
+  const shown: Choices = choices.scope === scope ? choices.state : { status: "idle" };
+  const blocked = takes && chosen === null;
+  const unsettled = takes && chosen !== null && listed.isPending; // the scope isn't known until its revision is
   const text = typeof value === "string" ? value : "";
   async function load() {
-    const n = ++asked.current;
-    setChoices({ status: "loading" });
+    const asked = scope;
+    setChoices({ scope: asked, state: { status: "loading" } });
     try {
       const answer = await ok(
         client.POST("/api/v1/t/{tenant_id}/node-types/{ref}/options", {
-          params: { path: { tenant_id: drawer.tenantId, ref: drawer.type.ref } },
-          body: { field: spec.name, connection_id: typeof connection === "string" ? connection : null, query: text.slice(0, 200) },
+          params: { path: { tenant_id: drawer.tenantId, ref: type.ref } },
+          body: { field: spec.name, connection_id: chosen, query: text.slice(0, 200) },
         }),
       );
-      if (n === asked.current) setChoices({ status: "done", options: answer.options });
+      if (current.current === asked) setChoices({ scope: asked, state: { status: "done", options: answer.options } });
     } catch (e) {
-      if (n === asked.current) setChoices({ status: "failed", why: (e instanceof ApiError && WHY[e.code]) || "The choices couldn't load." });
+      const why = (e instanceof ApiError && WHY[e.code]) || "The choices couldn't load.";
+      if (current.current === asked) setChoices({ scope: asked, state: { status: "failed", why } });
     }
   }
   return (
@@ -3754,13 +5036,13 @@ export function OptionsControl({ spec, value, id, describedBy, invalid, disabled
           onChange={(e) => onChange(e.target.value === "" ? undefined : e.target.value, true)}
           className={controlClass(invalid)}
         />
-        <Button className="shrink-0" disabled={disabled || blocked || choices.status === "loading"} onClick={() => void load()}>
+        <Button className="shrink-0" disabled={disabled || blocked || unsettled || shown.status === "loading"} onClick={() => void load()}>
           Show choices
         </Button>
       </div>
       {blocked && <p className="text-small text-muted">Choose the step&apos;s connection first: the choices come from it.</p>}
-      <p role="status" className={`text-small ${choices.status === "failed" ? "text-danger" : "text-muted"}`}>{said(choices)}</p>
-      {choices.status === "done" && choices.options.length > 0 && (
+      <p role="status" className={`text-small ${shown.status === "failed" ? "text-danger" : "text-muted"}`}>{said(shown)}</p>
+      {shown.status === "done" && shown.options.length > 0 && (
         <select
           aria-label={`Choices for ${spec.label}`} value="" disabled={disabled} className={controlClass(false)}
           onChange={(e) => {
@@ -3768,8 +5050,8 @@ export function OptionsControl({ spec, value, id, describedBy, invalid, disabled
             document.getElementById(id)?.focus();
           }}
         >
-          <option value="">{choices.options.length === 1 ? "1 choice" : `${choices.options.length} choices`}</option>
-          {choices.options.map((o, i) => (
+          <option value="">{shown.options.length === 1 ? "1 choice" : `${shown.options.length} choices`}</option>
+          {shown.options.map((o, i) => (
             <option key={`${i}:${o.value}`} value={o.value}>{o.label === o.value ? o.label : `${o.label} (${o.value})`}</option>
           ))}
         </select>
@@ -3803,25 +5085,22 @@ Expected: all pass.
 
 ```bash
 git add frontend/src/routes/editor/drawer
-git commit -m "feat(editor): live options load only when asked, through the step's connection (4c-1)"
+git commit -m "feat(editor): live options load only when asked, through the step's connection, kept to their scope (4c-1)"
 ```
 
-### Task 10: The error-handling chip and its error port
+### Task 12: The error-handling chip and its error port
 
 **Files:**
 - Modify: `frontend/src/routes/editor/drawer/ErrorHandling.tsx` (the section)
-- Modify: `frontend/src/routes/editor/drawer/StepDrawer.tsx` (the chip, the section, `onOptions`)
-- Modify: `frontend/src/routes/editor/Editor.tsx` (`onOptions`)
+- Modify: `frontend/src/routes/editor/drawer/StepDrawer.tsx` (the chip opens it)
 - Test: `frontend/src/routes/editor/drawer/ErrorHandling.test.tsx`, `frontend/src/routes/editor/Editor.test.tsx`
 
 **Interfaces:**
 - Consumes:
-  - from Task 2: `setOptions`, `StepOptions`;
-  - from Task 5: `useSession`, `useText`;
-  - from Task 6: `settle`.
-- Produces:
-  - `ErrorHandling({ node, type, editable, onOptions: (options: StepOptions, mark?: string) => void })`;
-  - StepDrawer prop `onOptions`.
+  - from Task 3: `limitProblem`, `Limit`;
+  - from Task 6: `useDrawer` (`options`, `held`, `hold`, `release`), `useSession`, `useText`;
+  - from Task 7: the editor's `options` action, through `writeDraft`, which asks before ports go.
+- Produces: `ErrorHandling()`, rendered inside the drawer's context.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -3829,13 +5108,21 @@ Create `frontend/src/routes/editor/drawer/ErrorHandling.test.tsx`:
 
 ```tsx
 // SPDX-License-Identifier: Apache-2.0
-import { render, screen } from "@testing-library/react";
+import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { StepOptions } from "../../../lib/config";
 import type { GraphNode } from "../../../lib/workflows";
 import { DELAY } from "../../../test/nodeTypes";
 import { ErrorHandling, chipText } from "./ErrorHandling";
+import { fakeApi, showFields } from "./harness";
+
+beforeEach(() => {
+  fakeApi({});
+});
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 const node = (options?: StepOptions): GraphNode => ({ id: "n1", key: "wait", type: "flow.delay@1", ...(options ? { options } : {}) });
 
@@ -3846,23 +5133,22 @@ it("says what a failure does in words, and the limits the step sets", () => {
 });
 
 it("sets what a failure does, and leaves an emptied limit to the type", async () => {
-  const onOptions = vi.fn<(options: StepOptions, mark?: string) => void>();
-  render(<ErrorHandling node={node({ max_attempts: 5 })} type={DELAY} editable onOptions={onOptions} />);
+  const { node: step } = showFields(DELAY, { options: { max_attempts: 5 } }, <ErrorHandling />);
   await userEvent.selectOptions(screen.getByLabelText("When it fails"), "Continue with the next step");
-  expect(onOptions).toHaveBeenLastCalledWith({ max_attempts: 5, on_error: "continue" });
+  expect(step().options).toEqual({ max_attempts: 5, on_error: "continue" });
   expect(screen.getByText("If empty: 3.")).toBeTruthy();
   await userEvent.clear(screen.getByLabelText("Attempts"));
-  expect(onOptions).toHaveBeenLastCalledWith({ max_attempts: undefined }, expect.stringMatching(/^n1\/options\/max_attempts#\d+$/));
+  expect(step().options).toEqual({ on_error: "continue" });
 });
 
-it("refuses attempts and a timeout the graph's format refuses, saving neither", async () => {
-  const onOptions = vi.fn<(options: StepOptions, mark?: string) => void>();
-  render(<ErrorHandling node={node()} type={DELAY} editable onOptions={onOptions} />);
+it("holds attempts and a timeout the graph's format refuses, writing neither", async () => {
+  const { node: step, held } = showFields(DELAY, {}, <ErrorHandling />);
   await userEvent.type(screen.getByLabelText("Attempts"), "25");
   expect(screen.getByText("A whole number from 1 to 20.")).toBeTruthy();
   await userEvent.type(screen.getByLabelText("Timeout (seconds)"), "0");
   expect(screen.getByText("A number of seconds above 0, up to 86,400.")).toBeTruthy();
-  expect(onOptions.mock.calls.map(([options]) => options)).toEqual([{ max_attempts: 2 }]); // "2", before the "5"
+  expect(step().options).toEqual({ max_attempts: 2 }); // "2", before the "5"
+  expect(held().map((u) => [u.kind, u.text])).toEqual([["limit", "25"], ["limit", "0"]]);
 });
 ```
 
@@ -3904,71 +5190,63 @@ Expected: FAIL. `ErrorHandling` isn't exported, and the chip is text, not a butt
 Append to `frontend/src/routes/editor/drawer/ErrorHandling.tsx`, adding the imports at its top:
 
 ```tsx
-import { useState } from "react";
 import { Field, Select } from "../../../components/Field";
 import type { StepOptions } from "../../../lib/config";
-import { useSession } from "./context";
+import { limitProblem, type Limit } from "../../../lib/unapplied";
+import { useDrawer, useSession } from "./context";
 import { useText } from "./scalars";
 ```
 
 ```tsx
 /** A limit the step sets for itself: empty takes the type's. The graph's bounds are checked here, since a draft
- * breaking them isn't saved at all (ruling 7). */
-function Limit({ label, value, fallback, disabled, check, onChange }: {
-  label: string; value: number | null | undefined; fallback: string; disabled: boolean;
-  check: (n: number) => string | null; onChange: (value: number | undefined) => void;
-}) {  // prettier-ignore
+ * breaking them isn't saved at all (ruling 7); text they refuse is held, with why (ruling 18). */
+function LimitField({ name, label, fallback }: { name: Limit; label: string; fallback: string }) {
+  const drawer = useDrawer();
+  const own = drawer.node.options ?? {};
+  const pointer = `/options/${name}`;
+  const held = drawer.held("limit", pointer);
+  const { mark, onFocus } = useSession(`${drawer.node.id}${pointer}`);
   const [text, setText] = useText(
-    value ?? undefined,
+    own[name] ?? undefined,
     (v) => (typeof v === "number" ? String(v) : ""),
     (t, v) => (t.trim() === "" ? v === undefined : Number(t) === v),
+    held?.text,
   );
-  const [problem, setProblem] = useState<string | null>(null);
   return (
-    <Field
-      label={label} hint={`If empty: ${fallback}.`} error={problem ?? undefined} value={text} disabled={disabled}
-      onChange={(e) => {
-        setText(e.target.value);
-        const t = e.target.value.trim();
-        const why = t === "" ? null : check(Number(t));
-        setProblem(why);
-        if (why === null) onChange(t === "" ? undefined : Number(t));
-      }}
-    />
+    <div onFocus={onFocus}>
+      <Field
+        label={label} hint={`If empty: ${fallback}.`} error={held?.why ?? undefined} value={text} disabled={!drawer.editable}
+        onChange={(e) => {
+          setText(e.target.value);
+          const why = limitProblem(name, e.target.value);
+          if (why !== null) return drawer.hold("limit", pointer, { path: [name], label, text: e.target.value, why });
+          drawer.release("limit", pointer);
+          const t = e.target.value.trim();
+          drawer.options({ ...own, [name]: t === "" ? undefined : Number(t) }, mark());
+        }}
+      />
+    </div>
   );  // prettier-ignore
 }
 
 /** The chip's section (ruling 10): what a failure does, then the attempts and the timeout. */
-export function ErrorHandling({ node, type, editable, onOptions }: {
-  node: GraphNode; type: NodeType; editable: boolean; onOptions: (options: StepOptions, mark?: string) => void;
-}) {  // prettier-ignore
-  const own = node.options ?? {};
-  const attempts = useSession(`${node.id}/options/max_attempts`);
-  const timeout = useSession(`${node.id}/options/timeout_s`);
+export function ErrorHandling() {
+  const drawer = useDrawer();
+  const type = drawer.type;
+  if (!type) return null; // a type this server doesn't know: its options are kept, not shown
+  const own = drawer.node.options ?? {};
   return (
     <section id="error-handling" aria-label="Error handling" className="flex flex-col gap-4">
       <Select
-        label="When it fails" value={own.on_error ?? "fail"} disabled={!editable}
-        onChange={(e) => onOptions({ ...own, on_error: e.target.value as StepOptions["on_error"] })}
+        label="When it fails" value={own.on_error ?? "fail"} disabled={!drawer.editable}
+        onChange={(e) => drawer.options({ ...own, on_error: e.target.value as StepOptions["on_error"] })}
       >
         <option value="fail">Fail the run</option>
         <option value="continue">Continue with the next step</option>
         <option value="port">Route to an error port</option>
       </Select>
-      <div onFocus={attempts.onFocus}>
-        <Limit
-          label="Attempts" value={own.max_attempts} fallback={String(type.retry.max_attempts)} disabled={!editable}
-          check={(n) => (Number.isInteger(n) && n >= 1 && n <= 20 ? null : "A whole number from 1 to 20.")}
-          onChange={(v) => onOptions({ ...own, max_attempts: v }, attempts.mark())}
-        />
-      </div>
-      <div onFocus={timeout.onFocus}>
-        <Limit
-          label="Timeout (seconds)" value={own.timeout_s} fallback={`${type.timeout_s} s`} disabled={!editable}
-          check={(n) => (n > 0 && n <= 86_400 ? null : "A number of seconds above 0, up to 86,400.")}
-          onChange={(v) => onOptions({ ...own, timeout_s: v }, timeout.mark())}
-        />
-      </div>
+      <LimitField name="max_attempts" label="Attempts" fallback={String(type.retry.max_attempts)} />
+      <LimitField name="timeout_s" label="Timeout (seconds)" fallback={`${type.timeout_s} s`} />
     </section>
   );  // prettier-ignore
 }
@@ -3977,8 +5255,7 @@ export function ErrorHandling({ node, type, editable, onOptions }: {
 - [ ] **Step 4: Make the chip open it**
 
 In `frontend/src/routes/editor/drawer/StepDrawer.tsx`:
-- import `ErrorHandling` beside `chipText`, and `type StepOptions` from `../../../lib/config`;
-- add the prop `onOptions: (options: StepOptions, mark?: string) => void`;
+- import `ErrorHandling` beside `chipText`;
 - add the state `const [handling, setHandling] = useState(false);`;
 - replace `<p className="text-small">{chipText(node, type)}</p>` with:
 
@@ -3992,57 +5269,45 @@ In `frontend/src/routes/editor/drawer/StepDrawer.tsx`:
           )}
 ```
 
-- after the header's closing `</div>`, add
-  `{type && handling && <ErrorHandling node={node} type={type} editable={editable} onOptions={onOptions} />}`.
+- after the header's closing `</div>`, add `{handling && <ErrorHandling />}`.
 
-- [ ] **Step 5: Set options in the editor**
+The editor needs nothing new: its `options` action (Task 7) writes through `writeDraft`, which asks before the error
+port's edges go.
 
-In `frontend/src/routes/editor/Editor.tsx`:
-- add `setOptions` and `type StepOptions` to the `../../lib/config` import;
-- add, after `onConfig`:
-
-```ts
-  function onOptions(nodeId: string, options: StepOptions, mark?: string) {
-    const node = findNode(doc, nodeId);
-    if (!node) return;
-    const { doc: next, dropped } = setOptions(doc, nodeId, options, typeMap.get(node.type));
-    settle(next, dropped, mark);
-  }
-```
-
-- pass `onOptions={(options, mark) => onOptions(open.id, options, mark)}` to `StepDrawer`.
-
-- [ ] **Step 6: Run the tests to see them pass**
+- [ ] **Step 5: Run the tests to see them pass**
 
 Run: `npx -y pnpm@12.6.0 exec vitest run src/routes/editor`
 Expected: PASS, every test. The 4b version test still finds "30 s", now in the chip's button.
 
-- [ ] **Step 7: Run every check**
+- [ ] **Step 6: Run every check**
 
 Run: `npx -y pnpm@12.6.0 test && npx -y pnpm@12.6.0 typecheck && npx -y pnpm@12.6.0 lint`
 Expected: all pass.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add frontend/src/routes/editor
-git commit -m "feat(editor): a step's error handling in a chip, its error port's edges asked before they go (4c-1)"
+git commit -m "feat(editor): a step's error handling in a chip, limits checked, the error port's edges asked before they go (4c-1)"
 ```
 
-### Task 11: Key rename
+### Task 13: Key rename
 
 **Files:**
 - Create: `frontend/src/routes/editor/drawer/KeyField.tsx`
-- Modify: `frontend/src/routes/editor/drawer/StepDrawer.tsx` (`onRename`)
-- Modify: `frontend/src/routes/editor/Editor.tsx` (`onRename`)
+- Modify: `frontend/src/routes/editor/drawer/StepDrawer.tsx` (the rename, and its note)
+- Modify: `frontend/src/routes/editor/Editor.tsx` (the note, until the next edit)
 - Test: `frontend/src/routes/editor/Editor.test.tsx`
 
 **Interfaces:**
-- Consumes: from Task 2, `keyProblem` and `renameKey`.
+- Consumes:
+  - from Task 3: the `key` kind of unapplied edit (`applyUnapplied` renames, and answers `said` and `note`);
+  - from Task 7: `applyEdit`, which announces `said`.
 - Produces:
-  - `type Renamed = { problem: string } | { formulas: number }`;
-  - `KeyField({ current, editable, onRename: (key: string) => Renamed, onRenamed: () => void })`;
-  - StepDrawer prop `onRename: (key: string) => Renamed`.
+  - `KeyField({ onRenamed }: { onRenamed: () => void })`: the rename held as an unapplied edit of kind `key` at
+    pointer `""`;
+  - StepDrawer prop `note: string | null`;
+  - in `Editor.tsx`, `renamed: { doc: GraphDoc; text: string } | null`, said only while `doc` is the draft.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -4060,33 +5325,50 @@ const readers = () => ({
   edges: [],
 });  // prettier-ignore
 
-async function renameFetch(to: string) {
+async function openFetch() {
   answers.set("GET /api/v1/node-types", () => json([...TYPES, IF]));
   answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: readers() }));
   await show();
   await userEvent.click(screen.getByRole("button", { name: "fetch" }));
   await userEvent.click(screen.getByRole("button", { name: "Rename" }));
-  const key = screen.getByLabelText("Key");
-  await userEvent.clear(key);
-  await userEvent.type(key, `${to}{Enter}`);
 }
 
-it("says how many formulas still name the old key", async () => {
-  await renameFetch("load");
+async function renameTo(key: string) {
+  const field = screen.getByLabelText("Key");
+  await userEvent.clear(field);
+  await userEvent.type(field, `${key}{Enter}`);
+}
+
+it("says which formulas mention the old key, until the next edit", async () => {
+  await openFetch();
+  await renameTo("load");
   const heading = screen.getByRole("heading", { name: "load" });
   await vi.waitFor(() => expect(document.activeElement).toBe(heading));
-  expect(screen.getByText("1 formula still names fetch: the problems show where.")).toBeTruthy();
+  expect(screen.getByText("1 formula mentions fetch and keeps its text: check it.")).toBeTruthy();
   expect(stepConfig("copy")).toEqual({ fields: { x: { $value: { kind: "ref", path: "steps.load.output" } } } });
   await userEvent.keyboard("{Control>}z{/Control}"); // one step: the key and its references
   expect(stepConfig("copy")).toEqual({ fields: { x: { $value: { kind: "ref", path: "steps.fetch.output" } } } });
   expect(screen.getByRole("heading", { name: "fetch" })).toBeTruthy();
-  expect(screen.queryByText(/still names fetch/)).toBeNull(); // said only while it's true
+  expect(screen.queryByText(/mentions fetch/)).toBeNull(); // said only while it's true of the draft
 });
 
 it("refuses a key another step has, and keeps its own", async () => {
-  await renameFetch("use");
+  await openFetch();
+  await renameTo("use");
   expect(screen.getByText("Another step is already called use.")).toBeTruthy();
   expect(screen.getByRole("heading", { name: "fetch" })).toBeTruthy();
+});
+
+it("disables an open rename when the draft can't change, and never says it renamed", async () => {
+  answers.set(`PUT ${BASE}/draft`, () => json({ error: "draft_conflict" }, 409));
+  await openFetch();
+  await userEvent.type(screen.getByLabelText("Key"), "_v2"); // typed, not applied
+  await userEvent.click(screen.getByRole("button", { name: "Move fetch right" })); // an edit, whose save conflicts
+  await vi.waitFor(() => expect(screen.getByLabelText<HTMLInputElement>("Key").disabled).toBe(true), { timeout: 3000 });
+  expect(screen.getByRole<HTMLButtonElement>("button", { name: "Rename" }).disabled).toBe(true);
+  expect(screen.getByLabelText<HTMLInputElement>("Key").value).toBe("fetch_v2"); // kept, never lost
+  expect(screen.getByRole("heading", { name: "fetch" })).toBeTruthy();
+  expect(screen.queryByText(/^Renamed/)).toBeNull();
 });
 ```
 
@@ -4101,127 +5383,102 @@ Create `frontend/src/routes/editor/drawer/KeyField.tsx`:
 
 ```tsx
 // SPDX-License-Identifier: Apache-2.0
-// A step's key renamed from its drawer (4c-1, ruling 11). It's checked here: a key the graph's format refuses isn't
-// saved, and a CEL word or another step's key never reads. Every structured reference follows. The formulas that
-// still name the old key are counted: they aren't parsed here.
+// A step's key renamed from its drawer (4c-1, ruling 11). It's checked before it's written: a key the graph's format
+// refuses isn't saved, and a CEL word or another step's key never reads. Every structured reference follows. What's
+// typed is an unapplied edit (ruling 18): kept while the drawer closes, disabled while the draft can't change, and
+// said, never as if it had worked, when it's refused.
 import { useEffect, useRef, useState } from "react";
 import { Button } from "../../../components/Button";
 import { Field } from "../../../components/Field";
+import { useDrawer } from "./context";
 
-export type Renamed = { problem: string } | { formulas: number };
-
-export function KeyField({ current, editable, onRename, onRenamed }: {
-  current: string; editable: boolean; onRename: (key: string) => Renamed; onRenamed: () => void;
-}) {  // prettier-ignore
-  const [open, setOpen] = useState(false);
-  const [text, setText] = useState(current);
-  const [problem, setProblem] = useState<string | null>(null);
-  // The formulas left naming the old key, said until the key changes again (an undo, another rename).
-  const [left, setLeft] = useState<{ old: string; key: string; formulas: number } | null>(null);
-  if (left !== null && left.key !== current) setLeft(null);
+export function KeyField({ onRenamed }: { onRenamed: () => void }) {
+  const drawer = useDrawer();
+  const held = drawer.held("key", "");
+  const [open, setOpen] = useState(held !== undefined); // a rename typed before the drawer closed is still open
   const box = useRef<HTMLDivElement>(null); // Field makes its own input: focus finds it here
   const opener = useRef<HTMLButtonElement>(null);
+  const current = drawer.node.key;
+  const disabled = !drawer.editable;
   useEffect(() => {
     if (open) box.current?.querySelector("input")?.focus();
   }, [open]);
   const close = () => {
+    drawer.release("key", ""); // Cancel, Escape: dropped, on purpose
     setOpen(false);
-    setProblem(null);
     requestAnimationFrame(() => opener.current?.focus());
   };
   const apply = () => {
-    const key = text.trim();
-    if (key === current) return close();
-    const result = onRename(key);
-    if ("problem" in result) return setProblem(result.problem);
+    if (disabled) return;
+    if (!held || held.text.trim() === current) return close();
+    if (drawer.apply("key", "") !== null) return; // refused: its reason shows at the field, never as done
     setOpen(false);
-    setProblem(null);
-    setLeft(result.formulas > 0 ? { old: current, key, formulas: result.formulas } : null);
     onRenamed();
   };
+  if (!open) {
+    return drawer.editable ? (
+      <Button ref={opener} size="sm" className="self-start" onClick={() => setOpen(true)}>Rename</Button>
+    ) : null;
+  }
   return (
-    <div className="flex flex-col gap-2">
-      {editable && !open && (
-        <Button
-          ref={opener} size="sm" className="self-start"
-          onClick={() => {
-            setText(current);
-            setOpen(true);
-          }}
-        >
-          Rename
-        </Button>
-      )}
-      {open && (
-        <div
-          ref={box}
-          className="flex flex-col gap-2"
-          onKeyDown={(e) => {
-            if (e.key === "Escape") {
-              e.stopPropagation(); // closes the rename, not the drawer
-              close();
-            }
-          }}
-        >
-          <Field
-            label="Key" value={text} spellCheck={false} autoCapitalize="off" error={problem ?? undefined}
-            onChange={(e) => setText(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") apply();
-            }}
-          />
-          <div className="flex gap-2">
-            <Button size="sm" variant="primary" onClick={apply}>Rename</Button>
-            <Button size="sm" onClick={close}>Cancel</Button>
-          </div>
-        </div>
-      )}
-      {left && (
-        <p role="status" className="text-small">
-          {left.formulas === 1 ? "1 formula still names" : `${left.formulas} formulas still name`} {left.old}: the problems show where.
-        </p>
-      )}
+    <div
+      ref={box}
+      className="flex flex-col gap-2"
+      onKeyDown={(e) => {
+        if (e.key === "Escape") {
+          e.stopPropagation(); // closes the rename, not the drawer
+          close();
+        }
+      }}
+    >
+      <Field
+        label="Key" value={held?.text ?? current} disabled={disabled} spellCheck={false} autoCapitalize="off"
+        error={held?.why ?? undefined}
+        onChange={(e) => {
+          if (e.target.value === current) drawer.release("key", "");
+          else drawer.hold("key", "", { path: [], label: "Key", text: e.target.value, why: null });
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") apply();
+        }}
+      />
+      <div className="flex gap-2">
+        <Button size="sm" variant="primary" disabled={disabled} onClick={apply}>Rename</Button>
+        <Button size="sm" disabled={disabled} onClick={close}>Cancel</Button>
+      </div>
     </div>
   );  // prettier-ignore
 }
 ```
 
-- [ ] **Step 4: Put it under the drawer's heading**
+- [ ] **Step 4: Put it under the drawer's heading, with its note**
 
 In `frontend/src/routes/editor/drawer/StepDrawer.tsx`:
-- import `KeyField` and `type Renamed` from `./KeyField`;
-- add the prop `onRename: (key: string) => Renamed`;
+- import `KeyField` from `./KeyField`;
+- add the prop `note: string | null`;
 - after the `<h2>`, add:
 
 ```tsx
-          <KeyField
-            current={node.key}
-            editable={editable}
-            onRename={onRename}
-            onRenamed={() => requestAnimationFrame(() => heading.current?.focus())}
-          />
+            <KeyField onRenamed={() => requestAnimationFrame(() => heading.current?.focus())} />
+            {note !== null && <p role="status" className="text-small">{note}</p>}
 ```
 
-- [ ] **Step 5: Rename in the editor**
+- [ ] **Step 5: Keep the note only while it's true**
 
 In `frontend/src/routes/editor/Editor.tsx`:
-- add `keyProblem` and `renameKey` to the `../../lib/config` import, and `type Renamed` from `./drawer/KeyField`;
-- add, after `onOptions`:
+- add, beside the unapplied edits, `const [renamed, setRenamed] = useState<{ doc: GraphDoc; text: string } | null>(null);
+  // a rename's word on formulas, true of the draft it made (ruling 11)`;
+- in `applyEdit`, after a write that succeeded, keep the note with the document it describes: replace its last
+  lines with:
 
 ```ts
-  /** A step's key, with every structured reference to it (ruling 11), in one undo step. */
-  function onRename(nodeId: string, key: string): Renamed {
-    const problem = keyProblem(doc, nodeId, key);
-    if (problem) return { problem };
-    const old = keyOf(nodeId);
-    const { doc: next, formulas } = renameKey(doc, nodeId, key);
-    const still = formulas === 0 ? "" : `; ${formulas === 1 ? "1 formula still names" : `${formulas} formulas still name`} ${old}`;
-    change(next, `Renamed ${old} to ${key}${still}`);
-    return { formulas };
-  }
+    if (why !== null) keep({ ...u, why });
+    else if (!("problem" in result) && result.note !== null) setRenamed({ doc: result.doc, text: result.note });
+    return why;
 ```
 
-- pass `onRename={(key) => onRename(open.id, key)}` to `StepDrawer`.
+- pass `note={renamed !== null && renamed.doc === doc ? renamed.text : null}` to `StepDrawer`. The next edit, an undo
+  among them, makes another document, and the note goes.
 
 - [ ] **Step 6: Run the tests to see them pass**
 
@@ -4237,10 +5494,10 @@ Expected: all pass.
 
 ```bash
 git add frontend/src/routes/editor
-git commit -m "feat(editor): rename a step, its references following, the formulas that still name it counted (4c-1)"
+git commit -m "feat(editor): rename a step, its references following, the formulas that mention it said until the next edit (4c-1)"
 ```
 
-### Task 12: A problem's "Go to" focuses its field
+### Task 14: A problem's "Go to", and "Go back to them", focus the field
 
 **Files:**
 - Modify: `frontend/src/routes/editor/ProblemsPanel.tsx`
@@ -4249,6 +5506,7 @@ git commit -m "feat(editor): rename a step, its references following, the formul
 - Test: `frontend/src/routes/editor/ProblemsPanel.test.tsx`, `frontend/src/routes/editor/Editor.test.tsx`
 
 **Interfaces:**
+- Consumes: from Task 8, `goBack(u)`.
 - Produces:
   - `ProblemsPanel`'s `onJump: (nodeId: string, field: string | null) => void`;
   - `Side`'s step kind: `{ kind: "step"; node: string; field?: { pointer: string; n: number } }`;
@@ -4295,6 +5553,14 @@ it("goes to the step itself for a problem about it as a whole, as in 4b", async 
   await goTo("");
   await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "each" })));
 });
+
+it("goes back to an edit not applied, at its field", async () => {
+  await unappliedDuration();
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
+  await userEvent.click(screen.getByRole("button", { name: "Export" }));
+  await userEvent.click(within(screen.getByRole("dialog", { name: "Edits not applied" })).getByRole("button", { name: "Go back to them" }));
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Duration S")));
+});
 ```
 
 - [ ] **Step 2: Run them to see them fail**
@@ -4302,7 +5568,8 @@ it("goes to the step itself for a problem about it as a whole, as in 4b", async 
 Run: `npx -y pnpm@12.6.0 exec vitest run src/routes/editor`
 Expected: FAIL:
 - `onJump` is called with `"n1"` alone;
-- in the editor, "Go to each" focuses the step, never the drawer.
+- in the editor, "Go to each" focuses the step, never the drawer;
+- "Go back to them" opens the drawer at its heading, not the field.
 
 - [ ] **Step 3: Pass the field from the problems panel**
 
@@ -4327,7 +5594,15 @@ In `frontend/src/routes/editor/Editor.tsx`:
             }}
 ```
 
-- pass `focusField={side?.kind === "step" ? (side.field ?? null) : null}` to `StepDrawer`.
+- pass `focusField={side?.kind === "step" ? (side.field ?? null) : null}` to `StepDrawer`;
+- `goBack` (Task 8) lands on the edit's field the same way:
+
+```ts
+  /** Back to an unapplied edit: its step's drawer, at its field (ruling 16's way). */
+  function goBack(u: Unapplied) {
+    setSide({ kind: "step", node: u.node, field: { pointer: u.pointer, n: ++jumps.current } });
+  }
+```
 
 In `frontend/src/routes/editor/drawer/StepDrawer.tsx`:
 - add the prop `focusField: { pointer: string; n: number } | null`;
@@ -4385,12 +5660,12 @@ Expected: all pass.
 
 ```bash
 git add frontend/src/routes/editor
-git commit -m "feat(editor): a problem's Go to opens its step's drawer at the field (4c-1, ruling 83)"
+git commit -m "feat(editor): a problem's Go to, and an unapplied edit's Go back, open the drawer at the field (4c-1, ruling 83)"
 ```
 
 # Milestone 4: end to end
 
-### Task 13: The browser flows, every check, the ledger and the checkpoint
+### Task 15: The browser flows, every check, the ledger and the checkpoint
 
 **Files:**
 - Create: `frontend/e2e/fixtures/references.dewpoint.json`
@@ -4493,7 +5768,7 @@ test("a switch's case keeps its edges when its port is renamed, and removing it 
   await expect(page.getByRole("button", { name: "Insert a step between switch (big) and transform" })).toHaveCount(0);
 });
 
-test("a renamed step keeps the references to it, and says which formulas still name it", async ({ page }) => {
+test("a renamed step keeps the references to it, and says which formulas mention it", async ({ page }) => {
   await importFile(page, "References", "e2e/fixtures/references.dewpoint.json");
   await page.getByRole("button", { name: /^fetch, Transform/ }).click();
   const fetch = page.getByRole("complementary", { name: "fetch" });
@@ -4502,11 +5777,32 @@ test("a renamed step keeps the references to it, and says which formulas still n
   await fetch.getByLabel("Key").press("Enter");
   const load = page.getByRole("complementary", { name: "load" });
   await expect(load.getByRole("heading", { name: "load" })).toBeFocused();
-  await expect(load.getByText("1 formula still names fetch: the problems show where.")).toBeVisible();
+  await expect(load.getByText("1 formula mentions fetch and keeps its text: check it.")).toBeVisible();
   await page.getByRole("button", { name: /^use, Transform/ }).click();
   const use = page.getByRole("complementary", { name: "use" });
   await expect(use.locator('[data-pointer="/fields/copy"] output')).toHaveText("steps.load.output.n");
   await expectAccessible(page, "editor: drawer, a reference and a map");
+});
+
+test("an edit not applied is kept through tabs, and asked about before an export", async ({ page }) => {
+  await newWorkflow(page, "Unapplied flow");
+  await page.getByRole("button", { name: "Add the first step" }).click();
+  await page.getByRole("option", { name: /flow\.delay@1/ }).click();
+  await page.getByRole("button", { name: /^delay, Delay/ }).click();
+  const drawer = page.getByRole("complementary", { name: "delay" });
+  await drawer.getByLabel("Duration S").fill("1x");
+  await expect(page.getByText(/· 1 edit not applied/)).toBeVisible();
+  await drawer.getByRole("tab", { name: "Options" }).click();
+  await drawer.getByRole("tab", { name: "Setup" }).click();
+  await expect(drawer.getByLabel("Duration S")).toHaveValue("1x");
+  await page.getByRole("button", { name: "Export" }).click();
+  const ask = page.getByRole("dialog", { name: "Edits not applied" });
+  await expect(ask).toContainText("delay · Duration S: A whole number, like 42.");
+  await expectAccessible(page, "editor: edits not applied");
+  await ask.getByRole("button", { name: "Go back to them" }).click();
+  await expect(drawer.getByLabel("Duration S")).toBeFocused();
+  await drawer.getByLabel("Duration S").fill("30");
+  await expect(page.getByText(/edit not applied/)).toHaveCount(0);
 });
 
 test("a problem's Go to opens its step's drawer on the field", async ({ page }) => {
@@ -4577,7 +5873,7 @@ In `docs/superpowers/plans/2026-10-05-editor-ui-4-ledger.md`, after the last sec
   ruling, `M41.` onward, in 4b's form: a bold statement, then why, then the test that pins it.
 - **`### 4c-1, the final checkpoint (<date>)`**: the reviewer's findings and what was done with each.
 
-This plan's rulings join the numbered list as 96 to 112 only when the owner accepts the slice, as 68 to 95 did.
+This plan's rulings join the numbered list as 96 to 113 only when the owner accepts the slice, as 68 to 95 did.
 
 - [ ] **Step 6: Commit**
 
@@ -4615,28 +5911,39 @@ Nothing is pushed and no PR is opened without the owner's OK.
 
 ---
 
+---
+
 ## Self-review
 
 - **Spec coverage.**
-  - Outline §2's 4c, for the drawer: rulings 2–6 (Tasks 5–7), the pickers (Tasks 8, 9), error handling (Task 10),
-    rename (Task 11), a problem's field (Task 12).
-  - D17 (saves and undo): Tasks 3 and 6.
-  - D19 (formula mode, hints): Tasks 5 and 7.
+  - Outline §2's 4c, for the drawer:
+    - rulings 2–6 (Tasks 6, 7 and 9);
+    - the pickers (Tasks 10 and 11);
+    - error handling (Task 12);
+    - rename (Task 13);
+    - a problem's field (Task 14).
+  - D17 (saves and undo): Tasks 4, 7 and 8.
+  - D19 (formula mode, hints): Tasks 6 and 9.
   - D21–D24:
-    - Tabs pinned and checked: Task 4;
-    - the CSP in the browser: Tasks 6 and 13;
-    - no Mist calls: Tasks 9 and 13;
+    - Tabs pinned and checked: Task 5;
+    - the CSP in the browser: Tasks 7 and 15;
+    - no Mist calls: Tasks 11 and 15;
     - AI tells: the guard in every task's suite run, and the checkpoint.
   - Data pills, the condition builder, samples, triggers and the Test tab are 4c-2, 4c-3 and 4d (ruling 1).
-- **Placeholders.** None: every code step has its code. Where the running app decides a label (Task 13's "+" names
-  and the Mist step's key), the step says how to check it and record the difference.
+- **The review of revision 1.** Each correction maps to a ruling and its tasks in "Changes from revision 1". Its
+  tests sit in the Review Focus lines.
+- **Placeholders.** None: every code step has its code. Where the running app decides a label (Task 15's "+" names and
+  the Mist step's key), the step says how to check it and record the difference.
 - **Names across tasks.**
-  - `setConfig`, `setOptions`, `renamePort`, `freePort`, `keyProblem` and `renameKey` (Task 2) are the names Tasks 6,
-    7, 10 and 11 call.
-  - `record(h, next, mark)` (Task 3) is what `change` calls (Task 6).
-  - `Drawer`, `useDrawer`, `useSession`, `problemsAt` and `segment` (Task 5) keep their signatures; Task 7 adds
-    `renamePort`.
-  - `ControlProps` (Task 5) is what every control takes (Tasks 7–9).
-  - `StepDrawer` gains one prop per task (`onRenamePort` 7, `onOptions` 10, `onRename` 11, `focusField` 12), and the
-    editor passes each.
-- **Review Focus.** Each line names the tests that pin it, in their owning tasks: Tasks 2, 3, 5, 6, 7, 9, 10 and 11.
+  - `setConfig`, `setOptions`, `renamePort`, `renameEntry`, `freePort`, `keyProblem`, `renameKey`, `parseJson` and
+    `admission` (Task 2) are the names Tasks 3, 6, 7 and 9 call.
+  - `Unapplied`, `Holding`, `applyUnapplied`, `applyAll`, `within`, `droppedWhy`, `parseNumber` and `limitProblem`
+    (Task 3) are what the harness, the editor and the controls use (Tasks 6, 7, 8, 12).
+  - `record(h, next, mark)` (Task 4) is what `change` calls (Task 7).
+  - `DrawerActions` (Task 6) is what the harness and `actionsFor` (Task 7) both implement. Its members keep their
+    signatures through Tasks 9–13.
+  - `ControlProps` (Task 6) is what every control takes (Tasks 9–11).
+  - `StepDrawer` gains props in Task 12 (none: the chip's state is its own), Task 13 (`note`) and Task 14
+    (`focusField`), and the editor passes each.
+- **Review Focus.** Each line names the tests that pin it, in their owning tasks: Tasks 1, 2, 3, 4, 6, 7, 8, 9, 11,
+  12 and 13.
