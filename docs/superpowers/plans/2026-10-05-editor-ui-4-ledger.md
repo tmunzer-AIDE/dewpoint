@@ -1735,3 +1735,20 @@ worktree's own locked environment (`uv sync --frozen`); and chose the branch `fe
 124. **Accepted. The web client's types are regenerated, and its screens untouched.** `schema.d.ts` gains the new routes and
      `conditional_steps`. A test fixture the type checker names gets `conditional_steps: []`. Why: B1's drift check.
      The cost: none.
+
+### 4c-2a, milestone 1 (2026-10-10)
+
+Tasks 1–5 at 69ccd931, on `feat/editor-4c2a` (from origin/main 532ab6c6, the plan merged in b1a67b32): the merge of
+alternatives (a7c7c3a6), which steps may not run (7bbabcbb), what a field can read (99e17147), the guards' guarantees
+(69ccd931). Checks, as run in the worktree's locked environment:
+- the engine's tests: 1,257 passed, 1 skipped (the golden replays among them; ENGINE_ABI 6);
+- the whole backend suite, with the owner's OK: 4,692 passed (`-n auto`, CI's ignore list), then CI's CEL gate tests
+  415 passed, 8 skipped; no failure anywhere, so no existing test graph met a new diagnostic (about 16 minutes: a first
+  attempt ran only the gate files, because zsh doesn't split an unquoted variable; it was rerun under bash);
+- ruff, mypy (strict) and the import contracts: clean.
+
+M58. **The branch starts from origin/main 532ab6c6, not the plan's 93a0dd61**: main gained #76 (validate.py's sensitive
+    text and constant formulas), #77 and #80 (frontend). Only validate.py overlapped, in another region; every step
+    was applied to the current code. Cost if wrong: none seen; the suite is green.
+M59. **Task 1 recorded the owner's acceptance and copied rulings 114–124**, where the plan's text said "proposed": the
+    owner accepted before Task 1 ran, as with 96–113.
