@@ -10,7 +10,10 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
+from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
+
+from dewpoint.engine.graph.values import Pointer
 
 _TYPES = {
     "string": "a string", "integer": "an integer", "number": "a number", "boolean": "true or false",
@@ -115,3 +118,13 @@ def explain(e: ValidationError) -> str:  # noqa: PLR0911, PLR0912 - one sentence
     if k is None:  # the `false` schema: nothing is allowed here
         return "Isn't allowed here."
     return f"Doesn't satisfy its schema's `{k}`."
+
+
+def problems(schema: Mapping[str, Any], instance: Any) -> list[tuple[Pointer, str]]:
+    """Each of `instance`'s schema problems by place, ordered by its path's text, and said once: jsonschema reports
+    `required` once per missing property (`dependentRequired` per missing dependency, `propertyNames` per refused
+    name), but `explain` words the keyword at its place, not the report, so each of those reports would say the same."""
+    found: dict[tuple[Pointer, str], None] = {}
+    for e in sorted(Draft202012Validator(schema).iter_errors(instance), key=lambda e: str(list(e.absolute_path))):
+        found.setdefault((tuple(e.absolute_path), explain(e)), None)
+    return list(found)
