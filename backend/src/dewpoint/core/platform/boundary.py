@@ -16,6 +16,7 @@ from dataclasses import dataclass
 CONFIGURATIONS = {"mtls": "configuration A (mtls)", "jwt": "configuration B (jwt)"}
 
 D6_CASES = (  # tests/proofs/d6/test_d6.py
+    "test_d6_0_the_writer_and_the_verifier_are_demonstrably_apart",
     "test_d6_1_a_written_anchor_is_a_locked_version",
     "test_d6_2_deleting_the_version_is_refused_to_the_writer_and_to_root",
     "test_d6_3_shortening_or_changing_the_lock_is_refused",

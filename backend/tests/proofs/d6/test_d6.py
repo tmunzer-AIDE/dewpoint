@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """D6's proof (#3; 2b-4b M4): the off-host audit anchor sink on the pinned MinIO, D6.1-D6.11 as the owner approved
-them (2026-10-05), each an automated case. Opt-in: runs only when the owner authorizes it (`DEWPOINT_PROOF=d6`).
+them (2026-10-05), after D6.0, the credentials' separation (the owner's ruling on the run request: without it, D6
+stops). Each is an automated case. Opt-in: runs only when the owner authorizes it (`DEWPOINT_PROOF=d6`).
 
     DEWPOINT_PROOF=d6 DEWPOINT_PROOF_OUT=<file> .venv/bin/pytest -p no:cacheprovider -n 0 tests/proofs/d6
 
@@ -136,6 +137,32 @@ async def _sql(pg_url: str, statement: str, params: dict[str, Any] | None = None
             await s.execute(text(statement), params or {})
     finally:
         await engine.dispose()
+
+
+def test_d6_0_the_writer_and_the_verifier_are_demonstrably_apart(lab: Lab) -> None:
+    """The owner's ruling on the run request: if STS can't give demonstrably separate put-only and read-only
+    credentials, D6 stops here. The writer puts under anchors/ and nothing else: no read, no listing, no delete, no
+    write outside its prefix. The verifier reads and lists, and writes and deletes nothing."""
+    writer, verifier = environment.s3(lab.writer), environment.s3(lab.verifier)
+    key = f"{_prefix()}anchors/d6-0/{uuid.uuid4().hex}.json"
+    writer.put_object(Bucket=BUCKET, Key=key, Body=b"{}", IfNoneMatch="*")
+    refused = {
+        "writer get": lambda: writer.get_object(Bucket=BUCKET, Key=key),
+        "writer list": lambda: writer.list_object_versions(Bucket=BUCKET, Prefix=key),
+        "writer delete": lambda: writer.delete_object(Bucket=BUCKET, Key=key),
+        "writer put outside anchors/": lambda: writer.put_object(Bucket=BUCKET, Key=f"elsewhere/{uuid.uuid4().hex}",
+                                                                  Body=b"{}"),
+        "verifier put": lambda: verifier.put_object(Bucket=BUCKET, Key=f"{key}.forged", Body=b"{}"),
+        "verifier delete": lambda: verifier.delete_object(Bucket=BUCKET, Key=key),
+        "verifier retention": lambda: verifier.put_object_retention(
+            Bucket=BUCKET, Key=key, Retention={"Mode": "COMPLIANCE", "RetainUntilDate": datetime.now(UTC)}),
+    }  # fmt: skip
+    for what, call in refused.items():
+        with pytest.raises(ClientError) as denied:
+            call()
+        assert denied.value.response["Error"]["Code"] == "AccessDenied", what
+    assert verifier.get_object(Bucket=BUCKET, Key=key)["Body"].read() == b"{}"
+    assert [v["Key"] for v in verifier.list_object_versions(Bucket=BUCKET, Prefix=key)["Versions"]] == [key]
 
 
 def test_d6_1_a_written_anchor_is_a_locked_version(pg_url, _test_users, monkeypatch, lab: Lab) -> None:
