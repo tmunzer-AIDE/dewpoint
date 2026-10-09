@@ -11,6 +11,7 @@ import { STALE, type UnappliedKind } from "../../../lib/unapplied";
 import { problemsAt, useDrawer, useSession } from "./context";
 import { FieldFrame, GroupFrame, type Described } from "./FieldFrame";
 import { FormulaControl, ModeSwitch, ReferenceView, SensitiveView, runsText, type Mode } from "./Formula";
+import { OptionsControl } from "./LiveOptions";
 import { ConnectionControl, WorkflowControl } from "./pickers";
 import {
   BooleanControl, CUT_NOTE, EnumControl, JSON_NOTE, JsonControl, LITERAL_NOTE, NumberControl, TextControl,
@@ -60,6 +61,8 @@ function controlFor(widget: Widget): Control | null {
       return ConnectionControl;
     case "workflow":
       return WorkflowControl;
+    case "options":
+      return OptionsControl;
     default:
       return null;
   }
