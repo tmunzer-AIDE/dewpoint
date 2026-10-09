@@ -126,6 +126,117 @@ describe("setConfig", () => {
   });
 });
 
+describe("declassify entries", () => {
+  // A switch `pick` with cases a, b and c, and an if `check`; `entries` declassify their decisions.
+  const caseA = { port: "a", when: formula("trigger.secret == 1") };
+  const caseB = { port: "b", when: formula("trigger.secret == 2") };
+  const caseC = { port: "c", when: formula("trigger.secret == 3") };
+  const declassified = (...entries: { node: string; field: string }[]): GraphDoc => ({
+    graph_format: 1,
+    nodes: [
+      { id: A, key: "pick", type: "flow.switch@1", config: { cases: [caseA, caseB, caseC] } },
+      { id: B, key: "check", type: "flow.if@1", config: { condition: formula("trigger.secret") } },
+    ],
+    settings: { declassify: entries },
+  });
+  const cases = (doc: GraphDoc) => doc.nodes![0]!.config!.cases as unknown[];
+
+  it("follows its case when the cases move", () => {
+    const doc = declassified({ node: A, field: "/cases/0/when" }, { node: B, field: "/condition" }, { node: A, field: "/cases/2/when" });
+    const [a, b, c] = cases(doc);
+    const { doc: next } = setConfig(doc, A, ["cases"], [c, a, b], SWITCH); // c moved to the top
+    const moved = [{ node: A, field: "/cases/1/when" }, { node: B, field: "/condition" }, { node: A, field: "/cases/0/when" }];
+    expect(next.settings?.declassify).toEqual(moved);
+    expect(setConfig(doc, A, [], { cases: [c, a, b] }, SWITCH).doc.settings?.declassify).toEqual(moved); // the whole config
+  });
+
+  it("follows its own case through a move, even when another case is equal to it", () => {
+    const doc = declassified({ node: A, field: "/cases/1/when" });
+    const [a, , c] = cases(doc);
+    const twin = structuredClone(a); // an import's repeated case: the same port and decision
+    const { doc: next } = setConfig({ ...doc, nodes: [{ ...doc.nodes![0]!, config: { cases: [a, twin, c] } }, doc.nodes![1]!] }, A, ["cases"], [c, a, twin], SWITCH);
+    expect(next.settings?.declassify).toEqual([{ node: A, field: "/cases/2/when" }]);
+  });
+
+  it("follows its case whatever the spelling of its step's id", () => {
+    const doc = declassified({ node: `{${A.toUpperCase()}}`, field: "/cases/0/when" });
+    const [a, b, c] = cases(doc);
+    const { doc: next } = setConfig(doc, A, ["cases"], [b, a, c], SWITCH);
+    expect(next.settings?.declassify).toEqual([{ node: `{${A.toUpperCase()}}`, field: "/cases/1/when" }]);
+  });
+
+  it("goes with a removed case, and the later cases' follow theirs", () => {
+    const doc = declassified({ node: A, field: "/cases/0/when" }, { node: A, field: "/cases/2/when" }, { node: B, field: "/condition" });
+    const { doc: next } = setConfig(doc, A, ["cases", 0], undefined, SWITCH);
+    expect(next.settings?.declassify).toEqual([{ node: A, field: "/cases/1/when" }, { node: B, field: "/condition" }]);
+  });
+
+  it("stays where its case is edited in place", () => {
+    const doc = declassified({ node: A, field: "/cases/0/when" }, { node: A, field: "/cases/1/when" });
+    expect(setConfig(doc, A, ["cases", 0, "when"], formula("true"), SWITCH).doc.settings).toBe(doc.settings);
+    expect(setConfig(doc, A, ["cases", 0], { port: "a", when: formula("true") }, SWITCH).doc.settings).toBe(doc.settings);
+    expect(setConfig(doc, A, ["cases", 3], { port: "d" }, SWITCH).doc.settings).toBe(doc.settings); // an added case
+  });
+
+  it("follows a case that a list written whole keeps as it was, and goes with one it changed or repeats", () => {
+    const doc = declassified({ node: A, field: "/cases/0/when" }, { node: A, field: "/cases/1/when" }, { node: A, field: "/cases/2/when" });
+    // JSON text read back: new objects. b is the same (its keys in another order), a's decision changed, c is there twice.
+    const written = [{ when: formula("trigger.secret == 2"), port: "b" }, { port: "a", when: formula("true") }, structuredClone(caseC), structuredClone(caseC)];
+    const { doc: next } = setConfig(doc, A, ["cases"], written, SWITCH);
+    expect(next.settings?.declassify).toEqual([{ node: A, field: "/cases/0/when" }]); // b's, now first
+  });
+
+  it("goes with a case a list written whole keeps, when another case was equal to it", () => {
+    const doc = declassified({ node: A, field: "/cases/0/when" });
+    const [a, , c] = cases(doc);
+    const twins = { ...doc, nodes: [{ ...doc.nodes![0]!, config: { cases: [a, structuredClone(a), c] } }, doc.nodes![1]!] };
+    // One of the two is kept: which one can't be told.
+    const { doc: next } = setConfig(twins, A, ["cases"], [structuredClone(caseA), structuredClone(caseC)], SWITCH);
+    expect(next.settings?.declassify).toEqual([]);
+  });
+
+  it("goes with every case when the cases go", () => {
+    const doc = declassified({ node: A, field: "/cases/0/when" }, { node: B, field: "/condition" });
+    expect(setConfig(doc, A, ["cases"], undefined, SWITCH).doc.settings?.declassify).toEqual([{ node: B, field: "/condition" }]);
+    expect(setConfig(doc, A, ["cases"], [], SWITCH).doc.settings?.declassify).toEqual([{ node: B, field: "/condition" }]);
+  });
+
+  it("leaves an entry that names no case as it is, while the change adds none where it points", () => {
+    // A leading zero, past the end, the list itself: the validator calls each stale.
+    const doc = declassified({ node: A, field: "/cases/01/when" }, { node: A, field: "/cases/7/when" }, { node: A, field: "/cases" });
+    const [a, b, c] = cases(doc);
+    expect(setConfig(doc, A, ["cases"], [c, b, a], SWITCH).doc.settings).toBe(doc.settings);
+    expect(setConfig(doc, A, ["cases", 0], undefined, SWITCH).doc.settings).toBe(doc.settings);
+  });
+
+  it("goes when the change adds a case where it pointed at none", () => {
+    // Left, it would declassify the new case's decision (the review of the fix: a draft saved before it can hold one).
+    const doc = declassified({ node: A, field: "/cases/3/when" }, { node: B, field: "/condition" });
+    const [a, b, c] = cases(doc);
+    const d = { port: "d", when: formula("trigger.secret == 4") };
+    const left = [{ node: B, field: "/condition" }];
+    expect(setConfig(doc, A, ["cases"], [a, b, c, d], SWITCH).doc.settings?.declassify).toEqual(left); // Add to Cases
+    expect(setConfig(doc, A, ["cases", 3], d, SWITCH).doc.settings?.declassify).toEqual(left);
+    expect(setConfig(doc, A, [], { cases: [a, b, c, d] }, SWITCH).doc.settings?.declassify).toEqual(left);
+    const none = { ...doc, nodes: [{ ...doc.nodes![0]!, config: {} }, doc.nodes![1]!] }; // no cases at all
+    const first = { ...none, settings: { declassify: [{ node: A, field: "/cases/0/when" }] } };
+    expect(setConfig(first, A, ["cases"], [d], SWITCH).doc.settings?.declassify).toEqual([]);
+  });
+
+  it("stays on its case when the case's decision is written where there was none", () => {
+    const doc = declassified({ node: A, field: "/cases/3/when" });
+    const [a, b, c] = cases(doc);
+    const added = { ...doc, nodes: [{ ...doc.nodes![0]!, config: { cases: [a, b, c, { port: "d" }] } }, doc.nodes![1]!] };
+    expect(setConfig(added, A, ["cases", 3, "when"], formula("true"), SWITCH).doc.settings).toBe(added.settings);
+  });
+
+  it("leaves a draft without settings without them", () => {
+    const doc = switchDoc();
+    const [a, b] = cases(doc);
+    expect(setConfig(doc, A, ["cases"], [b, a], SWITCH).doc).not.toHaveProperty("settings");
+  });
+});
+
 describe("ports", () => {
   it("keeps a renamed case's edges", () => {
     const result = renamePort(switchDoc(), A, 0, "big", SWITCH);

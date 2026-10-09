@@ -9,7 +9,7 @@ import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { LoadError } from "../../components/LoadError";
 import { announce } from "../../lib/announce";
 import { ApiError, client, ok } from "../../lib/client";
-import { admission, setConfig, setOptions, valueAt, type Changed } from "../../lib/config";
+import { admission, setConfig, setOptions, unlisted, unlistedNote, valueAt, type Changed } from "../../lib/config";
 import { downloadJson, fileName } from "../../lib/download";
 import { ConflictError, DraftSync, type SyncState } from "../../lib/draftSync";
 import {
@@ -335,6 +335,16 @@ function Editor({
   // A rename's word on formulas, in its step's drawer while the draft is the one it made (ruling 11; the review of
   // 66fc658: kept when the rename is applied with the rest, and said in no other step's drawer).
   const [renamed, setRenamed] = useState<{ doc: GraphDoc; node: string; text: string } | null>(null);
+  // The declassify entries an edit removed, by step (their list item went, or couldn't be followed), said in the step's
+  // drawer while the draft is the one it made: nothing else shows them, and Undo brings them back. A version's drawer
+  // shows the version, of which neither note is true.
+  const [unlistedBy, setUnlistedBy] = useState<{ doc: GraphDoc; lost: Map<string, number> } | null>(null);
+  const noteFor = (id: string): string | null => {
+    if (viewing) return null;
+    const rename = renamed !== null && renamed.doc === doc && sameId(renamed.node, id) ? renamed.text : null;
+    const lost = unlistedBy !== null && unlistedBy.doc === doc ? (unlistedBy.lost.get(idKey(id)) ?? 0) : 0;
+    return [rename, lost > 0 ? unlistedNote(lost) : null].filter((s) => s !== null).join(" ") || null;
+  };
   const typeOf = (n: GraphNode) => typeMap.get(n.type);
   const [side, setSide] = useState<Side>(null); // the right column's one panel
   // Where focus lands when what held it goes: a panel's Close, or a confirmation whose button an action removed or
@@ -701,9 +711,14 @@ function Editor({
    * is null: a field's edits aren't announced, its control says what it holds. Whether it landed. */
   function change(next: GraphDoc, message: string | null, then?: string, mark?: string): boolean {
     if (!mayEdit()) return false; // read only now: a conflict, an exit agreed to, a version view, a publication
+    const lost = unlisted(historyNow.current.present, next);
+    if (lost.size > 0) setUnlistedBy({ doc: next, lost });
     commitHistory(record(historyNow.current, next, mark));
     saver.current?.change(next);
-    if (message !== null) announce(message);
+    // A removed declassify entry is said whatever said the edit, or nothing did: an edit applied on the way out (an
+    // export, a publication) has no drawer open to say it.
+    const said = [message, ...[...lost].map(([id, n]) => `${findNode(next, id)?.key ?? "a step"}: ${unlistedNote(n)}`)];
+    if (said.some((s) => s !== null)) announce(said.filter((s) => s !== null).join(". "));
     if (then) focus(then);
     return true;
   }
@@ -1018,6 +1033,13 @@ function Editor({
 
   const healed = asking?.kind === "node" ? deleteNode(doc, asking.id).healed : null;
   const open = panel ? findNode(shownDoc, panel) : undefined; // the step of what's on the screen
+  // The declassify entries an edit removed, shown above the canvas for each step whose drawer isn't saying it (closed,
+  // or showing a version): an edit applied on the way out (an export, a publication, a version view) has none open.
+  // `change` says it, so this isn't a live region; the notices' clearing never hides it.
+  const lostElsewhere =
+    unlistedBy !== null && unlistedBy.doc === doc
+      ? [...unlistedBy.lost].filter(([id]) => viewing !== null || panel === null || !sameId(panel, id))
+      : [];
 
   return (
     <div
@@ -1110,6 +1132,9 @@ function Editor({
           {notice.action && <Button size="sm" onClick={notice.action.run}>{notice.action.label}</Button>}
         </div>
       )}
+      {lostElsewhere.map(([id, n]) => (
+        <p key={id} className="border-b border-line bg-surface px-5 py-2.5 text-small text-ink">{`${keyOf(id)}: ${unlistedNote(n)}`}</p>
+      ))}
       <p role="status" className={trouble ? "border-b border-line bg-surface px-5 py-2.5 text-small text-muted" : undefined}>{trouble}</p>
       {sync.status === "conflict" && (
         <div role="alert" className="flex flex-wrap items-center gap-3 border-b border-danger bg-danger-bg px-5 py-2.5 text-small text-ink">
@@ -1175,7 +1200,7 @@ function Editor({
             editable={editable}
             adds={editable ? addsOf(doc, open, portMap.get(idKey(open.id)) ?? []) : []}
             actions={viewing ? VERSION_ACTIONS : actionsFor(open.id)}
-            note={renamed !== null && renamed.doc === doc && sameId(renamed.node, open.id) ? renamed.text : null}
+            note={noteFor(open.id)}
             focusField={side?.kind === "step" ? (side.field ?? null) : null}
             onAdd={onItem}
             onDelete={() => setAsking({ kind: "node", id: open.id })}
