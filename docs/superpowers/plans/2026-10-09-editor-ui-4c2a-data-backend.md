@@ -3,20 +3,30 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or
 > superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Revision 4, 2026-10-09.** Nothing is built before the owner approves this plan. Nothing is pushed and no PR is
+**Revision 5, 2026-10-09.** Nothing is built before the owner approves this plan. Nothing is pushed and no PR is
 opened without the owner's OK in chat. Reviews pasted in chat held revision 1 (06962fd2) for eight defects in its code,
-revision 2 (80de9638) for three, and revision 3 (2f2da5d3) for one; the "Changes from revision N" sections below say
-how each was answered.
+revision 2 (80de9638) for three, revision 3 (2f2da5d3) for one and revision 4 (ff95fbee) for one; the "Changes from
+revision N" sections below say how each was answered.
 
 The plan's code was checked before review on a scratch copy of 93a0dd61, never on a branch. Its blocks were applied
 as written, its tests run, and the plan corrected where they failed. Each correction since revision 1 has a test that
 reproduces the review's counterexample, run against the previous revision's code to see it fail:
-- the engine's tests: 1,224 passed;
+- the engine's tests: 1,226 passed;
 - the database and API tests the tasks touch (samples, scope, the worker's record, retention, the migration chain,
   OpenAPI, the workflow routes): passed;
 - ruff, mypy (strict) and the import contracts: clean.
 The whole backend suite wasn't run; Task 5 runs it, with the owner's OK. The executor still runs every step: the
 check is evidence, not a substitute.
+
+## Changes from revision 4
+
+It answers the review of ff95fbee, pasted in chat on 2026-10-09; its new tests fail on revision 4's code.
+
+1. **P1, the object test ignored a comprehension's own `map`.** `[string].all(map, type(trigger.variant) == map && …)`
+   compares with the variable, which holds the string type, so its "guard" was true for a scalar; it validated, and
+   failed in CEL. `shape` now takes the built-in `map` only when the comprehension scope doesn't bind that name (it
+   already receives the scope). Task 2: the `shape` fact's test gains the shadowed case, and `a name bound as map is
+   no object test` (the validator refuses it; native CEL fails on the scalar).
 
 ## Changes from revision 3
 
@@ -182,8 +192,8 @@ the task that owns it.
       whole read, not only one position` (a work count), `merges alternatives that are the same`, `an integer is a
       number`, `a field is sure only on a value sure to be an object`, `a value that may not be an object is guarded
       before any read` (every spelling, unguarded and `has()`-only, in the validator and in native CEL), `equivalent
-      spellings get the same obligations`, `open data and indexes keep their rules`, `a number that must be an
-      integer fills an integer`.
+      spellings get the same obligations`, `open data and indexes keep their rules`, `a name bound as map is no
+      object test`, `a number that must be an integer fills an integer`.
 - **A step whose liveness the analysis can't settle.**
   - The cases: liveness too complex to analyse (`None`); a step in a loop body, inside a branch; a step after an
     error port.
@@ -519,8 +529,8 @@ entry follows its index, not its case, when cases are moved or removed.
 ### 4c-2a plan (2026-10-09)
 
 `docs/superpowers/plans/2026-10-09-editor-ui-4c2a-data-backend.md`. Reviews pasted in chat held revision 1
-(06962fd2) for eight defects in its code, revision 2 (80de9638) for three and revision 3 (2f2da5d3) for one; revision 4
-answers them, each with a test that fails on the previous revision's code.
+(06962fd2) for eight defects in its code, revision 2 (80de9638) for three, revision 3 (2f2da5d3) for one and revision 4
+(ff95fbee) for one; revision 5 answers them, each with a test that fails on the previous revision's code.
 Its rulings (1–11) are proposed, and join this ledger as 114 onward only when the owner accepts the plan.
 ```
 
@@ -564,7 +574,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `json_types` reads an `allOf` as what all its members allow (`meet`);
   - `declared_non_object(root, path, start=None) -> tuple[int, ...]`, beside `declared_optional` and
     `declared_nullable` (one walk, `_declared(…, mode)`);
-  - in `engine/cel/guards.py`, the leaf `shape`: `type(x) == map` proves x (and what it's read from) an object;
+  - in `engine/cel/guards.py`, the leaf `shape`: `type(x) == map` proves x (and what it's read from) an object, the
+    built-in `map` only, never a comprehension's variable of that name;
   - in `cel_check`, `CelContext.non_object_fields`, and the `cel.conditional_ref` "`x` may not be an object in its
     schema, so reading its fields fails when it isn't." (fix "Guard it with `type(x) == map`.").
 
@@ -976,6 +987,17 @@ def test_equivalent_spellings_get_the_same_obligations() -> None:
     ]
 
 
+def test_a_name_bound_as_map_is_no_object_test() -> None:
+    """The review of revision 4: a comprehension may bind `map`; then `type(x) == map` compares with that variable,
+    not the built-in type, and guards nothing."""
+    schema = holder(SPELLINGS["anyOf"])
+    shadowed = "[string].all(map, " + SAFE + ")"
+    said = [d.message for d in check(one(shadowed, input_schema=schema)).diagnostics]
+    assert "`trigger.variant` may not be an object in its schema, so reading its fields fails when it isn't." in said
+    failed = evaluate(compile_checked(shadowed, {"trigger": T.MAP}), {"trigger": {"variant": "accepted scalar"}})
+    assert failed.kind == "error"  # its "guard" was true for the scalar: why publish refuses it
+
+
 def test_open_data_and_indexes_keep_their_rules() -> None:
     """Spec §4.3, unchanged: data the schema doesn't type needs no shape guard, and an element read by index is
     read freely."""
@@ -1026,6 +1048,8 @@ def test_an_object_test_guards_reads_below_it(expr: str) -> None:
         "has(trigger.variant.n) && trigger.variant.n > 0",  # has() itself fails on a scalar
         "trigger.variant != null && trigger.variant.n > 0",  # not null isn't an object
         "type(trigger.variant) == list || trigger.variant.n > 0",
+        # a comprehension's own `map`, here the string type: not the built-in (the review of revision 4)
+        "[string].all(map, type(trigger.variant) == map && trigger.variant.n > 0)",
     ],
 )
 def test_other_tests_dont_say_its_an_object(expr: str) -> None:
@@ -1410,8 +1434,9 @@ def _type_operand(e: ast.Expr) -> ast.Expr | None:
     return args[0] if (args := _args(e, "type", 1)) is not None else None
 
 
-def _is_map_type(e: ast.Expr) -> bool:
-    return e.WhichOneof("expr_kind") == "ident_expr" and e.ident_expr.name == "map"
+def _is_map_type(e: ast.Expr, scope: frozenset[str]) -> bool:
+    """The built-in type `map`, never a comprehension's variable of that name (`[string].all(map, …)`)."""
+    return e.WhichOneof("expr_kind") == "ident_expr" and e.ident_expr.name == "map" and "map" not in scope
 
 
 def shape(e: ast.Expr, scope: frozenset[str], truth: bool) -> Facts:
@@ -1421,7 +1446,11 @@ def shape(e: ast.Expr, scope: frozenset[str], truth: bool) -> Facts:
         if holds and (args := _args(e, function, 2)) is not None:
             for value, other in (args, args[::-1]):
                 operand = _type_operand(value)
-                if _is_map_type(other) and operand is not None and (path := ast.chain_path(operand, scope)) is not None:
+                if (
+                    _is_map_type(other, scope)
+                    and operand is not None
+                    and (path := ast.chain_path(operand, scope)) is not None
+                ):
                     return _prefixes(path)
     return _NONE
 ```
