@@ -278,8 +278,8 @@ it("keeps a formula, says how it runs, and turns a fixed value into the formula 
 
 it("offers no fixed value where the engine takes only a formula", () => {
   showFields(FILTER);
-  expect(screen.queryByRole("group", { name: "How Predicate is set" })).toBeNull();
-  expect(screen.getByLabelText("Predicate").tagName).toBe("TEXTAREA");
+  expect(screen.queryByRole("group", { name: "How Keep an item when is set" })).toBeNull();
+  expect(screen.getByLabelText("Keep an item when").tagName).toBe("TEXTAREA");
 });
 
 it("offers neither a fixed value nor a formula where the engine takes only references", () => {
@@ -373,8 +373,8 @@ it("adds a case with the first free port name", async () => {
   await userEvent.click(screen.getByRole("button", { name: "Add to Cases" }));
   expect(config()).toEqual({ cases: [{ port: "case_1" }] });
   const item = screen.getByRole("group", { name: "Cases, item 1" });
-  expect(within(item).getByLabelText<HTMLInputElement>("Port").value).toBe("case_1");
-  expect(within(item).getByLabelText("When").tagName).toBe("TEXTAREA");
+  expect(within(item).getByLabelText<HTMLInputElement>("Port name").value).toBe("case_1");
+  expect(within(item).getByLabelText("Condition").tagName).toBe("TEXTAREA");
 });
 
 it("sets a map's entries, renamed in place, never as $value", async () => {
