@@ -1417,7 +1417,11 @@ it("never moves a held edit to an equal item when a removal is undone", async ()
   await show();
   await userEvent.click(screen.getByRole("button", { name: "sz" }));
   await userEvent.click(screen.getByRole("button", { name: "Remove: Sizes, item 1" })); // [5, 7]
+  // The removal sends focus to Add a frame later: typing before it lands would type into the button (the review of f2bd150).
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Add to Sizes" })));
   await userEvent.type(screen.getByLabelText("Sizes, item 1"), "x"); // "5x", over the second 5
+  expect(screen.getByLabelText<HTMLInputElement>("Sizes, item 1").value).toBe("5x");
+  expect(screen.getByRole("button", { name: "1 edit not applied" })).toBeTruthy(); // held, before the undo
   await userEvent.click(screen.getByRole("heading", { name: "sz" }));
   await userEvent.keyboard("{Control>}z{/Control}"); // the removal undone: [5, 5, 7]
   await userEvent.type(screen.getByLabelText("Sizes, item 1"), "{Backspace}0"); // "50"
