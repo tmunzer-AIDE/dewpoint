@@ -16,6 +16,7 @@ import typer
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from temporalio.api.enums.v1 import ArchivalState
 from temporalio.api.workflowservice.v1 import DescribeNamespaceRequest
 from temporalio.client import Client
 
@@ -64,6 +65,7 @@ from dewpoint.core.plugins.registry import (
     list_node_types,
     sync_plugins,
 )
+from dewpoint.core.temporal_check import problems as temporal_problems
 from dewpoint.core.temporal_connect import TemporalConfigError
 from dewpoint.core.temporal_connect import connect as temporal_connect
 from dewpoint.core.tenancy import lifecycle as tenant_lifecycle
@@ -104,6 +106,8 @@ egress_cli = typer.Typer(
 platform_cli.add_typer(egress_cli, name="egress")
 api_cli = typer.Typer(no_args_is_help=True)
 app.add_typer(api_cli, name="api")
+temporal_cli = typer.Typer(help="Temporal, as this deployment reaches it (2b-4b M4).", no_args_is_help=True)
+app.add_typer(temporal_cli, name="temporal")
 schedules_cli = typer.Typer(no_args_is_help=True)
 app.add_typer(schedules_cli, name="schedules")
 
@@ -562,6 +566,41 @@ def _refused(e: TemporalConfigError) -> typer.Exit:
     """§10.4's settings refused: the command ends (exit 2), never read as Temporal being unreachable."""
     typer.echo(f"ERROR: {e}")
     return typer.Exit(2)
+
+
+@temporal_cli.command("check")
+def temporal_check() -> None:
+    """Read-only: Temporal's namespace as it reports itself, reached with this deployment's §10.4 settings: TLS
+    verified, a retention of at most 30 days (D3g), archival disabled. Exit 1 on a problem or when Temporal can't be
+    asked; 2 when the settings are refused or the namespace isn't the deployment's recorded one."""
+    settings = get_settings()
+
+    async def _run(s: AsyncSession) -> list[str]:
+        environment = await _verified_namespace(s, settings)
+        try:
+            client = await temporal_connect(settings, environment)
+            answer = await client.workflow_service.describe_namespace(
+                DescribeNamespaceRequest(namespace=settings.temporal_namespace)
+            )
+        except TemporalConfigError as e:
+            raise _refused(e) from None
+        except Exception as e:  # unreachable, refused: a problem, never a pass
+            return [f"Temporal couldn't be asked ({type(e).__name__})"]
+        ttl = answer.config.workflow_execution_retention_ttl
+        typer.echo(f"temporal: {settings.temporal_address}, namespace {settings.temporal_namespace} ({environment})")
+        typer.echo(f"retention: {ttl.seconds // 86400} days")
+        archived = [n for n, a in (("history", answer.config.history_archival_state),
+                                   ("visibility", answer.config.visibility_archival_state))
+                    if a == ArchivalState.ARCHIVAL_STATE_ENABLED]  # fmt: skip
+        typer.echo("archival: " + (", ".join(f"{n} enabled" for n in archived) if archived else "disabled"))
+        return temporal_problems(answer, plaintext=settings.temporal_insecure_dev)
+
+    found = asyncio.run(_in_session(_run))
+    for problem in found:
+        typer.echo(f"PROBLEM: {problem}")
+    if found:
+        raise typer.Exit(1)
+    typer.echo("tls: verified; the namespace is within D3g's rules")
 
 
 async def _namespace_retention(settings: Settings, environment: str) -> timedelta | None:

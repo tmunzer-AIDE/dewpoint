@@ -17,9 +17,17 @@ RUN --mount=type=bind,from=gomod,target=/go/pkg/mod,rw \
     go mod verify \
     && go vet ./... \
     && go test -count=1 ./... \
-    && go build -trimpath -buildvcs=false -ldflags="-s -w" -o /out/temporal-server .
+    && go build -trimpath -buildvcs=false -ldflags="-s -w" -o /out/temporal-server . \
+    && go build -trimpath -buildvcs=false -ldflags="-s -w" -o /out/proofclient ./cmd/proofclient
 
-FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
+# The proof's exhaustive gRPC caller (`--target proofclient`): never part of the server's image.
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab AS proofclient
+COPY --from=build /out/proofclient /usr/local/bin/proofclient
+USER nonroot
+ENTRYPOINT ["/usr/local/bin/proofclient"]
+
+# The server: the default target.
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab AS server
 COPY --from=build /out/temporal-server /usr/local/bin/temporal-server
 COPY config/dynamicconfig.yaml /etc/temporal/dynamicconfig.yaml
 USER nonroot
