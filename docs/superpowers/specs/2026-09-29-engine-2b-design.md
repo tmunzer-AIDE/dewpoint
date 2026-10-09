@@ -493,6 +493,20 @@ secret and a sub-flow's refusal is an activity result, in history.
   local `$ref` (#32). A sensitive CSV column takes neither a default nor `values` (§8.1). Null and the empty string are
   literals too: an omitted default is what's allowed, not a written empty one. The diagnostic points to trigger inputs
   now and to connections in sub-project 3.
+- A template or a CEL expression that writes a fixed value is a literal too (the owner's ruling, 2026-10-09). At a
+  sensitive position, publish refuses a template with no reference, with any non-empty text — a `Bearer ` prefix
+  included: publish can't tell a prefix from a secret — or with a default; empty text beside a reference writes
+  nothing. It refuses a CEL expression none of whose free identifiers is a root (`trigger`, `steps`, `vars`, `loops`,
+  `run`, `item`, `index`): fn-1 is pure, so the expression gives the same value every run. CEL's built-in types
+  (`string`, `int`, …) aren't run data, and a comprehension's own variables aren't free.
+- A reference's default is checked as a literal: at a sensitive position, or holding a part the target marks. A CEL
+  expression that reads nothing is refused wherever the target could mark a part, by the rules a literal is checked
+  with (a property, a pattern, `additionalProperties`, `items` or a tuple position, a union's branch, a local `$ref`,
+  sensitive keys), since publish can't tell which parts it writes: a fixed formula that leaves the sensitive part out
+  is refused too, and the same value written as a literal is checked part by part.
+- Not covered: a CEL expression that reads run data and still puts a literal in its result
+  (`"Bearer " + trigger.tok`, `trigger.n > 0 ? "<secret>" : ""`) publishes, so a prefix a template can't write, CEL
+  still can. Telling a literal that reaches the result from one that's only compared needs a data-flow analysis.
 - A start form still masks a sensitive field's default and enum (§7.7): versions published before this rule are
   immutable and may hold them.
 - A sensitive variable therefore has no default: it is null until a step sets it. Publish accepts it when its type

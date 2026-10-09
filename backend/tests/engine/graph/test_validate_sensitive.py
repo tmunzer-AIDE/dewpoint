@@ -45,6 +45,118 @@ def test_a_literal_at_a_sensitive_config_position_is_refused(token: Any) -> None
     assert ("sensitive.literal", "/token") in diagnostics(g)
 
 
+@pytest.mark.parametrize(
+    "token",
+    [
+        template("tok-1234"),  # a template of text alone is the literal it writes
+        template("tok-", "1234"),
+        template(""),
+        cel('"tok-1234"'),  # a formula that reads nothing gives the same value every run: fn-1 is pure
+        cel('"tok-" + "1234"'),
+        cel('""'),
+        cel('["tok-1234"].map(t, t)[0]'),  # its own variables aren't run data
+        cel('["tok-1234"].map(trigger, trigger)[0]'),  # even named as a root
+        cel('string == string ? "tok-1234" : ""'),  # nor are CEL's built-in types
+        cel('type("") == .string ? "tok-1234" : ""'),
+        cel('[int, uint, double, bool, bytes, list, map, null_type, type, dyn].size() > 0 ? "tok-1234" : ""'),
+    ],
+)
+def test_a_template_or_formula_that_writes_a_fixed_value_is_refused(token: Any) -> None:
+    g = G().node("s", SEND, {"token": token})
+    assert diagnostics(g) == [("sensitive.literal", "/token")]
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        template("Bearer ", {"ref": "trigger.tok"}),
+        template({"ref": "trigger.tok"}, "-1234"),
+        template({"ref": "trigger.tok"}, "", {"ref": "trigger.tok"}, ":"),
+    ],
+)
+def test_a_template_writing_text_beside_a_reference_is_refused(token: Any) -> None:
+    """Its text is written into the workflow as it is, as a literal part of a sensitive object is: the validator can't
+    tell a prefix from a secret, so it refuses both."""
+    g = G().node("s", SEND, {"token": token})
+    g.settings = {"input_schema": {"type": "object", "properties": {"tok": SECRET}, "required": ["tok"]}}
+    assert diagnostics(g) == [("sensitive.literal", "/token")]
+
+
+def test_a_template_of_references_and_a_formula_that_reads_the_run_are_fine() -> None:
+    trigger = {"type": "object", "properties": {"tok": SECRET, "n": {"type": "integer"}}, "required": ["tok", "n"]}
+    for token in (
+        template({"ref": "trigger.tok"}),
+        template("", {"ref": "trigger.tok"}, "", {"ref": "trigger.tok"}),  # empty text writes nothing
+        cel("trigger.tok"),
+        cel(".trigger.tok"),  # a root named from the top scope is read all the same
+        cel("trigger.n > 0 ? trigger.tok : trigger.tok + trigger.tok"),
+    ):
+        g = G().node("s", SEND, {"token": token})
+        g.settings = {"input_schema": trigger}
+        assert diagnostics(g) == [], token
+
+
+@pytest.mark.parametrize("value", [template("k3y-value"), cel('"k3y-" + "value"')])
+def test_a_fixed_template_or_formula_assigned_to_a_sensitive_variable_is_refused(value: Any) -> None:
+    g = G().node("v", SET, {"assignments": {"key": value}})
+    g.settings = {"vars_schema": {"type": "object", "properties": {"key": {**SECRET, "type": ["string", "null"]}}}}
+    assert diagnostics(g) == [("sensitive.literal", "/assignments/key")]
+
+
+LOGIN = {"type": ["object", "null"], "properties": {"user": {"type": "string"}, "pw": SECRET}}
+UNUSED_SECRET = {"$defs": {"unused": SECRET}}  # a sensitive definition no position reaches
+LOGIN_VARS = {"type": "object", "properties": {"login": LOGIN}} | UNUSED_SECRET
+LOGIN_BEHIND_REF = {"type": "object", "properties": {"login": {"$ref": "#/$defs/login"}}, "$defs": {"login": LOGIN}}
+PLAIN_LOGIN_VARS = {"type": "object", "properties": {"login": {"type": ["object", "null"]}}} | UNUSED_SECRET
+
+
+@pytest.mark.parametrize(
+    ("value", "vars_schema", "refused"),
+    [
+        (ref("trigger.login", default={"user": "ops", "pw": "pa55word"}), LOGIN_VARS, True),
+        (ref("trigger.login", default={"user": "ops"}), LOGIN_VARS, False),  # no sensitive part written
+        (ref("trigger.login"), LOGIN_VARS, False),
+        (cel('{"user": "ops", "pw": "pa55word"}'), LOGIN_VARS, True),
+        (cel('{"user": "ops"}'), LOGIN_VARS, True),  # its parts aren't known at publish
+        (cel('{"user": "ops"}'), LOGIN_BEHIND_REF, True),
+        (cel('{"user": "ops"}'), PLAIN_LOGIN_VARS, False),  # an unused sensitive definition marks nothing here
+    ],
+)
+def test_a_default_or_a_fixed_formula_holding_a_sensitive_part_is_refused(
+    value: Any, vars_schema: dict[str, Any], refused: bool
+) -> None:
+    """A reference's default is a literal: refused where a literal is, at a part the schema marks. A formula that reads
+    nothing can't be split into parts at publish, so it's refused wherever the schema marks one."""
+    g = G().node("v", SET, {"assignments": {"login": value}})
+    trigger = {"type": "object", "properties": {"login": {**LOGIN, "type": "object"}}, "required": ["login"]}
+    g.settings = {"input_schema": trigger, "vars_schema": vars_schema}
+    found = [d for d in diagnostics(g) if d[0] != "vars.no_default"]  # `login` isn't sensitive as a whole
+    assert found == ([("sensitive.literal", "/assignments/login")] if refused else [])
+
+
+@pytest.mark.parametrize(
+    ("schema", "value", "refused"),
+    [
+        ({"type": ["array", "null"], "items": SECRET}, cel('["k3y-value"]'), True),
+        ({"type": ["array", "null"], "prefixItems": [SECRET]}, cel('["k3y-value"]'), True),
+        ({"type": ["object", "null"], "additionalProperties": SECRET}, cel('{"k": "k3y-value"}'), True),
+        ({"type": ["object", "null"], "propertyNames": {"x-sensitive": True}}, cel('{"k3y-value": 1}'), True),
+        ({"anyOf": [{"type": "null"}, LOGIN]}, cel('{"user": "ops"}'), True),
+        ({"type": ["string", "null"], "not": {"type": "integer", "x-sensitive": True}}, cel('"plain"'), False),
+        ({"type": ["string", "null"], "not": {"type": "integer", "x-sensitive": True}}, "plain", False),
+    ],
+)
+def test_a_fixed_formula_is_refused_where_the_literal_rules_could_mark_a_part(
+    schema: dict[str, Any], value: Any, refused: bool
+) -> None:
+    """The rules a literal is checked with (`marked_positions`): a part under a property, `additionalProperties`,
+    `items` or a tuple position, a union's branch, or a map whose keys are sensitive. A keyword they don't read, as
+    `not`, marks no part of the value."""
+    g = G().node("v", SET, {"assignments": {"x": value}})
+    g.settings = {"vars_schema": {"type": "object", "properties": {"x": {**schema, "default": None}}}}
+    assert diagnostics(g) == ([("sensitive.literal", "/assignments/x")] if refused else [])
+
+
 def test_a_reference_without_a_default_and_plain_literals_are_fine() -> None:
     g = G().node("s", SEND, {"token": ref("trigger.tok"), "detail": "plain text"})
     g.settings = {"input_schema": {"type": "object", "properties": {"tok": SECRET}, "required": ["tok"]}}
