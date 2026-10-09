@@ -1173,3 +1173,114 @@ M40. **A value's schema problem is said without the value, and export refuses a 
       - the frontend's words.
     - The owner's ruling. - Messages say less than jsonschema did ("'ab' is too short" becomes "Must be at least 3
       characters long."): the field, named beside each, shows where.
+
+### Owner, 4c-1 plan (2026-10-09, in chat)
+
+The owner chose to have the 4c-1 plan (revision 6, deaa466) built: "go ahead", inline in one session, with a pause after
+milestone 2 (screenshots beside 1c) and at the final checkpoint. Two policies in ruling 7 were confirmed in the review
+of revision 4: rejecting `1e300` is a conservative editor input policy, not an engine requirement nor a promise to
+keep decimals exactly; and opening the drawer never rewrites existing values. Rulings 96 to 113 stay the plan's until
+the owner accepts the slice.
+
+### 4c-1, milestone 1 (2026-10-09)
+
+M41. **The branch starts from `main` at ab7fcfe, not 0838e4f** as the plan was written against: two backend-only fixes
+    had merged since (#67, #68). `feat/editor-4c1` is ab7fcfe with the plan merged in (0be88e1). - The plan says to
+    cut from `main` when execution starts. - None: neither touches the frontend.
+
+### 4c-1, milestone 2 (2026-10-09)
+
+M42. **The plan's `// prettier-ignore` markers stay** (Tasks 5 to 7). They were first dropped as noise, then restored
+    (bd0b614, comments only): 22 files already mark hand-formatted lines with them. - The codebase's convention. -
+    None: comments.
+M43. **The notices name Radix Tabs from Task 7, not Task 5**: the notices plugin lists only packages whose code lands
+    in a chunk, and nothing imports `Tabs` before the drawer. Task 7's build lists `@radix-ui/react-tabs 1.1.21`, and
+    the browser gate's notices test checks it. - The plugin's rule. - None.
+M44. **`e.relatedTarget` without a cast** (Tasks 6 and 9): lint refuses `as Node | null`, which React's types make
+    unnecessary. - The lint rule. - None: types.
+M45. **Two conflict tests look for the banner by its own words** (Task 8): the leave question is a native dialog
+    rendered while closed, so "This draft was changed elsewhere" matched it too. - The plan's query matched two
+    elements. - None: the same element.
+M46. **An async `act` in the codebase's form** (Task 8): `act(() => Promise.resolve(answer()))`, as lint refuses an
+    async arrow with no `await`. - None.
+
+### Owner, milestone 2 reviewed (2026-10-09, pasted)
+
+Four defects at 8bfc9e0, reproduced in tests and in Chromium with fake APIs: (1, high) a version's drawer showed the
+draft's pending text; (2) export skipped text typed while its save was awaited; (3) Clear discarded a stale edit but
+left the value; (4) the list of edits not applied left focus on the page body. Milestone 3 held. Five points the
+checkpoint raised got the review's recommendations, recorded as recommendations.
+
+### Owner, milestone 2 points ruled (2026-10-09, in chat)
+
+The owner's answers: O1, "Edit as JSON" gets a pressed look, in milestone 3; O2, a disabled look for the drawer's
+controls only; O3, the flow plugin's fields get written titles as a follow-up of their own (since #70); O4, "How its
+formulas run" drops the repeats, keeping the formulas no field says. The duplicate diagnostic and the Mist title became
+follow-ups (#69, #71, #72).
+
+### 4c-1, after the milestone 2 review (2026-10-09)
+
+M47. **The review's four findings, fixed** (f2bd150), each by a test that failed first:
+    - a version's read settles what was typed during it, or asks (Discard and view the version, or Go back to them);
+      a version's drawer gets read-only actions blind to the draft's edits not applied ("asks about an edit typed
+      while a version is read, and never shows it in the version"; "keeps an edit typed while a version is read, when
+      the person goes back to it"). No test can drive that guard once the read settles; the next review called it
+      enforcement of the version/draft boundary, not a product ruling;
+    - export settles and saves in one loop, as leaving does ("asks about an edit typed while an export waits for its
+      save"); publishing has no such gap: it disables editing and keeps its dialog open while it saves;
+    - Clear writes over a stale edit it discards, the editor's guards still answering ("clears the field on purpose,
+      even when what was typed in it is stale"; "clears nothing when the editor refuses the write, and says why");
+    - Close returns focus to the toolbar's count, else the canvas; a discarded entry lands on the list's heading
+      ("gives focus back to the count…"; "keeps focus in the list when its last entry is discarded").
+M48. **The removal/undo test waits for the removal's focus** (1b43b8b, test only): "never moves a held edit to an
+    equal item when a removal is undone" typed before the focus move to Add landed, so no edit was held (9 of 12 runs
+    failed alone). It now waits, and checks "5x" held and counted before the undo (12 of 12).
+
+### Owner, milestone 2 signed off (2026-10-09, pasted, confirmed in chat)
+
+A pasted review gave the visual sign-off of milestone 2's screens (the single column accepted for this slice; the
+mocked viewer shots show appearance, not authorization) and recommended merging `main`. The owner confirmed in chat:
+the sign-off stands, milestone 3 may start, and `main` at e9272e0a merges first.
+
+### 4c-1, milestone 3 (2026-10-09)
+
+M49. **The branch merges `main` at e9272e0a** (e35a792): #69 to #72, backend only. The branch's `backend/` and
+    `deploy/` equal `main`'s; the frontend suite and the browser gate passed on the merge, and milestone 2's evidence
+    was retaken on it (the flow plugin's written titles show).
+M50. **Two of Task 8's conflict tests wait 3 s for the banner** (275bc0e, test only): the save that meets the conflict
+    is sent 1 s after the edit, and the default 1 s wait lost the race under the full suite's load. 4b's conflict
+    tests wait 3 s.
+M51. **O1, O2 and O4, built** (66fc658), each by a test that failed first:
+    - O1: the toggle takes Segmented's pressed tokens under `aria-pressed` ("shows Edit as JSON pressed while it's
+      on…");
+    - O2: scoped on the drawer, so 4a's Field and Select inside it (error handling, the key) look disabled too and
+      4a's forms elsewhere don't; values in muted ink (about 6:1), as the disabled ink is under 3:1 on its fill ("gives
+      a viewer's drawer controls a disabled look, their values legible");
+    - O4: a field that says how its formula runs registers while shown; a formula on the other tab stays listed until
+      its tab opens ("says how a formula runs once, under its field, and lists only what no field says").
+
+### Owner, milestone 3 reviewed (2026-10-09, pasted)
+
+Three defects at 66fc658: (1) a rename applied with the rest lost its word on formulas; (2) "Go to it" missed held
+keys and limits; (3) "Go to" gave up before a picker's list loaded. The owner then chose, in chat, to run Task 15
+once they were fixed.
+
+### 4c-1, after the milestone 3 review (2026-10-09)
+
+M52. **The review's three findings, fixed** (b773518), each by a test that failed first:
+    - `applyAll`'s note carries its step, and bulk settling keeps it ("keeps a rename's word on formulas when it's
+      applied with the rest, as before an export"). Found beside it: the note showed in any open step's drawer, and
+      now only in its own ("says a rename's word only in the renamed step's drawer");
+    - "Go to it" routes by the edit's kind: a key to the key field, a limit to the error handling, opened, and an entry
+      name (the same gap) to its name ("goes to a held key…", "goes to a held limit…", "goes to a held entry name…");
+    - a Go to whose control is loading waits for it, watching the drawer, and gives way to the person's click or key,
+      another Go to, or the drawer closing ("goes to a field whose control is still loading…"; "drops a pending Go to
+      when the person moves on…"). Its test answers after several frames: it had passed by luck when the answer beat
+      the first one.
+
+### 4c-1, milestone 4 (2026-10-09)
+
+M53. **The drawer's browser flows read the running app's labels**: the flow plugin's written titles since #70 ("Duration,
+    in seconds", a case's "Condition" and "Port name"); text fields by role (`getByLabel` matched the Fixed/Formula
+    group too); the drawer's twin of a canvas "+", which shares its name. The gate: 33 passed, the 27 earlier flows
+    and 6 new, under the CSP and axe.
