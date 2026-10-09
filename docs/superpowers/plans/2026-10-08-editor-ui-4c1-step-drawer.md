@@ -2,8 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Revision 5 (2026-10-09).** For the owner's review. It answers the reviews of revisions 1 (02fe8a6), 2 (38afd9c),
-3 (83fc8d7) and 4 (3dbecc3), each pasted in chat on 2026-10-09: the "Changes from revision N" sections below say how. Nothing is built before the owner approves this plan. Nothing is
+**Revision 6 (2026-10-09).** For the owner's review. It answers the reviews of revisions 1 (02fe8a6), 2 (38afd9c),
+3 (83fc8d7), 4 (3dbecc3) and 5 (4a06a56), each pasted in chat on 2026-10-09: the "Changes from revision N" sections
+below say how. Nothing is built before the owner approves this plan. Nothing is
 pushed and no PR is opened without the owner's OK in chat.
 
 **Goal:** A person who may edit a workflow opens a step and sets it up in a drawer generated from its type's schema:
@@ -185,6 +186,17 @@ Revision 5 answers each correction in the review of revision 4, which also confi
 5. **The editor's wiring compiles.** The graph getter is `draftNow()`: `Editor.tsx` already has a `latest`, the newest
    published version's number, which is left as it is (Tasks 7, 8).
 
+## Changes from revision 5
+
+Revision 6 answers the one correction in the review of revision 5:
+1. **A removal starts a new lineage.**
+   - `setAt` no longer carries a list's root through a splice: removing an item moves every item after it, as a move
+     does. An edit in place, an item written at the end, or a sibling field's change still keeps the list's root, so
+     none of them makes an edit stale.
+   - In `[5, 5, 7]`, removing the first 5, typing over the other, and undoing the removal leaves the edit stale. It
+     isn't applied to the first 5 unless the person chooses "Apply here".
+   - Pinned in the pure model and through the editor (Tasks 2, 3, 9).
+
 ## Global Constraints
 
 - **CSP.** It stays exactly `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src
@@ -270,7 +282,7 @@ the task that owns it.
       whatever the order they were typed in`, `keeps a rename while an edit inside its entry can't be applied`,
       `writes edits not applied as a file of their own, never into the graph`, `keeps an edit where what it was typed
       over has changed, as an undo does`, `tells two items apart when their values match, and an edit beside it never
-      makes it stale`;
+      makes it stale`, `tells two equal numbers apart after a removal and its undo`;
     - Task 4: `makes one step of a field's edits while it keeps its mark`;
     - Task 6: `makes one mark of a field's typing while it keeps focus`, `keeps unapplied JSON through a change of
       view, applying what's valid first`, `keeps a held number shown when the value under it changes, as an undo
@@ -289,7 +301,8 @@ the task that owns it.
       hold them`;
     - Task 9: `moves an item only once the edits inside it are applied`, `renames an entry only once the edit inside
       it is applied`, `never writes a held edit over another item after an undo moves it`, `never writes a held edit
-      into the other of two equal items after an undo moves them`, `discards a new name without renaming the entry`,
+      into the other of two equal items after an undo moves them`, `never moves a held edit to an equal item when a
+      removal is undone`, `discards a new name without renaming the entry`,
       `lists an edit whose field an undo removed, and discards it without bringing the field back`;
     - Task 12: `keeps a limit a refused write turned away, with its reason`.
 - **Numbers and nesting the server would refuse or change.**
@@ -514,9 +527,10 @@ These join the ledger as rulings 96 onward when the slice is approved.
     - A control writes first and releases its held text only when the write lands. A refused write (an editor turned
       read only, the graph's admission) keeps the text and says why.
     - **What it was typed over.** Each held edit records its base, the value it was typed over, and its lineage, the
-      lists and items on its path. Where either has changed since (an undo moving a list's items, even two equal ones;
-      a literal turned to data), the edit is applied, or typed through, only when the person chooses "Apply here".
-      Otherwise it's discarded, or asked about at an exit. It keeps the reading it began with, a literal's or not.
+      lists and items on its path. Where either has changed since, the edit is applied, or typed through, only when
+      the person chooses "Apply here"; otherwise it's discarded, or asked about at an exit. The changes that count: an
+      undo moving or removing a list's items, even equal ones; a literal turned to data. The edit keeps the reading it
+      began with, a literal's or not.
     - **Their list.** The toolbar's "N edits not applied" opens a list of them all: step, field, text, reason, "Go
       to it", "Discard". It's where an edit whose field is gone is recovered, never by recreating the field.
     - **Discard means discard.** Leaving a field applies what's typed in it; moving to its own Discard or Clear, by
@@ -1258,13 +1272,17 @@ describe("paths", () => {
     expect(config.a.b).toBe(1);
   });
 
-  it("keeps a list's and an item's lineage through edits in place, never through a rebuild", () => {
+  it("keeps a list's and an item's lineage through edits in place, never through a move or a removal", () => {
     const item = { a: 1 };
     const list = [item, { a: 2 }];
     const edited = setAt({ l: list }, ["l", 0, "a"], 5) as { l: { a: number }[] };
     expect(rootOf(edited.l)).toBe(rootOf(list)); // the same list, edited in place
     expect(rootOf(edited.l[0]!)).toBe(rootOf(item)); // the same item
     expect(rootOf([...list].reverse())).not.toBe(rootOf(list)); // a move makes a new list
+    const removed = setAt({ l: list }, ["l", 0], undefined) as { l: unknown[] };
+    expect(rootOf(removed.l)).not.toBe(rootOf(list)); // so does a removal: the items after it have moved
+    const appended = setAt({ l: list }, ["l", 2], { a: 3 }) as { l: unknown[] };
+    expect(rootOf(appended.l)).toBe(rootOf(list)); // an item written at the end moves none
   });
 
   it("removes a property, and splices a list's item, for undefined", () => {
@@ -1537,7 +1555,8 @@ export function valueAt(root: unknown, path: Path): unknown {
 }
 
 // Lineage (4c-1, ruling 18): each copy `setAt` makes descends from what it copied. An item or a list edited in place
-// keeps its root through every copy; a list rebuilt by a move, a JSON edit or an import starts a root of its own. An
+// keeps its root through every copy; a list rebuilt by a move, a removal, a JSON edit or an import starts a root of
+// its own. An
 // unapplied edit is applied only where its lists and items are still the ones it was typed in (the review of
 // revision 4: two items can hold equal values).
 const roots = new WeakMap<object, object>();
@@ -1553,10 +1572,16 @@ export function setAt(root: unknown, path: Path, value: unknown): unknown {
   const [key, ...rest] = path;
   if (key === undefined) return value;
   if (typeof key === "number") {
-    const list = descends(Array.isArray(root) ? [...(root as unknown[])] : [], root);
-    if (rest.length === 0 && value === undefined) list.splice(key, 1);
-    else list[key] = setAt(list[key], rest, value);
-    return list;
+    const list = Array.isArray(root) ? [...(root as unknown[])] : [];
+    // A removal moves every item after it: a new lineage, as a move's. Only an edit in place keeps the list's (the
+    // review of revision 5: in [5, 5, 7], removing the first 5 and undoing it must not let an edit typed on the other
+    // 5 land on the first).
+    if (rest.length === 0 && value === undefined) {
+      list.splice(key, 1);
+      return list;
+    }
+    list[key] = setAt(list[key], rest, value);
+    return descends(list, root);
   }
   const object = isObject(root) ? root : {};
   if (rest.length === 0 && value === undefined) {
@@ -1922,6 +1947,16 @@ it("tells two items apart when their values match, and an edit beside it never m
   expect(applyUnapplied(before, typed, TRANSFORM)).toEqual({ problem: STALE });
 });
 
+it("tells two equal numbers apart after a removal and its undo", () => {
+  const before = fetch({ sizes: [5, 5, 7] });
+  const removed = setConfig(before, A, ["sizes", 0], undefined, TRANSFORM).doc; // [5, 7]: the second 5 is first now
+  const typed = held(removed, "number", "/sizes/0", ["sizes", 0], "50", { whole: true }); // over that second 5
+  expect(isStale(before, typed)).toBe(true); // the removal undone: the first 5, an equal value, sits there again
+  expect(applyUnapplied(before, typed, TRANSFORM)).toEqual({ problem: STALE });
+  const beside = setConfig(removed, A, ["sizes", 1], 8, TRANSFORM).doc; // the 7, edited in place
+  expect(isStale(beside, typed)).toBe(false);
+});
+
 it("writes edits not applied as a file of their own, never into the graph", () => {
   const doc = fetch({});
   const file = unappliedFile([held(doc, "number", "/n", ["n"], "5x", { label: "Count", why: "A number, like 42 or 2.5." })], () => "fetch");
@@ -2195,7 +2230,7 @@ export function unappliedFile(edits: Unapplied[], keyOf: (node: string) => strin
 - [ ] **Step 4: Run the tests to see them pass**
 
 Run: `npx -y pnpm@12.6.0 exec vitest run src/lib/unapplied.test.ts`
-Expected: PASS, 13 tests.
+Expected: PASS, 14 tests.
 
 - [ ] **Step 5: Typecheck and lint**
 
@@ -5042,8 +5077,8 @@ it("renames an entry only once the edit inside it is applied", async () => {
 });
 ```
 
-Append to `frontend/src/routes/editor/Editor.test.tsx` (add `formula` from `../../lib/config` and `SWITCH` to the
-imports):
+Append to `frontend/src/routes/editor/Editor.test.tsx` (add `formula` from `../../lib/config`, `STALE` from
+`../../lib/unapplied`, and `SWITCH` to the imports):
 
 ```tsx
 /** A switch whose case b leads to a transform. */
@@ -5093,6 +5128,24 @@ it("lists an edit whose field an undo removed, and discards it without bringing 
   await userEvent.click(within(list).getByRole("button", { name: "Discard: sz · Sizes, item 1" }));
   expect(stepConfig("sz")).toEqual({ sizes: [] }); // never recreated
   expect(screen.queryByRole("button", { name: /edits? not applied/ })).toBeNull();
+});
+
+it("never moves a held edit to an equal item when a removal is undone", async () => {
+  const SIZES = typeWith(
+    { type: "object", properties: { sizes: { type: "array", title: "Sizes", items: { type: "integer" } } } },
+    { ref: "acme.sizes@1", type: "acme.sizes", title: "Sizes" },
+  );
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, SIZES]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("acme.sizes@1", { sizes: [5, 5, 7] }, "sz") }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "sz" }));
+  await userEvent.click(screen.getByRole("button", { name: "Remove: Sizes, item 1" })); // [5, 7]
+  await userEvent.type(screen.getByLabelText("Sizes, item 1"), "x"); // "5x", over the second 5
+  await userEvent.click(screen.getByRole("heading", { name: "sz" }));
+  await userEvent.keyboard("{Control>}z{/Control}"); // the removal undone: [5, 5, 7]
+  await userEvent.type(screen.getByLabelText("Sizes, item 1"), "{Backspace}0"); // "50"
+  expect(stepConfig("sz")).toEqual({ sizes: [5, 5, 7] }); // never [50, 5, 7] unasked
+  expect(screen.getByText(STALE)).toBeTruthy();
 });
 
 it("asks before removing a case with edges", async () => {
