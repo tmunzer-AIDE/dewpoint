@@ -9,7 +9,7 @@ import { onAnnounce } from "../../lib/announce";
 import { cancelLeaving, mayLeave } from "../../lib/leaving";
 import type { CanvasProps } from "./Canvas";
 import { EditorPage } from "./Editor";
-import { DELAY, SWITCH, typeWith } from "../../test/nodeTypes";
+import { DELAY, IF, SWITCH, typeWith } from "../../test/nodeTypes";
 import { formula } from "../../lib/config";
 import { STALE } from "../../lib/unapplied";
 
@@ -1515,4 +1515,28 @@ it("keeps focus in the list when its last entry is discarded", async () => {
   const list = screen.getByRole("complementary", { name: "Edits not applied" });
   await userEvent.click(within(list).getByRole("button", { name: "Discard: wait · Duration S" })); // the count goes too
   await vi.waitFor(() => expect(document.activeElement).toBe(within(list).getByRole("heading", { name: "Edits not applied" })));
+});
+
+it("asks before errors stop going to a port", async () => {
+  const draft = {
+    graph_format: 1,
+    nodes: [
+      { id: "id-check", key: "check", type: "flow.if@1", options: { on_error: "port" }, position: { x: 0, y: 140 } },
+      { id: "id-transform", key: "transform", type: "flow.transform@1", position: { x: 0, y: 280 } },
+    ],
+    edges: [{ from: { node: "id-check", port: "error" }, to: { node: "id-transform" } }],
+  };  // prettier-ignore
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, IF]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "check" }));
+  const chip = screen.getByRole("button", { name: "On error: route to the error port" });
+  await userEvent.click(chip);
+  expect(chip.getAttribute("aria-expanded")).toBe("true");
+  await userEvent.selectOptions(screen.getByLabelText("When it fails"), "Fail the run");
+  const dialog = screen.getByRole("dialog", { name: "Remove a port" });
+  expect(dialog.textContent).toContain("The port error goes with this change, and its edge to transform is deleted.");
+  await userEvent.click(within(dialog).getByRole("button", { name: "Remove" }));
+  expect(drawn.at(-1)!.doc.edges).toEqual([]);
+  expect(drawn.at(-1)!.doc.nodes![0]).not.toHaveProperty("options");
 });

@@ -12,7 +12,7 @@ import type { Diagnostic, Expression, GraphNode, NodeType } from "../../../lib/w
 import type { ItemAction } from "../items";
 import { SIDE } from "../side";
 import { DrawerContext, problemsAt, segment, type DrawerActions } from "./context";
-import { chipText } from "./ErrorHandling";
+import { ErrorHandling, chipText } from "./ErrorHandling";
 import { FieldView } from "./FieldView";
 
 const EFFECTS: Record<NodeType["side_effect"], string> = {
@@ -55,6 +55,7 @@ export function StepDrawer({
   const fields = useMemo(() => (type ? fieldsOf(type) : []), [type]);
   const { setup, options } = tabsOf(fields);
   const [tab, setTab] = useState<Tab>(setup.length > 0 ? "setup" : "options");
+  const [handling, setHandling] = useState(false);
   const mine = problems ?? [];
   const top = new Set(fields.map((f) => segment(f.name)));
   // A problem no field shows: about the step as a whole, or a part its schema doesn't name (ruling 16).
@@ -83,10 +84,17 @@ export function StepDrawer({
                 {type.kind === "control" ? "Runs in the engine" : `Runs as its own step · ${EFFECTS[type.side_effect]}`}
               </p>
             )}
-            <p className="text-small">{chipText(node, type)}</p>
+            {type ? (
+              <Button size="sm" className="self-start" aria-expanded={handling} aria-controls="error-handling" onClick={() => setHandling(!handling)}>
+                {chipText(node, type)}
+              </Button>
+            ) : (
+              <p className="text-small">{chipText(node, type)}</p>
+            )}
           </div>
           <Button size="sm" onClick={onClose}>Close</Button>
         </div>
+        {handling && <ErrorHandling />}
         {problems === null ? (
           <p className="text-small text-muted">Not checked for what&apos;s on the screen.</p>
         ) : (
