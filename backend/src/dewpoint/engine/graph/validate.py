@@ -141,6 +141,7 @@ class ValidationResult:
     connections: tuple[tuple[str, str, uuid.UUID, str], ...] = ()
     # (input field, node ref, options field, connection id, the types it may be) of every start-form picker (D19)
     pickers: tuple[tuple[str, str, str, uuid.UUID, tuple[str, ...]], ...] = ()
+    conditional_steps: tuple[str, ...] = ()  # the steps that may not run (ruling 70's badge), by id, sorted
 
     @property
     def ok(self) -> bool:
@@ -179,6 +180,21 @@ def _descendants(s: Structure) -> dict[uuid.UUID, frozenset[uuid.UUID]]:
             acc |= desc[e.to.node]
         desc[n] = frozenset(acc)
     return desc
+
+
+def conditional_steps(s: Structure, live: Mapping[uuid.UUID | None, lv.RegionLiveness]) -> tuple[uuid.UUID, ...]:
+    """The steps that may not run (4c-2a ruling 3): their liveness in their region isn't "always", or can't be
+    analysed; or the loop whose body holds them may not run."""
+    memo: dict[uuid.UUID, bool] = {}
+
+    def may_skip(n: uuid.UUID) -> bool:
+        if n not in memo:
+            region = s.region_of[n]
+            cond = live[region].live[n]
+            memo[n] = cond is None or frozenset() not in cond or (region is not None and may_skip(region))
+        return memo[n]
+
+    return tuple(n for n in s.topo if may_skip(n))
 
 
 def _static_delay(node: GraphNode, spec: NodeTypeSpec) -> float:
@@ -1430,4 +1446,5 @@ def validate(graph: Graph, ctx: ValidationContext) -> ValidationResult:
         declassified=declassified,
         connections=tuple(sorted(v.connections, key=lambda c: (c[0], c[1]))),
         pickers=tuple(pickers) if not picker_problems(settings) else (),
+        conditional_steps=tuple(sorted(str(n) for n in conditional_steps(structure, v.live))),
     )
