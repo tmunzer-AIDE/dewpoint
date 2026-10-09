@@ -12,10 +12,11 @@ Nothing here is proven on a real target yet.
 | The frontend's server certificate | the client CA | the Temporal server's frontend (gRPC and HTTP API) | the address clients dial (SAN) |
 | The internode certificate | the internode CA, its own | every Temporal service, as server and as client; the internal frontend | the internode name (SAN) |
 | One client certificate per Dewpoint identity | the client CA | the worker, the dispatcher, the retention process, operators' CLI | its common name (CN), mapped to a role |
-| The platform admin's client certificate | the client CA | registering and updating the namespace | a CN with `system:admin` |
+| The platform admin's client certificate | the client CA | registering and updating the namespace | a CN with `temporal-system:admin` |
 
 - **Roles come from the CN.** The authorizer's roles file (`DEWPOINT_AUTHZ_CERT_ROLES`) maps each CN to its
-  permissions (`<namespace>:write` for Dewpoint's processes, `system:admin` for the platform admin only). A CN it
+  permissions (`<namespace>:write` for Dewpoint's processes, `temporal-system:admin` for the platform admin only:
+  Temporal's cluster scope; a bare `system` is refused). A CN it
   doesn't list has no role. The server reads it at startup.
 - **The internode certificate is a system-admin credential** on the internal frontend (Temporal gives it that role
   there; the namespace rules still apply). Guard it as the Temporal store's administrators are guarded (D12b): on the

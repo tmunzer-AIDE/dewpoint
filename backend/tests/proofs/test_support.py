@@ -65,7 +65,7 @@ def test_a_token_is_signed_by_its_key_set_and_expires() -> None:
     [published] = keys.jwks()["keys"]
     assert published["kid"] == "k1" and published["kty"] == "RSA" and published["alg"] == "RS256"
     now = int(time.time())
-    token = keys.sign({"sub": "proof-admin", "permissions": ["system:admin"], "aud": "dewpoint-temporal"},
+    token = keys.sign({"sub": "proof-admin", "permissions": ["temporal-system:admin"], "aud": "dewpoint-temporal"},
                       lifetime=60, now=now)  # fmt: skip
     header, claims = _claims(token, keys)
     assert header == {"alg": "RS256", "typ": "JWT", "kid": "k1"}
@@ -90,7 +90,8 @@ def test_the_run_directory_gives_each_container_only_its_part(tmp_path: Path) ->
     assert list((run.root / "authz" / "faults").iterdir()) == []
     assert json.loads((run.root / "jwks" / "jwks.json").read_text())["keys"][0]["kid"] == run.keys.kid
     roles = json.loads((run.root / "authz" / "roles.json").read_text())
-    assert roles == {"proof-admin": ["system:admin"], "dewpoint-proof": [f"{environment.NAMESPACE}:write"]}
+    # Temporal's cluster scope is temporal-system: "system" would be a namespace of that name (R3-B's lesson)
+    assert roles == {"proof-admin": ["temporal-system:admin"], "dewpoint-proof": [f"{environment.NAMESPACE}:write"]}
     secrets = [run.root / "db_password", run.root / "minio" / "root_user", run.root / "minio" / "root_password"]
     assert len({p.read_text() for p in secrets}) == 3 and all(len(p.read_text()) >= 24 for p in secrets)
     # the CAs' keys and the clients' certificates stay outside every mount

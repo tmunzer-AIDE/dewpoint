@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -187,7 +188,8 @@ func TestEveryFrontendRPCIsClassedAndTheTableNamesNoOther(t *testing.T) {
 
 func TestCertificateRoles(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "roles.json")
-	if err := os.WriteFile(path, []byte(`{"proof-admin": ["system:admin"], "dewpoint": ["proof-ns:write"]}`), 0o600); err != nil {
+	// the cluster's scope is Temporal's own, temporal-system, as its JWT claim mapper reads it (R3-B's lesson)
+	if err := os.WriteFile(path, []byte(`{"proof-admin": ["temporal-system:admin"], "dewpoint": ["proof-ns:write"]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	m, err := LoadCertClaims(path)
@@ -210,10 +212,17 @@ func TestCertificateRoles(t *testing.T) {
 	if got.Subject != "" || got.System != 0 {
 		t.Fatalf("no certificate: %+v", got)
 	}
-	if err := os.WriteFile(path, []byte(`{"x": ["system:owner"]}`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"x": ["temporal-system:owner"]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := LoadCertClaims(path); err == nil {
 		t.Fatal("an unknown role was accepted")
+	}
+	// "system" would be a namespace of that name to Temporal's JWT mapper, never the cluster: refused, not guessed
+	if err := os.WriteFile(path, []byte(`{"x": ["system:admin"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadCertClaims(path); err == nil || !strings.Contains(err.Error(), "temporal-system") {
+		t.Fatalf("an ambiguous system scope: %v", err)
 	}
 }

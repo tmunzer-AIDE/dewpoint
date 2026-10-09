@@ -9,18 +9,21 @@ import (
 	"strings"
 
 	"go.temporal.io/server/common/authorization"
+	"go.temporal.io/server/common/primitives"
 )
 
 // CertClaims is configuration A's claim mapper (mTLS only): a verified client certificate's common name mapped to its
-// permissions, in Temporal's JWT vocabulary (`system:admin`, `<namespace>:write`, …), from a JSON file read at
-// startup: {"<common name>": ["<namespace or system>:<read|write|worker|admin>", …]}. A name it doesn't list has no
-// role. Temporal sets the subject only from a verified chain, so an unverified certificate is no one.
+// permissions, in Temporal's JWT vocabulary (`temporal-system:admin` for the cluster, `<namespace>:write`, …), from a
+// JSON file read at startup: {"<common name>": ["<namespace or temporal-system>:<read|write|worker|admin>", …]}. A
+// name it doesn't list has no role. Temporal sets the subject only from a verified chain, so an unverified
+// certificate is no one. A bare "system" scope is refused at startup: Temporal's JWT mapper would read it as a
+// namespace of that name, never the cluster (R3-B's lesson), so the two mappers never disagree on it.
 type CertClaims struct {
 	byName map[string][]permission
 }
 
 type permission struct {
-	namespace string // "system": the cluster
+	namespace string // primitives.SystemLocalNamespace (temporal-system): the cluster
 	role      authorization.Role
 }
 
@@ -47,7 +50,12 @@ func LoadCertClaims(path string) (*CertClaims, error) {
 			namespace, roleName, ok := strings.Cut(p, ":")
 			role, known := roles[strings.ToLower(roleName)]
 			if !ok || !known || namespace == "" {
-				return nil, fmt.Errorf("certificate %q: permission %q isn't <namespace or system>:<role>", name, p)
+				return nil, fmt.Errorf("certificate %q: permission %q isn't <namespace or %s>:<role>", name, p,
+					primitives.SystemLocalNamespace)
+			}
+			if strings.EqualFold(namespace, "system") {
+				return nil, fmt.Errorf("certificate %q: permission %q: the cluster's scope is %s, as Temporal's JWT "+
+					"mapper reads it", name, p, primitives.SystemLocalNamespace)
 			}
 			m.byName[name] = append(m.byName[name], permission{namespace, role})
 		}
@@ -62,7 +70,7 @@ func (m *CertClaims) GetClaims(info *authorization.AuthInfo) (*authorization.Cla
 	}
 	claims.Subject = info.TLSSubject.CommonName
 	for _, p := range m.byName[claims.Subject] {
-		if strings.EqualFold(p.namespace, "system") {
+		if p.namespace == primitives.SystemLocalNamespace {
 			claims.System |= p.role
 			continue
 		}

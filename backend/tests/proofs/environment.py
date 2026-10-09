@@ -35,7 +35,8 @@ MTLS, JWT = "mtls", "jwt"  # configuration A (mutual TLS only) and B (a JWT bear
 NAMESPACE = "default"  # Dewpoint's namespace on the proof server: the one its tests' recorded deployment names
 SERVER_NAME = "temporal.dewpoint-m4.test"
 INTERNODE_NAME = "internode.dewpoint-m4.test"
-CLIENTS = {"proof-admin": ["system:admin"], "dewpoint-proof": [f"{NAMESPACE}:write"]}
+# Temporal's cluster scope is temporal-system (its JWT mapper's primitives.SystemLocalNamespace), not "system"
+CLIENTS = {"proof-admin": ["temporal-system:admin"], "dewpoint-proof": [f"{NAMESPACE}:write"]}
 
 
 @dataclass(frozen=True)
