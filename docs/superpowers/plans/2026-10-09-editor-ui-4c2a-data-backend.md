@@ -3,20 +3,37 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or
 > superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Revision 3, 2026-10-09.** Nothing is built before the owner approves this plan. Nothing is pushed and no PR is
-opened without the owner's OK in chat. Reviews pasted in chat held revision 1 (06962fd2) for eight defects in its code
-and revision 2 (80de9638) for three more; "Changes from revision 2" and "Changes from revision 1" below say how each
-was answered.
+**Revision 4, 2026-10-09.** Nothing is built before the owner approves this plan. Nothing is pushed and no PR is
+opened without the owner's OK in chat. Reviews pasted in chat held revision 1 (06962fd2) for eight defects in its code,
+revision 2 (80de9638) for three, and revision 3 (2f2da5d3) for one; the "Changes from revision N" sections below say
+how each was answered.
 
 The plan's code was checked before review on a scratch copy of 93a0dd61, never on a branch. Its blocks were applied
 as written, its tests run, and the plan corrected where they failed. Each correction since revision 1 has a test that
 reproduces the review's counterexample, run against the previous revision's code to see it fail:
-- the engine's tests: 1,202 passed;
+- the engine's tests: 1,224 passed;
 - the database and API tests the tasks touch (samples, scope, the worker's record, retention, the migration chain,
   OpenAPI, the workflow routes): passed;
 - ruff, mypy (strict) and the import contracts: clean.
 The whole backend suite wasn't run; Task 5 runs it, with the owner's OK. The executor still runs every step: the
 check is evidence, not a substitute.
+
+## Changes from revision 3
+
+It answers the review of 2f2da5d3, pasted in chat on 2026-10-09; its new tests fail without the change.
+
+1. **P1, a value that may not be an object lost its guards under combinators.** `_declared` stopped at a scalar
+   alternative, so `anyOf`/`oneOf`/`allOf` spellings owed nothing where the type-list spelling owed a guard; and no
+   spelling's `has()` test was itself guarded, though `has()` fails on a scalar.
+   - `_declared` now follows every way: a way that can't be an object, or a closed one without the field, lacks it;
+     only an open way that doesn't declare it stops the walk (open data, unchanged).
+   - A third obligation, `declared_non_object`: reading below a value that may not be an object, a `has()` test
+     included, needs `type(x) == map` first (the `shape` fact in `guards.py`). It discharges the null obligation too.
+   - Indexes and data whose type the schema doesn't say keep their rules (spec §4.3, amended to say so).
+   - Ruling 1; Task 2: `a value that may not be an object is guarded before any read` (5 spellings; the validator, and
+     native CEL on witness data: the unguarded and `has()`-only forms fail on the scalar, the guarded form is a value
+     on both), `equivalent spellings get the same obligations`, `open data and indexes keep their rules`, and the
+     `shape` fact's own tests; Task 4: `guards a value that may not be an object whatever its spelling`.
 
 ## Changes from revision 2
 
@@ -163,8 +180,10 @@ the task that owns it.
       to itself`, `reads a device's name as text in every kind of device`, `never promises less than the data holds`
       (a property test), `a field around a union keeps its type`, `reads every member of an all of`, `bounds the
       whole read, not only one position` (a work count), `merges alternatives that are the same`, `an integer is a
-      number`, `a field is sure only on a value sure to be an object`, `a field of a value that may not be an object
-      needs a guard`, `a number that must be an integer fills an integer`.
+      number`, `a field is sure only on a value sure to be an object`, `a value that may not be an object is guarded
+      before any read` (every spelling, unguarded and `has()`-only, in the validator and in native CEL), `equivalent
+      spellings get the same obligations`, `open data and indexes keep their rules`, `a number that must be an
+      integer fills an integer`.
 - **A step whose liveness the analysis can't settle.**
   - The cases: liveness too complex to analyse (`None`); a step in a loop body, inside a branch; a step after an
     error port.
@@ -251,6 +270,10 @@ it's wrong.
      field is sure to be there only when its way is sure to be an object and requires it: a value that may be a
      string (`type: ["object", "string"]`, or a string beside `properties`) may lack it. None of the shipped plugins'
      5,719 object schemas is affected: the 30 that declare `properties` without a `type` require nothing.
+   - A formula owes the same guards whatever the spelling (a type list, `anyOf`, `oneOf`, `allOf` around either):
+     `has()` for a field one way may lack, and `type(x) == map` before reading below a value that may not be an
+     object, a `has()` test included (the review of revision 3). This is a new obligation, a `cel.conditional_ref`
+     like the null one; a draft whose formula reads below such a value unguarded meets it on its next validation.
    - Why: the owner's ruling, and the data tree must type a device's `name` as text, as validation does. The cost:
      an existing draft may meet new diagnostics when it's next validated: a reference now typed that mismatches its
      field (`ref.type_mismatch`), a formula field declared optional in every alternative (`cel.conditional_ref`), or
@@ -496,8 +519,8 @@ entry follows its index, not its case, when cases are moved or removed.
 ### 4c-2a plan (2026-10-09)
 
 `docs/superpowers/plans/2026-10-09-editor-ui-4c2a-data-backend.md`. Reviews pasted in chat held revision 1
-(06962fd2) for eight defects in its code and revision 2 (80de9638) for three more; revision 3 answers them, each with a
-test that fails on the previous revision's code.
+(06962fd2) for eight defects in its code, revision 2 (80de9638) for three and revision 3 (2f2da5d3) for one; revision 4
+answers them, each with a test that fails on the previous revision's code.
 Its rulings (1–11) are proposed, and join this ledger as 114 onward only when the owner accepts the plan.
 ```
 
@@ -517,10 +540,13 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 **Files:**
 - Modify: `backend/src/dewpoint/engine/graph/schemas.py` (`Resolved`, new `alternatives`, `navigate`,
   `declared_optional`, `declared_nullable`; `_strip_null` stays for `target_schema`'s steps)
-- Modify: `backend/src/dewpoint/engine/graph/validate.py` (`_resolve_step`, `_resolve_loop`: carry `missing`)
+- Modify: `backend/src/dewpoint/engine/graph/validate.py` (`_resolve_step`, `_resolve_loop`: carry `missing`;
+  `_declared_non_object`, `_CelSite.non_object_fields`)
+- Modify: `backend/src/dewpoint/engine/cel/guards.py` (`shape`), `backend/src/dewpoint/engine/graph/cel_check.py`
+  (`non_object_fields`, `_non_object_prefixes`, the shape check)
 - Modify: `docs/superpowers/specs/2026-09-25-engine-core-design.md` (§4.3)
 - Test: `backend/tests/engine/graph/test_schemas.py`, `backend/tests/engine/graph/test_validate_cel.py`,
-  `backend/tests/engine/graph/test_validate.py`
+  `backend/tests/engine/graph/test_validate.py`, `backend/tests/engine/cel/test_guards.py`
 
 **Interfaces:**
 - Consumes: nothing.
@@ -535,7 +561,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `MAX_ALTERNATIVES = 64`, `MAX_UNION_DEPTH = 8`, `MAX_STEPS = 4096`;
   - `meet(a: frozenset[str], b: frozenset[str]) -> frozenset[str]`: the JSON types both allow, an integer being a
     number;
-  - `json_types` reads an `allOf` as what all its members allow (`meet`).
+  - `json_types` reads an `allOf` as what all its members allow (`meet`);
+  - `declared_non_object(root, path, start=None) -> tuple[int, ...]`, beside `declared_optional` and
+    `declared_nullable` (one walk, `_declared(…, mode)`);
+  - in `engine/cel/guards.py`, the leaf `shape`: `type(x) == map` proves x (and what it's read from) an object;
+  - in `cel_check`, `CelContext.non_object_fields`, and the `cel.conditional_ref` "`x` may not be an object in its
+    schema, so reading its fields fails when it isn't." (fix "Guard it with `type(x) == map`.").
 
 - [ ] **Step 1: Write the failing tests for `navigate`**
 
@@ -883,26 +914,123 @@ def test_a_field_every_alternative_declares_but_one_doesnt_require_needs_a_guard
     assert codes(one("trigger.device.ports == 1", input_schema=UNION_INPUT)) == []  # open data: one doesn't declare it
 
 
-# The review of revision 2: a field is sure only on a value sure to be an object; an integer is a number.
-VARIANTS: dict[str, Any] = {
+# The reviews of revisions 2 and 3: a value its schema says may not be an object is guarded with `type(x) == map`
+# before any read below it, a presence test included, whatever the spelling; an integer is a number.
+_OBJECT: dict[str, Any] = {
     "type": "object",
-    "properties": {
-        "text": {"allOf": [{"type": "string"}, {"properties": {"n": {"type": "integer"}}, "required": ["n"]}]},
-        "either": {"type": ["object", "string"], "properties": {"n": {"type": "integer"}}, "required": ["n"]},
-    },
-    "required": ["text", "either"],
+    "properties": {"n": {"type": "integer"}},
+    "required": ["n"],
+    "additionalProperties": False,
 }
+SPELLINGS: dict[str, dict[str, Any]] = {
+    "a type list": {**_OBJECT, "type": ["object", "string"]},
+    "anyOf": {"anyOf": [_OBJECT, {"type": "string"}]},
+    "oneOf": {"oneOf": [_OBJECT, {"type": "string"}]},
+    "allOf and anyOf": {"allOf": [{"anyOf": [_OBJECT, {"type": "string"}]}]},
+    "allOf and oneOf": {"allOf": [{"oneOf": [_OBJECT, {"type": "string"}]}, {"type": ["object", "string"]}]},
+}
+SAFE = "type(trigger.variant) == map && has(trigger.variant.n) && trigger.variant.n > 0"
+UNSAFE = ("trigger.variant.n > 0", "has(trigger.variant.n) && trigger.variant.n > 0")
 
 
-def test_a_field_of_a_value_that_may_not_be_an_object_needs_a_guard() -> None:
-    assert codes(one("trigger.either.n > 0", input_schema=VARIANTS)) == ["cel.conditional_ref"]
-    assert codes(one("type(trigger.either) == map && has(trigger.either.n) && trigger.either.n > 0",
-                     input_schema=VARIANTS)) == []  # fmt: skip
-    assert codes(one("trigger.text.n > 0", input_schema=VARIANTS)) != []  # a string has no fields: refused
+def holder(variant: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {"variant": variant},
+        "required": ["variant"],
+        "additionalProperties": False,
+    }
+
+
+@pytest.mark.parametrize("spelling", SPELLINGS)
+def test_a_value_that_may_not_be_an_object_is_guarded_before_any_read(spelling: str) -> None:
+    schema = holder(SPELLINGS[spelling])
+    scalar, record = {"variant": "accepted scalar"}, {"variant": {"n": 3}}
+    assert all(Draft202012Validator(schema).is_valid(w) for w in (scalar, record))  # both are data it admits
+    for expr in UNSAFE:  # publish refuses them: on the scalar, CEL fails
+        shape = [
+            d.message for d in check(one(expr, input_schema=schema)).diagnostics if "may not be an object" in d.message
+        ]
+        assert shape == [
+            "`trigger.variant` may not be an object in its schema, so reading its fields fails when it isn't."
+        ]
+        failed = evaluate(compile_checked(expr, {"trigger": T.MAP}), {"trigger": scalar})
+        assert failed.kind == "error", expr
+    assert codes(one(SAFE, input_schema=schema)) == []
+    for witness, expected in ((scalar, False), (record, True)):  # and the guarded read is a value on both
+        found = evaluate(compile_checked(SAFE, {"trigger": T.MAP}), {"trigger": witness})
+        assert (found.kind, found.value) == ("value", expected)
+
+
+def test_equivalent_spellings_get_the_same_obligations() -> None:
+    """The review of revision 3: the same constraints, spelt as a type list or through combinators, owe the same
+    guards: the object test, and the presence test for a field one way lacks."""
+    said = {
+        spelling: sorted(d.message for d in check(one(UNSAFE[0], input_schema=holder(variant))).diagnostics)
+        for spelling, variant in SPELLINGS.items()
+    }
+    assert len({tuple(m) for m in said.values()}) == 1, said
+    assert said["anyOf"] == [
+        "`trigger.variant.n` is optional in its schema, so it may be missing.",
+        "`trigger.variant` may not be an object in its schema, so reading its fields fails when it isn't.",
+    ]
+
+
+def test_open_data_and_indexes_keep_their_rules() -> None:
+    """Spec §4.3, unchanged: data the schema doesn't type needs no shape guard, and an element read by index is
+    read freely."""
+    untyped = holder({"properties": {"n": {"type": "integer"}}})
+    said = " ".join(d.message for d in check(one("trigger.variant.n > 0", input_schema=untyped)).diagnostics)
+    assert "may not be an object" not in said
+    listed = holder({"type": "array", "items": {"anyOf": [_OBJECT, {"type": "string"}]}})
+    assert codes(one("trigger.variant[0].n > 0", input_schema=listed)) == []
 ```
 
 The file's helper `one(expr, …, **settings)` writes `{"input_schema": INPUT, **settings}`, so passing
-`input_schema=UNION_INPUT` replaces the default input.
+`input_schema=…` replaces the default input. Add `from jsonschema import Draft202012Validator` and
+`from dewpoint.engine.cel.runtime import compile_checked, evaluate` to its imports: the spelling tests run each
+expression in native CEL on data the schema admits, to show why publish refuses it, and that the guarded form is a
+value.
+
+Append to `backend/tests/engine/cel/test_guards.py`:
+
+```python
+VARIANT = ("trigger", "variant")
+
+
+def _shaped(expr: str) -> bool:
+    """Whether every chain reading below trigger.variant knows it's an object (`type(...) == map`)."""
+    checked = runtime.compile_checked(expr, {"trigger": T.MAP}).checked
+    facts = guards.facts_at(checked.expr, guards.shape)
+    uses = [c for c in ast.chains(checked.expr) if c.path[:2] == VARIANT and len(c.path) > 2]
+    assert uses, "the expression must read below trigger.variant"
+    return all(VARIANT in facts[c.expr_id] for c in uses)
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        "type(trigger.variant) == map && trigger.variant.n > 0",
+        "map == type(trigger.variant) && has(trigger.variant.n)",
+        "!(type(trigger.variant) != map) && trigger.variant.n > 0",
+        "type(trigger.variant) != map || trigger.variant.n > 0",
+    ],
+)
+def test_an_object_test_guards_reads_below_it(expr: str) -> None:
+    assert _shaped(expr)
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        "has(trigger.variant.n) && trigger.variant.n > 0",  # has() itself fails on a scalar
+        "trigger.variant != null && trigger.variant.n > 0",  # not null isn't an object
+        "type(trigger.variant) == list || trigger.variant.n > 0",
+    ],
+)
+def test_other_tests_dont_say_its_an_object(expr: str) -> None:
+    assert not _shaped(expr)
+```
 
 Append to `backend/tests/engine/graph/test_validate.py` (it already has `G`, `ref`, the flow plugin's `CAT` and a
 `check(g)` helper):
@@ -941,7 +1069,8 @@ multi-alternative read, so the device, union, nullable and validator tests fail.
 
 - [ ] **Step 4: Write the merge**
 
-In `backend/src/dewpoint/engine/graph/schemas.py`, add `import json` to the imports, and replace `Resolved` with:
+In `backend/src/dewpoint/engine/graph/schemas.py`, add `import json` to the imports, `Literal` to `typing`'s, and
+replace `Resolved` with:
 
 ```python
 @dataclass(frozen=True)
@@ -980,7 +1109,9 @@ def meet(a: frozenset[str], b: frozenset[str]) -> frozenset[str]:
 ```
 
 Then replace everything from `def navigate(` up to `def element_schema(` (that is `navigate`, `declared_optional` and
-`declared_nullable`) with:
+`declared_nullable`) with the following. `_declared` answers the three obligations a formula's read can owe, from
+one walk: a field that may be absent (`has()`), null (`!= null`), or not an object (`type(x) == map`, the review of
+revision 3):
 
 ```python
 MAX_ALTERNATIVES = 64  # ways a value may match at one position, duplicates merged; past it, any value
@@ -1174,10 +1305,18 @@ def _end(root: Schema, frontier: list[Way], missing: bool, budget: _Budget) -> R
     return Resolved(standalone(root, merged), missing or nullable, missing=missing, nullable=nullable)
 
 
-def _declared(root: Any, path: Sequence[str | int], start: Any, nullable: bool) -> tuple[int, ...]:
-    """Positions in `path` of fields every alternative declares, where one of them doesn't require it (or where one of
-    them says it may be null). It stops where the schema stops describing the data: a field one alternative doesn't
-    declare, an unknown schema, a list index, past the bounds. Open data carries no such promise (spec §4.3)."""
+Obligation = Literal["optional", "nullable", "non_object"]
+
+
+def _declared(root: Any, path: Sequence[str | int], start: Any, mode: Obligation) -> tuple[int, ...]:
+    """Positions in `path` of declared fields a read can fail at: one that may be absent (`optional`), null
+    (`nullable`), or something other than an object (`non_object`: a scalar or a list beside an object, which has no
+    fields to read).
+
+    Every way of the value is followed (4c-2a ruling 1). A way that can't be an object, or a closed one without the
+    field, lacks it. It stops where the schema stops describing the data: an open way that doesn't declare the field, a
+    type it doesn't say, a list index, past the bounds. Data the schema doesn't declare carries no such promise, and
+    needs no guard (spec §4.3)."""
     if not isinstance(root, Mapping):
         return ()
     budget = _Budget()
@@ -1193,23 +1332,38 @@ def _declared(root: Any, path: Sequence[str | int], start: Any, nullable: bool) 
                 return tuple(out)
             ways += unfolded[0]
         fields: list[Way] = []
-        optional = False
+        absent = False
         for way in ways:
             types = _types(root, way)
+            if types is not None and "object" not in types:
+                absent = True  # a scalar or a list here: no fields
+                continue
             declared = tuple(
                 s["properties"][seg] for s in way if isinstance(s.get("properties"), Mapping) and seg in s["properties"]
             )
-            if not declared or (types is not None and "object" not in types):
-                return tuple(out)
+            if not declared:
+                if any(s.get("additionalProperties") is False for s in way):
+                    absent = True  # closed without it
+                    continue
+                return tuple(out)  # open: undeclared from here
             fields.append(declared)
             required = any(isinstance(s.get("required"), list) and seg in s["required"] for s in way)
-            optional |= not (required and types == frozenset({"object"}))
+            absent |= not (required and types == frozenset({"object"}))
         if not fields:
             return tuple(out)
-        if nullable:
-            if any((found := alternatives(root, f, budget)) is not None and found[1] for f in fields):
-                out.append(i)
-        elif optional:
+        if mode == "optional":
+            flagged = absent
+        else:
+            flagged = False
+            for field in fields:
+                found = alternatives(root, field, budget)
+                if found is None:
+                    continue
+                if mode == "nullable":
+                    flagged |= found[1]
+                else:
+                    flagged |= any((t := _types(root, w)) is not None and bool(t - {"object"}) for w in found[0])
+        if flagged:
             out.append(i)
         frontier = _merged(fields)
         if len(frontier) > MAX_ALTERNATIVES:
@@ -1218,13 +1372,19 @@ def _declared(root: Any, path: Sequence[str | int], start: Any, nullable: bool) 
 
 
 def declared_optional(root: Any, path: Sequence[str | int], start: Any = None) -> tuple[int, ...]:
-    """Positions in `path` of fields the schema declares but doesn't require: the value may be absent there."""
-    return _declared(root, path, start, nullable=False)
+    """Positions in `path` of fields the schema declares but that may be absent: CEL guards them with `has()`."""
+    return _declared(root, path, start, "optional")
 
 
 def declared_nullable(root: Any, path: Sequence[str | int], start: Any = None) -> tuple[int, ...]:
-    """Positions in `path` of fields the schema declares may be null (a `null` type, or a union with null)."""
-    return _declared(root, path, start, nullable=True)
+    """Positions in `path` of fields the schema declares may be null: CEL guards reads below them with `!= null`."""
+    return _declared(root, path, start, "nullable")
+
+
+def declared_non_object(root: Any, path: Sequence[str | int], start: Any = None) -> tuple[int, ...]:
+    """Positions in `path` of fields the schema declares may be something other than an object (a scalar or a list,
+    beside an object): CEL guards reads below them, `has()` included, with `type(x) == map`."""
+    return _declared(root, path, start, "non_object")
 ```
 
 Keep `_strip_null`: `target_schema`'s `_steps` still uses it. A position's state is a list of ways, each a
@@ -1234,6 +1394,97 @@ revision 1); every member of an `allOf` applies. Duplicates are merged at every 
 says (`meet`: an integer is a number), and object keywords count only for a value sure to be an object: a field is
 sure to be there only when the way's types are exactly `object`, and a way that can't be an object holds no field
 (the review of revision 2).
+
+A value the schema says may be something other than an object (a type list with a scalar, or alternatives with one,
+however spelt) has no fields: reading one fails in CEL, and so does a `has()` test on one. So a formula guards it with
+`type(x) == map` first, as it guards a nullable value with `!= null` (the review of revision 3). Data whose type the
+schema doesn't say, and an element read by index, keep their rules (spec §4.3).
+
+In `backend/src/dewpoint/engine/cel/guards.py` (it's the validator's: only `cel_check` imports it, so nothing a run
+does changes), add before `when_true`, and say in the module's docstring that facts may also be "known to be objects
+(`type(x) == map`)":
+
+```python
+def _type_operand(e: ast.Expr) -> ast.Expr | None:
+    """x, for `type(x)`."""
+    return args[0] if (args := _args(e, "type", 1)) is not None else None
+
+
+def _is_map_type(e: ast.Expr) -> bool:
+    return e.WhichOneof("expr_kind") == "ident_expr" and e.ident_expr.name == "map"
+
+
+def shape(e: ast.Expr, scope: frozenset[str], truth: bool) -> Facts:
+    """`type(x) == map` when true, `type(x) != map` when false: x is an object, and so is everything it's read from
+    (4c-2a: a value its schema says may not be an object is guarded so before its fields are read)."""
+    for function, holds in (("_==_", truth), ("_!=_", not truth)):
+        if holds and (args := _args(e, function, 2)) is not None:
+            for value, other in (args, args[::-1]):
+                operand = _type_operand(value)
+                if _is_map_type(other) and operand is not None and (path := ast.chain_path(operand, scope)) is not None:
+                    return _prefixes(path)
+    return _NONE
+```
+
+In `backend/src/dewpoint/engine/graph/cel_check.py`, add to `CelContext`:
+
+```python
+    def non_object_fields(self, path: RefPath) -> tuple[int, ...]:
+        """Positions in `path.rest` of fields its schema declares may be something other than an object."""
+        ...
+```
+
+add before `_wrapped_reads`:
+
+```python
+def _non_object_prefixes(chain: ast.Chain, ref: RefPath, ctx: CelContext) -> list[ast.Path]:
+    """Every prefix ending at a field its schema says may be something other than an object, with something read
+    below it: a field, or a presence test on one, which fails on a scalar too (the review of 4c-2a's revision 3)."""
+    offset = len(chain.path) - len(ref.rest)
+    return [chain.path[: offset + i + 1] for i in ctx.non_object_fields(ref) if offset + i + 1 < len(chain.path)]
+```
+
+and in `_references`, read the new facts beside the others, and check the shape before the null obligation (which an
+object test also discharges):
+
+```python
+    shapes = guards.facts_at(checked.expr, guards.shape)  # `type(x) == map`: an object, so not null either
+    non_null = guards.facts_at(checked.expr, guards.non_null)
+    unguarded_null: set[ast.Path] = set()
+    unguarded_shape: set[ast.Path] = set()
+```
+
+```python
+        for shaped in _non_object_prefixes(chain, ref, ctx):
+            if shaped in shapes[chain.expr_id] or shaped in unguarded_shape:
+                continue
+            unguarded_shape.add(shaped)
+            ok = False
+            ctx.error(
+                "cel.conditional_ref",
+                f"`{'.'.join(shaped)}` may not be an object in its schema, so reading its fields fails when it isn't.",
+                fix=f"Guard it with `type({'.'.join(shaped)}) == map`.",
+            )
+        for nullable in _nullable_prefixes(chain, ref, ctx):
+            if nullable in non_null[chain.expr_id] or nullable in shapes[chain.expr_id] or nullable in unguarded_null:
+                continue
+```
+
+In `backend/src/dewpoint/engine/graph/validate.py`, import `declared_non_object` beside `declared_nullable`, add to
+`_Validator` beside `_declared_nullable`:
+
+```python
+    def _declared_non_object(self, site: _Site, p: RefPath) -> tuple[int, ...]:
+        """Positions in `p.rest` the schema declares may not be objects: CEL guards reads below them (4c-2a)."""
+        return self._declared(site, p, declared_non_object)
+```
+
+and to `_CelSite`:
+
+```python
+    def non_object_fields(self, path: RefPath) -> tuple[int, ...]:
+        return self.v._declared_non_object(self.site, path)
+```
 
 In `backend/src/dewpoint/engine/graph/validate.py`, make the resolver carry `missing`:
 - In `_resolve_loop`, `return Resolved(None, bool(p.rest))` becomes `return Resolved(None, bool(p.rest), missing=bool(p.rest))`.
@@ -1256,7 +1507,12 @@ In `docs/superpowers/specs/2026-09-25-engine-core-design.md` §4.3, insert befor
     list may be shorter, or is null). It is any value when one alternative says nothing about it. A field no
     alternative can hold is `ref.unknown_field`. A union with `null` makes the value nullable. What surrounds a union
     applies to each branch, and every member of an `allOf` applies: a field one of them declares has its schema.
-    CEL's guards follow alternatives only where every one of them declares the field; elsewhere the data is open.
+    Types meet as JSON Schema says (an integer is a number), and object keywords speak only of objects. CEL's guards
+    follow every alternative that declares the field; an open one that doesn't makes the data undeclared from there.
+  - In CEL, a field the schema says may be something other than an object (a scalar or a list, beside an object,
+    however spelt) is guarded with `type(x) == map` before anything below it is read, a `has()` test included:
+    `has()` on a scalar fails too. Data whose type the schema doesn't say, and an element read by index, keep the
+    rules below.
 ```
 
 - [ ] **Step 6: Run the tests to see them pass, then the engine's graph tests**
@@ -1441,10 +1697,13 @@ Create `backend/tests/engine/graph/test_scope.py`:
 import uuid
 from typing import Any
 
+import pytest
+
 from dewpoint.engine.graph.scope import FIND_FOUND, Entry, Scope, scope
 from dewpoint.engine.graph.validate import ValidationContext
 from dewpoint.plugins.flow import PLUGIN as FLOW
 from dewpoint.plugins.mist import PLUGIN as MIST
+from tests.engine.graph.test_validate_cel import SPELLINGS, holder
 from tests.support.catalog import catalog
 from tests.support.graphs import G, cel, nid, ref
 from tests.support.plugins.testkit import TESTKIT
@@ -1618,6 +1877,17 @@ def test_tests_null_where_a_value_may_be_null_untyped_or_only_null() -> None:
     assert entries["steps.get.output.value"].formula.null_test  # type: ignore[union-attr]  # untyped
     assert not entries["trigger.site"].formula.null_test  # type: ignore[union-attr]
     assert not entries["steps.devices.output.results"].formula.null_test  # type: ignore[union-attr]  # `list != null`
+
+
+@pytest.mark.parametrize("spelling", SPELLINGS)
+def test_guards_a_value_that_may_not_be_an_object_whatever_its_spelling(spelling: str) -> None:
+    g = G().node("c", "flow.if@1", {"condition": True})
+    g.settings = {"input_schema": holder(SPELLINGS[spelling])}
+    n = by_path(scope(g.build(), CTX, nid("c"), "/condition", under="trigger.variant"))["trigger.variant.n"]
+    assert n.formula is not None and [x.cel() for x in n.formula.guards] == [
+        "type(trigger.variant) == map",
+        "has(trigger.variant.n)",
+    ]
 ```
 
 - [ ] **Step 2: Run them to see them fail**
@@ -2102,7 +2372,7 @@ Notes for the executor:
 - [ ] **Step 5: Run the tests to see them pass**
 
 Run: `… $PY -m pytest -q tests/engine/graph/test_scope.py`
-Expected: PASS, 14 tests.
+Expected: PASS, 19 tests (15 functions, one over 5 spellings).
 
 - [ ] **Step 6: The engine's graph tests, lint, types, imports; commit**
 
