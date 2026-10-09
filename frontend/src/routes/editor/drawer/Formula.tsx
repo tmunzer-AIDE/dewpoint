@@ -56,7 +56,8 @@ export function ModeSwitch({ label, mode, disabled, onChange }: {
           onClick={() => {
             if (mode !== m) onChange(m);
           }}
-          className={`min-h-8 px-3 text-small ${mode === m ? "bg-accent-soft font-semibold text-accent-ink" : "bg-surface text-ink enabled:hover:bg-surface-hover"}`}
+          // Disabled, the chosen mode still reads by its weight (the owner's ruling O2).
+          className={`min-h-8 px-3 text-small disabled:bg-disabled-bg disabled:text-muted ${mode === m ? "bg-accent-soft font-semibold text-accent-ink" : "bg-surface text-ink enabled:hover:bg-surface-hover"}`}
         >
           {m === "fixed" ? "Fixed" : "Formula"}
         </button>

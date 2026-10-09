@@ -460,3 +460,15 @@ it("clears nothing when the editor refuses the write, and says why", async () =>
   expect(config()).toEqual({ count: 5 }); // the editor's guards still hold
   expect(screen.getByText("Not written: the draft can't be changed now.")).toBeTruthy();
 });
+
+it("shows Edit as JSON pressed while it's on, by its weight and fill (the owner's ruling O1)", async () => {
+  showFields(PLAIN, { config: { query: { limit: 5 } } });
+  const toggle = () => screen.getByRole("button", { name: "Edit as JSON" });
+  expect(toggle().getAttribute("aria-pressed")).toBe("false");
+  // Segmented's pressed look, from its tokens: the state never by colour alone.
+  expect(toggle().className).toContain("aria-pressed:font-semibold");
+  expect(toggle().className).toContain("aria-pressed:bg-accent-soft");
+  expect(toggle().className).toContain("aria-pressed:text-accent-ink");
+  await userEvent.click(toggle());
+  expect(toggle().getAttribute("aria-pressed")).toBe("true");
+});

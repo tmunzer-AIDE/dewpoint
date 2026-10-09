@@ -39,6 +39,9 @@ export interface Drawer extends DrawerActions {
   workflowId: string;
   problems: Diagnostic[]; // the step's, from a current check
   expressions: Expression[]; // how its formulas run
+  /** A field that says how its formula runs, while it's shown: the drawer's own list leaves it out (the owner's
+   * ruling O4). Answers its undoing. */
+  explains?: (pointer: string) => () => void;
 }
 
 export const DrawerContext = createContext<Drawer | null>(null);

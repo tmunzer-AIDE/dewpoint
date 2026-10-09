@@ -1637,3 +1637,35 @@ it("goes to an edit not applied from its list, at its field", async () => {
   await userEvent.click(within(list).getByRole("button", { name: "Go to it: wait · Duration S" }));
   await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Duration S")));
 });
+
+it("gives a viewer's drawer controls a disabled look, their values legible (the owner's ruling O2)", async () => {
+  role = "viewer";
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, DELAY]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.delay@1", { duration_s: 5 }) }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "wait" }));
+  const drawer = screen.getByRole("complementary", { name: "wait" });
+  // The drawer's own: 4a's forms keep their look. The value's ink stays muted, never the fainter disabled ink.
+  for (const look of ["bg-disabled-bg", "border-disabled-line", "text-muted"]) {
+    expect(drawer.className).toContain(`[&_:is(input,select,textarea):disabled]:${look}`);
+  }
+  const fixed = within(drawer).getByRole<HTMLButtonElement>("button", { name: "Fixed" });
+  expect(fixed.disabled).toBe(true);
+  expect(fixed.className).toContain("disabled:bg-disabled-bg");
+  expect(fixed.className).toContain("font-semibold"); // the chosen mode still reads, by its weight
+});
+
+it("says how a formula runs once, under its field, and lists only what no field says (the owner's ruling O4)", async () => {
+  const runs = (field: string) => ({ node: "id-check", field, mode: "activity", reason: "it reads a large value" });
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, IF]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.if@1", { condition: formula("trigger.n > 1") }, "check") }));
+  answers.set(`POST ${BASE}/validate`, () => json({ ...valid(1), expressions: [runs("/condition"), runs("/elsewhere")] }));
+  await show();
+  await screen.findByRole("button", { name: "No problems" }, { timeout: 3000 });
+  await userEvent.click(screen.getByRole("button", { name: "check" }));
+  const drawer = screen.getByRole("complementary", { name: "check" });
+  await vi.waitFor(() => expect(within(drawer).getAllByText(/it reads a large value/)).toHaveLength(2));
+  const list = within(drawer).getByRole("heading", { name: "How its formulas run" }).parentElement!;
+  expect(list.textContent).toContain("/elsewhere"); // no field shows it: listed
+  expect(list.textContent).not.toContain("/condition"); // its field says it
+});

@@ -3,7 +3,7 @@
 // it, or neither (ruling 6); its control, chosen by its widget (ruling 5); the server's problems at it, with how a
 // formula runs (D19); and what's typed in it but not applied, with its reason and a Discard (ruling 18). Its typing
 // while it keeps focus is one undo step (ruling 8).
-import { useState, type MouseEvent, type ReactNode } from "react";
+import { useEffect, useState, type MouseEvent, type ReactNode } from "react";
 import { Button } from "../../../components/Button";
 import { fixedOf, formula, isPlainRef, kindOf, literal, referenceText, valueAt } from "../../../lib/config";
 import { canFixed, canFormula, emptyOf, startsAsFormula, type FieldSpec, type Widget } from "../../../lib/schemaForm";
@@ -166,7 +166,13 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
         <ModeSwitch label={spec.label} mode={mode} disabled={disabled} onChange={switchTo} />
       )}
       {mode === "fixed" && fixedOk && !computed && !hidden && kind === null && isContainer(spec.base) && !spec.holdsSensitive && (
-        <Button size="sm" aria-pressed={json} onClick={toggleJson}>Edit as JSON</Button>
+        // Pressed as Segmented's options are, by weight and fill from its tokens, while it's on (the owner's ruling O1).
+        <Button
+          size="sm" aria-pressed={json} onClick={toggleJson}
+          className="aria-pressed:bg-accent-soft aria-pressed:font-semibold aria-pressed:text-accent-ink"
+        >
+          Edit as JSON
+        </Button>
       )}
       {!disabled && held && stale && (
         <Button
@@ -211,6 +217,7 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
       : (controlFor(spec.widget === "formula" ? spec.base : spec.widget) ?? controlFor(spec.base) ?? JsonControl);
   const Held = held ? heldControl(held.kind, spec) : null;
   let body: ReactNode;
+  let says = false; // how its formula runs, said under it
   if (held && Held) {
     // What's held shows first, before what the value under it has become (a reference, a hidden secret, another
     // mode): it stays visible, and recoverable, until it's applied or discarded (the review of revision 3).
@@ -251,6 +258,7 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
     ));  // prettier-ignore
   } else if (mode === "formula") {
     const runs = runsText(drawer.expressions.find((x) => x.field === spec.pointer));
+    says = runs !== null;
     body = frame(
       (c) => <FormulaControl key={generation} {...c} spec={spec} value={value} literal={false} disabled={disabled} onChange={write} />,
       spec.hint,
@@ -277,6 +285,9 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
       joined(spec.hint, note),
     );
   }
+  // Said here, so the drawer's list of how its formulas run leaves it out (the owner's ruling O4).
+  const explains = drawer.explains;
+  useEffect(() => (says && explains ? explains(spec.pointer) : undefined), [says, explains, spec.pointer]);
   return (
     // The field is one focus region: what's typed in JSON or a port's name applies when focus leaves the region, so
     // moving to its own Discard or Clear, by keyboard or pointer, never applies it first (the review of revision 4).

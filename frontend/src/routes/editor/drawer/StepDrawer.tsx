@@ -4,7 +4,7 @@
 // schema, the required ones on Setup and the rest on Options (ruling 3). Then how its formulas run, and, for an
 // editor, 4b's actions: its "+" twins (WCAG 2.5.8), where it sits (2.5.7), its edges. Escape closes it and gives focus
 // back to the step. What its fields do to the draft goes through `actions`, the editor's (ruling 18).
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "../../../components/Button";
 import { Tabs } from "../../../components/Tabs";
 import { fieldsOf, tabsOf, type FieldSpec } from "../../../lib/schemaForm";
@@ -33,6 +33,13 @@ const NUDGES: { key: Nudge; glyph: string; word: string }[] = [
 ];
 
 type Tab = "setup" | "options";
+
+/** The drawer's disabled controls, its own and 4a's alike, look disabled: the disabled fill and line, their values in
+ * muted ink, which stays legible where the disabled ink wouldn't (the owner's ruling O2). 4a's forms elsewhere keep
+ * their look. */
+const DISABLED_CONTROLS =
+  "[&_:is(input,select,textarea):disabled]:bg-disabled-bg [&_:is(input,select,textarea):disabled]:border-disabled-line " +
+  "[&_:is(input,select,textarea):disabled]:text-muted";
 
 /** How many of the problems fall in these fields: a tab's count (ruling 3). */
 const counted = (problems: Diagnostic[], fields: FieldSpec[]) =>
@@ -93,7 +100,20 @@ export function StepDrawer({
   const top = new Set(fields.map((f) => segment(f.name)));
   // A problem no field shows: about the step as a whole, or a part its schema doesn't name (ruling 16).
   const general = mine.filter((d) => d.field === null || problemsAt([d], "", top).length > 0);
-  const drawer = { ...actions, node, type, editable, tenantId, workflowId, problems: mine, expressions };
+  // The formulas a shown field already says how it runs: the list at the end leaves them out, keeping those no field
+  // says (inside JSON, a field the form doesn't show, one on the other tab; the owner's ruling O4).
+  const [explained, setExplained] = useState<ReadonlySet<string>>(() => new Set());
+  const explains = useCallback((pointer: string) => {
+    setExplained((s) => new Set(s).add(pointer));
+    return () =>
+      setExplained((s) => {
+        const next = new Set(s);
+        next.delete(pointer);
+        return next;
+      });
+  }, []);
+  const unexplained = expressions.filter((x) => !explained.has(x.field));
+  const drawer = { ...actions, node, type, editable, tenantId, workflowId, problems: mine, expressions, explains };
   return (
     <DrawerContext.Provider value={drawer}>
       <aside
@@ -105,7 +125,7 @@ export function StepDrawer({
             onClose();
           }
         }}
-        className={`${SIDE} gap-5`}
+        className={`${SIDE} gap-5 ${DISABLED_CONTROLS}`}
       >
         <div className="flex items-start justify-between gap-3">
           <div className="flex min-w-0 flex-col gap-1">
@@ -182,11 +202,11 @@ export function StepDrawer({
             ]}
           />
         )}
-        {expressions.length > 0 && (
+        {unexplained.length > 0 && (
           <section className="flex flex-col gap-2">
             <h3 className="text-small font-semibold">How its formulas run</h3>
             <ul className="flex flex-col gap-1.5 text-small">
-              {expressions.map((x) => (
+              {unexplained.map((x) => (
                 <li key={x.field}>
                   <span className="font-mono text-meta">{x.field}</span>{" "}
                   {x.mode === "local" ? "Runs inline" : `Runs as a separate step: ${x.reason ?? "no reason given"}`}
