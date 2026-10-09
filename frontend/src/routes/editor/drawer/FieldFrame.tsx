@@ -46,7 +46,7 @@ const Required = () => <span className="text-small text-muted">(required)</span>
 export function FieldFrame({ label, required, hint, local, problems, actions, below, children }: Frame & {
   below?: ReactNode;
   children: (control: Described) => ReactNode;
-}) {
+}) {  // prettier-ignore
   const id = useId();
   const invalid = local !== null || problems.some((d) => d.severity === "error");
   return (

@@ -55,7 +55,7 @@ export function TextControl({ spec, value, literal, id, describedBy, invalid, di
       }}
       className={controlClass(invalid)}
     />
-  );
+  );  // prettier-ignore
 }
 
 export function NumberControl({ spec, value, literal, id, describedBy, invalid, disabled, onChange }: ControlProps) {
@@ -88,7 +88,7 @@ export function NumberControl({ spec, value, literal, id, describedBy, invalid, 
       }}
       className={controlClass(invalid)}
     />
-  );
+  );  // prettier-ignore
 }
 
 export function BooleanControl({ value, id, describedBy, invalid, disabled, onChange }: ControlProps) {
@@ -100,7 +100,7 @@ export function BooleanControl({ value, id, describedBy, invalid, disabled, onCh
       onChange={(e) => onChange(e.target.checked, false)}
       className="size-[20px] self-start accent-accent"
     />
-  );
+  );  // prettier-ignore
 }
 
 export function EnumControl({ spec, value, id, describedBy, invalid, disabled, onChange }: ControlProps) {
@@ -119,7 +119,7 @@ export function EnumControl({ spec, value, id, describedBy, invalid, disabled, o
         <option key={c} value={c}>{c}</option>
       ))}
     </select>
-  );
+  );  // prettier-ignore
 }
 
 /** JSON as the engine reads it (ruling 15). What's typed is the editor's until focus leaves its field, then applied
@@ -143,5 +143,5 @@ export function JsonControl({ spec, value, literal, id, describedBy, invalid, di
       }}
       className={`${controlClass(invalid)} py-2 font-mono text-small`}
     />
-  );
+  );  // prettier-ignore
 }

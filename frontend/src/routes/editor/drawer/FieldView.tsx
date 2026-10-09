@@ -14,7 +14,7 @@ import { FormulaControl, ModeSwitch, ReferenceView, SensitiveView, runsText, typ
 import {
   BooleanControl, CUT_NOTE, EnumControl, JSON_NOTE, JsonControl, LITERAL_NOTE, NumberControl, TextControl,
   type ControlProps,
-} from "./scalars";
+} from "./scalars";  // prettier-ignore
 import { ContainerParts, isContainer, partNames } from "./structured";
 
 type Control = (props: ControlProps) => ReactNode;
@@ -67,7 +67,7 @@ const keepFocus = (e: MouseEvent) => e.preventDefault();
 const startMode = (spec: FieldSpec, value: unknown): Mode =>
   kindOf(value) === "cel" ? "formula"
   : value !== undefined && value !== null ? "fixed"
-  : startsAsFormula(spec) ? "formula" : "fixed";
+  : startsAsFormula(spec) ? "formula" : "fixed";  // prettier-ignore
 
 export function FieldView({ spec }: { spec: FieldSpec }) {
   const drawer = useDrawer();
@@ -205,7 +205,7 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
         />
       ),
       joined(spec.hint, held.literal ? LITERAL_NOTE : held.kind === "json" ? JSON_NOTE : null),
-    );
+    );  // prettier-ignore
   } else if (hidden) {
     body = frame((c) => (
       <SensitiveView
@@ -213,7 +213,7 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
         onClear={clear}
         onFormula={() => reshape(() => emptyOf(spec), () => setChosen("formula"))}
       />
-    ));
+    ));  // prettier-ignore
   } else if (!fixedOk && !formulaOk) {
     // Only references or templates (4c-2's pills): what's there is shown, nothing is offered (ruling 6).
     body = frame(
@@ -231,7 +231,7 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
         onFixed={() => reshape(() => emptyOf(spec), () => setChosen("fixed"))}
         onFormula={() => reshape(() => (isPlainRef(value) ? formula(referenceText(value)) : emptyOf(spec)), () => setChosen("formula"))}
       />
-    ));
+    ));  // prettier-ignore
   } else if (mode === "formula") {
     const runs = runsText(drawer.expressions.find((x) => x.field === spec.pointer));
     body = frame(

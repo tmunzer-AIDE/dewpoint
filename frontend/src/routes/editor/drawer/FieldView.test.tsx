@@ -19,7 +19,7 @@ const PLAIN = typeWith({
     extra: { type: "array", items: {}, title: "Extra" },
     query: { type: "object", title: "Query", properties: { limit: { type: "integer", title: "Limit" } } },
   },
-});
+});  // prettier-ignore
 
 /** A group holding a secret, with a default that holds one too. */
 const HOLDER = typeWith({
@@ -30,7 +30,7 @@ const HOLDER = typeWith({
       properties: { key: { type: "string", title: "Key", "x-sensitive": true } },
     },
   },
-});
+});  // prettier-ignore
 
 const typedValues = () => [...document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input, textarea")].map((f) => f.value);
 

@@ -11,7 +11,7 @@ import { admission, setConfig, setOptions, valueAt, type Changed, type StepOptio
 import { fieldsOf, type Path } from "../../../lib/schemaForm";
 import {
   applyAll, applyUnapplied, baseOf, droppedWhy, isStale, lineageOf, unappliedId, within, type Unapplied, type UnappliedKind,
-} from "../../../lib/unapplied";
+} from "../../../lib/unapplied";  // prettier-ignore
 import type { Diagnostic, Expression, GraphDoc, NodeType } from "../../../lib/workflows";
 import { DrawerContext, type Drawer } from "./context";
 import { FieldView } from "./FieldView";
@@ -37,7 +37,7 @@ interface State {
 
 function Harness({ type, options, edits, state, children }: {
   type: NodeType; options: Options; edits: Edit[]; state: State; children: ReactNode;
-}) {
+}) {  // prettier-ignore
   const [, setVersion] = useState(0); // the draft and what's held live in `state`, which tests read; this redraws
   state.redraw = () => setVersion((v) => v + 1);
   const id = (kind: UnappliedKind, pointer: string) => unappliedId(NODE_ID, kind, pointer);
@@ -168,4 +168,4 @@ export function showFields(type: NodeType, options: Options = {}, children?: Rea
 /** A problem the server found at a field of the step. */
 export const problem = (field: string, message: string): Diagnostic => ({
   code: "config.invalid", severity: "error", message, fix: null, node: NODE_ID, field,
-});
+});  // prettier-ignore

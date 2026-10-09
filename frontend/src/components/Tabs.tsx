@@ -9,7 +9,7 @@ export function Tabs<T extends string>({ label, value, onChange, tabs }: {
   value: T;
   onChange: (value: T) => void;
   tabs: { value: T; label: string; content: ReactNode }[];
-}) {
+}) {  // prettier-ignore
   return (
     <TabsPrimitive.Root value={value} onValueChange={(v) => onChange(v as T)} className="flex min-w-0 flex-col gap-4">
       <TabsPrimitive.List aria-label={label} className="flex gap-1 border-b border-line">

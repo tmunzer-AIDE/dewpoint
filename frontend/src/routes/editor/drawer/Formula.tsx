@@ -34,7 +34,7 @@ export function FormulaControl({ spec, value, id, describedBy, invalid, disabled
       }}
       className={`${controlClass(invalid)} py-2 font-mono text-small`}
     />
-  );
+  );  // prettier-ignore
 }
 
 /** How the server says a formula runs (engine-core §5.10), in 4b's words. */
@@ -43,7 +43,7 @@ export const runsText = (x: Expression | undefined): string | null =>
 
 export function ModeSwitch({ label, mode, disabled, onChange }: {
   label: string; mode: Mode; disabled: boolean; onChange: (mode: Mode) => void;
-}) {
+}) {  // prettier-ignore
   return (
     // 1c's segmented look, never pills (outline §6): the chosen one pressed, by weight and fill.
     <div role="group" aria-label={`How ${label} is set`} className="inline-flex gap-px overflow-hidden rounded-lg border border-line-strong bg-line-strong">
@@ -67,7 +67,7 @@ export function ModeSwitch({ label, mode, disabled, onChange }: {
 
 export function ReferenceView({ value, id, describedBy, fixed, toFormula, disabled, onFixed, onFormula }: Described & {
   value: unknown; fixed: boolean; toFormula: boolean; disabled: boolean; onFixed: () => void; onFormula: () => void;
-}) {
+}) {  // prettier-ignore
   return (
     <div className="flex flex-col gap-2">
       <output id={id} aria-describedby={describedBy} className="block break-all rounded-lg border border-line px-3 py-2 font-mono text-small">
@@ -88,7 +88,7 @@ export function ReferenceView({ value, id, describedBy, fixed, toFormula, disabl
 
 export function SensitiveView({ id, describedBy, toFormula, disabled, onClear, onFormula }: Described & {
   toFormula: boolean; disabled: boolean; onClear: () => void; onFormula: () => void;
-}) {
+}) {  // prettier-ignore
   return (
     <div className="flex flex-col gap-2">
       <output id={id} aria-describedby={describedBy} className="block text-small">
