@@ -15,9 +15,11 @@ the Python SDK and the HTTP API from here; the `temporal` CLI from the pinned ad
 (deploy/temporal/cmd/proofclient) for every refused RPC, AdminService's included, and for the internal frontend, which
 it reaches from inside the server's network namespace with the internode certificate.
 
-D12.9-D12.11 and DW.2 run Dewpoint's own contract tests and probe on this server (`probe_temporal`): D12.11's third
-clause is run as the owner ruled at 2b-4a's M4 checkpoint (a recreated schedule's token restarts, so it matches an old
-one; incarnation ids are the protection), not as the 2026-10-05 wording, which the dev server disproved.
+D12.9-D12.11 and DW.2 run Dewpoint's own contract tests and probe on this server (`probe_temporal`). D12.11, as the
+owner ruled on the run request: the 2026-10-05 wording ("a token taken from a deleted schedule never matches a
+recreated one") doesn't hold, since Temporal restarts a recreated schedule's token at 1. That observation is pinned as
+a premise and doesn't count as D12.11; D12.11 passes on Dewpoint's incarnation fencing keeping the stale unpause off a
+late create.
 
 Passing doesn't prove the owner's deployment: real-target qualification reruns it there, mutating cases in an isolated
 test namespace and D12.4 through the namespace-scoped fault file, never the shared bucket."""
@@ -592,13 +594,28 @@ def test_d12_9_and_10_deletion_reads_back_not_found_and_the_prefix_query_finds_a
                                    "_visibility_finds_a_tenants_by_prefix")  # fmt: skip
 
 
-def test_d12_11_the_schedule_tests(server: Server) -> None:
+def test_d12_11_a_paused_schedule_fires_nothing_and_a_stale_update_is_discarded(server: Server) -> None:
     _pytest_on_this_server(
         server,
         f"{ERASURE}::test_a_paused_schedules_due_firings_are_neither_caught_up_nor_counted_but_matching_times_count_them",
         f"{CONTRACT}::test_a_stale_schedule_update_is_discarded_and_the_describe_after_it_shows_it",
-        f"{ERASURE}::test_a_deleted_and_recreated_schedule_restarts_its_token_so_a_stale_unpause_lands_on_it",
     )
+
+
+def test_d12_11_premise_temporal_restarts_a_recreated_schedules_token(server: Server) -> None:
+    """Observed, not D12.11: a deleted and recreated schedule's conflict token restarts at 1, so a token taken before
+    the deletion matches the recreated one and a stale unpause lands on it. Pinned on this server as the premise the
+    incarnation fencing answers; it proves no protection by itself."""
+    _pytest_on_this_server(
+        server, f"{ERASURE}::test_a_deleted_and_recreated_schedule_restarts_its_token_so_a_stale_unpause_lands_on_it"
+    )
+
+
+def test_d12_11_incarnation_fencing_keeps_a_stale_unpause_off_a_late_create(server: Server) -> None:
+    """D12.11 as the owner ruled: with an incarnation per create, recorded before the call, the late create lands
+    under an id no describe showed, the stale unpause targets another, the late one stays paused, and the erasure,
+    covering every incarnation, deletes it (tests/apps/erasure/test_incarnations.py, on this server)."""
+    _pytest_on_this_server(server, "tests/apps/erasure/test_incarnations.py")
 
 
 def test_dw_2_dewpoints_runs_start_and_complete_here(server: Server) -> None:
