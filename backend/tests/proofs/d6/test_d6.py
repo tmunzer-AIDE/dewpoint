@@ -32,7 +32,7 @@ from sqlalchemy import text
 from typer.testing import CliRunner
 
 from dewpoint.apps.cli.main import app
-from dewpoint.core.audit.anchor import signed_message
+from dewpoint.core.audit.anchor import signed_message, verify_anchors
 from dewpoint.core.audit.s3 import S3AnchorSink, anchor_key, bucket_problems, read_anchors
 from dewpoint.core.db import make_engine, make_sessionmaker
 from tests.apps.cli.test_audit_cli import _env, _seed
@@ -343,18 +343,28 @@ def test_d6_6c_verify_fails_on_a_hash_mismatch(pg_url, _test_users, monkeypatch,
     assert "bad anchor signature" not in failed.output and "chain broken" not in failed.output
 
 
+async def _verified(pg_url: str, entries: list[dict[str, Any]], lab: Lab) -> list[str]:
+    """verify_anchors itself, as the auditor's login, with no lag allowed: what `audit verify` checks after its hour."""
+    engine = make_engine(_url_for(pg_url, "dewpoint_auditor"))
+    try:
+        async with make_sessionmaker(engine)() as s, s.begin():
+            return await verify_anchors(s, entries, {"audit-1": lab.signing.public_key()}, max_lag=timedelta(0))
+    finally:
+        await engine.dispose()
+
+
 def test_d6_6d_verify_fails_on_a_missing_anchor(pg_url, _test_users, monkeypatch, lab: Lab) -> None:
-    """The database records a checkpoint whose anchor isn't in the bucket (written elsewhere, then withheld)."""
+    """An entry whose anchor never reached the bucket. `audit anchor` records its anchors in audit_anchors, not
+    checkpoints (those are pruning's), so a withheld anchor shows as an entry left unanchored past the allowed lag:
+    `audit verify`'s hour, none here (R2's fourth attempt: the earlier case looked for a missing checkpoint that
+    anchoring never makes). The bucket's real contents, read with the verifier's credentials."""
     prefix = _prefix()
-    api = _url_for(pg_url, "dewpoint_api")
-    asyncio.run(_seed(api))
-    _anchor(monkeypatch, pg_url, lab, prefix)
-    before = asyncio.run(_heads(pg_url))
-    asyncio.run(_seed(api))
-    _anchor(monkeypatch, pg_url, lab, _prefix())  # the new head's checkpoint, its anchor not under `prefix`
-    [scope] = [k for k in asyncio.run(_heads(pg_url)) if k not in before]
-    failed = _verify(monkeypatch, pg_url, lab, prefix)
-    assert failed.exit_code == 1 and f"{scope}:1: checkpoint not among the external anchors" in failed.output
+    scope, seq, _ = _anchored_then_another(monkeypatch, pg_url, lab, prefix)  # one scope anchored, this one withheld
+    listing = read_anchors(environment.s3(lab.verifier), BUCKET, prefix, kept=KEPT)
+    assert listing.problems == [] and len(listing.entries) == 1
+    problems = asyncio.run(_verified(pg_url, listing.entries, lab))
+    assert f"{scope}: rows up to seq {seq} older than 0:00:00 are not anchored" in problems, problems
+    assert not any(p for p in problems if not p.startswith(f"{scope}: rows up to")), problems
 
 
 def test_d6_6e_verify_fails_on_a_chain_break(pg_url, _test_users, monkeypatch, lab: Lab) -> None:
