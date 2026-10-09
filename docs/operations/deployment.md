@@ -283,6 +283,55 @@ runs are on refuses (409 `ingress_capacity_required`): its capacity stays whole.
 below the webhook work already outstanding is refused too (409 `ingress_capacity_below_outstanding`), until enough has
 drained. `GET` on the same path shows it, the limit it makes, what's outstanding and what's unset; production readiness (M6's enable command, D14's ingress switch) refuses while any value is.
 
+## Connecting to Temporal
+
+Every process that talks to Temporal (the worker, the dispatcher, the retention process and the CLI's Temporal
+commands) connects with one set of settings (engine 2b spec §10.4):
+
+| Setting | What it is |
+|---|---|
+| `DEWPOINT_TEMPORAL_TLS_CA` | the CA the server's certificate is verified against; the system roots when unset |
+| `DEWPOINT_TEMPORAL_TLS_SERVER_NAME` | the name verified, when it isn't the address's host |
+| `DEWPOINT_TEMPORAL_TLS_CERT`, `DEWPOINT_TEMPORAL_TLS_KEY` | mutual TLS: production's target |
+| `DEWPOINT_TEMPORAL_BEARER_TOKEN_FILE` | a file holding a JWT bearer token, read at connection and every minute |
+| `DEWPOINT_TEMPORAL_INSECURE_DEV` | plaintext: a recorded `development` environment only |
+
+- Set exactly one of mutual TLS or the token file. Both, neither, a certificate without its key, or a file that can't
+  be read stops the process at startup (exit 2 for a CLI command), the setting named, never its value.
+- The token isn't a Temporal Cloud API key: the server's JWT claim mapper checks it against its key set and audience.
+  A token replaced in its file is picked up within a minute by a running process, once that is proven on the D12
+  server (2b-4b's DW.3); until then, restart the processes after replacing it.
+- Production's Temporal is a self-hosted server with Dewpoint's authorizer (`deploy/temporal`), which keeps the
+  namespace's retention at most 30 days and its archival disabled, and records each namespace change in the audit
+  bucket. Temporal Cloud doesn't qualify.
+
+Check what the deployment reaches, read-only:
+
+```bash
+dewpoint temporal check
+```
+
+It reports the address, the namespace, its retention and its archival, and exits 1 on plaintext, a retention above
+30 days, archival enabled, or a Temporal it can't ask; 2 when the settings are refused or the namespace isn't the
+recorded one.
+
+### The namespace boundary
+
+Tenant erasure completes only on a verified namespace-change boundary (D3g). Once D12's proof passes against the
+server this deployment uses, a platform admin records it, tied to that proof:
+
+```bash
+dewpoint platform record-namespace-boundary --api https://dewpoint.example.com --email ops@example.com \
+  --proof d12-proof.jsonl --name d12-local --attestation "D12 passed on <where>, configurations A and B, <date>"
+```
+
+The command refuses a proof record with a failed case, or whose two inventories name different server builds; asks
+Temporal for the namespace's id under the same rules as `dewpoint temporal check`; then signs you in (password, then
+your authenticator's code) and asks the API, which audits the row (`platform.namespace_boundary.record`) with your id.
+Only the deployment's recorded namespace, and only a `development` deployment's for now: a production deployment's
+boundary waits for real-target qualification. Keep the name when you record again after rebuilding the server: an
+erasure relying on the boundary holds if the newest one's name changes.
+
 ## Encrypted payloads
 
 Every payload Dewpoint's workflows exchange with Temporal — a run's input and result, each step's input and output,
@@ -359,6 +408,10 @@ Schedules in step with the `schedules` table. A schedule's time zone is checked 
 data, which the shipped image holds (CI schedules a run in `Europe/Paris` through Compose to prove it). Don't edit a
 Dewpoint schedule in Temporal's UI: the dispatcher only tells its own updates apart, by the `dewpoint generation <n>`
 note it writes.
+
+Compose's services set `DEWPOINT_TEMPORAL_INSECURE_DEV=true` to reach the dev server in plaintext, which only a
+recorded `development` environment accepts: a Compose deployment recorded as `production` needs an external Temporal
+and the settings above.
 
 Compose's `migrate` service upgrades the schema, records the environment (`DEWPOINT_ENVIRONMENT`, `production` unless
 set) with the Temporal namespace (`DEWPOINT_TEMPORAL_NAMESPACE`, `default` unless set), and gives every tenant a data
