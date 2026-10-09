@@ -1310,3 +1310,20 @@ M55. **Nine minor findings, deferred** for the owner: hexadecimal and binary num
     installed type has one); valid JSON held through Escape (kept and counted, not applied); the heading's focus
     before a pending Go to (a double announcement). What the reviewer set aside is each the plan's, the owner's or
     4b's call, unchanged.
+
+### Owner, the final checkpoint reviewed (2026-10-09, pasted)
+
+Acceptance held at 97235e3 for two blockers: a formula pasted past the limit was cut by the browser and the rest
+written (`true` + 16,380 spaces + `&& false` saved as `true`), so M55's paste item isn't cosmetic; and clearing an
+optional list or map left focus on the page body. The milestone 3 fixes and the screenshots added no other blocker.
+
+### 4c-1, after the final checkpoint's review (2026-10-09)
+
+M56. **A formula past the engine's limit is held whole, never cut** (the paste item of M55, re-graded by its effect: a
+    silent change to the logic). The control has no `maxLength`; `formulaProblem` (16,384 characters, the engine's
+    `MAX_CEL`) holds longer text as an edit not applied, with why, in the control and when held edits are applied, and
+    the draft keeps what it had: "never applies a formula past the engine's limit, and says why", "holds a formula past
+    the engine's limit whole, never cut, and leaves the draft as it was", "keeps a formula past the limit out of the
+    draft, held and counted, never cut".
+M57. **Clearing an optional list or map lands on its Add**, the one control left: "lands on Add after a map is
+    cleared", "lands on Add after a list is cleared".
