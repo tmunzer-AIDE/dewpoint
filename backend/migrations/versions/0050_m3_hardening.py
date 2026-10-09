@@ -236,21 +236,25 @@ def _recorder_0039() -> str:
 
 RATES = {  # 0039's text: what it reads and how it refills and waits, the event rates derived once the capacity's set
     "    v_wait double precision;\n": "    v_wait double precision;\n    v_budget double precision;\n"
-    "    v_fanout integer;\n    v_event_rate double precision;\n    v_tenant_rate double precision;\n",
+    "    v_fanout integer;\n    v_widest integer;\n    v_event_rate double precision;\n"
+    "    v_tenant_rate double precision;\n",
     "    SELECT environment INTO v_environment FROM public.platform_settings WHERE id = 1;\n":
     "    SELECT environment, ingress_starts_per_s * ingress_headroom INTO v_environment, v_budget\n"
     "      FROM public.platform_settings WHERE id = 1;\n",
     "    -- The rate limits, by the clock as it is now,":
     "    -- The event rates (the owner's ruling 2 on the 2b-4b M3 checkpoint 2): once the deployment's ingress capacity\n"
-    "    -- is set, a tenant's at most the headroom's share of its measured starts, an endpoint's that divided by its\n"
-    "    -- enabled bindings (an event becomes a request for each); a rate configured lower stays.\n"
+    "    -- is set, the headroom's share of its measured starts divided by the enabled bindings an event can become a\n"
+    "    -- request for: an endpoint's by its own, its tenant's by the most any of its endpoints has (so its requests\n"
+    "    -- stay within the share however its events spread, the fresh M3 review 3's I2); a rate configured lower stays.\n"
     "    v_event_rate := e.event_per_s;\n"
     "    v_tenant_rate := c.event_per_s;\n"
     "    IF v_budget IS NOT NULL THEN\n"
     "        SELECT greatest(count(*), 1) INTO v_fanout FROM public.trigger_bindings b\n"
-    "         WHERE b.endpoint_id = p_endpoint AND b.enabled;\n"
+    "         WHERE b.tenant_id = v_tenant AND b.endpoint_id = p_endpoint AND b.enabled;\n"
+    "        SELECT greatest(coalesce(max(f.n), 0), 1) INTO v_widest FROM (SELECT count(*) AS n\n"
+    "          FROM public.trigger_bindings b WHERE b.tenant_id = v_tenant AND b.enabled GROUP BY b.endpoint_id) f;\n"
     "        v_event_rate := least(v_event_rate, v_budget / v_fanout);\n"
-    "        v_tenant_rate := least(v_tenant_rate, v_budget);\n"
+    "        v_tenant_rate := least(v_tenant_rate, v_budget / v_widest);\n"
     "    END IF;\n\n"
     "    -- The rate limits, by the clock as it is now,",
     "e.event_tokens + e.event_per_s * extract": "e.event_tokens + v_event_rate * extract",

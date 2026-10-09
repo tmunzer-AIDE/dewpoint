@@ -38,6 +38,9 @@ async def bound(owner: Any, tenant: uuid.UUID, endpoint_id: uuid.UUID, n: int, *
                              "u": user})  # fmt: skip
 
 
+# The buckets refill at their configured rate while a test sets up, a token or so: each test asks enough to see past it
+
+
 def events(n: int, at: int = 0) -> list[tuple[bytes | None, bytes | None, bytes]]:
     return [(key(at + i), digest(at + i), b"event") for i in range(n)]
 
@@ -51,8 +54,8 @@ async def test_an_endpoints_rate_is_its_share_of_the_measured_starts_by_its_enab
     configured = await record(ingress_sessionmaker, endpoint_id, events(2))
     assert configured == {"outcome": "rate_limited", "retry_after": 1}  # 2 events at its 10 a second
     await capacity(owner_sessionmaker, 8.0, 0.5)  # 4 starts a second: an event a second for 4 enabled bindings
-    derived = await record(ingress_sessionmaker, endpoint_id, events(2))
-    assert derived == {"outcome": "rate_limited", "retry_after": 2}
+    derived = await record(ingress_sessionmaker, endpoint_id, events(6))  # what refilled meanwhile: a token or so
+    assert derived["outcome"] == "rate_limited" and 4 <= derived["retry_after"] <= 6, derived
 
 
 async def test_a_tenants_rate_is_the_share_of_the_measured_starts_and_a_lower_configured_rate_stays(
@@ -68,3 +71,29 @@ async def test_a_tenants_rate_is_the_share_of_the_measured_starts_and_a_lower_co
     assert await record(ingress_sessionmaker, endpoint_id, events(8)) == {"outcome": "rate_limited", "retry_after": 2}
     await capacity(owner_sessionmaker, 800.0, 0.5)  # 400 a second: its configured 10 stays
     assert await record(ingress_sessionmaker, endpoint_id, events(8)) == {"outcome": "rate_limited", "retry_after": 1}
+
+
+async def test_a_tenants_rate_is_divided_by_its_largest_fan_out_whichever_endpoint_its_events_reach(
+    owner_sessionmaker, ingress_sessionmaker
+) -> None:  # fmt: skip
+    """The fresh M3 review 3's I2: an event becomes at most as many requests as the tenant's largest fan-out, so its
+    events come at most at the budget divided by it, and its requests at most at the budget, however they spread
+    over its endpoints."""
+    import hashlib
+
+    tenant, wide = await endpoint(owner_sessionmaker)
+    await bound(owner_sessionmaker, tenant, wide, 4)
+    narrow = uuid.uuid4()
+    async with owner_sessionmaker() as s, s.begin():
+        user = (await s.execute(text("select created_by from webhook_endpoints where id = :e"),
+                                {"e": wide})).scalar_one()  # fmt: skip
+        await s.execute(text("insert into webhook_endpoints (id, tenant_id, name, created_by, auth_kind, "
+                             "bearer_digest, dedupe_key, event_tokens, event_per_s) values (:e, :t, 'narrow', :u, "
+                             "'bearer', :d, 'sealed-dedupe-key', 1000, 1000)"),
+                        {"e": narrow, "t": tenant, "u": user, "d": hashlib.sha256(b"token").digest()})  # fmt: skip
+        await s.execute(text("insert into tenant_event_counters (tenant_id, event_tokens) values (:t, 0)"),
+                        {"t": tenant})  # fmt: skip
+    await bound(owner_sessionmaker, tenant, narrow, 1)
+    await capacity(owner_sessionmaker, 8.0, 0.5)  # 4 starts a second; 4 bindings at most: an event a second
+    limited = await record(ingress_sessionmaker, narrow, events(6))  # at 4 a second, about 2
+    assert limited["outcome"] == "rate_limited" and 4 <= limited["retry_after"] <= 6, limited

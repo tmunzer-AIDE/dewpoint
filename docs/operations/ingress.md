@@ -211,9 +211,11 @@ and audited (`platform.ingress_capacity.set`, with what it was), sets the three 
 - `--headroom`: the share of them ingress may use, above 0 and at most 1;
 - `--queue-wait-s`: the agreed wait, in seconds, a tenant's queued webhook requests may stand for.
 
-Once the first two are set, a tenant's events come at most at their product (starts × headroom a second) and an
-endpoint's at that divided by its enabled bindings: with 8 starts a second measured and a headroom of 0.5, a tenant's
-events at most 4 a second, an endpoint with 4 enabled bindings 1 a second. A rate configured lower stays; the bursts
+Once the first two are set, their product (starts × headroom a second) is what a tenant's requests may come at, and
+the event rates follow from it: an endpoint's divided by its enabled bindings, and the tenant's by the most enabled
+bindings any of its endpoints has, so its requests stay within it however its events spread. With 8 starts a second
+measured and a headroom of 0.5, an endpoint with 4 enabled bindings takes 1 event a second, and so does its tenant if
+none of its endpoints has more; an endpoint with 1 binding takes up to 4. A rate configured lower stays; the bursts
 stay as configured. With the wait set too, a tenant's queued webhook requests stop at starts × headroom × wait (never
 below 20, an endpoint's most bindings), counted as the dispatcher matches, under the tenant's counter row: dispatchers
 matching at once never queue past it. An event that doesn't fit stays pending, and the endpoint's and the tenant's
