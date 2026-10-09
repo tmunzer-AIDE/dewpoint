@@ -4,6 +4,7 @@ in-memory store and an in-process CEL evaluator (the real one needs Linux and it
 
 import asyncio
 import dataclasses
+import json
 import uuid
 from collections.abc import AsyncIterator, Iterable, Iterator, Sequence
 from contextlib import asynccontextmanager
@@ -175,8 +176,17 @@ class MemoryStore:
 
     # --- claims (2b spec §3), checked as the database store checks them ------------------------------------------
 
-    async def fetch_many(self, tenant_id: str, run_id: str, claim_ids: Sequence[str]) -> dict[str, StoredClaim]:
-        return {c: await self.fetch(tenant_id, run_id, c) for c in dict.fromkeys(claim_ids)}  # each checked first
+    async def read_level(self, tenant_id: str, run_id: str, claim_ids: Sequence[str], room: int) -> Any:
+        from dewpoint.apps.worker.claims import Level
+
+        held = [(c, await self.fetch(tenant_id, run_id, c)) for c in dict.fromkeys(claim_ids)]  # each checked first
+        level = Level()
+        for claim_id, stored in held:
+            level.nested.update(h.id for _, h in handles_in(stored.value))
+            size = len(json.dumps(stored.value))
+            if level.kept_bytes + size <= room:
+                level.kept[claim_id], level.kept_bytes = stored, level.kept_bytes + size
+        return level
 
     async def nested(self, tenant_id: str, run_id: str, claim_ids: Sequence[str]) -> set[str]:
         held = [await self.fetch(tenant_id, run_id, c) for c in dict.fromkeys(claim_ids)]  # each checked first

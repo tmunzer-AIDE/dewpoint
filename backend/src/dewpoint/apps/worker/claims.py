@@ -31,6 +31,7 @@ from dewpoint.engine.cel.bind import BindingError, bind_item, check_json
 from dewpoint.engine.cel.record import ExpressionRecord
 from dewpoint.engine.handles import (
     MISSING,
+    NESTING_MAX,
     RESERVED,
     ClaimRef,
     Fetch,
@@ -90,9 +91,10 @@ class ClaimStore(Protocol):
         reads one and let go once its handles are taken; one this run may not read refuses them all."""
         ...
 
-    async def fetch_many(self, tenant_id: str, run_id: str, claim_ids: Sequence[str]) -> dict[str, StoredClaim]:
-        """These whole claims, for `run_id`, in one session: each checked as `fetch` checks one, before any is read
-        (one this run may not read refuses them all), their ciphertexts read in groups bounded by bytes."""
+    async def read_level(self, tenant_id: str, run_id: str, claim_ids: Sequence[str], room: int) -> "Level":
+        """These claims, for `run_id`, in one session, each checked as `fetch` checks one before any is read (one
+        this run may not read refuses them all), read in groups bounded by bytes: the handles each nests, and the
+        values of those that fit in `room` bytes (their ciphertexts'), kept; the others let go with their group."""
         ...
 
     async def write(
@@ -633,17 +635,43 @@ async def _closure(claim_ids: Sequence[str], nested: Callable[[Sequence[str]], A
     return sorted(seen)
 
 
-async def _prefetched(store: ClaimStore, tenant: str, run: str, value: Any) -> dict[str, StoredClaim]:
-    """Every claim `value`'s handles reach, as `run` reads them (`fetch_many`), a level at a time and `CLOSURE_READS`
-    a read: what resolving `value` reads one claim at a time, and its closure (the owner's ruling on the 2b-4b M3
-    checkpoint 2: a sub-flow's input of 10,000 claims took 38.5 s of its crossing's minute, read a claim a session)."""
+# A crossing's claim values kept for its resolution at once, at most: their ciphertexts' bytes, a group's (2b-4b M3)
+HELD_BYTES = 16 * 1024 * 1024
+
+
+@dataclass
+class Level:
+    """A level of a closure as `read_level` reads it: the values kept, their bytes, and the handles they all nest."""
+
+    kept: dict[str, StoredClaim] = field(default_factory=dict)
+    kept_bytes: int = 0
+    nested: set[str] = field(default_factory=set)
+
+
+async def _walked(store: ClaimStore, tenant: str, run: str, value: Any) -> tuple[dict[str, StoredClaim], list[str]]:
+    """Every claim `value`'s handles reach, as `run` reads them, a level at a time and `CLOSURE_READS` a read: the
+    closure (granted to the child), and the values of the first read, up to `HELD_BYTES`, which its resolution reads
+    one claim at a time otherwise (the owner's ruling on the 2b-4b M3 checkpoint 2: a sub-flow's input of 10,000
+    claims took 38.5 s of its crossing's minute, a claim a session; the fresh M3 review 3's I1: never every value at
+    once). Nested past `NESTING_MAX`, refused, as resolving it is."""
     held: dict[str, StoredClaim] = {}
+    seen: set[str] = set()
+    room = HELD_BYTES
     level = sorted({h.id for _, h in handles_in(value)})
-    while level:
+    for depth in range(NESTING_MAX + 2):
+        if not level:
+            break
+        if depth > NESTING_MAX:
+            raise NestingError("Claims nested too deep.")
+        seen.update(level)
+        found: set[str] = set()
         for at in range(0, len(level), CLOSURE_READS):
-            held.update(await store.fetch_many(tenant, run, level[at : at + CLOSURE_READS]))
-        level = sorted({h.id for c in level for _, h in handles_in(held[c].value)} - held.keys())
-    return held
+            read = await store.read_level(tenant, run, level[at : at + CLOSURE_READS], room)
+            held.update(read.kept)
+            room -= read.kept_bytes
+            found |= read.nested
+        level = sorted(found - seen)
+    return held, sorted(seen)
 
 
 def _from(held: dict[str, StoredClaim], fetch: Fetch) -> Fetch:
@@ -723,7 +751,7 @@ async def child_input(data: ChildInput, store: ClaimStore) -> ChildInputResult:
     seed = uuid.uuid5(_INPUTS, data.child_run_id)
     made = _Reclassified(seed, uuid.UUID(data.child_run_id), uuid.UUID(data.root_run_id))
     try:
-        held = await _prefetched(store, tenant, run, data.value)  # the closure, read once: checked, granted below
+        held, closure = await _walked(store, tenant, run, data.value)  # read once: checked, granted below
         fetch = _from(held, _fetcher(store, tenant, run))
         refused = reasons(schema, (await resolve_value(data.value, fetch)).value)
         if refused:
@@ -731,8 +759,7 @@ async def child_input(data: ChildInput, store: ClaimStore) -> ChildInputResult:
         value = await _reclassify(data.value, from_schema(schema), fetch, made)
     except UNREADABLE:
         raise ApplicationError(UNAVAILABLE, type=CLAIM_UNAVAILABLE, non_retryable=True) from None
-    closure = sorted(held)
-    del held, fetch  # the values read: the split and the writes need only the handles
+    del held, fetch  # the values kept: the split and the writes need only the handles
     try:
         done = split(
             value,

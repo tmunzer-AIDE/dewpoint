@@ -174,3 +174,47 @@ async def test_a_claim_of_a_sub_flows_input_its_run_may_not_read_refuses_it_gran
         await crossed(tenant, version, root, run, child, value, DbRunStore(worker_sessionmaker, FixtureKeys()))
     assert (refused.value.type, refused.value.non_retryable) == (CLAIM_UNAVAILABLE, True)
     assert await granted_to(worker_sessionmaker, tenant, child) == 0
+
+
+async def test_a_sub_flows_input_holds_at_once_only_its_byte_budget_of_the_claims_it_reads(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, worker_sessionmaker, api_settings, monkeypatch
+) -> None:  # fmt: skip
+    """The fresh M3 review 3's I1 (the owner's ruling 3 on the M3 checkpoint 2 kept the crossing's byte-bounded
+    memory): a handle pointing at one item of a collected list of 200 large items. The crossing grants the closure,
+    every item, and resolves the one it points at; it never holds the items' values together: their ciphertexts a
+    group at a time, and the values kept for resolution within `HELD_BYTES`, the rest read again alone."""
+    import tracemalloc
+
+    from sqlalchemy import text
+
+    from dewpoint.apps.worker import claims as worker_claims
+    from dewpoint.engine.handles import ClaimRef
+    from tests.apps.test_admission import published
+    from tests.support.graphs import G
+
+    monkeypatch.setattr(service, "GROUP_BYTES", 256 * 1024)
+    monkeypatch.setattr(worker_claims, "HELD_BYTES", 1024 * 1024, raising=False)
+    item_schema = {"type": "object", "properties": {"item": {"type": "object", "properties": {
+        "pad": {"type": "string"}}, "additionalProperties": False}}, "required": ["item"],
+        "additionalProperties": False}  # fmt: skip
+    graph = G().node("e", "testkit.echo@1", {"value": 1}).data() | {"settings": {"input_schema": item_schema}}
+    ctx, wf = await published(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, graph)
+    async with owner_sessionmaker() as s:
+        version = (await s.execute(text("select id from workflow_versions where workflow_id = :w"), {"w": wf})).scalar()
+    root, run, child = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    store = DbRunStore(worker_sessionmaker, FixtureKeys())
+    items = [service.NewClaim(uuid.uuid4(), {"pad": f"{n:05d}" + "x" * 65_000}, (), root, root) for n in range(200)]
+    collected = service.NewClaim(uuid.uuid4(), [ClaimRef(str(i.id)).to_json() for i in items], (), root, root)
+    await store.write(str(ctx.tenant_id), [*items, collected], kind="output", step_id=None, iteration_key=None)
+    every = [str(c.id) for c in (*items, collected)]
+    await store.grant(str(ctx.tenant_id), granted_by=str(root), to=str(run), claim_ids=every, root_run_id=str(root))
+    value = {"item": ClaimRef(str(collected.id), "/0").to_json()}
+    tracemalloc.start()
+    try:
+        result = await crossed(ctx.tenant_id, str(version), root, run, child, value, store)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert result.reasons == []
+    assert await granted_to(worker_sessionmaker, ctx.tenant_id, child) == 201  # the closure, every item
+    assert peak < 6 * 1024 * 1024, peak  # the 200 items are 13 MB: never together

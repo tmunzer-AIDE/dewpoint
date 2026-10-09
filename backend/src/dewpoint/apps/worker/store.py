@@ -19,6 +19,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio.exceptions import ApplicationError
 
+from dewpoint.apps.worker.claims import Level
 from dewpoint.core.claims import secret_index
 from dewpoint.core.claims import service as claims
 from dewpoint.core.claims.cipher import ClaimCipher
@@ -147,16 +148,21 @@ class DbRunStore:
             )
         return StoredClaim(found.value, found.sensitive_pointers)
 
-    async def fetch_many(self, tenant_id: str, run_id: str, claim_ids: Sequence[str]) -> dict[str, StoredClaim]:
-        """These claims, read in groups bounded by bytes, each checked first (2b-4b M3: a sub-flow's input)."""
+    async def read_level(self, tenant_id: str, run_id: str, claim_ids: Sequence[str], room: int) -> Level:
+        """These claims, read in groups bounded by bytes, each checked first: the handles they nest, and the values
+        that fit in `room`, kept; each group let go once read (2b-4b M3: a sub-flow's input)."""
         cipher = self._claims()
-        found: dict[str, StoredClaim] = {}
+        level = Level()
         async with self.sessionmaker() as s, s.begin():
             await tenant_scope(s, uuid.UUID(tenant_id))
             async for group in claims.fetch_groups(s, cipher, uuid.UUID(tenant_id), run_id=uuid.UUID(run_id),
                                                    claim_ids=[uuid.UUID(c) for c in claim_ids]):  # fmt: skip
-                found.update({str(c): StoredClaim(v.value, v.sensitive_pointers) for c, v in group.items()})
-        return found
+                for claim_id, stored in group.items():
+                    level.nested.update(h.id for _, h in handles_in(stored.value))
+                    if level.kept_bytes + stored.size <= room:
+                        level.kept[str(claim_id)] = StoredClaim(stored.value, stored.sensitive_pointers)
+                        level.kept_bytes += stored.size
+        return level
 
     async def nested(self, tenant_id: str, run_id: str, claim_ids: Sequence[str]) -> set[str]:
         """The handles these claims nest, read in groups bounded by bytes, each group let go once scanned (2b-4b M3;

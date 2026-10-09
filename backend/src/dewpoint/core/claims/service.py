@@ -63,6 +63,7 @@ class NewClaim:
 class Stored:
     value: Any
     sensitive_pointers: tuple[str, ...]
+    size: int = 0  # its ciphertext's bytes, where a grouped read knows them (`fetch_groups`)
 
 
 def _plain(value: Any) -> bytes:
@@ -225,7 +226,8 @@ async def fetch_groups(
                 plain = await cipher.open(str(tenant_id), str(claim_id), rows[claim_id].ciphertext)
             except ClaimUnreadableError as e:
                 raise ClaimUnavailableError("A claim that doesn't open under its tenant.") from e
-            out[claim_id] = Stored(json.loads(plain), tuple(rows[claim_id].sensitive_pointers))
+            out[claim_id] = Stored(json.loads(plain), tuple(rows[claim_id].sensitive_pointers),
+                                   readable[claim_id].size)  # fmt: skip
         del rows
         yield out
 
