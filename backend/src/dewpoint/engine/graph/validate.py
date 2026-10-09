@@ -13,6 +13,8 @@ from typing import Any
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 
+from dewpoint.engine.cel import ast as cel_ast
+from dewpoint.engine.cel import runtime as cel_runtime
 from dewpoint.engine.cel.record import ExpressionRecord
 from dewpoint.engine.graph import cel_check
 from dewpoint.engine.graph import liveness as lv
@@ -318,11 +320,23 @@ def _declassify(
     return out, tuple(declassified)
 
 
+def _reads_nothing(expr: str) -> bool:
+    """Whether a CEL expression reads no run data: fn-1 is pure, so it gives the same value every run, written into
+    the workflow as a literal would be. One that doesn't parse is reported where it's checked."""
+    try:
+        parsed = cel_runtime.parse(expr)
+    except cel_runtime.CompileError:
+        return False
+    return not cel_ast.global_idents(parsed.expr)
+
+
 def _writes_sensitive(
     value: Value, root: Mapping[str, Any], pointer: Pointer, target: Mapping[str, Any] | None
 ) -> bool:
     """Whether a value envelope writes a literal at a sensitive position (§3.8): the literal itself, a part of it the
-    target schema marks, or a reference's or a template's default. Null and the empty string are written too."""
+    target schema marks, a reference's or a template's default, a template's text (all of it, without a reference),
+    or a CEL expression that reads nothing. Null and the empty string are written too; empty text beside a reference
+    writes nothing."""
     if isinstance(value, LiteralValue):
         return is_marked(root, pointer) or bool(target is not None and marked_positions(value.value, target))
     if not is_marked(root, pointer):
@@ -330,8 +344,10 @@ def _writes_sensitive(
     if isinstance(value, RefValue):
         return value.has_default
     if isinstance(value, TemplateValue):
-        return any(isinstance(p, TemplateRef) and p.default is not None for p in value.parts)
-    return False
+        refs = [p for p in value.parts if isinstance(p, TemplateRef)]
+        text = "".join(p for p in value.parts if isinstance(p, str))
+        return not refs or bool(text) or any(p.default is not None for p in refs)
+    return _reads_nothing(value.expr)
 
 
 _SCHEMA_LITERALS = ("default", "enum", "const", "examples")  # what a schema writes of its instances

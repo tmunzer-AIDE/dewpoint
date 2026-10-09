@@ -45,6 +45,59 @@ def test_a_literal_at_a_sensitive_config_position_is_refused(token: Any) -> None
     assert ("sensitive.literal", "/token") in diagnostics(g)
 
 
+@pytest.mark.parametrize(
+    "token",
+    [
+        template("tok-1234"),  # a template of text alone is the literal it writes
+        template("tok-", "1234"),
+        template(""),
+        cel('"tok-1234"'),  # a formula that reads nothing gives the same value every run: fn-1 is pure
+        cel('"tok-" + "1234"'),
+        cel('""'),
+        cel('["tok-1234"].map(t, t)[0]'),  # its own variables aren't run data
+    ],
+)
+def test_a_template_or_formula_that_writes_a_fixed_value_is_refused(token: Any) -> None:
+    g = G().node("s", SEND, {"token": token})
+    assert diagnostics(g) == [("sensitive.literal", "/token")]
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        template("Bearer ", {"ref": "trigger.tok"}),
+        template({"ref": "trigger.tok"}, "-1234"),
+        template({"ref": "trigger.tok"}, "", {"ref": "trigger.tok"}, ":"),
+    ],
+)
+def test_a_template_writing_text_beside_a_reference_is_refused(token: Any) -> None:
+    """Its text is written into the workflow as it is, as a literal part of a sensitive object is: the validator can't
+    tell a prefix from a secret, so it refuses both."""
+    g = G().node("s", SEND, {"token": token})
+    g.settings = {"input_schema": {"type": "object", "properties": {"tok": SECRET}, "required": ["tok"]}}
+    assert diagnostics(g) == [("sensitive.literal", "/token")]
+
+
+def test_a_template_of_references_and_a_formula_that_reads_the_run_are_fine() -> None:
+    trigger = {"type": "object", "properties": {"tok": SECRET, "n": {"type": "integer"}}, "required": ["tok", "n"]}
+    for token in (
+        template({"ref": "trigger.tok"}),
+        template("", {"ref": "trigger.tok"}, "", {"ref": "trigger.tok"}),  # empty text writes nothing
+        cel("trigger.tok"),
+        cel("trigger.n > 0 ? trigger.tok : trigger.tok + trigger.tok"),
+    ):
+        g = G().node("s", SEND, {"token": token})
+        g.settings = {"input_schema": trigger}
+        assert diagnostics(g) == [], token
+
+
+@pytest.mark.parametrize("value", [template("k3y-value"), cel('"k3y-" + "value"')])
+def test_a_fixed_template_or_formula_assigned_to_a_sensitive_variable_is_refused(value: Any) -> None:
+    g = G().node("v", SET, {"assignments": {"key": value}})
+    g.settings = {"vars_schema": {"type": "object", "properties": {"key": {**SECRET, "type": ["string", "null"]}}}}
+    assert diagnostics(g) == [("sensitive.literal", "/assignments/key")]
+
+
 def test_a_reference_without_a_default_and_plain_literals_are_fine() -> None:
     g = G().node("s", SEND, {"token": ref("trigger.tok"), "detail": "plain text"})
     g.settings = {"input_schema": {"type": "object", "properties": {"tok": SECRET}, "required": ["tok"]}}
