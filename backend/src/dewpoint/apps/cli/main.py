@@ -60,6 +60,8 @@ from dewpoint.core.plugins.registry import (
     list_node_types,
     sync_plugins,
 )
+from dewpoint.core.temporal_connect import TemporalConfigError
+from dewpoint.core.temporal_connect import connect as temporal_connect
 from dewpoint.core.tenancy import lifecycle as tenant_lifecycle
 from dewpoint.core.tenancy.service import NotKeyAdminError, ensure_tenant_event_keys, ensure_tenant_keys
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
@@ -422,26 +424,35 @@ def keys_reseal_ingress(batch_size: int = typer.Option(100, min=1, max=1000)) ->
     typer.echo("resealed " + " ".join(f"{k}={v}" for k, v in asyncio.run(_run()).items()))
 
 
-async def _verified_namespace(s: AsyncSession, settings: Settings) -> None:
+async def _verified_namespace(s: AsyncSession, settings: Settings) -> str:
     """Engine 2b spec §2.1, before a key command asks Temporal anything: this process's namespace is the deployment's
     recorded one. A mismatch, or none recorded, ends the command (exit 2) before any connection: never read as Temporal
-    being unreachable, an unknown answer (the final review's I1)."""
+    being unreachable, an unknown answer (the final review's I1). The recorded environment, which §10.4's settings are
+    checked against."""
     async with s.begin():
         try:
-            await check_namespace(s, settings.temporal_namespace)
+            return (await check_namespace(s, settings.temporal_namespace)).environment
         except (EnvironmentNotRecordedError, EnvironmentMismatchError) as e:
             typer.echo(f"ERROR: {e}")
             raise typer.Exit(2) from None
 
 
-async def _namespace_retention(settings: Settings) -> timedelta | None:
+def _refused(e: TemporalConfigError) -> typer.Exit:
+    """§10.4's settings refused: the command ends (exit 2), never read as Temporal being unreachable."""
+    typer.echo(f"ERROR: {e}")
+    return typer.Exit(2)
+
+
+async def _namespace_retention(settings: Settings, environment: str) -> timedelta | None:
     """The Temporal namespace's retention, as it reports it (engine 2b spec §6.4's payload floor); None when it can't
     be read: the floor then can't be reckoned, and nothing retires."""
     try:
-        client = await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
+        client = await temporal_connect(settings, environment)
         answer = await client.workflow_service.describe_namespace(
             DescribeNamespaceRequest(namespace=settings.temporal_namespace)
         )
+    except TemporalConfigError as e:
+        raise _refused(e) from None
     except Exception as e:  # unreachable, refused: unknown, never assumed
         typer.echo(f"WARNING: the namespace's retention couldn't be read ({type(e).__name__})")
         return None
@@ -449,14 +460,16 @@ async def _namespace_retention(settings: Settings) -> timedelta | None:
     return timedelta(seconds=ttl.seconds, microseconds=ttl.nanos // 1000)
 
 
-async def _run_histories(settings: Settings, s: AsyncSession, tenant_id: uuid.UUID, version: int, *,
-                         record: bool) -> retire.RunProof | None:  # fmt: skip
+async def _run_histories(settings: Settings, environment: str, s: AsyncSession, tenant_id: uuid.UUID, version: int,
+                         *, record: bool) -> retire.RunProof | None:  # fmt: skip
     """What Temporal shows of the tenant's run executions that could hold `version` (the owner's M3 rulings), in the
     caller's transaction (`record`: whether to record what it shows); None when Temporal can't be asked."""
     try:
-        client = await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
+        client = await temporal_connect(settings, environment)
         before = await retire.candidates_before(s, tenant_id, version)
         return await evidence.prove(s, client, tenant_id, before=before, record=record)
+    except TemporalConfigError as e:
+        raise _refused(e) from None
     except Exception as e:  # unreachable, refused: unknown, never assumed
         typer.echo(f"WARNING: the run executions couldn't be asked about ({type(e).__name__})")
         return None
@@ -485,14 +498,14 @@ def keys_retire(
     settings = get_settings()
 
     async def _run(s: AsyncSession) -> tuple[list[retire.Check], bool]:
-        if tenant_id:
-            await _verified_namespace(s, settings)
-        retention = await _namespace_retention(settings) if tenant_id else None
+        environment = await _verified_namespace(s, settings) if tenant_id else ""
+        retention = await _namespace_retention(settings, environment) if tenant_id else None
         async with s.begin():
             if not confirm:  # a dry run changes nothing, what it reads of Temporal included (the final review's I1)
                 await s.execute(text("SET TRANSACTION READ ONLY"))
             await tenant_scope(s, tenant_id)
-            histories = await _run_histories(settings, s, tenant_id, version, record=confirm) if tenant_id else None
+            histories = (await _run_histories(settings, environment, s, tenant_id, version, record=confirm)
+                         if tenant_id else None)  # fmt: skip
             if not confirm:
                 found = await retire.checks(s, tenant_id, version, namespace_retention=retention,
                                             run_histories=histories)  # fmt: skip
@@ -517,11 +530,13 @@ def keys_retire(
 ATTESTED = "every dispatcher from before 0039 stopped and unable to restart; no image from before 0039 deployable"
 
 
-async def _admission_pollers(settings: Settings) -> list[str] | None:
+async def _admission_pollers(settings: Settings, environment: str) -> list[str] | None:
     """The identities polling the admission queue, as Temporal shows them; None when it can't be asked."""
     try:
-        client = await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
+        client = await temporal_connect(settings, environment)
         return await admission_pollers(client)
+    except TemporalConfigError as e:
+        raise _refused(e) from None
     except Exception as e:  # unreachable, refused: unknown, never assumed
         typer.echo(f"WARNING: the admission queue's pollers couldn't be read ({type(e).__name__})")
         return None
@@ -547,12 +562,12 @@ def keys_tick_cutover(
     settings = get_settings()
 
     async def _run(s: AsyncSession) -> str:
-        await _verified_namespace(s, settings)
+        environment = await _verified_namespace(s, settings)
         async with s.begin():
             existing = (await s.execute(text("SELECT at FROM tick_cutover"))).scalar_one_or_none()
         if existing is not None:
             return f"already recorded at {existing.isoformat()}"
-        pollers = await _admission_pollers(settings)
+        pollers = await _admission_pollers(settings, environment)
         if pollers is None:
             raise typer.Exit(3)
         old = [p for p in pollers if tick_contract.IDENTITY not in p]
@@ -619,12 +634,12 @@ def schedules_inventory_cutover(
     settings = get_settings()
 
     async def _run(s: AsyncSession) -> str:
-        await _verified_namespace(s, settings)
+        environment = await _verified_namespace(s, settings)
         async with s.begin():
             existing = (await s.execute(text("SELECT at FROM schedule_inventory_cutover"))).scalar_one_or_none()
         if existing is not None:
             return f"already recorded at {existing.isoformat()}"
-        pollers = await _admission_pollers(settings)
+        pollers = await _admission_pollers(settings, environment)
         if pollers is None:
             raise typer.Exit(3)
         old = [p for p in pollers if tick_contract.IDENTITY not in p]
@@ -876,14 +891,16 @@ async def _temporal() -> AsyncIterator[Client]:
     try:
         sessionmaker = make_sessionmaker(engine)
         try:
-            await verify_environment(sessionmaker, settings)
+            recorded = await verify_environment(sessionmaker, settings)
         except (EnvironmentNotRecordedError, EnvironmentMismatchError) as e:
             typer.echo(f"ERROR: {e}")
             raise typer.Exit(2) from None
         keys = KeyringKeys(sessionmaker, Keyring(KekSet.from_settings(settings)))
-        yield await Client.connect(
-            settings.temporal_address, namespace=settings.temporal_namespace, data_converter=data_converter(keys)
-        )
+        try:
+            client = await temporal_connect(settings, recorded.environment, data_converter=data_converter(keys))
+        except TemporalConfigError as e:
+            raise _refused(e) from None
+        yield client
     finally:
         await engine.dispose()
 

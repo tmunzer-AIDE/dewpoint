@@ -50,6 +50,7 @@ from tests.core.ingress.support import RECORD
 from tests.core.retention.support import request, run, sql, tenant
 from tests.probes.ingress_load import FAST
 from tests.support.keys import FIXTURE_CONVERTER
+from tests.support.temporal import probe_temporal
 
 pytestmark = [
     pytest.mark.skipif(not os.environ.get("DEWPOINT_PROBE"), reason="a probe, run by hand (DEWPOINT_PROBE)"),
@@ -64,10 +65,10 @@ RESULTS: list[dict[str, Any]] = []
 
 @pytest.fixture(scope="module")
 async def server() -> AsyncIterator[WorkflowEnvironment]:
-    # A history near Temporal's own limit of 51,200 events takes more signals than the dev server lets an execution have
+    # A history near Temporal's own limit of 51,200 events takes more signals than the dev server lets an execution
+    # have; an external server (DEWPOINT_PROBE_TEMPORAL_ADDRESS, 2b-4b M4's D12 server) sets that in its own config
     extra = ["--dynamic-config-value", "history.maximumSignalsPerExecution=60000"]
-    async with await WorkflowEnvironment.start_local(data_converter=FIXTURE_CONVERTER,
-                                                     dev_server_extra_args=extra) as environment:  # fmt: skip
+    async with probe_temporal(data_converter=FIXTURE_CONVERTER, dev_server_extra_args=extra) as environment:
         yield environment
     out = os.environ.get("DEWPOINT_PROBE_OUT")
     if out:

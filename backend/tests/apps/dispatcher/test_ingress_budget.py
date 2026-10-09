@@ -553,22 +553,25 @@ async def test_a_capacity_change_waits_for_an_admission_in_flight_and_counts_it(
 async def test_a_matcher_that_never_asks_the_budget_still_cannot_commit_past_the_limit(
     stack, owner_sessionmaker, ingress_sessionmaker, dispatch_sessionmaker, monkeypatch
 ) -> None:  # fmt: skip
-    """The owner's ruling on the M3 checkpoint 5: a dispatcher still on the code before 0050 (an upgrade rolling out)
-    queues an event's requests without asking, however many bindings were added since it was accepted. The database
-    refuses any commit that adds past the limit, whoever wrote it: the match rolls back, its event pending, and the
-    limit holds. 9 outstanding of 40; two events of credit 1 grown to 20 bindings: the first fits (28), the second
-    (47) doesn't."""
+    """The owner's ruling on the M3 checkpoint 5: a matcher that queues an event's requests without asking (here, the
+    check stubbed out) can't commit past the limit: the database refuses any commit adding past it, whoever wrote it.
+    And the matcher takes that refusal as a full backlog (the ruling on M4's design: tolerant code, run in a release
+    before the migration that brings the refusal): the event pending, its tenant passed by for the pass, so its later
+    events keep their order. 10 outstanding of 40; three events of credit 1 grown to 20 bindings: the first fits (29),
+    the second doesn't (48), the third waits behind it."""
     await limited(owner_sessionmaker, 40)
     ready, other = await a_tenant(stack, 1), await a_tenant(stack, 1)
-    await deliver(ingress_sessionmaker, ready, 2)
+    await deliver(ingress_sessionmaker, ready, 3)
     await widened(stack, ready, 19)
     assert (await deliver(ingress_sessionmaker, other, 7))["outcome"] == "recorded"
     monkeypatch.setattr(matching, "MATCHED", text("SELECT cast(:credit AS bigint) + cast(:k AS bigint) >= 0"))
-    assert await matching.match_once(dispatch_sessionmaker, KEYS, matching.Verified()) == {"matched": 8, "error": 1}
+    assert await matching.match_once(dispatch_sessionmaker, KEYS, matching.Verified()) == {
+        "matched": 8, "backlog_full": 1, "busy_tenant": 1,
+    }  # fmt: skip
     async with owner_sessionmaker() as s:
         found = await s.execute(text("select count(*) from inbound_events where status = 'pending'"))
-        assert found.scalar_one() == 1
-    assert await exact(owner_sessionmaker) == 28
+        assert found.scalar_one() == 2
+    assert await exact(owner_sessionmaker) == 29
 
 
 async def test_a_commit_that_adds_nothing_net_goes_through_above_the_limit(

@@ -2,10 +2,12 @@
 from functools import lru_cache
 
 from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import SettingsConfigDict
+
+from dewpoint.core.temporal_connect import TemporalConnection
 
 
-class Settings(BaseSettings):
+class Settings(TemporalConnection):  # Temporal's §10.4 security settings with the others
     model_config = SettingsConfigDict(env_prefix="DEWPOINT_", env_file=".env", extra="ignore")
 
     database_url: str

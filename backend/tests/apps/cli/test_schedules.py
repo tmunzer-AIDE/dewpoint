@@ -92,7 +92,7 @@ def _cutover_env(pg_url: str, monkeypatch) -> list[str]:
     from dewpoint.apps import tick_contract
     from dewpoint.apps.cli import main as cli
 
-    async def admission_pollers(settings: object) -> list[str]:
+    async def admission_pollers(settings: object, environment: str) -> list[str]:
         return [f"4243@a-new-dispatcher {tick_contract.IDENTITY}"]
 
     monkeypatch.setattr(cli, "_admission_pollers", admission_pollers)
@@ -114,7 +114,7 @@ def test_the_inventory_cutover_is_recorded_once_after_its_catch_up_and_never_whi
 
     pollers: list[str] = ["4242@an-old-dispatcher"]
 
-    async def admission_pollers(settings: object) -> list[str]:
+    async def admission_pollers(settings: object, environment: str) -> list[str]:
         return pollers
 
     monkeypatch.setattr(cli, "_admission_pollers", admission_pollers)

@@ -37,6 +37,7 @@ from datetime import timedelta
 import structlog
 from cryptography.exceptions import InvalidTag
 from sqlalchemy import func, or_, select, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import undefer
 
@@ -80,6 +81,7 @@ EVENT_ATTEMPTS = 5  # event-specific attempts before an unconfirmed failure is d
 BACKOFF = timedelta(seconds=30)  # after the first event-specific failure, doubling (§15, provisional)
 PAGES = 4  # a pass picks this many batches' candidates: one busy (D9) gives its place to the next; a batch is still
 # all it tries
+BUDGET_PAST = "DPB02"  # the database's bound on the ingress budget (0050), refusing a commit adding past the limit
 ROLLED_BACK = (GATE_OFF, ENVIRONMENT_NOT_RECORDED, TENANT_ERASING, SKIPPED, BUSY, BUSY_TENANT, BACKLOG_FULL)
 ALERTS = "dewpoint.matching.alerts"  # in the session's `info`: alerts logged once its transaction commits
 
@@ -202,12 +204,20 @@ async def match_event(
     """One event's matching transaction: `matched`, `unmatched`, or why it waits or was passed by. Its alerts are
     logged once it has committed: a transaction rolled back alerts on nothing (the owner's M3 review)."""
     async with sessionmaker() as s:
-        async with s.begin():
-            outcome = await _match(s, keys, verified, tenant_id, event_id, endpoint_id)
-            if outcome in ROLLED_BACK:
-                await s.rollback()
-            else:
-                await _before_commit()
+        try:
+            async with s.begin():
+                outcome = await _match(s, keys, verified, tenant_id, event_id, endpoint_id)
+                if outcome in ROLLED_BACK:
+                    await s.rollback()
+                else:
+                    await _before_commit()
+        except DBAPIError as e:
+            # The budget's bound refusing the commit (0050's `ingress_budget_bounded`, SQLSTATE DPB02): a full backlog,
+            # rolled back, its tenant passed by so its later events keep their order (2b-4b M4: tolerant code, run in
+            # a release before the migration that brings a refusal)
+            if getattr(e.orig, "sqlstate", None) == BUDGET_PAST:
+                return BACKLOG_FULL
+            raise
         for event, fields in s.info.pop(ALERTS, []):  # committed
             log.error(event, **fields)
         return outcome

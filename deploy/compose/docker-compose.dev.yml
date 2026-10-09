@@ -5,7 +5,20 @@
 # (DEWPOINT_TEMPORAL_NAMESPACE). The migrate step then records `development`: runs start with no gate, and every
 # process that talks to Temporal refuses any other namespace. The label proves nothing about the data: synthetic
 # fixtures only. Plain Compose stays `production`, and gated.
+# Temporal here is Compose's dev server, without TLS: every process that talks to it is let connect in plaintext,
+# which it refuses unless the recorded environment is `development` (engine 2b spec §10.4). Plain Compose, recorded
+# `production`, needs an external Temporal with verified TLS and mTLS or a bearer token (docs/operations/deployment.md).
+x-plaintext-temporal: &plaintext-temporal
+  DEWPOINT_TEMPORAL_INSECURE_DEV: "true"
 services:
   migrate:
     environment:
       DEWPOINT_ENVIRONMENT: development
+  worker:
+    environment: *plaintext-temporal
+  dispatcher:
+    environment: *plaintext-temporal
+  retention:
+    environment: *plaintext-temporal
+  api:  # it never talks to Temporal itself; its container also runs the CLI's Temporal commands
+    environment: *plaintext-temporal

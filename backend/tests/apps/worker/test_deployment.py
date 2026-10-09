@@ -7,6 +7,7 @@ import asyncio
 import contextlib
 import uuid
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 from temporalio.api.enums.v1 import EventType, VersioningBehavior
@@ -187,8 +188,9 @@ async def test_a_run_stays_pinned_through_a_workflow_task_the_sdk_completes_by_i
                 await handle.terminate()  # a run that hung isn't left running on the shared server
 
 
-async def recorded(*args: object) -> None:
-    """A deployment whose record matches the worker's namespace (engine 2b spec §2.1)."""
+async def recorded(*args: object) -> object:
+    """A deployment whose record matches the worker's namespace (engine 2b spec §2.1): a development one."""
+    return SimpleNamespace(environment="development")
 
 
 async def test_a_worker_set_to_makes_its_build_current_once_it_polls(

@@ -31,6 +31,8 @@ from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.db import MAX_OVERFLOW, POOL_SIZE, make_engine, make_sessionmaker
 from dewpoint.core.egress import allowlist
 from dewpoint.core.egress.guard import Guard, SystemResolver
+from dewpoint.core.temporal_connect import connect as temporal_connect
+from dewpoint.core.temporal_connect import keep_token_fresh
 from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, cel_queue
 from dewpoint.engine.runtime.workflow import LoopBatch, RunGraph
@@ -113,14 +115,12 @@ async def run(settings: Settings) -> None:
     engine, guard_engine = engines(settings.database_url)
     try:
         sessionmaker = make_sessionmaker(engine)
-        await verify_environment(sessionmaker, settings)
+        recorded = await verify_environment(sessionmaker, settings)
         keyring = Keyring(KekSet.from_settings(settings))
         report = reporter(sessionmaker, uuid.uuid4(), this_build())
         await start_healthy(lambda: self_check(keyring, sessionmaker), report)
         keys = KeyringKeys(sessionmaker, keyring)
-        client = await Client.connect(
-            settings.temporal_address, namespace=settings.temporal_namespace, data_converter=data_converter(keys)
-        )
+        client = await temporal_connect(settings, recorded.environment, data_converter=data_converter(keys))
         store = DbRunStore(sessionmaker, keys)  # claims, sealed with the same keys (engine 2b spec §3.1)
         guard = Guard(resolver=SystemResolver(), allowlist=allowlist.source(sessionmaker))  # plugins-3 D7, D8
         plugins = installed_plugins()
@@ -146,6 +146,7 @@ async def run(settings: Settings) -> None:
         tasks = [w.run() for w in workers]
         tasks.append(plugin_calls.run())
         tasks.append(watch(lambda: self_check(keyring, sessionmaker), report, stop))
+        tasks.append(keep_token_fresh(client, settings))  # bearer mode: a rotated token, without a restart
         if settings.worker_set_current:
             tasks.append(promote(client))
         await asyncio.gather(*tasks)

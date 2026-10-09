@@ -9,6 +9,7 @@ import asyncio
 import uuid
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -117,7 +118,6 @@ async def test_a_worker_process_opens_at_most_its_budgeted_connections(monkeypat
     """The fix-pass review's R10: every engine the worker's `run()` makes, up to where its workers would poll, counted
     where each is made (the one factory every engine goes through), with the most connections each may open: the
     budget, CONNECTIONS. Its plugin calls' LISTEN takes a connection of the shared pool's."""
-    from types import SimpleNamespace
 
     from dewpoint.apps.worker import main
     from dewpoint.core import db
@@ -138,7 +138,8 @@ async def test_a_worker_process_opens_at_most_its_budgeted_connections(monkeypat
             coroutine.close()
         raise Polling
 
-    async def recorded(*args: object) -> None: ...
+    async def recorded(*args: object) -> object:
+        return SimpleNamespace(environment="development")
 
     async def connect(*args: object, **kwargs: object) -> object:
         return object()

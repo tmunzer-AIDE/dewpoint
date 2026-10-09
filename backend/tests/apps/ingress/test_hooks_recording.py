@@ -10,6 +10,7 @@ import os
 import uuid
 
 import pytest
+import structlog
 from sqlalchemy import text
 
 from dewpoint.apps.ingress import main
@@ -168,6 +169,21 @@ async def test_past_the_deployments_limit_is_429_with_a_wait_from_its_starts(app
     later = await _post(app, endpoint_id, '{"n": 1}')
     assert (later.status_code, later.json(), later.headers["retry-after"]) == (429, {"error": "backlog_full"}, "5")
     assert await events_of(owner_sessionmaker, endpoint_id) == []
+
+
+def test_an_outcome_this_build_doesnt_know_is_503_with_a_retry_after_never_a_500() -> None:
+    """2b-4b M4, the owner's ruling on online upgrades: an ingress process older than the recording function it calls
+    (a later migration's new refusal) answers as for an outage, never with an error a sender may give up on."""
+    from dewpoint.apps.ingress.recording import respond
+
+    with structlog.testing.capture_logs() as logs:
+        unknown = respond({"outcome": "a_refusal_from_a_later_release"})
+    assert (unknown.status_code, unknown.body, unknown.headers.get("retry-after")) == (
+        503, b'{"error":"unavailable"}', "30",
+    )  # fmt: skip
+    assert [(entry["event"], entry["outcome"]) for entry in logs] == [
+        ("ingress_outcome_unknown", "a_refusal_from_a_later_release")
+    ]
 
 
 def test_a_delivery_that_can_never_fit_the_deployments_limit_is_413_without_a_retry_after() -> None:

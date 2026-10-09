@@ -37,7 +37,10 @@ from dewpoint.core.crypto.kek import KekSet
 from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.crypto.keys import KeySource
 from dewpoint.core.db import make_engine, make_sessionmaker
+from dewpoint.core.models.platform import PlatformSettings
 from dewpoint.core.platform.service import record_run_duration
+from dewpoint.core.temporal_connect import connect as temporal_connect
+from dewpoint.core.temporal_connect import keep_token_fresh
 
 log = structlog.get_logger("dewpoint.dispatcher")
 CYCLE_S = 1.0  # between cycles
@@ -125,13 +128,14 @@ def admission_worker(client: Client, sessionmaker: async_sessionmaker[AsyncSessi
     )
 
 
-async def startup(sessionmaker: async_sessionmaker[AsyncSession], settings: Settings) -> None:
+async def startup(sessionmaker: async_sessionmaker[AsyncSession], settings: Settings) -> PlatformSettings:
     """Before it connects to Temporal: the deployment's environment checked (EnvironmentNotRecordedError,
     EnvironmentMismatchError), and its maximum run duration recorded, which every deadline it sets is reckoned from
-    and the payload floor waits on (engine 2b spec §6.4)."""
-    await verify_environment(sessionmaker, settings)
+    and the payload floor waits on (engine 2b spec §6.4). The record."""
+    recorded = await verify_environment(sessionmaker, settings)
     async with sessionmaker() as s, s.begin():
         await record_run_duration(s, settings.max_run_duration_days)
+    return recorded
 
 
 async def run(settings: Settings) -> None:
@@ -139,12 +143,13 @@ async def run(settings: Settings) -> None:
     engine = make_engine(settings.database_url)
     try:
         sessionmaker = make_sessionmaker(engine)
-        await startup(sessionmaker, settings)
+        recorded = await startup(sessionmaker, settings)
         keys = KeyringKeys(sessionmaker, Keyring(KekSet.from_settings(settings)))
-        client = await Client.connect(
-            settings.temporal_address, namespace=settings.temporal_namespace, data_converter=data_converter(keys),
+        client = await temporal_connect(
+            settings, recorded.environment, data_converter=data_converter(keys),
             identity=f"{os.getpid()}@{socket.gethostname()} {tick_contract.IDENTITY}", retry_config=RETRY,
         )  # fmt: skip
+        refreshing = asyncio.create_task(keep_token_fresh(client, settings))  # bearer mode: a rotated token
         budget.instrument(client)  # its passes' soft budget: every call timed (D16 prototype)
         instance = uuid.uuid4()
         reconciler, leader = uuid.uuid5(instance, "reconciler"), Leader(engine)
@@ -163,6 +168,7 @@ async def run(settings: Settings) -> None:
             ):  # ends the process if it fails: Compose restarts it
                 await serve(one)
         finally:
+            refreshing.cancel()
             await leader.close()
     finally:
         await engine.dispose()

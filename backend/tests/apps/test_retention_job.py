@@ -70,7 +70,7 @@ async def test_each_interval_carries_erasures_on_and_each_sweep_reconciles_compl
         calls.append(f"erase {client}")
         return {}
 
-    async def connected(settings: Any) -> str:
+    async def connected(settings: Any, environment: str) -> str:
         return f"temporal@{settings.temporal_address}"
 
     async def sleep(seconds: float) -> None:
@@ -167,7 +167,7 @@ async def test_no_erasure_work_reaches_temporal_unless_its_namespace_is_the_depl
         calls.append("sweep")
         return sweep.Sweep(1, True, 0, 0.0)
 
-    async def connected(_: Any) -> Any:
+    async def connected(*_: Any) -> Any:
         raise AssertionError("connected to Temporal")
 
     async def sleep(seconds: float) -> None:

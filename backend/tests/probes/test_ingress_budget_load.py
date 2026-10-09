@@ -37,7 +37,7 @@ from tests.apps.test_workflow_ops import create, publish
 from tests.apps.worker.test_real_server import serving
 from tests.core.ingress.support import RECORD
 from tests.support.keys import FIXTURE_CONVERTER, FixtureKeys
-from tests.support.temporal import start_local
+from tests.support.temporal import probe_temporal
 
 pytestmark = [
     pytest.mark.skipif(not os.environ.get("DEWPOINT_PROBE"), reason="a probe, run by hand (DEWPOINT_PROBE)"),
@@ -70,7 +70,8 @@ PAYLOAD = {"type": "ap_down", "site": "lyon"}
 
 @pytest.fixture(scope="module")
 async def server() -> AsyncIterator[WorkflowEnvironment]:
-    async with await start_local(data_converter=FIXTURE_CONVERTER) as environment:
+    # a dev server of its own, or the external one DEWPOINT_PROBE_TEMPORAL_ADDRESS names (2b-4b M4: the D12 server)
+    async with probe_temporal(data_converter=FIXTURE_CONVERTER) as environment:
         yield environment
 
 
