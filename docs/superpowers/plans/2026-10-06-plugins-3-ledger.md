@@ -507,8 +507,10 @@ Rulings:
   step's memory (an output over 64 KB is already a size claim) - cost if wrong: a list past 10 pages of 1,000 is cut.
 - Ruling: a create's body is required, an action's (ack, restart) optional; an action answers `{}` and a delete
   `{already_absent}`, whatever Mist's body says - the OAS describes no answer for them - cost if wrong: none.
-- Ruling: titles are the operationId in words ("List org sites"), descriptions the OAS's first paragraph cut at 300
-  characters, no icon - display metadata, changeable without a version - cost if wrong: none.
+- Ruling: titles are the operationId in words ("List org sites"), normalized through reviewed Mist terminology
+  ("List org PSKs", "Create org wxtag"; amended 2026-10-09, awaiting the owner's sign-off: see "Mist titles" at the
+  end), descriptions the OAS's first paragraph cut at 300 characters, no icon - display metadata, changeable without a
+  version - cost if wrong: none.
 - D23 measured on the generated manifest: 262 nodes, 8.0 MB (1.34 MB gzipped), 3.3 MB without `description`s; the
   median node 5.6 KB; the largest site settings' update (634 KB: config 327 KB, output 307 KB), a device's update
   (560 KB) and device profiles' create and update (500 KB). A schema's descriptions sit outside contract hashes, so
@@ -1896,3 +1898,30 @@ The owner signed off this section's rulings (2026-10-08: "I'm good"), the review
 simulate's departure from D13's exact request too; and authorized the full suite, push and PR.
 - Full suite at bfc8e3c (on `origin/main` 16666f6, which hadn't moved): 4,522 passed (`-n auto`), the CEL gates 398
   passed and 8 skipped; gitleaks over the branch's commits finds nothing; CodeQL's python analysis finds nothing locally.
+
+## Mist titles (2026-10-09)
+
+The owner saw `mist.site_rogue_aps.list@1` listed as "List site rogue ps" (GET /node-types, a local stack). The split
+skipped what no word matched, so the id's "A" was lost: fixed in 20b47e38, every letter now in a word. A technical
+review (pasted by the owner): no blocking findings; technical review only.
+
+The owner then proposed spellings (wxtag, vBeacon, 128T, ESL, NAC, CoA) and asked for the other titles to follow. In
+chat (2026-10-09) the owner chose: wx and mx joined to their noun as the API spells them (wxtag, wxrule, wxtunnel,
+mxedge, mxtunnel); AP everywhere; path values' field titles too ("Site ID"); names as Juniper writes them; PMA as
+"Premium Analytics"; and had it built and committed locally (a679340d). Two design reviews (pasted by the owner)
+shaped it: technical recommendations only.
+
+- Ruling (awaiting the owner's sign-off): a title is the operationId, or a path value's name, in words, normalized
+  through reviewed Mist terminology (`plugins/mist/titles.py`, `TERMS`): a term's lowercase words (one or two, the
+  last maybe plural) are written as Mist writes them; a two-word term is tried first ("Mist Edge" over "Mist"); any
+  other word keeps the id's acronym (WLAN, AAMW, E911) or is lowercase. The split stays lossless. Path value names
+  keep the API's compounds ("Nacrule ID", "Mxcluster ID", "Vbeacon ID"); dot1x, cmd and the ids' typos stay as written.
+  Display metadata: no contract hash changes, so sync stores the titles at `@1` - cost if wrong: a label.
+- Two intentional corrections, each pinned by its expected title: `listApLEslVersions` drops the id's stray "L"
+  ("List AP ESL versions"; its path is `ap_esl_versions`), a correction rather than casing; `listOrgPmaDashboards`
+  adds letters ("List org Premium Analytics dashboards"): the OAS never writes "PMA", so this is a naming choice, not
+  a confirmed spelling. PBN, PLF and SIRT are written in capitals by the OAS.
+- Measured against 20b47e38: 131 of 294 generated node titles and 270 of 946 field titles change, the 294 contract
+  hashes don't; over the whole OAS, 602 of 1,160 operation ids and path value names. Siblings read as their ids do:
+  "Count org site mxedge events" beside "Search org Mist Edge events".
+- Not run: the full suite. Awaiting the owner: review of the full title diff, sign-off of this ruling, push and PR.
