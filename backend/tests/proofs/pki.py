@@ -73,12 +73,15 @@ class Authority(Issued):
         common_name: str,
         *,
         server: bool,
+        client: bool | None = None,
         names: Sequence[str] = (),
         ips: Sequence[str] = (),
         not_after: datetime | None = None,
     ) -> Issued:
         """A server certificate (its names and addresses as alternative names) or a client one (its common name the
-        subject Temporal's interceptor maps); `not_after` in the past makes an expired one."""
+        subject Temporal's interceptor maps), or both (`server=True, client=True`: Temporal's internode certificate,
+        which it presents both ways); `not_after` in the past makes an expired one."""
+        client = (not server) if client is None else client
         key = ec.generate_private_key(ec.SECP256R1())
         now = datetime.now(UTC)
         until = not_after or now + LIFETIME
@@ -92,7 +95,10 @@ class Authority(Issued):
             .not_valid_after(until)
             .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
             .add_extension(
-                x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH if server else ExtendedKeyUsageOID.CLIENT_AUTH]),
+                x509.ExtendedKeyUsage(
+                    ([ExtendedKeyUsageOID.SERVER_AUTH] if server else [])
+                    + ([ExtendedKeyUsageOID.CLIENT_AUTH] if client else [])
+                ),
                 critical=False,
             )
         )

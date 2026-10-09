@@ -69,7 +69,9 @@ def prepare(root: Path) -> Run:
     )
     frontend = run.ca.issue(SERVER_NAME, server=True, names=[SERVER_NAME, "localhost"], ips=["127.0.0.1"])
     # internode: one certificate serves and dials (Temporal presents the internode server certificate as a client)
-    internode = run.internode.issue(INTERNODE_NAME, server=True, names=[INTERNODE_NAME, "localhost"], ips=["127.0.0.1"])
+    internode = run.internode.issue(
+        INTERNODE_NAME, server=True, client=True, names=[INTERNODE_NAME, "localhost"], ips=["127.0.0.1"]
+    )
     for name, data in {
         "ca.pem": run.ca.cert_pem(),
         "frontend.pem": frontend.cert_pem(),

@@ -100,6 +100,11 @@ def test_the_run_directory_gives_each_container_only_its_part(tmp_path: Path) ->
     assert (run.root / "pki" / "proof-admin.pem").exists() and (run.root / "pki" / "other-ca.pem").exists()
     leaf = x509.load_pem_x509_certificate((run.root / "tls" / "frontend.pem").read_bytes())
     assert pki.verifies(leaf, run.ca.cert) and "temporal.dewpoint-m4.test" in _san(leaf)
+    # Temporal presents its one internode certificate as a server and as a client, to its own services and to the
+    # internal frontend: it needs both usages (R3-B's second run: serverAuth alone, "tls: bad certificate")
+    internode = x509.load_pem_x509_certificate((run.root / "tls" / "internode.pem").read_bytes())
+    assert _usage(internode) == [ExtendedKeyUsageOID.SERVER_AUTH, ExtendedKeyUsageOID.CLIENT_AUTH]
+    assert _usage(leaf) == [ExtendedKeyUsageOID.SERVER_AUTH]  # the frontend only serves
 
 
 def test_the_session_policies_keep_the_credentials_apart() -> None:
