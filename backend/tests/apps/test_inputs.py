@@ -23,3 +23,27 @@ def test_a_refusal_names_declared_properties_positions_and_the_root() -> None:
     assert reasons(ROWS, {"rows": [1, "x"]}) == [WHY.format("rows.1", "type")]
     assert reasons(ROWS, []) == [WHY.format("its root", "type")]
     assert reasons(CREDS, {"creds": {}, KEY: 1}) == [WHY.format("its root", "additionalProperties")]
+
+
+def test_a_rule_broken_at_one_place_is_told_once() -> None:
+    """jsonschema reports `required` once per missing property, `dependentRequired` once per missing dependency and a
+    `propertyNames` rule once per name it refuses, and map keys breaking one rule show as one `*`: each place and rule
+    is told once, so repeats never take the place of another reason."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "rows": {"type": "array"},
+            "creds": {"type": "object", "additionalProperties": {"type": "integer"}},
+        },
+        "required": ["a", "b"],
+        "dependentRequired": {"rows": ["x", "y"]},
+        "propertyNames": {"maxLength": 5},
+    }
+    value = {"rows": 1, "creds": {KEY: "x", f"{KEY}-2": "y"}, KEY: 0, f"{KEY}-2": 0}  # 9 errors, 5 places and rules
+    assert reasons(schema, value) == [
+        WHY.format("its root", "dependentRequired"),
+        WHY.format("its root", "maxLength"),
+        WHY.format("its root", "required"),
+        WHY.format("creds.*", "type"),
+        WHY.format("rows", "type"),
+    ]
