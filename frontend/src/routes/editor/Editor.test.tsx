@@ -1321,7 +1321,7 @@ it("keeps an edit not applied shown, and counted, when the editor turns read onl
   answers.set(`PUT ${BASE}/draft`, () => json({ error: "draft_conflict" }, 409));
   await unappliedDuration(); // "5x" held
   await userEvent.click(screen.getByRole("button", { name: "Move wait right" })); // an edit whose save conflicts
-  await screen.findByText(/This draft was changed elsewhere, so your changes since then aren't saved/);
+  await screen.findByText(/This draft was changed elsewhere, so your changes since then aren't saved/, {}, { timeout: 3000 }); // after the 1 s save delay
   const field = screen.getByLabelText<HTMLInputElement>("Duration S");
   expect([field.value, field.disabled]).toEqual(["5x", true]);
   expect(screen.getByRole("button", { name: "1 edit not applied" })).toBeTruthy();
@@ -1331,7 +1331,7 @@ it("downloads the edits not applied as a file of their own, and says the draft's
   answers.set(`PUT ${BASE}/draft`, () => json({ error: "draft_conflict" }, 409));
   await unappliedDuration();
   await userEvent.click(screen.getByRole("button", { name: "Move wait right" }));
-  const banner = (await screen.findByText(/This draft was changed elsewhere, so your changes since then aren't saved/)).closest<HTMLElement>("[role='alert']")!;
+  const banner = (await screen.findByText(/This draft was changed elsewhere, so your changes since then aren't saved/, {}, { timeout: 3000 })).closest<HTMLElement>("[role='alert']")!;
   expect(banner.textContent).toContain("Your version's file doesn't hold the 1 edit not applied: download it separately.");
   await userEvent.click(within(banner).getByRole("button", { name: "Download the edit not applied" }));
   await userEvent.click(within(banner).getByRole("button", { name: "Download my version" }));
