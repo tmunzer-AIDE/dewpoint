@@ -1557,3 +1557,181 @@ reference to a plan ruling from 1 to 18 means the ledger ruling numbered 95 high
     - Clear and deleting a step discard the unapplied edits beneath them, on purpose. The delete question says so.
     - Why: the review of revision 1; nothing a person typed disappears without their decision. The cost: one more
       state in the editor, and one more question at its exits.
+
+### Owner, 4c-2 mockups and plan shape (2026-10-09, in chat)
+
+Asked with the 4c-2 mockups (the Design canvas "4c-2 Data Mockups", version 10, after a pasted review's six
+corrections), the owner:
+- signed off D8 for 4c-2: the plan may be written from the mockups;
+- adopted the pasted review's ten recommendations as rulings: one text and pill editor as a text field's fixed mode;
+  conditional pills stay dashed, with a default; "Add a default" is a visible button; the untyped trigger keeps its
+  fallback (type a path), a declared input schema is honoured, and no trigger setup comes before 4c-3; samples show
+  only in a pill's details; alternatives are merged conservatively; the builder replaces "Fixed" for conditions; one
+  level of groups; per-comparison guards, with "is missing" and "is there" defined; keys a reference can't name are
+  shown disabled;
+- ruled, when asked again on corrected facts, that the validator merges alternatives (`anyOf`, `oneOf`) only.
+  References and templates already treat an index as possibly missing; formulas keep engine-core spec §4.3, an element
+  read by index being "data, read freely";
+- ruled that 4c-2 is two plans in sequence: 4c-2a, the backend (the merge, B6, liveness, B7 with slot 0045), reviewed,
+  built and merged first; then 4c-2b, the UI.
+
+Two findings from the research went to the owner as separate tasks, outside 4c-2: a text-only template or a CEL
+string constant at a sensitive position published clean where a literal is refused (#76); and a switch case's declassify
+entry followed its index, not its case, when cases were moved or removed (#77). Both are merged.
+
+### 4c-2a plan accepted (2026-10-09, in chat)
+
+`docs/superpowers/plans/2026-10-09-editor-ui-4c2a-data-backend.md`. Reviews pasted in chat held revision 1 (06962fd2)
+for eight defects in its code, revision 2 (80de9638) for three, revision 3 (2f2da5d3) for one and revision 4
+(ff95fbee) for one; revision 5 (3d5c8b40) answered them, each with a test that fails on the previous revision's code,
+and a pasted review signed it off on the review side (no rulings accepted by it). The owner, asked in chat, then
+accepted revision 5 and adopted its rulings 1–11, which join this ledger as 114–124, copied as ruled; chose inline
+execution with the milestone pauses (the engine reviewed after Milestone 1, a fresh review at the end); approved the
+worktree's own locked environment (`uv sync --frozen`); and chose the branch `feat/editor-4c2a` from origin/main
+(532ab6c6), the plan's docs branch merged in. Push and a PR stay the owner's decisions.
+
+114. **Accepted. Alternatives are read together, conservatively** (`navigate`, Task 2; engine-core spec §4.3 amended).
+     - `anyOf` and `oneOf` are unfolded, nested ones too. Each way a value may match is a conjunction: what surrounds
+       a union stays beside each branch, never overwritten by it, and every member of an `allOf` applies (so `allOf`
+       is now read, as a conjunction, by `navigate` and `json_types` alike).
+     - The bounds: 8 levels of nesting; 64 ways at a position, duplicates merged first; and one budget of 4,096
+       unfolded schemas for the whole read, every position counted, `declared_optional` and `declared_nullable`
+       included. Past any of them, the value is "any value".
+     - Reading a field or an index follows every alternative:
+       - the value's type is what any alternative allows there;
+       - it may be missing when an alternative may lack it (it doesn't require it, a closed one doesn't declare it, its
+         type isn't an object or a list, its list may be shorter, or it's null);
+       - an alternative that says nothing about it (open, undeclared) makes it "any value";
+       - a field no alternative can hold is `ref.unknown_field`, as for one schema.
+     - A union with `null` makes the value nullable whatever its number of alternatives (today only one non-null
+       alternative counts). A position that is only `null` stays a plain null value, as today.
+     - `declared_optional` and `declared_nullable` read through a union only when every alternative declares the
+       field. Otherwise the data is open there, and nothing is reported (spec §4.3: undeclared data needs no guard).
+     - Within a way, a field declared by one of its schemas has that schema (all of them, when several declare it); the
+       way is closed to an undeclared field when one of them is closed.
+     - Types meet as JSON Schema says: an integer is a number, so `number` and `integer` meet in `integer`.
+     - Object keywords speak only of objects, `items` only of lists. A way that can't be an object holds no field. A
+       field is sure to be there only when its way is sure to be an object and requires it: a value that may be a
+       string (`type: ["object", "string"]`, or a string beside `properties`) may lack it. None of the shipped plugins'
+       5,719 object schemas is affected: the 30 that declare `properties` without a `type` require nothing.
+     - A formula owes the same guards whatever the spelling (a type list, `anyOf`, `oneOf`, `allOf` around either):
+       `has()` for a field one way may lack, and `type(x) == map` before reading below a value that may not be an
+       object, a `has()` test included (the review of revision 3). This is a new obligation, a `cel.conditional_ref`
+       like the null one; a draft whose formula reads below such a value unguarded meets it on its next validation.
+     - Why: the owner's ruling, and the data tree must type a device's `name` as text, as validation does. The cost:
+       an existing draft may meet new diagnostics when it's next validated: a reference now typed that mismatches its
+       field (`ref.type_mismatch`), a formula field declared optional in every alternative (`cel.conditional_ref`), or
+       `has()` on a list now typed (`cel.has_on_typed_path`). Reading `allOf` types two Mist schemas
+       (`site_setting_switch`, in `mist.site_settings.get` and `.update`) that were "any value". Published versions are
+       untouched.
+115. **Accepted. "May be missing" and "may be null" are told apart.** `Resolved` gains `missing` and `nullable`, filled by
+     `navigate` and by the resolver (a step that may not run); the scope adds a variable not yet set. `conditional`
+     stays their union, so every existing check is unchanged. Why: a default replaces both, but the tree and the builder say them
+     differently ("may be null" for Mist's `total`). The cost: none.
+116. **Accepted. A step is conditional when it may not run**:
+     - its liveness in its region isn't "always", or it can't be analysed;
+     - or the loop whose body holds it is conditional.
+     Validate's answer lists them (`conditional_steps`, node ids, sorted). A version's detail doesn't: the badge is the
+     draft's. Why: ruling 70. The cost: none.
+117. **Accepted. The scope of a field** (B6): `GET /api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/scope`.
+     - It takes `node`, `field` (a JSON pointer in that node's config), and at most one of:
+       - nothing: the top of each root (each of `trigger`, `steps.<key>.output|error`, `vars.<name>`, `item`, `index`,
+         `loops.<key>.item|index`, `run.id|started_at|now` that the field can read);
+       - `under`: the children of one path (at most 500, then `more`); the top answer includes each root's children too;
+       - `at`: one path, or the problem that stops the field reading it (the validator's own diagnostic);
+       - `find`: fields whose name contains the text, at most 6 levels below each root, 2,000 positions visited and
+         50 found.
+     - It reads the saved draft, like validate, and answers its `draft_revision`, so an editor drops an old answer
+       (D17). It needs `workflow.view`: a viewer's read-only drawer shows a pill's details too.
+     - When the saved draft can't be analysed, or doesn't hold the step, it answers `state: "unavailable"` and a
+       reason, never an error status.
+     - Why: B6; scope is per field, since a filter's predicate and a loop's `collect` see their own `item`. The cost:
+       each request runs the validator's analysis once (as validate does).
+118. **Accepted. An entry** says:
+     - `path`, `parent`, `name` (`timezone`, `[0]`);
+     - `root`, and `step` (the producing step's id);
+     - `types` (the JSON types it may have; empty: any value) and `format`;
+     - `missing` and `nullable`;
+     - `sensitive`: what a reference to it holds (engine 2b spec §4.1);
+     - `nameable`: false for a key a reference can't name (a dash, a space), shown disabled;
+     - `children`;
+     - `formula`: null when CEL can't select one of its fields (`in`, `true`, `false`, `null`) or when `problem` is set;
+       otherwise its `guards`, whether a formula reading it reads sensitive data, and `null_test`;
+     - `problem`: what validation reports for reading it here, as validation says it: a sensitive variable that has no
+       default and that no step sure to run sets (`vars.unassigned`). Such an entry is shown, and refused.
+     Why: the 4c-2 mockups and their ten rulings. The cost: none.
+119. **Accepted. Guards come from the server, as data** (`present`, `not_null`, `is_map`, `is_list`, `min_size`).
+     - For each step of the path:
+       - a step that may not run: `has(steps.<key>.output)`;
+       - a parent that may be null: `parent != null`;
+       - a field read from what isn't surely an object: `type(parent) == map`;
+       - an index into what isn't surely a list: `type(parent) == list`, then `size(parent) > i`;
+       - a field that may be absent: `has(path)`.
+     - Never `has()` on a list always there (`cel.has_on_typed_path`).
+     - Tests prove a formula made of the guards and the read publishes with no guard diagnostic, and is never an error
+       at run time.
+     - "is there" is the guards, and `path != null` when the scope's `null_test` says so: the value may be null, is
+       untyped, or is only null (a `type: "null"` field is never "there"). "is missing" is its negation. A list always
+       there can't be compared with null in CEL (`list != null` doesn't compile), and needs no such test. 4c-2b's
+       builder renders them from `guards` and `null_test`, never re-deriving the rules.
+     - Why: the owner's ruling for per-comparison guards with defined "is missing" and "is there"; D18 (the server
+       alone checks): the same rules make and check them. The cost: the builder can't guard data the scope doesn't
+       list.
+120. **Accepted. A formula's sensitivity is reported per entry**, for the formula the guards make: the read and every guard.
+     - A formula reading `X[0].f` reads the list `X` whole: CEL's chains stop at an index.
+     - A guard reads its operand whole: `trigger.owner != null` or `type(trigger.who) == map` reads that object, and
+       an object open to undeclared fields counts as sensitive (engine 2b spec §4.1). A `has()` guard reads only the
+       field it tests, and `has(steps.k.output)` reads only whether the step ran (the run's shape), never its output.
+     - So `formula.sensitive` can differ from `sensitive`. A test holds it equal to what validation finds.
+     - Why: a condition on `results[0].name` needs declassifying even though the pill isn't sensitive; the tree says so
+       before the person builds it. The cost: none.
+121. **Accepted. Each attempt records the connections it opens** (B7, slot 0045).
+     - Table `run_step_connections`, keyed `(run_id, step_id, iteration_key, attempt, connection_id, revision)`:
+       every revision an attempt opened is kept, so a connection changed between two opens in one attempt shows both.
+     - It holds the connection's type, name and revision, and its non-secret config as it was (`context`, at most
+       4 KiB as canonical JSON, otherwise `{}`), with the time.
+     - The worker writes it when an attempt opens the connection, before the node uses it, inside the activity: no
+       ABI change. Opening it twice in one attempt records it once.
+     - A write the database doesn't answer fails the attempt as nothing sent (retryable), like the connection's own
+       load. Any other failure is a bug, raised. Opening the same revision again records nothing more.
+     - A simulated attempt opens no connection, so records nothing. Neither do flow steps.
+     - Why: B7: a connection keeps its id while its config changes. The cost: one insert per opened connection per
+       attempt.
+122. **Accepted. Which sample** (B7):
+     - Candidates: the newest 200 runs of this workflow that have ended (an end time recorded, not running), of any
+       kind (a run, a sub-flow's run, a failure handler's run), newest ended first. A run that hasn't ended never takes
+       a place in the window: the filter comes before the limit.
+     - Each candidate must be within retention through its root.
+     - Within each candidate, the asked iteration, else the first by number (`l:2` before `l:10`), and its highest
+       attempt. Among the candidates, the answer is the one whose row ended last: B7's "newest succeeded row", within
+       the window.
+     - The answer says how many runs it searched (`searched_runs`, at most `search_limit`, 200). "No sample" then
+       means none in those runs, never "this step has never run": 4c-2b's copy says which. The count and the choice come
+       from one statement, so one snapshot: a run ending meanwhile can't make them disagree.
+     - Migration 0045 adds the index `runs_workflow_ended (workflow_id, ended_at DESC, id DESC) WHERE ended_at IS NOT
+       NULL` for it.
+     - Why: B7's selection; sub-flows run this workflow's steps too. The cost: a sample older than the newest 200 ended
+       runs isn't found, and the answer says so.
+123. **Accepted. A sample's answer:**
+     - `run_id`, the run's kind and mode, its version id and number, and the search's `searched_runs` and
+       `search_limit` (ruling 9);
+     - the iteration and attempt, and `captured_at` (the row's end);
+     - the node's `type@version` in that version, with `same_type` and `same_config` against the saved draft;
+     - `output`: the stored preview, markers as they are;
+     - `connections`, with one of four states:
+       - `recorded`, with each connection's state: `unchanged`, `changed` (another revision now) or `deleted`;
+       - `none`: the step names no connection;
+       - `simulated`: none used;
+       - `unknown`: the step names one, but no record exists.
+       A step "names" a connection only in a top-level field its type marks for one (`x-dewpoint-connection`, read
+       from the node type's manifest), naming one of its version's connections: the worker's own rule
+       (`DbConnections.named_by`). Text that happens to hold a connection's id names nothing.
+     - `stale`: true when the type, the config or a connection differs.
+     - A renamed connection is unchanged: a rename doesn't change a revision. The current name shows, or the
+       recorded one when the connection is gone.
+     - A step the saved draft doesn't hold, or with no sample, answers `sample: null`.
+     - It needs `run.view`.
+     - Why: B7, D20. The cost: none.
+124. **Accepted. The web client's types are regenerated, and its screens untouched.** `schema.d.ts` gains the new routes and
+     `conditional_steps`. A test fixture the type checker names gets `conditional_steps: []`. Why: B1's drift check.
+     The cost: none.
