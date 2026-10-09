@@ -12,7 +12,7 @@ import { SIDE } from "./side";
 /** What only publish found, with the snapshot it was found in: the saved revision, and the editor's generation. */
 export type PublishProblems = { revision: number; generation: number; diagnostics: Diagnostic[] };
 
-function Problem({ d, keyOf, onJump }: { d: Diagnostic; keyOf: (id: string) => string; onJump: (id: string) => void }) {
+function Problem({ d, keyOf, onJump }: { d: Diagnostic; keyOf: (id: string) => string; onJump: (nodeId: string, field: string | null) => void }) {
   return (
     <li className="flex flex-col gap-0.5 border-t border-line py-2.5 text-small first:border-t-0">
       <span className={d.severity === "error" ? "text-danger" : "text-warn-ink"}>
@@ -22,7 +22,7 @@ function Problem({ d, keyOf, onJump }: { d: Diagnostic; keyOf: (id: string) => s
       <span className="flex flex-wrap items-center gap-2">
         <span className="font-mono text-meta text-muted">{d.code}{d.field ? ` · ${d.field}` : ""}</span>
         {d.node && (
-          <Button size="sm" onClick={() => onJump(d.node!)}>
+          <Button size="sm" onClick={() => onJump(d.node!, d.field)}>
             Go to {keyOf(d.node)}
           </Button>
         )}
@@ -44,7 +44,7 @@ export function ProblemsPanel({
   state, validation, publishProblems, publishCurrent, keyOf, onJump, onCheck, onClose,
 }: {
   state: CheckState; validation: Validation | null; publishProblems: PublishProblems | null; publishCurrent: boolean;
-  keyOf: (id: string) => string; onJump: (nodeId: string) => void; onCheck: () => void; onClose: () => void;
+  keyOf: (id: string) => string; onJump: (nodeId: string, field: string | null) => void; onCheck: () => void; onClose: () => void;
 }) {  // prettier-ignore
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => heading.current?.focus(), []);

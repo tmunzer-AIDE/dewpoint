@@ -43,20 +43,52 @@ const counted = (problems: Diagnostic[], fields: FieldSpec[]) =>
 const tabLabel = (label: string, n: number) => (n === 0 ? label : `${label} · ${n} ${n === 1 ? "problem" : "problems"}`);
 
 export function StepDrawer({
-  node, type, tenantId, workflowId, ports, problems, expressions, editable, adds, actions, note,
+  node, type, tenantId, workflowId, ports, problems, expressions, editable, adds, actions, note, focusField,
   onAdd, onDelete, onConnectPort, onPlace, onNudge, onClose,
 }: {
   node: GraphNode; type: NodeType | undefined; tenantId: string; workflowId: string; ports: string[];
   problems: Diagnostic[] | null; expressions: Expression[]; editable: boolean; adds: { label: string; action: ItemAction }[];
-  actions: DrawerActions; note: string | null; onAdd: (action: ItemAction) => void; onDelete: () => void; onConnectPort: (port: string) => void;
+  actions: DrawerActions; note: string | null; focusField: { pointer: string; n: number } | null; onAdd: (action: ItemAction) => void; onDelete: () => void; onConnectPort: (port: string) => void;
   onPlace: () => void; onNudge: (key: Nudge) => void; onClose: () => void;
 }) {  // prettier-ignore
   const heading = useRef<HTMLHeadingElement>(null);
+  const aside = useRef<HTMLElement>(null);
   useEffect(() => heading.current?.focus(), [node.id]);
   const fields = useMemo(() => (type ? fieldsOf(type) : []), [type]);
   const { setup, options } = tabsOf(fields);
   const [tab, setTab] = useState<Tab>(setup.length > 0 ? "setup" : "options");
   const [handling, setHandling] = useState(false);
+  // "Go to" a field (ruling 16): its tab first; then, once that has rendered, the control of the closest field shown.
+  // A pointer no field shows lands on "Problems with this step", which lists it.
+  const pending = useRef<string | null>(null);
+  useEffect(() => {
+    if (!focusField) return;
+    const first = focusField.pointer.split("/")[1] ?? "";
+    if (setup.some((f) => segment(f.name) === first)) setTab("setup");
+    else if (options.some((f) => segment(f.name) === first)) setTab("options");
+    pending.current = focusField.pointer;
+  }, [focusField?.n]);
+  useEffect(() => {
+    const pointer = pending.current;
+    if (pointer === null) return;
+    const frame = requestAnimationFrame(() => {
+      pending.current = null;
+      const holders = [...(aside.current?.querySelectorAll<HTMLElement>("[data-pointer]") ?? [])];
+      const parts = pointer.split("/");
+      for (let n = parts.length; n > 1; n--) {
+        const holder = holders.find((el) => el.dataset.pointer === parts.slice(0, n).join("/"));
+        const label = holder?.querySelector<HTMLLabelElement>("label[for]");
+        const control = label ? document.getElementById(label.htmlFor) : null;
+        const target =
+          control && control.tagName !== "OUTPUT" && !(control as HTMLInputElement).disabled
+            ? control
+            : holder?.querySelector<HTMLElement>("button:not([disabled])");  // prettier-ignore
+        if (target) return target.focus();
+      }
+      (document.getElementById("step-problems") ?? heading.current)?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  });
   const mine = problems ?? [];
   const top = new Set(fields.map((f) => segment(f.name)));
   // A problem no field shows: about the step as a whole, or a part its schema doesn't name (ruling 16).
@@ -65,6 +97,7 @@ export function StepDrawer({
   return (
     <DrawerContext.Provider value={drawer}>
       <aside
+        ref={aside}
         aria-labelledby="step-drawer-title"
         onKeyDown={(e) => {
           if (e.key === "Escape") {

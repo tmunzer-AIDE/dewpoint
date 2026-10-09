@@ -9,7 +9,7 @@ import { onAnnounce } from "../../lib/announce";
 import { cancelLeaving, mayLeave } from "../../lib/leaving";
 import type { CanvasProps } from "./Canvas";
 import { EditorPage } from "./Editor";
-import { DELAY, IF, SWITCH, typeWith } from "../../test/nodeTypes";
+import { DELAY, IF, LOOP, SWITCH, typeWith } from "../../test/nodeTypes";
 import { formula } from "../../lib/config";
 import { STALE } from "../../lib/unapplied";
 
@@ -1596,4 +1596,44 @@ it("disables an open rename when the draft can't change, and never says it renam
   expect(screen.getByLabelText<HTMLInputElement>("Key").value).toBe("fetch_v2"); // kept, never lost
   expect(screen.getByRole("heading", { name: "fetch" })).toBeTruthy();
   expect(screen.queryByText(/^Renamed/)).toBeNull();
+});
+
+/** A check that found these problems. */
+const found = (...diagnostics: { message: string; field: string }[]) => ({
+  draft_revision: 1, valid: false, expressions: [], taint: { sites: [], declassified: [] },
+  diagnostics: diagnostics.map((d) => ({ code: "config.invalid", node: "id-each", fix: null, severity: "error", ...d })),
+});  // prettier-ignore
+
+async function goTo(field: string) {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, LOOP]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.loop@1", { items: formula("trigger.list") }, "each") }));
+  answers.set(`POST ${BASE}/validate`, () => json(found({ message: "Must be at most 10.", field })));
+  await show();
+  await userEvent.click(await screen.findByRole("button", { name: "Problems · 1" }));
+  await userEvent.click(within(screen.getByRole("complementary", { name: "Problems" })).getByRole("button", { name: "Go to each" }));
+}
+
+it("goes to a problem's field: the drawer opens on its tab, the field focused (ruling 83)", async () => {
+  await goTo("/concurrency");
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Concurrency")));
+  expect(screen.getByRole("tab", { name: "Options · 1 problem" }).getAttribute("aria-selected")).toBe("true");
+});
+
+it("goes to the step's own problems when no field shows the one named", async () => {
+  await goTo("/nope");
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Problems with this step" })));
+});
+
+it("goes to the step itself for a problem about it as a whole, as in 4b", async () => {
+  await goTo("");
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "each" })));
+});
+
+it("goes to an edit not applied from its list, at its field", async () => {
+  await unappliedDuration();
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
+  await userEvent.click(screen.getByRole("button", { name: "1 edit not applied" }));
+  const list = screen.getByRole("complementary", { name: "Edits not applied" });
+  await userEvent.click(within(list).getByRole("button", { name: "Go to it: wait · Duration S" }));
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Duration S")));
 });

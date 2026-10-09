@@ -48,7 +48,7 @@ import { Toolbar } from "./Toolbar";
 type Opened = { workflow: WorkflowDetail; types: NodeType[]; role: string | null };
 
 /** The editor's right column: a step's panel, the problems, or the versions (Task 15). */
-type Side = { kind: "step"; node: string } | { kind: "problems" } | { kind: "versions" } | { kind: "unapplied" } | null;
+type Side = { kind: "step"; node: string; field?: { pointer: string; n: number } } | { kind: "problems" } | { kind: "versions" } | { kind: "unapplied" } | null;
 const NO_DIAGNOSTICS: Diagnostic[] = []; // one empty list, so a memo over it holds
 
 /** Whether a request's outcome is unknown: no answer reached the editor (the network), or a 5xx came in the API's
@@ -342,6 +342,7 @@ function Editor({
   const versionsButton = useRef<HTMLButtonElement>(null);
   const publishButton = useRef<HTMLButtonElement>(null);
   const unappliedButton = useRef<HTMLButtonElement>(null);
+  const jumps = useRef(0); // each "Go to" a field, so the same one twice still focuses it
   const [landing, setLanding] = useState<{
     on: "problems" | "versions" | "publish" | "problems-panel" | "versions-panel" | "unapplied" | "unapplied-panel";
     n: number;
@@ -1172,6 +1173,7 @@ function Editor({
             adds={editable ? addsOf(doc, open, portMap.get(idKey(open.id)) ?? []) : []}
             actions={viewing ? VERSION_ACTIONS : actionsFor(open.id)}
             note={renamed !== null && renamed.doc === doc ? renamed.text : null}
+            focusField={side?.kind === "step" ? (side.field ?? null) : null}
             onAdd={onItem}
             onDelete={() => setAsking({ kind: "node", id: open.id })}
             onConnectPort={(port) => setConnecting({ node: open.id, port })}
@@ -1191,7 +1193,7 @@ function Editor({
             edits={[...unapplied.values()]}
             keyOf={(id) => findNode(doc, id)?.key ?? null}
             reason={(u) => (isStale(draftNow(), u) ? STALE : (u.why ?? "Still being typed."))}
-            onGo={(u) => setSide({ kind: "step", node: u.node })}
+            onGo={(u) => setSide({ kind: "step", node: u.node, field: { pointer: u.pointer, n: ++jumps.current } })}
             onDiscard={(u) => {
               drop([u.id]);
               land("unapplied-panel"); // its entry is gone, and with the last one the count: the list's heading takes focus
@@ -1224,7 +1226,11 @@ function Editor({
             publishProblems={publishProblems}
             publishCurrent={publishCurrent}
             keyOf={keyOf}
-            onJump={(nodeId) => focus(item.node(nodeId))}
+            onJump={(nodeId, field) => {
+              // A field inside the step opens its drawer there (ruling 16); the step as a whole is focused, as in 4b.
+              if (field === null || field === "") focus(item.node(nodeId));
+              else setSide({ kind: "step", node: nodeId, field: { pointer: field, n: ++jumps.current } });
+            }}
             onCheck={() => void validate.current()}
             onClose={() => {
               setSide(null);
