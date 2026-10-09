@@ -3,19 +3,38 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or
 > superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Revision 2, 2026-10-09.** Nothing is built before the owner approves this plan. Nothing is pushed and no PR is
-opened without the owner's OK in chat. Revision 1 (06962fd2) was held by a review pasted in chat for eight defects in
-its code; "Changes from revision 1" below says how each was answered.
+**Revision 3, 2026-10-09.** Nothing is built before the owner approves this plan. Nothing is pushed and no PR is
+opened without the owner's OK in chat. Reviews pasted in chat held revision 1 (06962fd2) for eight defects in its code
+and revision 2 (80de9638) for three more; "Changes from revision 2" and "Changes from revision 1" below say how each
+was answered.
 
 The plan's code was checked before review on a scratch copy of 93a0dd61, never on a branch. Its blocks were applied
-as written, its tests run, and the plan corrected where they failed; revision 2's corrections were checked the same
-way, each with a test that reproduces the review's counterexample:
-- the engine's tests: 1,194 passed (revision 1), then the graph tests with revision 2's: 424 passed;
+as written, its tests run, and the plan corrected where they failed. Each correction since revision 1 has a test that
+reproduces the review's counterexample, run against the previous revision's code to see it fail:
+- the engine's tests: 1,202 passed;
 - the database and API tests the tasks touch (samples, scope, the worker's record, retention, the migration chain,
   OpenAPI, the workflow routes): passed;
 - ruff, mypy (strict) and the import contracts: clean.
 The whole backend suite wasn't run; Task 5 runs it, with the owner's OK. The executor still runs every step: the
 check is evidence, not a substitute.
+
+## Changes from revision 2
+
+Each answers a finding of the review of 80de9638, pasted in chat on 2026-10-09; each new test fails on revision 2's
+code.
+
+1. **P1, `integer` and `number` were disjoint** (`allOf: [number, integer]` read as no type, though 5 passes it, and a
+   valid reference was refused). Types meet as JSON Schema says (`meet`), in both `json_types` and the ways. Ruling 1;
+   Task 2: `an integer is a number`, `a number that must be an integer fills an integer`.
+2. **P1, object keywords were trusted on scalars** (a string beside `properties` and `required` promised a present
+   field, and a formula on it validated, then failed in CEL). A way that can't be an object holds no field; a field
+   is sure only when its way is sure to be an object; `declared_optional` follows. Ruling 1; Task 2: `a field is sure
+   only on a value sure to be an object`, `a field of a value that may not be an object needs a guard`.
+3. **P2, the count and the sample came from two snapshots.** One statement counts the candidate runs and chooses
+   among them. Ruling 9; Task 10: `counts the search in the same statement as its answer`.
+4. **The surrounding-union fixture admitted no data** (each closed branch forbade the required `common`). Its
+   branches now declare `common`, and every new fixture checks witness data against JSON Schema (`_valid`).
+5. **No fallback environment.** The worktree's own locked environment, or the work stops for the owner.
 
 ## Changes from revision 1
 
@@ -143,7 +162,9 @@ the task that owns it.
     - Task 2: `follows nested alternatives up to the bound, then says any value`, `ends on a definition that refers
       to itself`, `reads a device's name as text in every kind of device`, `never promises less than the data holds`
       (a property test), `a field around a union keeps its type`, `reads every member of an all of`, `bounds the
-      whole read, not only one position` (a work count), `merges alternatives that are the same`.
+      whole read, not only one position` (a work count), `merges alternatives that are the same`, `an integer is a
+      number`, `a field is sure only on a value sure to be an object`, `a field of a value that may not be an object
+      needs a guard`, `a number that must be an integer fills an integer`.
 - **A step whose liveness the analysis can't settle.**
   - The cases: liveness too complex to analyse (`None`); a step in a loop body, inside a branch; a step after an
     error port.
@@ -198,7 +219,7 @@ the task that owns it.
       but unchanged), `marks a sample stale when the config differs`, `takes the first iteration by number, not by
       text`, `takes the highest attempt`, `takes the newest captured row, not the newest run`, `runs that haven't
       ended never fill the window`, `says how many runs it searched`, `names a connection only through a field its
-      type marks`;
+      type marks`, `counts the search in the same statement as its answer`;
     - Task 9: `records each revision an attempt opens`.
 
 ## Rulings this plan proposes
@@ -223,8 +244,13 @@ it's wrong.
      alternative counts). A position that is only `null` stays a plain null value, as today.
    - `declared_optional` and `declared_nullable` read through a union only when every alternative declares the
      field. Otherwise the data is open there, and nothing is reported (spec §4.3: undeclared data needs no guard).
-   - Within a way, a field declared by one of its schemas has that schema (all of them, when several declare it); it
-     is required when one of them requires it; the way is closed to an undeclared field when one of them is closed.
+   - Within a way, a field declared by one of its schemas has that schema (all of them, when several declare it); the
+     way is closed to an undeclared field when one of them is closed.
+   - Types meet as JSON Schema says: an integer is a number, so `number` and `integer` meet in `integer`.
+   - Object keywords speak only of objects, `items` only of lists. A way that can't be an object holds no field. A
+     field is sure to be there only when its way is sure to be an object and requires it: a value that may be a
+     string (`type: ["object", "string"]`, or a string beside `properties`) may lack it. None of the shipped plugins'
+     5,719 object schemas is affected: the 30 that declare `properties` without a `type` require nothing.
    - Why: the owner's ruling, and the data tree must type a device's `name` as text, as validation does. The cost:
      an existing draft may meet new diagnostics when it's next validated: a reference now typed that mismatches its
      field (`ref.type_mismatch`), a formula field declared optional in every alternative (`cel.conditional_ref`), or
@@ -313,7 +339,8 @@ it's wrong.
      attempt. Among the candidates, the answer is the one whose row ended last: B7's "newest succeeded row", within
      the window.
    - The answer says how many runs it searched (`searched_runs`, at most `search_limit`, 200). "No sample" then
-     means none in those runs, never "this step has never run": 4c-2b's copy says which.
+     means none in those runs, never "this step has never run": 4c-2b's copy says which. The count and the choice come
+     from one statement, so one snapshot: a run ending meanwhile can't make them disagree.
    - Migration 0045 adds the index `runs_workflow_ended (workflow_id, ended_at DESC, id DESC) WHERE ended_at IS NOT
      NULL` for it.
    - Why: B7's selection; sub-flows run this workflow's steps too. The cost: a sample older than the newest 200 ended
@@ -392,8 +419,8 @@ Every command runs from the plan's worktree (see "Executing this plan"). `$WT` i
 
 - Python, from `$WT/backend`: the worktree's own environment, made from the lock (the review of revision 1).
   `uv sync --frozen` installs exactly `uv.lock` into `$WT/backend/.venv`; it installs packages, so the owner's OK is
-  asked at the start (an earlier session's tooling refused it unasked). If the owner declines, the fallback is the
-  main checkout's venv with an identical lock (`cmp` them) and `PYTHONPATH=src:.`, as revision 1 said. Then:
+  asked at the start (an earlier session's tooling refused it unasked). If it can't be made, the work stops for the
+  owner's word: there is no fallback to another checkout's environment (the review of revision 2). Then:
   ```bash
   export PY="uv run --frozen python"
   $PY -c 'import dewpoint; print(dewpoint.__file__)'   # must print $WT/backend/src/...
@@ -468,8 +495,9 @@ entry follows its index, not its case, when cases are moved or removed.
 
 ### 4c-2a plan (2026-10-09)
 
-`docs/superpowers/plans/2026-10-09-editor-ui-4c2a-data-backend.md`. A review pasted in chat held revision 1
-(06962fd2) for eight defects in its code; revision 2 answers them, each with a test that fails on revision 1's code.
+`docs/superpowers/plans/2026-10-09-editor-ui-4c2a-data-backend.md`. Reviews pasted in chat held revision 1
+(06962fd2) for eight defects in its code and revision 2 (80de9638) for three more; revision 3 answers them, each with a
+test that fails on the previous revision's code.
 Its rulings (1–11) are proposed, and join this ledger as 114 onward only when the owner accepts the plan.
 ```
 
@@ -505,14 +533,18 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
     ways at a position (one schema, or a conjunction) and whether it may also be null; None when unknown or past the
     bounds;
   - `MAX_ALTERNATIVES = 64`, `MAX_UNION_DEPTH = 8`, `MAX_STEPS = 4096`;
-  - `json_types` reads an `allOf` as what all its members allow.
+  - `meet(a: frozenset[str], b: frozenset[str]) -> frozenset[str]`: the JSON types both allow, an integer being a
+    number;
+  - `json_types` reads an `allOf` as what all its members allow (`meet`).
 
 - [ ] **Step 1: Write the failing tests for `navigate`**
 
 Append to `backend/tests/engine/graph/test_schemas.py` (add `import json`, `from typing import Any`,
 `from hypothesis import given, settings`, `from hypothesis import strategies as st` and
 `from dewpoint.engine.graph import schemas` to its imports, and `MAX_ALTERNATIVES, MAX_STEPS, MAX_UNION_DEPTH` to the
-`schemas` import):
+`schemas` import; it already imports `Draft202012Validator` and `compatible`). Every new fixture states witness data
+and checks it passes JSON Schema itself (`_valid`): a fixture that admits no data proves nothing (the review of
+revision 2).
 
 ```python
 # Alternatives, read together (4c-2a ruling 1; engine-core spec §4.3).
@@ -730,6 +762,12 @@ def test_never_promises_less_than_the_data_holds(data: st.DataObject) -> None:
 
 
 # The review of revision 1: what surrounds a union stays, and the whole read is bounded.
+def _valid(schema: dict[str, Any], *witnesses: Any) -> None:
+    """A fixture admits data: each witness passes JSON Schema itself (the review of revision 2)."""
+    for witness in witnesses:
+        assert Draft202012Validator(schema).is_valid(witness), witness
+
+
 def test_a_field_around_a_union_keeps_its_type() -> None:
     """What surrounds a union applies to each branch beside it, never overwritten by it."""
     around = {
@@ -737,10 +775,13 @@ def test_a_field_around_a_union_keeps_its_type() -> None:
         "properties": {"common": {"type": "string"}},
         "required": ["common"],
         "anyOf": [
-            {"properties": {"a": {"type": "integer"}}, "required": ["a"], "additionalProperties": False},
-            {"properties": {"b": {"type": "integer"}}, "required": ["b"], "additionalProperties": False},
+            {"properties": {"common": {}, "kind": {"const": "a"}, "a": {"type": "integer"}},
+             "required": ["kind", "a"], "additionalProperties": False},
+            {"properties": {"common": {}, "kind": {"const": "b"}, "b": {"type": "integer"}},
+             "required": ["kind", "b"], "additionalProperties": False},
         ],
-    }
+    }  # fmt: skip
+    _valid(around, {"common": "x", "kind": "a", "a": 1}, {"common": "y", "kind": "b", "b": 2})
     common = navigate(around, ["common"])
     assert json_types(common.schema) == {"string"} and not common.conditional
     a = navigate(around, ["a"])
@@ -750,9 +791,36 @@ def test_a_field_around_a_union_keeps_its_type() -> None:
 def test_reads_every_member_of_an_all_of() -> None:
     both = {"allOf": [{"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]},
                       {"type": "object", "properties": {"b": {"type": "integer"}}}]}  # fmt: skip
+    _valid(both, {"a": "x"}, {"a": "x", "b": 1})
     assert json_types(navigate(both, ["a"]).schema) == {"string"} and not navigate(both, ["a"]).conditional
     assert json_types(navigate(both, ["b"]).schema) == {"integer"} and navigate(both, ["b"]).missing
     assert json_types({"allOf": [{"type": ["string", "integer"]}, {"type": "string"}]}) == {"string"}
+
+
+def test_an_integer_is_a_number() -> None:
+    """`number` and `integer` meet in `integer`: 5 passes both (the review of revision 2)."""
+    count = {"allOf": [{"type": "number"}, {"type": "integer"}]}
+    _valid(count, 5)
+    assert json_types(count) == {"integer"}
+    holder = {"type": "object", "properties": {"n": count}, "required": ["n"]}
+    _valid(holder, {"n": 5})
+    n = navigate(holder, ["n"])
+    assert json_types(n.schema) == {"integer"} and not n.conditional
+    assert compatible(n.schema, {"type": "integer"})
+
+
+def test_a_field_is_sure_only_on_a_value_sure_to_be_an_object() -> None:
+    """Object keywords speak only of objects: a string with `properties` and `required` beside it is still a string
+    (the review of revision 2)."""
+    text = {"allOf": [{"type": "string"}, {"properties": {"n": {"type": "integer"}}, "required": ["n"]}]}
+    _valid(text, "x")
+    with pytest.raises(PathError, match="isn't an object"):
+        navigate({"type": "object", "properties": {"v": text}, "required": ["v"]}, ["v", "n"])
+    mixed = {"type": ["object", "string"], "properties": {"n": {"type": "integer"}}, "required": ["n"]}
+    _valid(mixed, {"n": 1}, "x")
+    n = navigate({"type": "object", "properties": {"v": mixed}, "required": ["v"]}, ["v", "n"])
+    assert json_types(n.schema) == {"integer"} and n.missing  # when the value is the string, there's no `n`
+    assert declared_optional({"type": "object", "properties": {"v": mixed}, "required": ["v"]}, ["v", "n"]) == (1,)
 
 
 def _tree(depth: int, tag: str, required: bool = True) -> dict[str, Any]:
@@ -813,6 +881,24 @@ def test_a_field_every_alternative_declares_but_one_doesnt_require_needs_a_guard
     assert codes(one("has(trigger.device.site) && trigger.device.site == 'a'", input_schema=UNION_INPUT)) == []
     assert codes(one("trigger.device.name == 'a'", input_schema=UNION_INPUT)) == []  # required in every one
     assert codes(one("trigger.device.ports == 1", input_schema=UNION_INPUT)) == []  # open data: one doesn't declare it
+
+
+# The review of revision 2: a field is sure only on a value sure to be an object; an integer is a number.
+VARIANTS: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "text": {"allOf": [{"type": "string"}, {"properties": {"n": {"type": "integer"}}, "required": ["n"]}]},
+        "either": {"type": ["object", "string"], "properties": {"n": {"type": "integer"}}, "required": ["n"]},
+    },
+    "required": ["text", "either"],
+}
+
+
+def test_a_field_of_a_value_that_may_not_be_an_object_needs_a_guard() -> None:
+    assert codes(one("trigger.either.n > 0", input_schema=VARIANTS)) == ["cel.conditional_ref"]
+    assert codes(one("type(trigger.either) == map && has(trigger.either.n) && trigger.either.n > 0",
+                     input_schema=VARIANTS)) == []  # fmt: skip
+    assert codes(one("trigger.text.n > 0", input_schema=VARIANTS)) != []  # a string has no fields: refused
 ```
 
 The file's helper `one(expr, …, **settings)` writes `{"input_schema": INPUT, **settings}`, so passing
@@ -836,6 +922,14 @@ def test_a_reference_through_alternatives_is_typed() -> None:
     g.settings = {"input_schema": union}
     found = [d for d in check(g).diagnostics if d.code == "ref.type_mismatch"]
     assert [d.message for d in found] == ["`trigger.device.name` is string, but this field expects integer."]
+
+
+def test_a_number_that_must_be_an_integer_fills_an_integer() -> None:
+    """The review of revision 2: `allOf: [number, integer]` is an integer, and 5 passes it."""
+    g = G().node("wait", "flow.delay@1", {"duration_s": ref("trigger.count")})
+    g.settings = {"input_schema": {"type": "object", "properties": {"count": {"allOf": [{"type": "number"},
+                  {"type": "integer"}]}}, "required": ["count"]}}  # fmt: skip
+    assert [d.code for d in check(g).diagnostics if d.code == "ref.type_mismatch"] == []
 ```
 
 - [ ] **Step 3: Run them to see them fail**
@@ -859,8 +953,8 @@ class Resolved:
     nullable: bool = False  # the value itself may be null
 ```
 
-In `json_types`, after the `anyOf`/`oneOf` loop and before its last `return None`, read an `allOf` as what all its
-members allow:
+In `json_types`, after the `anyOf`/`oneOf` loop and in place of its last line, read an `allOf` as what all its members
+allow:
 
 ```python
     members = s.get("allOf")
@@ -869,8 +963,20 @@ members allow:
         for member in members:
             types = json_types(standalone(schema, member)) if isinstance(member, Mapping) else None
             if types is not None:
-                common = types if common is None else common & types
+                common = types if common is None else meet(common, types)
         return common
+    return None
+```
+
+and add, after `json_types` (an integer is a number: `number` and `integer` meet in `integer`):
+
+```python
+def meet(a: frozenset[str], b: frozenset[str]) -> frozenset[str]:
+    """The JSON types both allow. An integer is a number: `number` and `integer` meet in `integer`."""
+    out = set(a & b)
+    if ("integer" in a and "number" in b) or ("number" in a and "integer" in b):
+        out.add("integer")
+    return frozenset(out)
 ```
 
 Then replace everything from `def navigate(` up to `def element_schema(` (that is `navigate`, `declared_optional` and
@@ -949,7 +1055,7 @@ def _types(root: Schema, way: Way) -> frozenset[str] | None:
     for schema in way:
         types = json_types(standalone(root, schema))
         if types is not None:
-            out = types if out is None else out & types
+            out = types if out is None else meet(out, types)
     return out
 
 
@@ -982,21 +1088,23 @@ def alternatives(root: Schema, schemas: Any, budget: _Budget | None = None) -> t
 
 def _step(root: Schema, way: Way, seg: str | int) -> tuple[Way, bool] | PathError | None:
     """One way, one segment: the schemas there (all apply) and whether it may be absent; a PathError when this way
-    can't hold it; None when it says nothing about it (any value)."""
+    can't hold it; None when it says nothing about it (any value). Object keywords (`properties`, `required`) speak only
+    of objects, and `items` only of lists: a field is sure to be there only when the value is sure to be an object."""
     types = _types(root, way)
     if isinstance(seg, int):
         if types is not None and "array" not in types:
             return PathError(f"[{seg}] indexes a value that isn't a list")
         items = tuple(s["items"] for s in way if isinstance(s.get("items"), Mapping) and s["items"])
-        return (items, True) if items else None  # the list may be shorter
+        return (items, True) if items else None  # the list may be shorter, or the value not a list
+    if types is not None and "object" not in types:
+        return PathError(f"`{seg}` reads a field of a value that isn't an object")
+    surely_object = types == frozenset({"object"})
     declared = tuple(
         s["properties"][seg] for s in way if isinstance(s.get("properties"), Mapping) and seg in s["properties"]
     )
     if declared:
         required = any(isinstance(s.get("required"), list) and seg in s["required"] for s in way)
-        return declared, not required
-    if types is not None and "object" not in types:
-        return PathError(f"`{seg}` reads a field of a value that isn't an object")
+        return declared, not (required and surely_object)
     extra = tuple(
         s["additionalProperties"]
         for s in way
@@ -1087,13 +1195,15 @@ def _declared(root: Any, path: Sequence[str | int], start: Any, nullable: bool) 
         fields: list[Way] = []
         optional = False
         for way in ways:
+            types = _types(root, way)
             declared = tuple(
                 s["properties"][seg] for s in way if isinstance(s.get("properties"), Mapping) and seg in s["properties"]
             )
-            if not declared:
+            if not declared or (types is not None and "object" not in types):
                 return tuple(out)
             fields.append(declared)
-            optional |= not any(isinstance(s.get("required"), list) and seg in s["required"] for s in way)
+            required = any(isinstance(s.get("required"), list) and seg in s["required"] for s in way)
+            optional |= not (required and types == frozenset({"object"}))
         if not fields:
             return tuple(out)
         if nullable:
@@ -1120,7 +1230,10 @@ def declared_nullable(root: Any, path: Sequence[str | int], start: Any = None) -
 Keep `_strip_null`: `target_schema`'s `_steps` still uses it. A position's state is a list of ways, each a
 conjunction (`Way`): what surrounds a union stays beside each branch, never overwritten by it (the review of
 revision 1); every member of an `allOf` applies. Duplicates are merged at every position, and one budget
-(`MAX_STEPS`) bounds the whole read, `declared_optional` and `declared_nullable` included.
+(`MAX_STEPS`) bounds the whole read, `declared_optional` and `declared_nullable` included. Types meet as JSON Schema
+says (`meet`: an integer is a number), and object keywords count only for a value sure to be an object: a field is
+sure to be there only when the way's types are exactly `object`, and a way that can't be an object holds no field
+(the review of revision 2).
 
 In `backend/src/dewpoint/engine/graph/validate.py`, make the resolver carry `missing`:
 - In `_resolve_loop`, `return Resolved(None, bool(p.rest))` becomes `return Resolved(None, bool(p.rest), missing=bool(p.rest))`.
@@ -3380,6 +3493,33 @@ async def test_names_a_connection_only_through_a_field_its_type_marks(owner_sess
     await _row(owner_sessionmaker, named, await _run(owner_sessionmaker, named))
     their = await _newest(api_sessionmaker, named)
     assert their is not None and their.names_connection
+
+
+async def test_counts_the_search_in_the_same_statement_as_its_answer(owner_sessionmaker, api_sessionmaker) -> None:
+    """One statement, one snapshot: a run ending between a count and a search would make them disagree (the review of
+    revision 2). So exactly one statement reads the candidate runs, and it both counts and chooses."""
+    from sqlalchemy import event
+
+    seeded = await seed_step(owner_sessionmaker, named=[None])
+    await _row(owner_sessionmaker, seeded, await _run(owner_sessionmaker, seeded))
+    statements: list[str] = []
+    async with api_sessionmaker() as s, s.begin():
+        await tenant_scope(s, seeded.tenant)
+        wf = (await s.execute(text("select workflow_id from runs where id = :r"), {"r": seeded.run})).scalar_one()
+        at = await cutoff(s, seeded.tenant)
+        connection = await s.connection()
+
+        def seen(_c: Any, _cursor: Any, statement: str, *_: Any) -> None:
+            statements.append(statement)
+
+        event.listen(connection.sync_connection, "before_cursor_execute", seen)
+        try:
+            search = await samples.newest(s, seeded.tenant, wf, seeded.step, iteration_key=None, at=at)
+        finally:
+            event.remove(connection.sync_connection, "before_cursor_execute", seen)
+    reading = [st for st in statements if "candidates" in st]
+    assert len(reading) == 1 and "count(" in reading[0].lower()
+    assert search.sample is not None and search.searched == 1
 ```
 
 `seed_step` gives a run whose status is `running`; `_run` adds ended ones. Check before running: the `Seeded` export from
@@ -3474,16 +3614,15 @@ async def newest(
     at: Cutoff,
 ) -> Search:
     root = aliased(Run)
-    candidates = (  # ended ones only, before the limit: a run still going never takes a place (the review's P2)
+    candidates = (  # ended ones only, before the limit: a run still going never takes a place
         select(Run.id, Run.kind, Run.mode, Run.workflow_version_id, Run.ended_at)
         .join(root, (root.id == Run.root_run_id) & (root.tenant_id == Run.tenant_id))
         .where(Run.tenant_id == tenant_id, Run.workflow_id == workflow_id)
         .where(Run.status != "running", Run.ended_at.is_not(None), kept(root.ended_at, at))
         .order_by(Run.ended_at.desc(), Run.id.desc())
         .limit(SCAN_RUNS)
-        .subquery("candidates")
+        .cte("candidates")
     )
-    searched = await s.scalar(select(func.count()).select_from(candidates)) or 0
     # "l:3/m:10" → {3,10}: the first iteration is the lowest index, by number (`l:2` before `l:10`).
     number = cast(
         func.string_to_array(func.regexp_replace(RunStep.iteration_key, "[a-z][a-z0-9_]*:", "", "g"), "/"),
@@ -3502,21 +3641,31 @@ async def newest(
         .limit(1)
         .lateral("picked")
     )
-    found = (
-        await s.execute(
-            select(
-                candidates.c.id, candidates.c.kind, candidates.c.mode, candidates.c.workflow_version_id,
-                picked.c.iteration_key, picked.c.attempt, picked.c.ended_at, picked.c.output_preview,
-            )
-            .select_from(candidates)
-            .join(picked, true())
-            # the newest captured: the row's end first, then its run's (B7's "newest succeeded row")
-            .order_by(picked.c.ended_at.desc().nulls_last(), candidates.c.ended_at.desc(), candidates.c.id.desc())
-            .limit(1)
+    best = (
+        select(
+            candidates.c.id,
+            candidates.c.kind,
+            candidates.c.mode,
+            candidates.c.workflow_version_id,
+            picked.c.iteration_key,
+            picked.c.attempt,
+            picked.c.ended_at,
+            picked.c.output_preview,
         )
-    ).first()  # fmt: skip
+        .select_from(candidates)
+        .join(picked, true())
+        # the newest captured: the row's end first, then its run's (B7's "newest succeeded row")
+        .order_by(picked.c.ended_at.desc().nulls_last(), candidates.c.ended_at.desc(), candidates.c.id.desc())
+        .limit(1)
+        .subquery("best")
+    )
+    # One statement, so one snapshot: the count describes exactly the runs the answer was chosen among.
+    searched = select(func.count()).select_from(candidates).scalar_subquery()
+    one = select(true()).subquery("one")  # a single row, so the count comes back when no sample does
+    row = (await s.execute(select(searched.label("searched"), best).select_from(one).outerjoin(best, true()))).one()
+    found = row if row.id is not None else None
     if found is None:
-        return Search(None, searched)
+        return Search(None, row.searched)
     version = (
         await s.execute(
             select(WorkflowVersion.number, WorkflowVersion.graph, WorkflowVersion.connection_ids).where(
@@ -3567,7 +3716,7 @@ async def newest(
             ),
             names_connection=await _names_connection(s, node, {str(c) for c in version.connection_ids or ()}),
         ),
-        searched,
+        row.searched,
     )
 
 
@@ -3593,7 +3742,7 @@ SQLAlchemy (2.x), the `Connection` model's module, and that `RunStep.tenant_id` 
 - [ ] **Step 4: Run the core tests to see them pass**
 
 Run: `… $PY -m pytest -q tests/core/runs/test_samples.py`
-Expected: PASS, 11 tests.
+Expected: PASS, 12 tests.
 
 - [ ] **Step 5: Write the route's failing tests**
 
