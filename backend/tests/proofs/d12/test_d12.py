@@ -441,7 +441,10 @@ def test_d12_3_nexus_routes_are_closed(server: Server) -> None:
     record({"environment": f"d12-{server.config}", "nexus_route": "namespace and task queue", "status": status})
     assert status == 403
     assert len(_decisions(server, NAMESPACE)) == before  # closed: refused without an audit write
-    for name, path, unreachable in (("endpoint", "/nexus/endpoints/e/services/s/o", 404),
+    # the endpoint route takes an endpoint's id, a UUID: a malformed one ("e") is answered 500 by the SQL store's
+    # parse ("unable to parse endpoint ID as UUID"), never a refusal (the diagnostic run); a well-formed one that
+    # doesn't exist is NotFound, 404
+    for name, path, unreachable in (("endpoint", f"/nexus/endpoints/{uuid.uuid4()}/services/s/o", 404),
                                     ("callback", f"/namespaces/{NAMESPACE}/nexus/callback", 400)):  # fmt: skip
         status, _ = _http(server, "POST", path, {})
         record({"environment": f"d12-{server.config}", "nexus_route": name, "status": status,
