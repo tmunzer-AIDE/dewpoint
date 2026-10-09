@@ -50,6 +50,7 @@ from dewpoint.core.ingress.keys import retire_event_keys, rotate_event_key
 from dewpoint.core.models.identity import User
 from dewpoint.core.models.tenancy import Tenant
 from dewpoint.core.platform import inventory
+from dewpoint.core.platform.boundary import ProofRefusedError, proof_evidence
 from dewpoint.core.platform.service import (
     EnvironmentMismatchError,
     EnvironmentNotRecordedError,
@@ -1124,7 +1125,7 @@ def platform_disable_production_runs(
 
 
 class CapacityApiError(Exception):
-    """The API refused the capacity command: its error code, never more."""
+    """The API refused a platform admin's command: its error code, never more."""
 
 
 def _api_client(base: str) -> httpx.AsyncClient:
@@ -1135,8 +1136,28 @@ async def capacity_via_api(
     client: httpx.AsyncClient, *, email: str, password: str, code: str, change: dict[str, object], attestation: str
 ) -> dict[str, object]:
     """The ingress capacity changed through the platform admin's API (D11, the owner's ruling on the 2b-4b M3
-    checkpoint 3): signed in with the password, then the authenticator's code (a second factor proven now, so fresh),
-    the change asked on that session, which is then ended. What the capacity is then."""
+    checkpoint 3). What the capacity is then."""
+    return await _as_platform_admin(client, email=email, password=password, code=code, method="PATCH",
+                                    path="/api/v1/admin/platform/ingress-capacity",
+                                    body={**change, "attestation": attestation})  # fmt: skip
+
+
+async def boundary_via_api(
+    client: httpx.AsyncClient, *, email: str, password: str, code: str, evidence: dict[str, str]
+) -> dict[str, object]:
+    """A namespace boundary recorded through the platform admin's API (D11, the owner's ruling on the 2b-4b M4
+    design). The row as the API shows it."""
+    return await _as_platform_admin(client, email=email, password=password, code=code, method="POST",
+                                    path="/api/v1/admin/platform/namespace-boundaries",
+                                    body=dict(evidence))  # fmt: skip
+
+
+async def _as_platform_admin(
+    client: httpx.AsyncClient, *, email: str, password: str, code: str, method: str, path: str,
+    body: dict[str, object],
+) -> dict[str, object]:  # fmt: skip
+    """One platform admin's call (D11): signed in with the password, then the authenticator's code (a second factor
+    proven now, so fresh), the call made on that session, which is then ended. Its answer."""
     token: str | None = None
     csrf = ""
 
@@ -1159,14 +1180,78 @@ async def capacity_via_api(
     csrf = (await call("POST", "/api/v1/auth/login", {"email": email, "password": password})).json()["csrf_token"]
     csrf = (await call("POST", "/api/v1/auth/mfa/totp", {"code": code})).json()["csrf_token"]
     try:
-        changed = await call("PATCH", "/api/v1/admin/platform/ingress-capacity", {**change, "attestation": attestation})
-        result: dict[str, object] = changed.json()
+        answered = await call(method, path, body)
+        result: dict[str, object] = answered.json()
         return result
     finally:
         try:
             await call("POST", "/api/v1/auth/logout")
         except (CapacityApiError, httpx.HTTPError):
             pass
+
+
+@platform_cli.command("record-namespace-boundary")
+def platform_record_namespace_boundary(
+    api: str = typer.Option(..., "--api", envvar="DEWPOINT_API_URL", help="the API's origin, as the web reaches it"),
+    email: str = typer.Option(..., "--email", help="the platform admin's email: you sign in as them"),
+    proof: str = typer.Option(..., "--proof", help="D12's proof record (the JSON lines DEWPOINT_PROOF_OUT wrote)"),
+    name: str = typer.Option(..., "--name", help="the boundary's name, kept while the boundary holds: a rebuilt "
+                             "server recorded under the same name doesn't strand an erasure relying on it"),
+    attestation: str = typer.Option(..., "--attestation", help="where and how D12 was proven, kept with the row and "
+                                    "in the audit"),
+) -> None:  # fmt: skip
+    """Record this deployment's namespace boundary (D3g) through the platform admin's API (D11), tied to D12's proof
+    and to the server and namespace it holds for (2b-4b M4). First the proof record: a whole pass, both
+    configurations' inventories naming one server build. Then Temporal, with this deployment's own settings: the
+    namespace's id, its TLS verified, its retention at most 30 days, its archival disabled. Then you sign in with your
+    password and your authenticator's code. A development deployment's boundary only: production's waits for
+    real-target qualification. Exit 2 on a refused proof or setting, 1 on what Temporal shows."""
+    try:
+        evidence = proof_evidence(Path(proof).read_bytes())
+    except (OSError, ProofRefusedError) as e:
+        typer.echo(f"ERROR: the proof record is refused: {e if isinstance(e, ProofRefusedError) else type(e).__name__}")
+        raise typer.Exit(2) from None
+    settings = get_settings()
+
+    async def _described(s: AsyncSession) -> Any:
+        environment = await _verified_namespace(s, settings)
+        try:
+            client = await temporal_connect(settings, environment)
+            return await client.workflow_service.describe_namespace(
+                DescribeNamespaceRequest(namespace=settings.temporal_namespace)
+            )
+        except TemporalConfigError as e:
+            raise _refused(e) from None
+        except Exception as e:  # unreachable, refused: nothing recorded on an unknown
+            typer.echo(f"PROBLEM: Temporal couldn't be asked ({type(e).__name__})")
+            raise typer.Exit(1) from None
+
+    answer = asyncio.run(_in_session(_described))
+    problems = temporal_problems(answer, plaintext=settings.temporal_insecure_dev)
+    for problem in problems:
+        typer.echo(f"PROBLEM: {problem}")
+    if problems:
+        raise typer.Exit(1)
+    recorded = {"name": name, "namespace": settings.temporal_namespace, "namespace_id": answer.namespace_info.id,
+                "server_build": evidence.server_build, "proof_digest": evidence.digest,
+                "attestation": attestation}  # fmt: skip
+    password = typer.prompt("Password", hide_input=True)
+    code = typer.prompt("Authenticator code")
+
+    async def _go() -> dict[str, object]:
+        async with _api_client(api) as client:
+            return await boundary_via_api(client, email=email, password=password, code=code, evidence=recorded)
+
+    try:
+        shown = asyncio.run(_go())
+    except (CapacityApiError, httpx.HTTPError) as e:
+        typer.echo(f"ERROR: the API refused it: {e}" if isinstance(e, CapacityApiError) else "ERROR: the API is "
+                   f"unreachable ({type(e).__name__})")  # fmt: skip
+        raise typer.Exit(2) from None
+    typer.echo(
+        f"namespace boundary {shown['id']} recorded: {name}, namespace {recorded['namespace']} "
+        f"({recorded['namespace_id']}), server {evidence.server_build}, proof {evidence.digest}"
+    )
 
 
 @platform_cli.command("set-ingress-capacity")

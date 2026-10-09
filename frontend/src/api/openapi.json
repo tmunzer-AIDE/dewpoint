@@ -98,6 +98,54 @@
         "title": "BindingPatch",
         "type": "object"
       },
+      "BoundaryIn": {
+        "properties": {
+          "attestation": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Attestation",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "namespace": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Namespace",
+            "type": "string"
+          },
+          "namespace_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Namespace Id",
+            "type": "string"
+          },
+          "proof_digest": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Proof Digest",
+            "type": "string"
+          },
+          "server_build": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Server Build",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "namespace",
+          "namespace_id",
+          "server_build",
+          "proof_digest",
+          "attestation"
+        ],
+        "title": "BoundaryIn",
+        "type": "object"
+      },
       "CapacityIn": {
         "description": "The values to change, each `null` to unset it, or `unset` for all three; and how the starts were measured.",
         "properties": {
@@ -2028,6 +2076,72 @@
           }
         },
         "summary": "Change Ingress Capacity",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/platform/namespace-boundaries": {
+      "get": {
+        "description": "Every boundary recorded, newest first; the erasure's bound relies on the newest not lost.",
+        "operationId": "namespace_boundaries_api_v1_admin_platform_namespace_boundaries_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Namespace Boundaries Api V1 Admin Platform Namespace Boundaries Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Namespace Boundaries",
+        "tags": [
+          "admin"
+        ]
+      },
+      "post": {
+        "description": "The boundary recorded, audited (`platform.namespace_boundary.record`) with the admin's id and its evidence.",
+        "operationId": "record_boundary_api_v1_admin_platform_namespace_boundaries_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BoundaryIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Record Boundary Api V1 Admin Platform Namespace Boundaries Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Record Boundary",
         "tags": [
           "admin"
         ]

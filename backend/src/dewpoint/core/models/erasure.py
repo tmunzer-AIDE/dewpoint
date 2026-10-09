@@ -102,3 +102,10 @@ class NamespaceBoundary(Base):
     name: Mapped[str] = mapped_column(Text)
     verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     lost_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # what it rests on (0051, 2b-4b M4): null on a row from before
+    namespace: Mapped[str | None] = mapped_column(Text)
+    namespace_id: Mapped[str | None] = mapped_column(Text)  # Temporal's id for the namespace
+    server_build: Mapped[str | None] = mapped_column(Text)  # sha256:<hex> of the server binary
+    proof_digest: Mapped[str | None] = mapped_column(Text)  # sha256:<hex> of the D12 proof record
+    attestation: Mapped[str | None] = mapped_column(Text)
+    recorded_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))  # the platform admin

@@ -47,6 +47,30 @@ export interface paths {
         patch: operations["change_ingress_capacity_api_v1_admin_platform_ingress_capacity_patch"];
         trace?: never;
     };
+    "/api/v1/admin/platform/namespace-boundaries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Namespace Boundaries
+         * @description Every boundary recorded, newest first; the erasure's bound relies on the newest not lost.
+         */
+        get: operations["namespace_boundaries_api_v1_admin_platform_namespace_boundaries_get"];
+        put?: never;
+        /**
+         * Record Boundary
+         * @description The boundary recorded, audited (`platform.namespace_boundary.record`) with the admin's id and its evidence.
+         */
+        post: operations["record_boundary_api_v1_admin_platform_namespace_boundaries_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/recovery": {
         parameters: {
             query?: never;
@@ -1422,6 +1446,21 @@ export interface components {
             /** Filter */
             filter?: unknown[] | null;
         };
+        /** BoundaryIn */
+        BoundaryIn: {
+            /** Attestation */
+            attestation: string;
+            /** Name */
+            name: string;
+            /** Namespace */
+            namespace: string;
+            /** Namespace Id */
+            namespace_id: string;
+            /** Proof Digest */
+            proof_digest: string;
+            /** Server Build */
+            server_build: string;
+        };
         /**
          * CapacityIn
          * @description The values to change, each `null` to unset it, or `unset` for all three; and how the starts were measured.
@@ -2166,6 +2205,63 @@ export interface operations {
         responses: {
             /** @description Successful Response */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    namespace_boundaries_api_v1_admin_platform_namespace_boundaries_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    record_boundary_api_v1_admin_platform_namespace_boundaries_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BoundaryIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
                 headers: {
                     [name: string]: unknown;
                 };

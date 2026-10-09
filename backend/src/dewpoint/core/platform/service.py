@@ -214,3 +214,46 @@ async def inventory_cut_over(s: AsyncSession) -> bool:
     before migration 0040 may still sync a schedule under its own id (the owner's D15 ruling on the 2b-4b M1
     checkpoint)."""
     return bool(await s.scalar(text("SELECT EXISTS (SELECT 1 FROM schedule_inventory_cutover)")))
+
+
+class BoundaryRefusedError(Exception):
+    """`record_namespace_boundary()` refused: `code` says why (the API's 409 or 422)."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+BOUNDARY_REFUSALS = {  # record_namespace_boundary()'s sqlstates
+    "DPN01": "environment_not_recorded",
+    "DPN02": "boundary_needs_qualification",
+    "DPN03": "namespace_not_recorded",
+    "DPN04": "boundary_evidence_incomplete",
+}
+
+
+async def record_namespace_boundary(s: AsyncSession, *, evidence: dict[str, str], actor_id: uuid.UUID) -> int:
+    """A namespace boundary (D3g) recorded (2b-4b M4, the owner's ruling on the M4 design), as the API's role for a
+    platform admin (D11), in the caller's transaction, audited with that admin's id and everything it rests on:
+    `evidence` names it (`name`), its namespace and Temporal's id for it, the server's and the D12 proof record's
+    SHA-256 and the attestation. Its id. Raises BoundaryRefusedError for what the function refuses."""
+    try:
+        async with s.begin_nested():
+            found = await s.execute(
+                text("select record_namespace_boundary(:name, :namespace, :namespace_id, :server_build, "
+                     ":proof_digest, :attestation, :actor)"),
+                {**{k: evidence[k] for k in BOUNDARY_EVIDENCE}, "actor": actor_id},
+            )  # fmt: skip
+    except DBAPIError as e:
+        code = BOUNDARY_REFUSALS.get(getattr(e.orig, "sqlstate", None) or "")
+        if code is None:
+            raise
+        raise BoundaryRefusedError(code) from None
+    boundary_id = int(found.scalar_one())
+    await audit.record(s, tenant_id=None, actor_id=actor_id, action="platform.namespace_boundary.record",
+                       target_type="namespace_boundary", target_id=str(boundary_id),
+                       details={k: evidence[k] for k in BOUNDARY_EVIDENCE})  # fmt: skip
+    return boundary_id
+
+
+BOUNDARY_EVIDENCE = ("name", "namespace", "namespace_id", "server_build", "proof_digest", "attestation")
