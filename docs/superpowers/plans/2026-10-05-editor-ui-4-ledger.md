@@ -1284,3 +1284,29 @@ M53. **The drawer's browser flows read the running app's labels**: the flow plug
     in seconds", a case's "Condition" and "Port name"); text fields by role (`getByLabel` matched the Fixed/Formula
     group too); the drawer's twin of a canvas "+", which shares its name. The gate: 33 passed, the 27 earlier flows
     and 6 new, under the CSP and axe.
+
+### 4c-1, the final checkpoint (2026-10-09)
+
+A fresh reviewer read the whole branch (e9272e0a..55dd746) against the plan, outline §6, the Review Focus and these
+rulings: nothing critical, four important findings, nine minor, and no ruling judged wrong. It verified the pure layers
+against the engine's constants and grammar, found no AI tells, and checked the O2 contrast (6.0:1 light, 6.7:1 dark).
+
+M54. **The four important findings, fixed** (5b9f45f), each by a test that failed first:
+    - focus goes back to the field's control after its Discard, Apply here, Clear and Replace, and to a limit after
+      its own (WCAG 2.4.3): "keeps focus at the field after its Discard or its Clear", "…after Apply here", "gives
+      focus to the new control after a reference is replaced", "…after a sensitive field's fixed value is replaced",
+      "keeps focus at a limit after its Discard";
+    - a reference or a template in a sensitive field shows as one, as the engine allows (only a fixed value there is
+      hidden and offered a Clear): "shows a reference in a sensitive field as a reference, never as a fixed value to
+      clear";
+    - an emptied list item or map entry keeps its place, blank, never "Required" nor announced required: "keeps an
+      emptied list item blank without calling it missing";
+    - a sensitive part under `patternProperties` or `propertyNames` counts, as `engine/sensitive.py`'s positions do:
+      "finds a sensitive part under patternProperties or propertyNames, as the engine does".
+M55. **Nine minor findings, deferred** for the owner: hexadecimal and binary number notation read as decimal; a
+    formula over 16,384 characters truncated on paste; list items keyed by index (view state follows the position);
+    every "Show choices" button named alike; a picker's loading and "none yet" states labelled without a control; the
+    O2 contrast pair outside the token check; a limit's pointer colliding with a config property named `options` (no
+    installed type has one); valid JSON held through Escape (kept and counted, not applied); the heading's focus
+    before a pending Go to (a double announcement). What the reviewer set aside is each the plan's, the owner's or
+    4b's call, unchanged.
