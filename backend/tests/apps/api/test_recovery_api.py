@@ -331,7 +331,9 @@ async def test_held_before_needs_its_offset_and_is_answered_and_audited_in_utc(
     before = datetime.now(UTC) - timedelta(minutes=60)
     utc, local = before.isoformat(), before.astimezone(timezone(timedelta(hours=2))).isoformat()
     async with admin:
-        for bad in ("2026-10-09T10:00:00", "2026-10-09", 1760000000):
+        # naive, a date, a number; and past UTC's range once normalized (the fresh M3 review 3: a 500, not a 422)
+        for bad in ("2026-10-09T10:00:00", "2026-10-09", 1760000000, "9999-12-31T23:59:59-05:00",
+                    "0001-01-01T00:00:00+01:00"):  # fmt: skip
             counted = await admin.get(url(tenant, "held/count"), params={"kind": "cancel", "held_before": bad})
             released = await admin.post(url(tenant, "held/release-many"),
                                         json={"kind": "cancel", "held_before": bad, "max": 1})  # fmt: skip

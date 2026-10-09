@@ -59,9 +59,16 @@ def _text(value: object) -> object:
     return value
 
 
+def _utc(at: datetime) -> datetime:
+    try:
+        return at.astimezone(UTC)
+    except OverflowError:  # past UTC's range once normalized: refused as any other bad value is (a 422, never a 500)
+        raise ValueError("a timestamp within UTC's range") from None
+
+
 # An ISO 8601 timestamp with an explicit offset, in UTC from then on (the owner's ruling on the M3 checkpoint 2): a
 # naive one, a date or a number is refused
-HeldBefore = Annotated[AwareDatetime, BeforeValidator(_text), AfterValidator(lambda at: at.astimezone(UTC))]
+HeldBefore = Annotated[AwareDatetime, BeforeValidator(_text), AfterValidator(_utc)]
 
 
 class ReleaseManyIn(BaseModel):
