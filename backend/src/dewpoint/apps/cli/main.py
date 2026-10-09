@@ -1035,10 +1035,15 @@ def platform_set_ingress_capacity(
     if now["starts_per_s"] is None and now["headroom"] is None and now["queue_wait_s"] is None:
         typer.echo("ingress capacity unset: the development-only rates and limit")
         return
-    queue = (f"a {now['queue_wait_s']} s wait: the deployment's outstanding work at most {now['limit']} requests"
-             if now["queue_wait_s"] is not None else "no wait agreed")  # fmt: skip
+    problems = now.get("problems")
+    missing = [str(name) for name in problems] if isinstance(problems, list) else []
+    if missing:  # the limit in force is the development-only one: never shown as agreed (the fresh review 5's M4)
+        typer.echo(f"ingress capacity incomplete ({', '.join(missing)} unset): the development-only rates and "
+                   f"limit, {now['limit']} requests' outstanding work at most")  # fmt: skip
+        return
     typer.echo(f"ingress capacity: {now['starts_per_s']} starts a second measured, {now['headroom']} of them for "
-               f"ingress, {queue}")  # fmt: skip
+               f"ingress, a {now['queue_wait_s']} s wait: the deployment's outstanding work at most {now['limit']} "
+               "requests")  # fmt: skip
 
 
 @deployment_cli.command("set-current")

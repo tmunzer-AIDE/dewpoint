@@ -100,21 +100,21 @@ def stack(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_ses
 async def test_deliveries_at_once_from_tenants_of_mixed_fan_out_never_pass_the_limit(
     stack, owner_sessionmaker, ingress_sessionmaker, dispatch_sessionmaker, api_settings
 ) -> None:  # fmt: skip
-    """The invariant: 40 deliveries at once from three tenants (fan-outs 1, 5 and 20) against a limit of 60, 41 for
+    """The invariant: 40 deliveries at once from three tenants (fan-outs 1, 5 and 20) against a limit of 100, 81 for
     ingress. Then their events matched and their requests started: the counters equal the truth after each."""
-    await limited(owner_sessionmaker, 60)
+    await limited(owner_sessionmaker, 100)
     tenants = [await a_tenant(stack, fan_out) for fan_out in (1, 5, 20)]
     outcomes = await asyncio.gather(*(deliver(ingress_sessionmaker, tenants[k % 3], 1 + k % 2) for k in range(40)))
     kinds = {o["outcome"] for o in outcomes}
     assert kinds == {"recorded", "backlog_full"}, outcomes
-    assert await exact(owner_sessionmaker) <= 41
+    assert await exact(owner_sessionmaker) <= 81
     await workers(owner_sessionmaker)
     for _ in range(3):
         await matching.match_once(dispatch_sessionmaker, KEYS, matching.Verified())
-        assert await exact(owner_sessionmaker) <= 60
+        assert await exact(owner_sessionmaker) <= 100
         await dispatch.dispatch_once(dispatch_sessionmaker, FakeClient(), KEYS, api_settings, BUILD,
                                      dispatch.Rotation())  # fmt: skip
-        assert await exact(owner_sessionmaker) <= 60
+        assert await exact(owner_sessionmaker) <= 100
 
 
 async def test_idle_tenants_delivering_at_once_share_the_limits_room_never_past_it(
@@ -133,15 +133,14 @@ async def test_a_tenant_with_work_outstanding_is_admitted_only_within_its_share(
     stack, owner_sessionmaker, ingress_sessionmaker
 ) -> None:  # fmt: skip
     """Its share: ingress's room over the tenants with work outstanding and one more, half of it when it's alone. A
-    tenant with none may always come in within the room, so a delivery larger than its share isn't refused for ever. A
-    limit of 80: 61 for ingress."""
-    await limited(owner_sessionmaker, 80)
+    limit of 100: 81 for ingress."""
+    await limited(owner_sessionmaker, 100)
     wide, middle = await a_tenant(stack, 20), await a_tenant(stack, 5)
-    assert (await deliver(ingress_sessionmaker, wide, 2))["outcome"] == "recorded"  # 40: none outstanding before
-    refused = await deliver(ingress_sessionmaker, wide)  # 60 > its share alone, 30
+    assert (await deliver(ingress_sessionmaker, wide, 2))["outcome"] == "recorded"  # 40: its first, alone, 40 at most
+    refused = await deliver(ingress_sessionmaker, wide)  # 60 > its share alone, 40
     assert refused["outcome"] == "backlog_full" and refused["retry_after"] >= 1
     assert (await deliver(ingress_sessionmaker, middle))["outcome"] == "recorded"  # 45
-    assert (await deliver(ingress_sessionmaker, middle))["outcome"] == "recorded"  # its 10 within 61 over 3, 20
+    assert (await deliver(ingress_sessionmaker, middle))["outcome"] == "recorded"  # its 10 within 81 over 3, 27
     assert await owed(owner_sessionmaker, wide.tenant_id) == 40 and await exact(owner_sessionmaker) == 50
     assert (await budget(owner_sessionmaker))[1] == 2
 
@@ -149,18 +148,20 @@ async def test_a_tenant_with_work_outstanding_is_admitted_only_within_its_share(
 async def test_while_the_deployment_is_full_freed_credit_goes_to_a_tenant_under_its_share(
     stack, owner_sessionmaker, ingress_sessionmaker
 ) -> None:  # fmt: skip
-    await limited(owner_sessionmaker, 80)  # 61 for ingress
-    wide, middle, narrow = await a_tenant(stack, 20), await a_tenant(stack, 5), await a_tenant(stack, 1)
+    await limited(owner_sessionmaker, 100)  # 81 for ingress
+    wide, middle = await a_tenant(stack, 20), await a_tenant(stack, 5)
+    filler, narrow = await a_tenant(stack, 1), await a_tenant(stack, 1)
     assert (await deliver(ingress_sessionmaker, wide, 2))["outcome"] == "recorded"  # 40
-    assert (await deliver(ingress_sessionmaker, middle, 4))["outcome"] == "recorded"  # 60
-    assert (await deliver(ingress_sessionmaker, narrow, 2))["outcome"] == "backlog_full"  # 62: past the room
+    assert (await deliver(ingress_sessionmaker, middle, 5))["outcome"] == "recorded"  # 65
+    assert (await deliver(ingress_sessionmaker, filler, 16))["outcome"] == "recorded"  # 81: full
+    assert (await deliver(ingress_sessionmaker, narrow))["outcome"] == "backlog_full"
     async with owner_sessionmaker() as s, s.begin():  # one of the wide tenant's events cancelled: 20 freed
         await s.execute(text("update inbound_events set status = 'cancelled', reason = 'user_cancelled', "
                              "ended_at = now() where id = (select id from inbound_events where tenant_id = :t "
                              "limit 1)"), {"t": wide.tenant_id})  # fmt: skip
-    assert (await deliver(ingress_sessionmaker, wide))["outcome"] == "backlog_full"  # 40 > its share, 61 over 3: 20
+    assert (await deliver(ingress_sessionmaker, wide))["outcome"] == "backlog_full"  # 40 > its share, 81 over 4: 20
     assert (await deliver(ingress_sessionmaker, narrow, 2))["outcome"] == "recorded"  # nothing outstanding: in
-    assert await exact(owner_sessionmaker) == 42
+    assert await exact(owner_sessionmaker) == 63
 
 
 EVENT_EXITS = {  # how a pending event leaves: each releases its credit
@@ -393,13 +394,14 @@ async def test_tenants_at_once_keep_to_their_shares_and_leave_a_newcomer_room(
 async def test_a_delivery_that_can_never_fit_is_refused_for_good(
     stack, owner_sessionmaker, ingress_sessionmaker
 ) -> None:  # fmt: skip
-    """The fresh review 5's I1: one worth more than ingress may ever fill (the limit but what's kept for top-ups) would
-    get a 429 for ever; it's refused as too large, nothing stored."""
-    await limited(owner_sessionmaker, 40)  # 21 for ingress
+    """The fresh review 5's I1: one worth more than a tenant may hold even alone in an otherwise empty deployment (half
+    of ingress's room, or an event's most bindings if that's more: the owner's ruling on the M3 checkpoint 5) would get
+    a 429 for ever; it's refused as too large, nothing stored."""
+    await limited(owner_sessionmaker, 40)  # 21 for ingress: 20 at most for one tenant
     ready = await a_tenant(stack, 1)
-    assert await deliver(ingress_sessionmaker, ready, 22) == {"outcome": "over_limit"}
-    assert (await deliver(ingress_sessionmaker, ready, 21))["outcome"] == "recorded"
-    assert await exact(owner_sessionmaker) == 21
+    assert await deliver(ingress_sessionmaker, ready, 21) == {"outcome": "over_limit"}
+    assert (await deliver(ingress_sessionmaker, ready, 20))["outcome"] == "recorded"
+    assert await exact(owner_sessionmaker) == 20
 
 
 async def test_while_ingress_fills_the_deployment_a_top_up_still_finds_room(
@@ -416,3 +418,116 @@ async def test_while_ingress_fills_the_deployment_a_top_up_still_finds_room(
     await deliver(ingress_sessionmaker, second, 19)  # the rest of the limit, were ingress to fill it
     assert await matching.match_once(dispatch_sessionmaker, KEYS, matching.Verified()) == {"matched": 21}
     assert await exact(owner_sessionmaker) == 22  # its two requests, the first tenant's 20 events' requests
+
+
+async def test_an_idle_tenant_takes_no_more_than_its_share_to_be_so_a_newcomer_still_gets_in(
+    stack, owner_sessionmaker, ingress_sessionmaker
+) -> None:  # fmt: skip
+    """The owner's ruling on the M3 checkpoint 5: a tenant with nothing outstanding could take all of ingress's room
+    (81 of a limit of 100), and a newcomer then not even 1. Its first admission is now at most the share it will have
+    once counted (the room over the tenants with work outstanding, itself and one more), or one event's most bindings
+    if that's more. Alone: 40. Past what it could hold even in an otherwise empty deployment: 413, for good."""
+    await limited(owner_sessionmaker, 100)  # 81 for ingress
+    first, second, third = [await a_tenant(stack, 1) for _ in range(3)]
+    assert await deliver(ingress_sessionmaker, first, 81) == {"outcome": "over_limit"}
+    assert await deliver(ingress_sessionmaker, first, 41) == {"outcome": "over_limit"}
+    assert (await deliver(ingress_sessionmaker, first, 40))["outcome"] == "recorded"
+    assert (await deliver(ingress_sessionmaker, first))["outcome"] == "backlog_full"  # its share alone: 40
+    assert (await deliver(ingress_sessionmaker, second, 28))["outcome"] == "backlog_full"  # its first: 81 over 3, 27
+    assert (await deliver(ingress_sessionmaker, second, 27))["outcome"] == "recorded"
+    assert (await deliver(ingress_sessionmaker, third, 14))["outcome"] == "recorded"  # the room left, within 20
+    assert await exact(owner_sessionmaker) == 81
+
+
+async def test_at_the_least_limit_an_event_of_twenty_bindings_waits_its_turn_never_refused_for_good(
+    stack, owner_sessionmaker, ingress_sessionmaker
+) -> None:  # fmt: skip
+    """The owner's ruling on the M3 checkpoint 5: whatever bounds a first admission, an event of an endpoint's most
+    bindings stays admissible at the least limit (40, 21 for ingress): alone, once its tenant has nothing
+    outstanding."""
+    await limited(owner_sessionmaker, 40)
+    wide = await a_tenant(stack, 20)
+    assert (await deliver(ingress_sessionmaker, wide))["outcome"] == "recorded"
+    assert (await deliver(ingress_sessionmaker, wide))["outcome"] == "backlog_full"  # its share: 10
+    assert await deliver(ingress_sessionmaker, wide, 2) == {"outcome": "over_limit"}  # 40: never, even alone
+    async with owner_sessionmaker() as s, s.begin():  # its event leaves pending: nothing outstanding
+        await s.execute(text("update inbound_events set status = 'cancelled', reason = 'user_cancelled', "
+                             "ended_at = now() where tenant_id = :t"), {"t": wide.tenant_id})  # fmt: skip
+    assert (await deliver(ingress_sessionmaker, wide))["outcome"] == "recorded"
+
+
+async def test_idle_tenants_asking_at_once_never_take_the_room_between_two_of_them(
+    stack, owner_sessionmaker, ingress_sessionmaker
+) -> None:  # fmt: skip
+    """Four tenants with nothing outstanding asking 40 each at once (81 for ingress): whichever comes first gets it,
+    alone; the others' first admissions are then at most 27, so none. Then the three ask 20 each at once, beside the
+    first tenant asking more: two of them get in, the room's 80, and the first tenant, past its share, doesn't."""
+    await limited(owner_sessionmaker, 100)
+    tenants = [await a_tenant(stack, 1) for _ in range(4)]
+    asked = await asyncio.gather(*(deliver(ingress_sessionmaker, ready, 40) for ready in tenants))
+    assert sorted(o["outcome"] for o in asked) == ["backlog_full"] * 3 + ["recorded"], asked
+    first = tenants[[o["outcome"] for o in asked].index("recorded")]
+    others = [ready for ready in tenants if ready is not first]
+    again = await asyncio.gather(deliver(ingress_sessionmaker, first),
+                                 *(deliver(ingress_sessionmaker, ready, 20) for ready in others))  # fmt: skip
+    assert again[0]["outcome"] == "backlog_full"
+    assert sorted(o["outcome"] for o in again[1:]) == ["backlog_full", "recorded", "recorded"], again
+    assert await exact(owner_sessionmaker) == 80
+
+
+async def test_a_capacity_change_waits_for_an_admission_in_flight_and_counts_it(
+    stack, owner_sessionmaker, ingress_sessionmaker, api_sessionmaker
+) -> None:  # fmt: skip
+    """The owner's ruling on the M3 checkpoint 5: a change taking the limit to 45 while 30 are outstanding and a
+    delivery of 20 is being admitted. It waits for that admission's commit, counts its 20, and refuses: never a limit
+    of 45 under 50 outstanding."""
+    from dewpoint.core.auth.users import create_user
+    from dewpoint.core.platform import service
+
+    await limited(owner_sessionmaker, 100)
+    held, arriving = await a_tenant(stack, 1), await a_tenant(stack, 1)
+    assert (await deliver(ingress_sessionmaker, held, 30))["outcome"] == "recorded"
+    async with owner_sessionmaker() as s, s.begin():
+        actor = (await create_user(s, email=f"{uuid.uuid4().hex[:8]}@corp.test", password="violet-otter-canyon-42")).id
+
+    async def lowered() -> None:
+        async with api_sessionmaker() as s, s.begin():
+            await service.set_ingress_capacity(s, change={"starts_per_s": 45.0}, attestation="Measured.",
+                                               actor_id=actor)  # fmt: skip
+
+    ids = [uuid.uuid4() for _ in range(20)]
+    params = {"e": arriving.endpoint_id, "refusal": None, "read": 0, "ids": ids,
+              "sealed": [sealed(arriving, i, ALARM) for i in ids], "versions": [1] * 20, "dedupe": [None] * 20,
+              "digests": [None] * 20}  # fmt: skip
+    async with ingress_sessionmaker() as s:
+        async with s.begin():
+            assert (await s.execute(RECORD, params)).scalar_one()["outcome"] == "recorded"  # the budget's row held
+            change = asyncio.create_task(lowered())
+            await asyncio.sleep(1.0)
+            assert not change.done()  # waiting on the admission's row
+    with pytest.raises(service.IngressCapacityBelowOutstandingError):
+        await change
+    async with owner_sessionmaker() as s:
+        assert (await s.execute(text("select ingress_limit()"))).scalar_one() == 100
+    assert await exact(owner_sessionmaker) == 50
+
+
+async def test_a_matcher_that_never_asks_the_budget_still_cannot_commit_past_the_limit(
+    stack, owner_sessionmaker, ingress_sessionmaker, dispatch_sessionmaker, monkeypatch
+) -> None:  # fmt: skip
+    """The owner's ruling on the M3 checkpoint 5: a dispatcher still on the code before 0050 (an upgrade rolling out)
+    queues an event's requests without asking, however many bindings were added since it was accepted. The database
+    refuses any commit that raised the budget past the limit, whoever wrote it: the match rolls back, its event
+    pending, and the limit holds. 21 outstanding of 40; two events of credit 1 grown to 20 bindings: the first fits
+    exactly, the second doesn't."""
+    await limited(owner_sessionmaker, 40)
+    ready, other = await a_tenant(stack, 1), await a_tenant(stack, 1)
+    await deliver(ingress_sessionmaker, ready, 2)
+    await widened(stack, ready, 19)
+    assert (await deliver(ingress_sessionmaker, other, 19))["outcome"] == "recorded"
+    monkeypatch.setattr(matching, "MATCHED", text("SELECT cast(:credit AS bigint) + cast(:k AS bigint) >= 0"))
+    assert await matching.match_once(dispatch_sessionmaker, KEYS, matching.Verified()) == {"matched": 20, "error": 1}
+    async with owner_sessionmaker() as s:
+        found = await s.execute(text("select count(*) from inbound_events where status = 'pending'"))
+        assert found.scalar_one() == 1
+    assert await exact(owner_sessionmaker) == 40

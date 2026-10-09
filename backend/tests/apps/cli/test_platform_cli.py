@@ -107,3 +107,20 @@ def test_the_command_sends_only_what_it_was_given(monkeypatch: pytest.MonkeyPatc
     ]  # fmt: skip
     nothing = CliRunner().invoke(cli.app, base)
     assert nothing.exit_code == 2 and "--unset" in nothing.output
+
+
+def test_a_capacity_left_incomplete_is_shown_as_such_never_as_an_agreed_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fresh review 5's M4 (the owner's ruling on the M3 checkpoint 5): with the wait set but not the starts, the
+    limit in force is the development-only one; the command says so, naming what's unset."""
+
+    async def asked(_client: object, **kwargs: object) -> dict[str, object]:
+        return {"starts_per_s": None, "headroom": None, "queue_wait_s": 600, "limit": 50000, "outstanding": 0,
+                "active_tenants": 0, "problems": ["starts_per_s", "headroom"]}  # fmt: skip
+
+    monkeypatch.setattr(cli, "capacity_via_api", asked)
+    base = ["platform", "set-ingress-capacity", "--api", "https://dewpoint.test", "--email", "ops@corp.test",
+            "--attestation", SAID, "--queue-wait-s", "600"]  # fmt: skip
+    shown = CliRunner().invoke(cli.app, base, input=f"{PW}\n123456\n")
+    assert shown.exit_code == 0, shown.output
+    assert shown.output.endswith("ingress capacity incomplete (starts_per_s, headroom unset): the development-only "
+                                 "rates and limit, 50000 requests' outstanding work at most\n")  # fmt: skip

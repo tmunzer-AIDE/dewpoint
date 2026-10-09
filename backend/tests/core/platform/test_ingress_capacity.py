@@ -81,3 +81,23 @@ async def test_its_row_refuses_a_starts_rate_that_isnt_a_finite_number(owner_ses
     async with owner_sessionmaker() as s, s.begin():  # and its other values, whoever writes them
         with pytest.raises(DBAPIError):
             await s.execute(text("update platform_settings set ingress_headroom = 2"))
+
+
+async def test_a_change_never_leaves_the_limit_below_whats_outstanding(api_sessionmaker, owner_sessionmaker) -> None:
+    """The owner's ruling on the M3 checkpoint 5: refused, the capacity as it was, until enough has drained; raising it,
+    or unsetting it in development (its limit, 50,000), is never refused for it."""
+    actor = await an_admin(owner_sessionmaker)
+    async with api_sessionmaker() as s, s.begin():
+        await service.set_ingress_capacity(s, change={"starts_per_s": 100.0, "headroom": 1.0, "queue_wait_s": 1},
+                                           attestation=SAID, actor_id=actor)  # fmt: skip
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text("update ingress_budget set outstanding = 50, active = 1"))
+    for lowered in ({"starts_per_s": 45.0}, {"headroom": 0.45}):
+        async with api_sessionmaker() as s, s.begin():
+            with pytest.raises(service.IngressCapacityBelowOutstandingError):
+                await service.set_ingress_capacity(s, change=lowered, attestation=SAID, actor_id=actor)
+    assert await stored(owner_sessionmaker) == (100.0, 1.0, 1)
+    for allowed in ({"starts_per_s": 50.0}, {"starts_per_s": 80.0}, dict.fromkeys(("starts_per_s", "headroom",
+                                                                                    "queue_wait_s"))):  # fmt: skip
+        async with api_sessionmaker() as s, s.begin():
+            await service.set_ingress_capacity(s, change=allowed, attestation=SAID, actor_id=actor)

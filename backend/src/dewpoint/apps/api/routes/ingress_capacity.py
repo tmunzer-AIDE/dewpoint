@@ -3,7 +3,8 @@
 read on an active MFA session; changed with a second factor proven within the reauthentication window, audited in the
 change's transaction with that admin's id, the attestation and the readiness it leaves. `dewpoint platform
 set-ingress-capacity` asks this API; nothing else changes it. A value left out keeps what it was, `null` unsets it,
-`unset` unsets all three; a production deployment whose runs are on keeps a whole capacity (409). Each answer shows the
+`unset` unsets all three; a production deployment whose runs are on keeps a whole capacity (409), and no change leaves
+the limit below the work outstanding (409, until it drains). Each answer shows the
 deployment's outstanding-work limit it makes (the owner's ruling on the M3 checkpoint 4) and what's outstanding now."""
 
 from typing import Any
@@ -18,7 +19,11 @@ from dewpoint.core.http import active_session, ensure_fresh_reauth, get_db, get_
 from dewpoint.core.models.identity import AuthSession, User
 from dewpoint.core.models.platform import PlatformSettings
 from dewpoint.core.platform import readiness
-from dewpoint.core.platform.service import IngressCapacityRequiredError, set_ingress_capacity
+from dewpoint.core.platform.service import (
+    IngressCapacityBelowOutstandingError,
+    IngressCapacityRequiredError,
+    set_ingress_capacity,
+)
 from dewpoint.core.recovery import EVIDENCE_LIMIT
 
 router = APIRouter(prefix="/api/v1/admin/platform", tags=["admin"])
@@ -88,4 +93,6 @@ async def change_ingress_capacity(
         await set_ingress_capacity(db, change=body.change(), attestation=body.attestation, actor_id=admin.id)
     except IngressCapacityRequiredError:
         raise HTTPException(409, detail={"error": "ingress_capacity_required"}) from None
+    except IngressCapacityBelowOutstandingError:  # until the backlog drains (the owner's ruling on the M3 checkpoint 5)
+        raise HTTPException(409, detail={"error": "ingress_capacity_below_outstanding"}) from None
     return await _shown(db, await _platform(db))

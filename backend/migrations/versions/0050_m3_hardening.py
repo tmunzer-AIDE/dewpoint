@@ -210,6 +210,7 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
     p platform_settings%ROWTYPE;
     v_before jsonb;
+    v_outstanding bigint;
 BEGIN
     SELECT * INTO p FROM platform_settings WHERE id = 1 FOR UPDATE;
     IF NOT FOUND THEN
@@ -226,8 +227,14 @@ BEGIN
         OR p.ingress_headroom IS NULL OR p.ingress_queue_wait_s IS NULL) THEN
         RAISE EXCEPTION 'production ingress needs its whole capacity' USING ERRCODE = 'DPC01';
     END IF;
+    -- Never a limit below the work already outstanding (the owner's ruling on the M3 checkpoint 5): under the
+    -- budget's row, so an admission in flight is waited for and counted, and none starts meanwhile
+    SELECT outstanding INTO v_outstanding FROM ingress_budget WHERE id = 1 FOR UPDATE;
     UPDATE platform_settings SET ingress_starts_per_s = p.ingress_starts_per_s, ingress_headroom = p.ingress_headroom,
         ingress_queue_wait_s = p.ingress_queue_wait_s WHERE id = 1;
+    IF v_outstanding > ingress_limit() THEN
+        RAISE EXCEPTION 'the ingress limit would be below the work outstanding' USING ERRCODE = 'DPC02';
+    END IF;
     RETURN jsonb_build_object('before', v_before, 'after', jsonb_build_object(
         'starts_per_s', p.ingress_starts_per_s, 'headroom', p.ingress_headroom, 'queue_wait_s', p.ingress_queue_wait_s));
 END
@@ -276,10 +283,10 @@ RATES = {  # 0039's text: what it reads, how it refills and waits, and what it a
     "    -- checkpoint 4)\n"
     "    IF cardinality(v_new) > 0 THEN\n"
     "        v_weight := cardinality(v_new)::bigint * v_fanout;\n"
-    "        IF v_weight > public.ingress_room() THEN  -- it could never fit: no retry helps it\n"
+    "        v_short := public.ingress_admit(v_tenant, v_weight);\n"
+    "        IF v_short < 0 THEN  -- it could never fit: no retry helps it\n"
     "            RETURN jsonb_build_object('outcome', 'over_limit');\n"
     "        END IF;\n"
-    "        v_short := public.ingress_admit(v_tenant, v_weight);\n"
     "        IF v_short > 0 THEN\n"
     "            RETURN jsonb_build_object('outcome', 'backlog_full', 'retry_after', CASE WHEN v_budget IS NULL THEN 30\n"
     "                ELSE greatest(1, least(60, ceil(v_short / v_budget)))::integer END);\n"
@@ -377,10 +384,13 @@ BEGIN
      WHERE id = 1;
 END
 $$""",
-    # `weight` more for a tenant, under the budget's row: within ingress's room, and for a tenant with work outstanding,
-    # within its share, the room over the tenants with work outstanding and one more, so that one more always finds
-    # room once they're at their shares (the load probe's finding; at most half when it's alone). 0 when admitted, else
-    # how much past
+    # `weight` more for a tenant, under the budget's row, within ingress's room and:
+    # - for a tenant with work outstanding, its share: the room over the tenants with work outstanding and one more, so
+    #   that one more finds room once they're at their shares (the load probe's finding; half when it's alone);
+    # - for one with none, its first admission: the share it will have once counted (the room over them, itself and one
+    #   more), or an event's most bindings if that's more, so no tenant takes the room for itself and an event of the
+    #   most bindings stays admissible at the least limit (the owner's ruling on the M3 checkpoint 5).
+    # 0 when admitted; how much past; or -1 when it could never fit, even alone in an otherwise empty deployment
     f"""CREATE FUNCTION ingress_admit(p_tenant uuid, p_weight bigint) RETURNS bigint
 LANGUAGE plpgsql {DEFINER} AS $$
 DECLARE
@@ -396,6 +406,9 @@ BEGIN
     END IF;
     SELECT coalesce((SELECT outstanding FROM ingress_outstanding WHERE tenant_id = p_tenant), 0) INTO v_mine;
     v_room := ingress_room();
+    IF p_weight > greatest(floor(v_room / 2.0), {MAX_BINDINGS}) THEN
+        RETURN -1;
+    END IF;
     IF v_all + p_weight > v_room THEN
         RETURN v_all + p_weight - v_room;
     END IF;
@@ -403,6 +416,11 @@ BEGIN
         v_share := floor(v_room::numeric / (v_active + 1));
         IF v_mine + p_weight > v_share THEN
             RETURN v_mine + p_weight - v_share;
+        END IF;
+    ELSE
+        v_share := greatest(floor(v_room::numeric / (v_active + 2)), {MAX_BINDINGS});
+        IF p_weight > v_share THEN
+            RETURN p_weight - v_share;
         END IF;
     END IF;
     PERFORM ingress_credit(p_tenant, p_weight);
@@ -506,6 +524,25 @@ COUNTED = [
    GROUP BY r.tenant_id""",
     """UPDATE ingress_budget SET outstanding = (SELECT coalesce(sum(outstanding), 0) FROM ingress_outstanding),
     active = (SELECT count(*) FROM ingress_outstanding WHERE outstanding > 0) WHERE id = 1""",
+]
+# The limit, whoever writes (the owner's ruling on the M3 checkpoint 5): a commit that raised the budget never leaves it
+# past the limit. A dispatcher still on the code before 0050 (an upgrade rolling out) queues an event's requests without
+# asking; its match is refused at its commit, its event left pending. Checked as the transaction commits, after its
+# other deferred work (each increment's check fires a round later, reading the row as it ends); a commit that only
+# released is never refused, so a backlog above the limit drains
+BOUNDED = [
+    f"""CREATE FUNCTION ingress_budget_bounded() RETURNS trigger LANGUAGE plpgsql {DEFINER} AS $$
+BEGIN
+    IF (SELECT outstanding FROM ingress_budget WHERE id = 1) > ingress_limit() THEN
+        RAISE EXCEPTION 'the ingress budget would pass its limit' USING ERRCODE = 'DPB02';
+    END IF;
+    RETURN NULL;
+END
+$$""",
+    "REVOKE ALL ON FUNCTION ingress_budget_bounded() FROM PUBLIC",
+    "CREATE CONSTRAINT TRIGGER ingress_budget_bounded AFTER UPDATE OF outstanding ON ingress_budget "
+    "DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.outstanding > OLD.outstanding) "
+    "EXECUTE FUNCTION ingress_budget_bounded()",
 ]
 BUDGET_READ = [
     "GRANT SELECT ON ingress_budget TO dewpoint_api, dewpoint_dispatch",
@@ -769,6 +806,12 @@ def upgrade() -> None:
              done=exists("trigger", "inbound_events_credit_deleted", "inbound_events"))  # fmt: skip
         step(conn, "0050 run_requests counted", *COUNTED,
              done=exists("trigger", "run_requests_credit_deleted", "run_requests"))  # fmt: skip
+        step(
+            conn,
+            "0050 the budget's bound",
+            *BOUNDED,
+            done=exists("trigger", "ingress_budget_bounded", "ingress_budget"),
+        )
         step(conn, "0050 event rates and admission from the ingress budget", _rated())
         step(conn, "0050 grants", *grants(*CURSOR), *grants(*CLEAR), *grants(*OPERATOR), *grants(*SETTLED),
              *grants(*NEXT), *grants(*SET_CAPACITY), *grants(*CREDITED), *BUDGET_READ, *ACCESS)  # fmt: skip
@@ -782,13 +825,15 @@ def downgrade() -> None:
     op.execute("DROP FUNCTION work_settled_clear(integer)")
     op.execute("DROP FUNCTION dispatch_next(uuid[])")
     op.execute(_recorder_0039())
-    for trigger, table in (("inbound_events_credit_settled", "inbound_events"),
+    for trigger, table in (("ingress_budget_bounded", "ingress_budget"),
+                           ("inbound_events_credit_settled", "inbound_events"),
                            ("inbound_events_credit_deleted", "inbound_events"),
                            ("run_requests_credit_queued", "run_requests"),
                            ("run_requests_credit_settled", "run_requests"), ("run_requests_credit_deleted", "run_requests"),
                            ("tenant_event_counters_credit_gone", "tenant_event_counters")):  # fmt: skip
         op.execute(f"DROP TRIGGER {trigger} ON {table}")
-    op.execute("DROP FUNCTION ingress_event_settled(), ingress_request_queued(), ingress_request_settled(), "
+    op.execute("DROP FUNCTION ingress_budget_bounded(), ingress_event_settled(), ingress_request_queued(), "
+               "ingress_request_settled(), "
                "ingress_tenant_gone(), "
                "ingress_budget_drift(), ingress_matched(bigint, bigint), ingress_admit(uuid, bigint), "
                "ingress_credit(uuid, bigint), ingress_room(), ingress_limit()")  # fmt: skip

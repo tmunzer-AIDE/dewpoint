@@ -95,3 +95,22 @@ async def test_a_production_deployment_whose_runs_are_on_keeps_a_whole_capacity(
             assert (refused.status_code, refused.json()) == (409, {"error": "ingress_capacity_required"})
         assert (await admin.patch(URL, json={"headroom": 0.4, "attestation": SAID})).status_code == 200
     assert await stored(owner_sessionmaker) == (8.0, 0.4, 300)
+
+
+@pytest.mark.usefixtures("development_deployment")
+async def test_a_change_that_would_leave_less_than_whats_outstanding_is_409_until_it_drains(
+    app, owner_sessionmaker, api_settings
+) -> None:  # fmt: skip
+    """The owner's ruling on the M3 checkpoint 5: a capacity change never lowers the limit below the work already
+    outstanding; it's refused, and answers once enough has drained."""
+    admin, _ = await admin_of(app, owner_sessionmaker, api_settings)
+    async with admin:
+        assert (await admin.patch(URL, json=WHOLE | {"attestation": SAID})).status_code == 200  # 1,200
+        async with owner_sessionmaker() as s, s.begin():
+            await s.execute(text("update ingress_budget set outstanding = 50, active = 1"))
+        lowered = await admin.patch(URL, json={"queue_wait_s": 10, "attestation": SAID})  # 40 < 50
+        assert (lowered.status_code, lowered.json()) == (409, {"error": "ingress_capacity_below_outstanding"})
+        async with owner_sessionmaker() as s, s.begin():  # drained
+            await s.execute(text("update ingress_budget set outstanding = 40"))
+        assert (await admin.patch(URL, json={"queue_wait_s": 10, "attestation": SAID})).json()["limit"] == 40
+    assert await stored(owner_sessionmaker) == (8.0, 0.5, 10)

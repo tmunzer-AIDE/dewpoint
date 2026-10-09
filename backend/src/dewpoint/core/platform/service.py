@@ -43,14 +43,20 @@ class IngressCapacityRequiredError(Exception):
     """Production ingress is enabled: its capacity stays whole."""
 
 
+class IngressCapacityBelowOutstandingError(Exception):
+    """The change would leave the deployment's ingress limit below the work outstanding: refused until it drains."""
+
+
 async def set_ingress_capacity(
     s: AsyncSession, *, change: dict[str, float | int | None], attestation: str, actor_id: uuid.UUID
 ) -> dict[str, object]:
     """The deployment's ingress capacity changed (the owner's rulings 2 on the 2b-4b M3 checkpoints 2 and 3), as the
     API's role for a platform admin (D11), in the caller's transaction, audited with that admin's id, the attestation
     and the readiness it leaves: `change` names the values to set, a None unsetting one; the others keep what they
-    were. What it is then, the values unset among them. Raises ValueError for a value out of range, and
-    IngressCapacityRequiredError for one left unset while production ingress is enabled."""
+    were. What it is then, the values unset among them. Raises ValueError for a value out of range,
+    IngressCapacityRequiredError for one left unset while production ingress is enabled, and
+    IngressCapacityBelowOutstandingError for a limit below the work outstanding (the owner's ruling on the M3
+    checkpoint 5)."""
     starts, headroom, wait = (change.get(k) for k in readiness.CAPACITY)
     if (
         (starts is not None and not (math.isfinite(starts) and starts > 0))
@@ -66,6 +72,8 @@ async def set_ingress_capacity(
     except DBAPIError as e:
         if getattr(e.orig, "sqlstate", None) == CAPACITY_REQUIRED:
             raise IngressCapacityRequiredError(str(e.orig).split("\n")[0]) from None
+        if getattr(e.orig, "sqlstate", None) == BELOW_OUTSTANDING:
+            raise IngressCapacityBelowOutstandingError(str(e.orig).split("\n")[0]) from None
         raise
     moved = json.loads(found.scalar_one())
     after = moved["after"]
@@ -78,6 +86,7 @@ async def set_ingress_capacity(
 
 
 CAPACITY_REQUIRED = "DPC01"  # set_ingress_capacity()'s refusal: production ingress keeps a whole capacity
+BELOW_OUTSTANDING = "DPC02"  # and: the limit never below the work outstanding
 
 
 class _Capacity:

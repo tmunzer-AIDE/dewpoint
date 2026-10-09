@@ -182,6 +182,44 @@ async def test_each_revision_ends_as_the_original_left_it() -> None:
     assert [r for r, there in added.items() if there] == ["0040", "0043", "0044"]
 
 
+HOLDING = """SELECT tenant_id, count(*) FROM run_requests WHERE source = 'webhook' AND status IN ('queued', 'starting')
+GROUP BY tenant_id"""
+
+
+async def test_the_budget_counts_the_webhook_requests_queued_or_starting_when_0050_arrives(cluster, templates) -> None:
+    """The owner's ruling on the 2b-4b M3 checkpoint 5: from 0049 with webhook requests queued and starting (and
+    manual ones queued, which it never counts), 0050's backfill counts each tenant's holding webhook requests, the
+    deployment's total and its tenants with any, in the triggers' own step; from then on the triggers keep it."""
+    url = await copy(cluster, templates["0042"])
+    await asyncio.to_thread(upgrade, url, "0049")
+    await execute(url, """
+UPDATE run_requests SET source = 'webhook', status = 'queued'
+ WHERE id IN (SELECT id FROM run_requests ORDER BY id LIMIT 30);
+UPDATE run_requests SET source = 'webhook', status = 'starting', starting_at = now()
+ WHERE id IN (SELECT id FROM run_requests WHERE source <> 'webhook' ORDER BY id LIMIT 12);
+UPDATE run_requests SET status = 'queued'
+ WHERE id IN (SELECT id FROM run_requests WHERE source <> 'webhook' ORDER BY id LIMIT 5);
+""")  # fmt: skip
+    c = await asyncpg.connect(url)
+    try:
+        expected = {r[0]: r[1] for r in await c.fetch(HOLDING)}
+    finally:
+        await c.close()
+    assert sum(expected.values()) == 42 and len(expected) > 1
+    await asyncio.to_thread(upgrade, url)
+    c = await asyncpg.connect(url)
+    try:
+        counted = {r[0]: r[1] for r in await c.fetch("SELECT tenant_id, outstanding FROM ingress_outstanding")}
+        assert counted == expected
+        assert tuple(await c.fetchrow("SELECT outstanding, active FROM ingress_budget")) == (42, len(expected))
+        await c.execute("UPDATE run_requests SET status = 'cancelled', reason = 'user_cancelled', ended_at = now() "
+                        "WHERE id = (SELECT id FROM run_requests WHERE source = 'webhook' AND status = 'queued' "
+                        "ORDER BY id LIMIT 1)")  # fmt: skip
+        assert await c.fetchval("SELECT outstanding FROM ingress_budget") == 41
+    finally:
+        await c.close()
+
+
 async def test_the_round_trip_restores_the_starting_revision() -> None:
     """From 0034 with its runs: upgraded to the head, then downgraded to 0034 (the downgrades unchanged, a transaction
     per migration), the schema is 0034's again; upgraded again, every run has its tree's root. A cluster of its own:

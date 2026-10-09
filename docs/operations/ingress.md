@@ -117,7 +117,7 @@ stored: only keyed digests of them.
 | 408 | the body took longer than 10 s |
 | 409 `event_id_reused` | an id reused for other content |
 | 413 `too_large` | past the endpoint's body limit (1 MiB by default, at most 5 MiB) or the global 5 MiB |
-| 413 `over_limit`, no `Retry-After` | the delivery's credit is more than ingress may ever hold ([below](#the-ingress-capacity)): no retry helps it; send fewer events at once |
+| 413 `over_limit`, no `Retry-After` | the delivery's credit is more than one tenant may hold even alone in an otherwise empty deployment ([below](#the-ingress-capacity)): no retry helps it; send fewer events at once |
 | 429 `rate_limited`, `Retry-After` | short of a rate budget, or too many failures from this address |
 | 429 `quota_exceeded`, `Retry-After: 30` | the endpoint's or the tenant's pending backlog is full |
 | 429 `backlog_full`, `Retry-After` | the deployment's outstanding work is at its limit, or the tenant at its share of it ([below](#the-ingress-capacity)); 1 to 60 s, or 30 s while the capacity is unset |
@@ -228,24 +228,45 @@ was; `--unset` unsets all three.
   use what the headroom leaves.
 - **Ingress's room.** Ingress fills the limit but 19, an event's most bindings but the one its credit holds: those
   are kept for events whose bindings grew since they were accepted, so they're never starved behind new deliveries.
-- **Admission, at ingress.** A delivery is accepted only if its new events' credit fits ingress's room and, for a
-  tenant with work outstanding already, its share: the room divided by the tenants with work outstanding and one more
-  (half of it when the tenant is alone). Keeping one share aside means a tenant with nothing outstanding always finds
-  room once the others are at their shares, and it may use the room whatever its share, so a delivery bigger than a
-  share still gets in while the deployment has room. Otherwise the whole delivery is refused, 429 `backlog_full`, and
-  nothing is stored; `Retry-After` is how long the budget's starts take to free what's missing (1 to 60 s), or 30 s
-  while the capacity is unset. A delivery worth more than the room itself could never fit: 413 `over_limit`. One
-  database row holds the deployment's count, locked as each delivery is admitted, so deliveries at once, from any
-  tenants and any ingress process, never pass the limit.
+- **Admission, at ingress.** A delivery is accepted only if its new events' credit fits ingress's room and the
+  tenant's share of it:
+  - a tenant with work outstanding already: the room divided by the tenants with work outstanding and one more (half
+    of it when the tenant is alone). Keeping one share aside means a tenant arriving finds room once the others are at
+    their shares;
+  - a tenant with nothing outstanding (its first admission): the share it will have once counted, the room divided by
+    the tenants with work outstanding, itself and one more, or an event's most bindings (20) if that's more. So no
+    tenant takes the room for itself (alone, at most half of it), and an event of 20 bindings is admitted even at the
+    least limit, alone, once its tenant has nothing outstanding.
+
+  Otherwise the whole delivery is refused, 429 `backlog_full`, and nothing is stored; `Retry-After` is how long the
+  budget's starts take to free what's missing (1 to 60 s), or 30 s while the capacity is unset. A delivery worth more
+  than a tenant may hold even alone in an otherwise empty deployment (half the room, or 20) could never fit: 413
+  `over_limit`. One database row holds the deployment's count, locked as each delivery is admitted, so deliveries at
+  once, from any tenants and any ingress process, never pass the limit.
 - **Matching.** An event's requests take its credit. Bindings enabled since it was accepted need the limit's room for
   the difference (what's kept from ingress holds one event's): without it the event waits, as above. Bindings disabled
   since give back what they held.
 - **Release.** An event leaving `pending` (matched, unmatched, dead, cancelled) or deleted gives back its credit; a
   request leaving `queued` or `starting` (started, cancelled, dead) or deleted gives back 1; a tenant's erasure gives
   back all it held. The database counts each as the change commits, whatever code makes it.
+- **Held by the database.** A commit that raised the count past the limit is refused, whatever code wrote it. During
+  an upgrade to this version, a dispatcher still on the code before it matches without asking: its matches can use the
+  19 kept for top-ups, never more than the limit (the match rolls back and its event waits). The shares and the reserve
+  hold only for ingress and the dispatchers of this version.
+- **Changing the capacity.** A change that would take the limit below the work already outstanding is refused, 409
+  `ingress_capacity_below_outstanding`, until enough has drained; the change waits for any admission in flight, so
+  what it counts includes it.
 - **Checked.** The dispatcher's leader compares the count with what's really outstanding at most once a minute and
   alerts on any difference (`ingress_budget_drift`, error level). It never corrects it: a difference is a defect to
   find.
+
+**Known limits, for now.** The drift check compares the deployment's total only: one tenant's count off one way and
+another's off the other, or a wrong count of tenants with work outstanding (which every share divides by), goes unseen.
+`Retry-After` is an estimate: a refused delivery still spends its rate budget (as every refused attempt does, above),
+so the retry may then wait on its rate instead, and a refusal for a tenant's share is reckoned on the whole deployment's
+starts, not the tenant's part of them, so it can be shorter than the wait. Work outstanding from before this version
+(webhook requests queued or starting, counted when it arrives) above the limit drains only as those requests start or
+end: until it's below the limit, no commit that adds to it goes through.
 
 **The limit isn't a wait guarantee.** It bounds how much is outstanding, not how long an accepted event waits for its
 runs to start: that depends on the dispatchers, Temporal, slots and each tenant's run limit. The dispatcher's rounds
@@ -297,12 +318,14 @@ development machine, **not production capacity**:
   dispatcher a cycle at a time, slots enough that only it bounds the starts, 2026-10-09): a limit of 120 (30 starts a
   second, all for ingress, a 4 s wait; 101 for ingress), three tenants sending steadily for 40 s (1 binding at 8
   events a second, 5 at 2, 10 at 1) and a fourth in bursts (2 bindings; 10, 12 and 30 events at 10, 20 and 30 s). The
-  outstanding work peaked at 89, four tenants at once, and the counters equalled the truth at the end. The steady
-  tenants were each refused 53 to 58% of their deliveries (`backlog_full`) and started 3.6 to 4.3 runs a second; the
-  bursts of 20 and 24 requests' worth got in beside them, the one of 60 didn't. **From an event's acceptance to its
-  runs' start: 4.1 to 5.4 s at the median, 6.7 to 10.0 s at the 95th percentile, 11.2 s at most** (measured, not
-  promised: another machine, another Temporal, or more tenants, and they differ). Before shares kept one aside, the
-  three steady tenants held the whole limit between them, and both bursts were refused;
+  outstanding work peaked at 81, four tenants at once, and the counters equalled the truth at the end. The steady
+  tenants were each refused 49 to 60% of their deliveries (`backlog_full`) and started 4.1 to 4.3 runs a second. The
+  burst of 20 requests' worth got in; the one of 24 didn't, more than a tenant arriving beside three others may take
+  (20), and wasn't sent again; the one of 60, more than any tenant may hold even alone, was refused for good (413).
+  **From an event's acceptance to its runs' start: 4.6 to 5.4 s at the median, 5.6 to 8.3 s at the 95th percentile,
+  9.6 s at most** (measured, not promised: another machine, another Temporal, or more tenants, and they differ).
+  Before shares kept one aside, the three steady tenants held the whole limit between them, and both of the fourth's
+  bursts were refused;
 - **what the budget's row costs** (`contention`: 16 tenants recording one event a call): 313 recordings a second on
   one connection, 837 on 8 and 769 on 32 (2.5, 8.0 and 34 ms at the median, 153 ms at the 99th percentile on 32),
   against 368, 1,223 and 1,453 before it: each recording, a refused one too, holds the row until it commits. Starts

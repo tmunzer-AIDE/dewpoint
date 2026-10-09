@@ -279,8 +279,9 @@ ingress may use, and the wait its operators agree the outstanding webhook work m
 endpoint's event rates and the deployment's outstanding-work limit ([ingress](ingress.md#the-ingress-capacity)); none
 is set by default, and until they are, the rates and the limit are development-only. The values above are an example, not a
 recommendation. A value left out keeps what it was; `--unset` unsets all three, which a production deployment whose
-runs are on refuses (409 `ingress_capacity_required`): its capacity stays whole. `GET` on the same path shows it, the
-limit it makes, what's outstanding and what's unset; production readiness (M6's enable command, D14's ingress switch) refuses while any value is.
+runs are on refuses (409 `ingress_capacity_required`): its capacity stays whole. A change that would take the limit
+below the webhook work already outstanding is refused too (409 `ingress_capacity_below_outstanding`), until enough has
+drained. `GET` on the same path shows it, the limit it makes, what's outstanding and what's unset; production readiness (M6's enable command, D14's ingress switch) refuses while any value is.
 
 ## Encrypted payloads
 

@@ -49,7 +49,7 @@ pytestmark = [
 CAPACITY = (30.0, 1.0, 4)
 # Each tenant: (name, bindings, events a second sent steadily, bursts as (seconds in, events in one delivery)). With
 # the three steady ones at their shares (101 over 4: 25 each), the bursty one finds 26 of room: its bursts of 20 and 24
-# fit, its last, 60, doesn't while they hold theirs
+# fit; its last, 60, is more than any tenant may hold even alone (half of 101: 50), so it's refused for good (413)
 TENANTS = (
     ("narrow", 1, 8.0, ()),
     ("middle", 5, 2.0, ()),
