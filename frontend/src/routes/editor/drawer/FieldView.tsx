@@ -147,7 +147,10 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
   const clear = () => {
     drawer.discard(spec.pointer); // Clear drops what's typed in it too, on purpose (ruling 18)
     setGeneration((g) => g + 1);
-    write(undefined, false);
+    setTouched(true);
+    // Written over what's there now: the stale edit `write` guards against is discarded above, so this render's
+    // `stale` no longer applies. The editor's own guards (read only, admission) still answer (the review of milestone 2).
+    setLocal(drawer.set(spec.path, emptyOf(spec)));
   };
   const actions = (
     <>

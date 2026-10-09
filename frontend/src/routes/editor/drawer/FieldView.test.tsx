@@ -435,3 +435,21 @@ it("renames an entry only once the edit inside it is applied", async () => {
   await userEvent.tab();
   expect(config()).toEqual({ sizes: { new: 1 } });
 });
+
+it("clears the field on purpose, even when what was typed in it is stale", async () => {
+  const { config, held, replace } = showFields(PLAIN, { config: { count: 5 } });
+  await userEvent.type(screen.getByLabelText("Count"), "x"); // "5x", held
+  replace({ count: 7 }); // an undo under it: the held edit is stale now
+  await userEvent.click(screen.getByRole("button", { name: "Clear Count" }));
+  expect(held()).toEqual([]); // what was typed is discarded
+  expect(config()).toEqual({}); // and the field is cleared, as asked
+  expect(screen.getByLabelText<HTMLInputElement>("Count").value).toBe("");
+});
+
+it("clears nothing when the editor refuses the write, and says why", async () => {
+  const { config, refuse } = showFields(PLAIN, { config: { count: 5 } });
+  refuse("Not written: the draft can't be changed now.");
+  await userEvent.click(screen.getByRole("button", { name: "Clear Count" }));
+  expect(config()).toEqual({ count: 5 }); // the editor's guards still hold
+  expect(screen.getByText("Not written: the draft can't be changed now.")).toBeTruthy();
+});

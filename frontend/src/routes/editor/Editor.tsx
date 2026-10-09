@@ -78,6 +78,21 @@ function portsQuestion(dropped: GraphEdge[], keyOf: (id: string) => string): str
 
 const CANT = "Not written: the draft can't be changed now."; // a conflict, an exit agreed to, a version view
 
+/** A version's drawer: read only, and blind to the draft's edits not applied, which are never a version's (the review
+ * of milestone 2). */
+const VERSION_ACTIONS: DrawerActions = {
+  set: () => CANT,
+  options: () => CANT,
+  held: () => undefined,
+  hold: () => undefined,
+  release: () => undefined,
+  discard: () => undefined,
+  apply: () => CANT,
+  stale: () => false,
+  rebase: () => undefined,
+  restructure: () => CANT,
+};
+
 export function EditorPage({ tenantId, workflowId }: { tenantId: string; workflowId: string }) {
   const qc = useQueryClient();
   // A draft cached from an earlier visit would conflict on the first edit (4b ruling 23): the editor waits for the read
@@ -325,7 +340,11 @@ function Editor({
   const problemsButton = useRef<HTMLButtonElement>(null);
   const versionsButton = useRef<HTMLButtonElement>(null);
   const publishButton = useRef<HTMLButtonElement>(null);
-  const [landing, setLanding] = useState<{ on: "problems" | "versions" | "publish" | "problems-panel" | "versions-panel"; n: number } | null>(null);
+  const unappliedButton = useRef<HTMLButtonElement>(null);
+  const [landing, setLanding] = useState<{
+    on: "problems" | "versions" | "publish" | "problems-panel" | "versions-panel" | "unapplied" | "unapplied-panel";
+    n: number;
+  } | null>(null);
   const land = (on: NonNullable<typeof landing>["on"]) => setLanding((l) => ({ on, n: (l?.n ?? 0) + 1 }));
   useEffect(() => {
     if (!landing) return;
@@ -337,6 +356,8 @@ function Editor({
         publish: () => usable(publishButton.current) ?? usable(versionsButton.current),
         "problems-panel": () => document.getElementById("problems-title") ?? usable(problemsButton.current),
         "versions-panel": () => document.getElementById("versions-title") ?? usable(versionsButton.current),
+        unapplied: () => usable(unappliedButton.current),
+        "unapplied-panel": () => document.getElementById("unapplied-title") ?? usable(unappliedButton.current),
       }[landing.on]();
       target?.focus();
     });
@@ -595,11 +616,16 @@ function Editor({
         }),
       );
       if (asked !== viewAsked.current) return; // a newer view, or Back to the draft, came since
-      setViewing(opened);
-      setSide(null);
-      setPlacing(null);
-      focus(START);
-      announce(`Viewing version ${opened.number}, read only`);
+      // What was typed while the version was read is applied now, or asked about: a version view never carries the
+      // draft's edits not applied, and never drops them unasked (the review of milestone 2).
+      whenSettled("view the version", () => {
+        if (asked !== viewAsked.current) return; // Back to the draft, or a newer view, while the person decided
+        setViewing(opened);
+        setSide(null);
+        setPlacing(null);
+        focus(START);
+        announce(`Viewing version ${opened.number}, read only`);
+      });
     } catch {
       if (asked === viewAsked.current) setNotice({ tone: "danger", text: `Version ${version.number} couldn't be opened. Try again.` });
     }
@@ -611,12 +637,21 @@ function Editor({
     focus(START);
   }
 
-  /** The saved draft as a file (B12; 4b ruling 18). Unsaved edits stop it: the file would miss them. */
+  /** The saved draft as a file (B12; 4b ruling 18). Unsaved edits stop it: the file would miss them. Settling and
+   * saving are one transaction, as leaving's are: what's typed while the save is awaited is applied too, or asked about,
+   * before the file is asked for (the review of milestone 2). */
   async function exportFile(savedOnly = false) {
     setNotice(null);
-    if (!savedOnly) {
+    while (!savedOnly) {
+      const left = settleAll();
+      if (left.length > 0) {
+        setAsking({ kind: "unapplied", action: "export", left, then: () => void exportFile() });
+        return;
+      }
+      const s = saver.current!;
+      if (!s.unsaved) break; // settled just now, synchronously: nothing typed since
       try {
-        await saver.current!.flush();
+        await s.flush();
       } catch {
         setNotice({
           tone: "danger",
@@ -993,7 +1028,7 @@ function Editor({
           <>
             <SaveState state={sync} />
             {unapplied.size > 0 && (
-              <Button size="md" aria-expanded={side?.kind === "unapplied"} onClick={() => setSide(side?.kind === "unapplied" ? null : { kind: "unapplied" })}>
+              <Button ref={unappliedButton} size="md" aria-expanded={side?.kind === "unapplied"} onClick={() => setSide(side?.kind === "unapplied" ? null : { kind: "unapplied" })}>
                 {unapplied.size === 1 ? "1 edit not applied" : `${unapplied.size} edits not applied`}
               </Button>
             )}
@@ -1023,7 +1058,7 @@ function Editor({
         <Button ref={versionsButton} size="md" aria-expanded={side?.kind === "versions"} onClick={() => setSide(side?.kind === "versions" ? null : { kind: "versions" })}>
           Versions
         </Button>
-        <Button size="md" onClick={() => whenSettled("export", () => void exportFile())}>Export</Button>
+        <Button size="md" onClick={() => void exportFile()}>Export</Button>
         {publisher && viewing === null && (
           <Button
             ref={publishButton}
@@ -1133,7 +1168,7 @@ function Editor({
             expressions={(viewing ? viewing.expressions : (trusted?.expressions ?? [])).filter((x) => x.node !== null && sameId(x.node, open.id))}
             editable={editable}
             adds={editable ? addsOf(doc, open, portMap.get(idKey(open.id)) ?? []) : []}
-            actions={actionsFor(open.id)}
+            actions={viewing ? VERSION_ACTIONS : actionsFor(open.id)}
             onAdd={onItem}
             onDelete={() => setAsking({ kind: "node", id: open.id })}
             onConnectPort={(port) => setConnecting({ node: open.id, port })}
@@ -1154,9 +1189,17 @@ function Editor({
             keyOf={(id) => findNode(doc, id)?.key ?? null}
             reason={(u) => (isStale(draftNow(), u) ? STALE : (u.why ?? "Still being typed."))}
             onGo={(u) => setSide({ kind: "step", node: u.node })}
-            onDiscard={(u) => drop([u.id])}
+            onDiscard={(u) => {
+              drop([u.id]);
+              land("unapplied-panel"); // its entry is gone, and with the last one the count: the list's heading takes focus
+            }}
             onDownload={downloadUnapplied}
-            onClose={() => setSide(null)}
+            onClose={() => {
+              setSide(null);
+              // Back to the count that opened it while there is one; with none left, to the canvas (WCAG 2.4.3).
+              if (unappliedRef.current.size > 0) land("unapplied");
+              else focus(shown);
+            }}
           />
         )}
         {side?.kind === "versions" && (
