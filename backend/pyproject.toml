@@ -24,6 +24,8 @@ dependencies = [
   "protobuf>=7.35.1,<8",
   "temporalio==1.33.0",
   "ahocorasick-rs>=0.22",
+  "boto3==1.43.103",
+  "botocore==1.43.103",
 ]
 
 [project.scripts]
