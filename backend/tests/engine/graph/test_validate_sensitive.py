@@ -55,6 +55,10 @@ def test_a_literal_at_a_sensitive_config_position_is_refused(token: Any) -> None
         cel('"tok-" + "1234"'),
         cel('""'),
         cel('["tok-1234"].map(t, t)[0]'),  # its own variables aren't run data
+        cel('["tok-1234"].map(trigger, trigger)[0]'),  # even named as a root
+        cel('string == string ? "tok-1234" : ""'),  # nor are CEL's built-in types
+        cel('type("") == .string ? "tok-1234" : ""'),
+        cel('[int, uint, double, bool, bytes, list, map, null_type, type, dyn].size() > 0 ? "tok-1234" : ""'),
     ],
 )
 def test_a_template_or_formula_that_writes_a_fixed_value_is_refused(token: Any) -> None:
@@ -84,6 +88,7 @@ def test_a_template_of_references_and_a_formula_that_reads_the_run_are_fine() ->
         template({"ref": "trigger.tok"}),
         template("", {"ref": "trigger.tok"}, "", {"ref": "trigger.tok"}),  # empty text writes nothing
         cel("trigger.tok"),
+        cel(".trigger.tok"),  # a root named from the top scope is read all the same
         cel("trigger.n > 0 ? trigger.tok : trigger.tok + trigger.tok"),
     ):
         g = G().node("s", SEND, {"token": token})

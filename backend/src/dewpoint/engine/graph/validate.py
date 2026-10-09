@@ -320,14 +320,19 @@ def _declassify(
     return out, tuple(declassified)
 
 
+_RUN_ROOTS = frozenset((*cel_check.ROOTS, *cel_check.ITEM_ROOTS))
+
+
 def _reads_nothing(expr: str) -> bool:
-    """Whether a CEL expression reads no run data: fn-1 is pure, so it gives the same value every run, written into
-    the workflow as a literal would be. One that doesn't parse is reported where it's checked."""
+    """Whether a CEL expression reads no run data: none of its free identifiers is a root (a comprehension's own
+    variable isn't free, and `string` or `int` is a built-in type). fn-1 is pure, so it gives the same value every
+    run, written into the workflow as a literal would be. One that doesn't parse is reported where it's checked."""
     try:
         parsed = cel_runtime.parse(expr)
     except cel_runtime.CompileError:
         return False
-    return not cel_ast.global_idents(parsed.expr)
+    names = cel_ast.global_idents(parsed.expr)
+    return not any(n.lstrip(".").split(".")[0] in _RUN_ROOTS for n in names)  # `.trigger`: the root, named from the top
 
 
 def _holds_marked(schema: Mapping[str, Any]) -> bool:
