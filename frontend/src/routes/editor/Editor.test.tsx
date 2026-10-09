@@ -9,7 +9,7 @@ import { onAnnounce } from "../../lib/announce";
 import { cancelLeaving, mayLeave } from "../../lib/leaving";
 import type { CanvasProps } from "./Canvas";
 import { EditorPage } from "./Editor";
-import { DELAY, IF, LOOP, SWITCH, typeWith } from "../../test/nodeTypes";
+import { DELAY, IF, LOOP, REMOTE, SWITCH, TRANSFORM, typeWith } from "../../test/nodeTypes";
 import { formula } from "../../lib/config";
 import { STALE } from "../../lib/unapplied";
 
@@ -1668,4 +1668,96 @@ it("says how a formula runs once, under its field, and lists only what no field 
   const list = within(drawer).getByRole("heading", { name: "How its formulas run" }).parentElement!;
   expect(list.textContent).toContain("/elsewhere"); // no field shows it: listed
   expect(list.textContent).not.toContain("/condition"); // its field says it
+});
+
+// The review of 66fc658: a rename settled with the rest keeps its word on formulas; "Go to it" reaches a held key, a
+// held limit, and a field whose control is still loading.
+
+it("keeps a rename's word on formulas when it's applied with the rest, as before an export", async () => {
+  answers.set(`GET ${BASE}/export`, () => json({ format: "dewpoint.workflow", format_version: 1, name: "Nightly", graph: {}, bindings: [] }));
+  await openFetch();
+  await userEvent.clear(screen.getByLabelText("Key"));
+  await userEvent.type(screen.getByLabelText("Key"), "load"); // typed, never applied: no Enter
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
+  await userEvent.click(screen.getByRole("button", { name: "Export" })); // applies it, with every other edit
+  await vi.waitFor(() => expect(downloads).toEqual(["nightly.dewpoint.json"]), { timeout: 3000 });
+  expect(stepConfig("copy")).toEqual({ fields: { x: { $value: { kind: "ref", path: "steps.load.output" } } } });
+  await userEvent.click(screen.getByRole("button", { name: "load" }));
+  expect(screen.getByText("1 formula mentions fetch and keeps its text: check it.")).toBeTruthy();
+});
+
+it("says a rename's word only in the renamed step's drawer", async () => {
+  await openFetch();
+  await renameTo("load");
+  await screen.findByText("1 formula mentions fetch and keeps its text: check it.");
+  await userEvent.click(screen.getByRole("button", { name: "use" }));
+  expect(within(screen.getByRole("complementary", { name: "use" })).queryByText(/mentions fetch/)).toBeNull();
+});
+
+/** The list of edits not applied, opened from the toolbar with the drawer closed, then its entry's "Go to it". */
+async function goBackTo(entry: string) {
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
+  await userEvent.click(screen.getByRole("button", { name: "1 edit not applied" }));
+  await userEvent.click(within(screen.getByRole("complementary", { name: "Edits not applied" })).getByRole("button", { name: `Go to it: ${entry}` }));
+}
+
+it("goes to a held key from the list of edits not applied, at its field", async () => {
+  await openFetch();
+  await userEvent.type(screen.getByLabelText("Key"), "_v2"); // held
+  await goBackTo("fetch · Key");
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Key")));
+});
+
+it("goes to a held limit from the list of edits not applied, its section open", async () => {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, DELAY]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.delay@1", { duration_s: 5 }) }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "wait" }));
+  await userEvent.click(screen.getByRole("button", { name: "On error: fail the run" }));
+  await userEvent.type(screen.getByLabelText("Attempts"), "25"); // "2" written, "25" held: past 20
+  await goBackTo("wait · Attempts");
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Attempts")));
+});
+
+/** A step whose connection field's list is answered when the test says: `answer()`. A check names its connection. */
+async function goToLoadingConnection() {
+  let answer: () => void = () => undefined;
+  const prod = { id: "c1", name: "Prod", type: "acme", status: "ok", revision: 1, config: {}, secret_set: true, status_detail: "", privilege: null, last_verified_at: null };
+  answers.set("GET /api/v1/t/t1/connections", () => new Promise<Response>((resolve) => (answer = () => resolve(json([prod])))));
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, REMOTE]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("acme.sites@1", { site_id: "s1" }, "sites") }));
+  answers.set(`POST ${BASE}/validate`, () =>
+    json({ ...valid(1), valid: false, diagnostics: [{ code: "config.invalid", node: "id-sites", field: "/connection", fix: null, severity: "error", message: "Choose one." }] }),
+  );
+  await show();
+  await userEvent.click(await screen.findByRole("button", { name: "Problems · 1" }, { timeout: 3000 }));
+  await userEvent.click(within(screen.getByRole("complementary", { name: "Problems" })).getByRole("button", { name: "Go to sites" }));
+  await screen.findByText("Loading connections…");
+  await new Promise((r) => setTimeout(r, 50)); // several frames pass while the list is still on its way
+  return () => act(() => Promise.resolve(answer()));
+}
+
+it("goes to a field whose control is still loading, once it's there", async () => {
+  const arrive = await goToLoadingConnection();
+  await arrive();
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Connection")));
+});
+
+it("drops a pending Go to when the person moves on before the field's control loads", async () => {
+  const arrive = await goToLoadingConnection();
+  await userEvent.click(screen.getByRole("button", { name: "Rename" })); // the person's own move: the key field
+  await arrive();
+  await new Promise((r) => setTimeout(r, 50)); // the list has landed, and a frame has passed
+  expect(document.activeElement).toBe(screen.getByLabelText("Key"));
+});
+
+it("goes to a held entry name from the list of edits not applied, at its name", async () => {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES.filter((t) => t.ref !== "flow.transform@1"), TRANSFORM]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.transform@1", { fields: { old: 1, other: 2 } }, "map") }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "map" }));
+  await userEvent.clear(screen.getByLabelText("Name: old"));
+  await userEvent.type(screen.getByLabelText("Name: old"), "other"); // another entry's: refused when focus leaves, held
+  await goBackTo("map · Fields, the name old");
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Name: old")));
 });

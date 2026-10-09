@@ -37,7 +37,7 @@ function LimitField({ name, label, fallback }: { name: Limit; label: string; fal
   );
   const stale = held !== undefined && drawer.stale("limit", pointer);
   return (
-    <div onFocus={onFocus} className="flex flex-col gap-1.5">
+    <div onFocus={onFocus} data-limit={name} className="flex flex-col gap-1.5">
       <Field
         label={label} hint={`If empty: ${fallback}.`} error={stale ? STALE : (held?.why ?? undefined)} value={held?.text ?? text}
         disabled={!drawer.editable}

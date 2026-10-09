@@ -48,7 +48,7 @@ import { Toolbar } from "./Toolbar";
 type Opened = { workflow: WorkflowDetail; types: NodeType[]; role: string | null };
 
 /** The editor's right column: a step's panel, the problems, or the versions (Task 15). */
-type Side = { kind: "step"; node: string; field?: { pointer: string; n: number } } | { kind: "problems" } | { kind: "versions" } | { kind: "unapplied" } | null;
+type Side = { kind: "step"; node: string; field?: { pointer: string; kind?: UnappliedKind; n: number } } | { kind: "problems" } | { kind: "versions" } | { kind: "unapplied" } | null;
 const NO_DIAGNOSTICS: Diagnostic[] = []; // one empty list, so a memo over it holds
 
 /** Whether a request's outcome is unknown: no answer reached the editor (the network), or a 5xx came in the API's
@@ -332,7 +332,9 @@ function Editor({
     for (const id of ids) next.delete(id);
     setRecord(next);
   };
-  const [renamed, setRenamed] = useState<{ doc: GraphDoc; text: string } | null>(null); // a rename's word on formulas, true of the draft it made (ruling 11)
+  // A rename's word on formulas, in its step's drawer while the draft is the one it made (ruling 11; the review of
+  // 66fc658: kept when the rename is applied with the rest, and said in no other step's drawer).
+  const [renamed, setRenamed] = useState<{ doc: GraphDoc; node: string; text: string } | null>(null);
   const typeOf = (n: GraphNode) => typeMap.get(n.type);
   const [side, setSide] = useState<Side>(null); // the right column's one panel
   // Where focus lands when what held it goes: a panel's Close, or a confirmation whose button an action removed or
@@ -736,7 +738,7 @@ function Editor({
       : result.dropped.length > 0 ? (writeDraft(result, { release: [id] }) ?? droppedWhy(result.dropped, result.doc))
       : writeDraft(result, { release: [id], said: result.said });  // prettier-ignore
     if (why !== null) keep({ ...u, why });
-    else if (!("problem" in result) && result.note !== null) setRenamed({ doc: result.doc, text: result.note });
+    else if (!("problem" in result) && result.note !== null) setRenamed({ doc: result.doc, node: u.node, text: result.note });
     return why;
   }
 
@@ -796,11 +798,12 @@ function Editor({
     const all = [...unappliedRef.current.values()];
     // The latest document, not the render's: after a save was awaited, this render's `doc` is older (the review of
     // revision 3).
-    const { doc: next, applied, left } = applyAll(draftNow(), all, typeOf, () => true);
+    const { doc: next, applied, left, note } = applyAll(draftNow(), all, typeOf, () => true);
     for (const u of left) keep(u);
     if (applied.length === 0) return left;
     if (!change(next, applied.length === 1 ? "Applied an edit" : `Applied ${applied.length} edits`)) return all;
     drop(applied.map((u) => u.id));
+    if (note !== null) setRenamed({ doc: next, ...note });
     return left;
   }
 
@@ -1172,7 +1175,7 @@ function Editor({
             editable={editable}
             adds={editable ? addsOf(doc, open, portMap.get(idKey(open.id)) ?? []) : []}
             actions={viewing ? VERSION_ACTIONS : actionsFor(open.id)}
-            note={renamed !== null && renamed.doc === doc ? renamed.text : null}
+            note={renamed !== null && renamed.doc === doc && sameId(renamed.node, open.id) ? renamed.text : null}
             focusField={side?.kind === "step" ? (side.field ?? null) : null}
             onAdd={onItem}
             onDelete={() => setAsking({ kind: "node", id: open.id })}
@@ -1193,7 +1196,7 @@ function Editor({
             edits={[...unapplied.values()]}
             keyOf={(id) => findNode(doc, id)?.key ?? null}
             reason={(u) => (isStale(draftNow(), u) ? STALE : (u.why ?? "Still being typed."))}
-            onGo={(u) => setSide({ kind: "step", node: u.node, field: { pointer: u.pointer, n: ++jumps.current } })}
+            onGo={(u) => setSide({ kind: "step", node: u.node, field: { pointer: u.pointer, kind: u.kind, n: ++jumps.current } })}
             onDiscard={(u) => {
               drop([u.id]);
               land("unapplied-panel"); // its entry is gone, and with the last one the count: the list's heading takes focus

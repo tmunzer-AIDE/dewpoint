@@ -8,6 +8,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "../../../components/Button";
 import { Tabs } from "../../../components/Tabs";
 import { fieldsOf, tabsOf, type FieldSpec } from "../../../lib/schemaForm";
+import type { UnappliedKind } from "../../../lib/unapplied";
 import type { Diagnostic, Expression, GraphNode, NodeType } from "../../../lib/workflows";
 import type { ItemAction } from "../items";
 import { SIDE } from "../side";
@@ -49,13 +50,41 @@ const counted = (problems: Diagnostic[], fields: FieldSpec[]) =>
   }).length;
 const tabLabel = (label: string, n: number) => (n === 0 ? label : `${label} · ${n} ${n === 1 ? "problem" : "problems"}`);
 
+type FocusRequest = { pointer: string; kind?: UnappliedKind };
+
+/** One of the elements under `root` whose `data-*` value (`attribute`, camel-cased) is `value`. */
+const marked = (root: HTMLElement, attribute: "pointer" | "limit" | "namePointer", value: string) =>
+  [...root.querySelectorAll<HTMLElement>(`[data-${attribute.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}]`)].find(
+    (el) => el.dataset[attribute] === value,
+  );  // prettier-ignore
+
+/** The control a "Go to" lands on; "loading" while it's on its way (a picker's list); null when nothing shown matches. */
+function locate(root: HTMLElement, { pointer, kind }: FocusRequest): HTMLElement | "loading" | null {
+  const usable = (el: HTMLElement | null | undefined) => (el && !(el as HTMLInputElement).disabled ? el : null);
+  if (kind === "key") return usable(root.querySelector<HTMLElement>("[data-key-field] input"));
+  if (kind === "limit") return usable(marked(root, "limit", pointer.split("/").at(-1) ?? "")?.querySelector<HTMLElement>("input"));
+  if (kind === "name") return usable(marked(root, "namePointer", pointer)?.querySelector<HTMLElement>("input"));
+  const parts = pointer.split("/");
+  for (let n = parts.length; n > 1; n--) {
+    const holder = marked(root, "pointer", parts.slice(0, n).join("/"));
+    if (!holder) continue;
+    const label = holder.querySelector<HTMLLabelElement>("label[for]");
+    const control = label ? document.getElementById(label.htmlFor) : null;
+    if (control && control.tagName !== "OUTPUT" && usable(control)) return control;
+    if (holder.querySelector("[data-loading]")) return "loading";
+    const button = holder.querySelector<HTMLElement>("button:not([disabled])");
+    if (button) return button;
+  }
+  return null;
+}
+
 export function StepDrawer({
   node, type, tenantId, workflowId, ports, problems, expressions, editable, adds, actions, note, focusField,
   onAdd, onDelete, onConnectPort, onPlace, onNudge, onClose,
 }: {
   node: GraphNode; type: NodeType | undefined; tenantId: string; workflowId: string; ports: string[];
   problems: Diagnostic[] | null; expressions: Expression[]; editable: boolean; adds: { label: string; action: ItemAction }[];
-  actions: DrawerActions; note: string | null; focusField: { pointer: string; n: number } | null; onAdd: (action: ItemAction) => void; onDelete: () => void; onConnectPort: (port: string) => void;
+  actions: DrawerActions; note: string | null; focusField: { pointer: string; kind?: UnappliedKind; n: number } | null; onAdd: (action: ItemAction) => void; onDelete: () => void; onConnectPort: (port: string) => void;
   onPlace: () => void; onNudge: (key: Nudge) => void; onClose: () => void;
 }) {  // prettier-ignore
   const heading = useRef<HTMLHeadingElement>(null);
@@ -65,36 +94,54 @@ export function StepDrawer({
   const { setup, options } = tabsOf(fields);
   const [tab, setTab] = useState<Tab>(setup.length > 0 ? "setup" : "options");
   const [handling, setHandling] = useState(false);
-  // "Go to" a field (ruling 16): its tab first; then, once that has rendered, the control of the closest field shown.
-  // A pointer no field shows lands on "Problems with this step", which lists it.
-  const pending = useRef<string | null>(null);
+  // "Go to" (ruling 16; the review of 66fc658): a config field on its tab; a held key at the key field; a held limit in
+  // the error handling, opened; a held entry name at its name. Its control takes focus once it has rendered, and one
+  // still loading (a picker's list) is waited for, until it comes, the person moves on (a click, a key), another "Go to"
+  // comes or the drawer closes. A pointer no field shows lands on "Problems with this step", which lists it.
+  const pending = useRef<FocusRequest | null>(null);
   useEffect(() => {
     if (!focusField) return;
-    const first = focusField.pointer.split("/")[1] ?? "";
-    if (setup.some((f) => segment(f.name) === first)) setTab("setup");
-    else if (options.some((f) => segment(f.name) === first)) setTab("options");
-    pending.current = focusField.pointer;
+    if (focusField.kind === "limit") setHandling(true);
+    else if (focusField.kind !== "key") {
+      const first = focusField.pointer.split("/")[1] ?? "";
+      if (setup.some((f) => segment(f.name) === first)) setTab("setup");
+      else if (options.some((f) => segment(f.name) === first)) setTab("options");
+    }
+    pending.current = { pointer: focusField.pointer, kind: focusField.kind };
   }, [focusField?.n]);
   useEffect(() => {
-    const pointer = pending.current;
-    if (pointer === null) return;
-    const frame = requestAnimationFrame(() => {
+    const request = pending.current;
+    const root = aside.current;
+    if (request === null || !root) return;
+    const land = (): boolean => {
+      const target = locate(root, request);
+      if (target === "loading") return false;
       pending.current = null;
-      const holders = [...(aside.current?.querySelectorAll<HTMLElement>("[data-pointer]") ?? [])];
-      const parts = pointer.split("/");
-      for (let n = parts.length; n > 1; n--) {
-        const holder = holders.find((el) => el.dataset.pointer === parts.slice(0, n).join("/"));
-        const label = holder?.querySelector<HTMLLabelElement>("label[for]");
-        const control = label ? document.getElementById(label.htmlFor) : null;
-        const target =
-          control && control.tagName !== "OUTPUT" && !(control as HTMLInputElement).disabled
-            ? control
-            : holder?.querySelector<HTMLElement>("button:not([disabled])");  // prettier-ignore
-        if (target) return target.focus();
-      }
-      (document.getElementById("step-problems") ?? heading.current)?.focus();
+      (target ?? document.getElementById("step-problems") ?? heading.current)?.focus();
+      return true;
+    };
+    const observer = new MutationObserver(() => {
+      if (land()) stop();
     });
-    return () => cancelAnimationFrame(frame);
+    const moved = () => {
+      pending.current = null; // the person's own move wins over a request still waiting
+      stop();
+    };
+    function stop() {
+      observer.disconnect();
+      document.removeEventListener("pointerdown", moved, true);
+      document.removeEventListener("keydown", moved, true);
+    }
+    const frame = requestAnimationFrame(() => {
+      if (land()) return;
+      observer.observe(root, { childList: true, subtree: true });
+      document.addEventListener("pointerdown", moved, true);
+      document.addEventListener("keydown", moved, true);
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+      stop();
+    };
   });
   const mine = problems ?? [];
   const top = new Set(fields.map((f) => segment(f.name)));

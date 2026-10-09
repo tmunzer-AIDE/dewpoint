@@ -198,9 +198,9 @@ const byRank = (a: Unapplied, b: Unapplied) => {
  * name stays while an edit inside its entry does: renamed, that edit would point at nothing. */
 export function applyAll(
   doc: GraphDoc, held: Iterable<Unapplied>, typeOf: (node: GraphNode) => NodeType | undefined, take: (u: Unapplied) => boolean,
-): { doc: GraphDoc; applied: Unapplied[]; left: Unapplied[]; note: string | null } {  // prettier-ignore
+): { doc: GraphDoc; applied: Unapplied[]; left: Unapplied[]; note: { node: string; text: string } | null } {  // prettier-ignore
   let next = doc;
-  let note: string | null = null;
+  let note: { node: string; text: string } | null = null; // a rename's word on formulas, with its step (ruling 11)
   const applied: Unapplied[] = [];
   const left: Unapplied[] = [];
   for (const u of [...held].filter(take).sort(byRank)) {
@@ -214,7 +214,7 @@ export function applyAll(
     else if (result.dropped.length > 0) left.push({ ...u, why: droppedWhy(result.dropped, next) });
     else {
       next = result.doc;
-      note = result.note ?? note;
+      if (result.note !== null) note = { node: u.node, text: result.note };
       applied.push(u);
     }
   }

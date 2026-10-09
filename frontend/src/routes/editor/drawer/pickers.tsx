@@ -39,7 +39,7 @@ export function ConnectionControl({ spec, value, id, describedBy, invalid, disab
   const marker = spec.schema["x-dewpoint-connection"];
   const kind = typeof marker === "string" ? marker : "";
   const list = useQuery(connectionsQuery(tenantId));
-  if (list.isPending) return <p className="text-small text-muted">Loading connections…</p>;
+  if (list.isPending) return <p data-loading className="text-small text-muted">Loading connections…</p>;
   if (list.isError) return <Failed what="Connections" retry={() => void list.refetch()} />;
   const mine = list.data.filter((c) => c.type === kind);
   const current = typeof value === "string" ? value : "";
@@ -79,7 +79,7 @@ export function ConnectionControl({ spec, value, id, describedBy, invalid, disab
 export function WorkflowControl({ spec, value, id, describedBy, invalid, disabled, onChange }: ControlProps) {
   const { tenantId, workflowId } = useDrawer();
   const list = useQuery(workflowsQuery(tenantId));
-  if (list.isPending) return <p className="text-small text-muted">Loading workflows…</p>;
+  if (list.isPending) return <p data-loading className="text-small text-muted">Loading workflows…</p>;
   if (list.isError) return <Failed what="Workflows" retry={() => void list.refetch()} />;
   const others = list.data.filter((w) => !sameId(w.id, workflowId));
   const current = typeof value === "string" ? value : "";

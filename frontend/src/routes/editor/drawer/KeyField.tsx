@@ -41,6 +41,7 @@ export function KeyField({ onRenamed }: { onRenamed: () => void }) {
   return (
     <div
       ref={box}
+      data-key-field
       className="flex flex-col gap-2"
       onKeyDown={(e) => {
         if (e.key === "Escape") {

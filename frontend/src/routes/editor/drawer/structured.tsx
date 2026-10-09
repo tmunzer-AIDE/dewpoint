@@ -98,6 +98,7 @@ function NameField({ map, name }: { map: FieldSpec; name: string }) {
     // One focus region, its Discard before the input as a field's actions are: Tab out of the input leaves it, and
     // applies the name; a move to the Discard doesn't.
     <div
+      data-name-pointer={pointer}
       className="flex min-w-0 flex-col gap-1.5"
       onBlur={(e) => {
         if (!e.currentTarget.contains(e.relatedTarget)) commit();
