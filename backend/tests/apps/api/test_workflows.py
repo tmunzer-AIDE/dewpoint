@@ -252,3 +252,31 @@ async def test_validation_explains_the_taint_to_the_editor(app, owner_sessionmak
         ),
         "declassified": [{"node": str(nid("c")), "field": "/condition", "reveals": "the branch taken"}],
     }
+
+
+async def test_a_tainted_workflow_output_is_a_site_with_no_step(app, owner_sessionmaker, api_settings) -> None:
+    """A workflow output's value belongs to no step: its tainted site says `node: null`, as its expression does,
+    whether the output is the value or holds it."""
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    g = G().node("a", "testkit.echo@1")
+    g.settings = {
+        "input_schema": {
+            "type": "object",
+            "properties": {"token": {"type": "string", "x-sensitive": True}},
+            "required": ["token"],
+            "additionalProperties": False,
+        },
+        "outputs": {"echo": ref("trigger.token"), "pair": {"secret": ref("trigger.token"), "plain": 1}},
+    }
+    async with c:
+        wf = (await c.post(f"/api/v1/t/{tid}/workflows", json={"name": "Out", "draft": g.data()})).json()
+        r = await c.post(f"/api/v1/t/{tid}/workflows/{wf['id']}/validate")
+    assert r.status_code == 200, r.text
+    assert r.json()["valid"] is True
+    assert r.json()["taint"] == {
+        "sites": [
+            {"node": None, "field": "/settings/outputs/echo"},
+            {"node": None, "field": "/settings/outputs/pair/secret"},
+        ],
+        "declassified": [],
+    }

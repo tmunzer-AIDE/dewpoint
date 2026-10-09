@@ -219,7 +219,7 @@ class ExpressionOut(_Answer):
 
 
 class TaintSiteOut(_Answer):
-    node: str
+    node: str | None  # null for a workflow output
     field: str
 
 
