@@ -66,7 +66,15 @@ from dewpoint.engine.registry import control as C
 from dewpoint.engine.registry.catalog import Catalog, NodeTypeSpec, marked_below_top
 from dewpoint.engine.schema_refs import PREFIX as REF_PREFIX
 from dewpoint.engine.schema_refs import ref_problems, subschemas
-from dewpoint.engine.sensitive import SENSITIVE, expand, is_marked, marked_positions, resolve
+from dewpoint.engine.sensitive import (
+    SENSITIVE,
+    expand,
+    is_marked,
+    keys_sensitive,
+    map_values,
+    marked_positions,
+    resolve,
+)
 from dewpoint.engine.taint import CLEAN, TAINTED, Shape, from_schema, make
 from dewpoint.sdk.fields import CONNECTION, KINDS
 
@@ -336,21 +344,26 @@ def _reads_nothing(expr: str) -> bool:
 
 
 def _holds_marked(schema: Mapping[str, Any]) -> bool:
-    """Whether a standalone schema marks any part of its instances sensitive: nested, in a union's branch, or in a
-    definition it reaches through a local `$ref`. A definition it doesn't reach marks nothing here."""
+    """Whether a standalone schema can mark a part of its instances sensitive, by the rules a literal is checked with
+    (`marked_positions`): behind a local `$ref`, in a union's branch, under a property, a pattern,
+    `additionalProperties`, `items` or a tuple position, or a map whose keys are. Other keywords (`not`, `if`, a
+    definition nothing reaches) mark nothing."""
     seen: set[int] = set()
     stack: list[Any] = [schema]
     while stack:
         node = stack.pop()
-        if not isinstance(node, Mapping) or id(node) in seen:
+        if id(node) in seen:
             continue
         seen.add(id(node))
-        if node.get(SENSITIVE) is True:
+        branches = expand(node, schema)
+        if any(b.get(SENSITIVE) is True for b in branches) or keys_sensitive(branches, schema):
             return True
-        stack += [sub for suffix, sub in subschemas(node) if not suffix.startswith("/$defs/")]
-        ref = node.get("$ref")
-        if isinstance(ref, str) and ref.startswith(REF_PREFIX):
-            stack.append(resolve(schema, ref))
+        stack += map_values(branches)
+        for b in branches:
+            props, prefix = b.get("properties"), b.get("prefixItems")
+            stack += list(props.values()) if isinstance(props, Mapping) else []
+            stack += prefix if isinstance(prefix, list) else []
+            stack += [b["items"]] if isinstance(b.get("items"), Mapping) else []
     return False
 
 

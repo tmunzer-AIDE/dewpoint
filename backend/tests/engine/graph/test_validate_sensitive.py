@@ -134,6 +134,29 @@ def test_a_default_or_a_fixed_formula_holding_a_sensitive_part_is_refused(
     assert found == ([("sensitive.literal", "/assignments/login")] if refused else [])
 
 
+@pytest.mark.parametrize(
+    ("schema", "value", "refused"),
+    [
+        ({"type": ["array", "null"], "items": SECRET}, cel('["k3y-value"]'), True),
+        ({"type": ["array", "null"], "prefixItems": [SECRET]}, cel('["k3y-value"]'), True),
+        ({"type": ["object", "null"], "additionalProperties": SECRET}, cel('{"k": "k3y-value"}'), True),
+        ({"type": ["object", "null"], "propertyNames": {"x-sensitive": True}}, cel('{"k3y-value": 1}'), True),
+        ({"anyOf": [{"type": "null"}, LOGIN]}, cel('{"user": "ops"}'), True),
+        ({"type": ["string", "null"], "not": {"type": "integer", "x-sensitive": True}}, cel('"plain"'), False),
+        ({"type": ["string", "null"], "not": {"type": "integer", "x-sensitive": True}}, "plain", False),
+    ],
+)
+def test_a_fixed_formula_is_refused_where_the_literal_rules_could_mark_a_part(
+    schema: dict[str, Any], value: Any, refused: bool
+) -> None:
+    """The rules a literal is checked with (`marked_positions`): a part under a property, `additionalProperties`,
+    `items` or a tuple position, a union's branch, or a map whose keys are sensitive. A keyword they don't read, as
+    `not`, marks no part of the value."""
+    g = G().node("v", SET, {"assignments": {"x": value}})
+    g.settings = {"vars_schema": {"type": "object", "properties": {"x": {**schema, "default": None}}}}
+    assert diagnostics(g) == ([("sensitive.literal", "/assignments/x")] if refused else [])
+
+
 def test_a_reference_without_a_default_and_plain_literals_are_fine() -> None:
     g = G().node("s", SEND, {"token": ref("trigger.tok"), "detail": "plain text"})
     g.settings = {"input_schema": {"type": "object", "properties": {"tok": SECRET}, "required": ["tok"]}}
