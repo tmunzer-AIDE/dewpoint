@@ -19,7 +19,9 @@ def problems(answer: DescribeNamespaceResponse, *, plaintext: bool) -> list[str]
         found.append("no retention reported")
     else:
         ttl = config.workflow_execution_retention_ttl
-        if ttl.seconds > MAX_RETENTION_S:
+        if not 0 <= ttl.nanos <= 999_999_999:  # Temporal stores them unchecked and reads more as seconds
+            found.append("malformed retention (nanos beyond a second)")
+        elif ttl.seconds > MAX_RETENTION_S:
             found.append(f"retention of {ttl.seconds // 86400} days, above 30 (D3g)")
         elif ttl.seconds == MAX_RETENTION_S and ttl.nanos > 0:
             found.append("retention above 30 days (by a fraction of a second)")

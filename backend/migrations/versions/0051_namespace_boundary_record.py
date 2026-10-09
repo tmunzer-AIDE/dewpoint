@@ -9,9 +9,10 @@ Temporal's id for it, the server binary's SHA-256, the D12 proof record's SHA-25
 admin who recorded it (all null on any row from before, which none of 0040's paths wrote). The API's role writes it
 only through `record_namespace_boundary()`, which refuses a deployment whose environment isn't recorded (DPN01), any
 but a development deployment (DPN02: production's boundary waits for real-target qualification), a namespace other than
-the recorded one (DPN03) and evidence that isn't whole (DPN04). The admin's role keeps its grants from 0040, `lost_at`
-among them; the API's lists them through `namespace_boundaries_listed()`, no grant on the table. Adding nullable
-columns and functions: no table rewrite, no long lock (D15)."""
+the recorded one (DPN03) and evidence that isn't whole (DPN04). The key admin's role loses 0040's insert (the review's
+I4: a direct insert would skip every refusal and the platform admin's second factor) and keeps reading the table and
+marking a boundary lost (`lost_at`). The API's role lists them through `namespace_boundaries_listed()`, no grant on
+the table. Adding nullable columns and functions: no table rewrite, no long lock (D15)."""
 
 from alembic import op
 
@@ -74,16 +75,25 @@ $$""",
 ]
 
 
+REVOKED = [  # 0040's, kept: SELECT and UPDATE (lost_at)
+    "REVOKE INSERT ON namespace_boundaries FROM dewpoint_admin",
+    "REVOKE USAGE ON SEQUENCE namespace_boundaries_id_seq FROM dewpoint_admin",
+]
+
+
 def upgrade() -> None:
     with online() as conn:
         added = f"ALTER TABLE namespace_boundaries {', '.join(f'ADD COLUMN {c}' for c in COLUMNS)}"
         step(conn, "0051 a boundary's evidence", added, done=exists("column", "recorded_by", "namespace_boundaries"))
         step(conn, "0051 record_namespace_boundary", *ungranted(*RECORD),
              done=exists("function", "namespace_boundaries_listed()"))  # fmt: skip
+        step(conn, "0051 the admin's insert revoked", *REVOKED)
         step(conn, "0051 grants", *grants(*RECORD))
 
 
 def downgrade() -> None:
+    op.execute("GRANT INSERT ON namespace_boundaries TO dewpoint_admin")
+    op.execute("GRANT USAGE ON SEQUENCE namespace_boundaries_id_seq TO dewpoint_admin")
     op.execute("DROP FUNCTION namespace_boundaries_listed()")
     op.execute(f"DROP FUNCTION {SIGNATURE}")
     op.execute(f"ALTER TABLE namespace_boundaries {', '.join(f'DROP COLUMN {c.split()[0]}' for c in COLUMNS)}")

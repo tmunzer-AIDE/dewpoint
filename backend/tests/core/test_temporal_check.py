@@ -38,6 +38,7 @@ def test_a_namespace_within_the_rules_over_tls_has_no_problem() -> None:
 @pytest.mark.parametrize(("given", "found"), [
     (answer(seconds=31 * DAY), "retention of 31 days, above 30 (D3g)"),
     (answer(nanos=1), "retention above 30 days"),
+    (answer(seconds=30 * DAY - 1, nanos=999_999_999 + 1), "malformed retention"),  # the review's C1
     (answer(seconds=None), "no retention reported"),
     (answer(history=ArchivalState.ARCHIVAL_STATE_ENABLED), "history archival enabled"),
     (answer(visibility=ArchivalState.ARCHIVAL_STATE_ENABLED), "visibility archival enabled"),

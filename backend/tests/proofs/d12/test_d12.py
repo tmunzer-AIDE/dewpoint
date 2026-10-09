@@ -252,6 +252,7 @@ def test_d12_1_the_inventory_classes_every_rpc_and_lists_every_endpoint(server: 
     for service in ("internal-frontend", "history", "matching", "worker"):
         assert listening[(service, "grpc")]["address"].startswith("127.0.0.1:")
     assert listening[("internal-frontend", "grpc")]["authorized"]
+    assert ("internal-frontend", "http") not in listening  # the review's I1: no credential-free HTTP API there
     assert inventory["server_version"].startswith("1.32.0")
 
 
@@ -422,12 +423,22 @@ def test_d12_3_the_internal_frontend_runs_the_same_authorizer(server: Server) ->
 
 
 def test_d12_3_nexus_routes_are_closed(server: Server) -> None:
-    """Nexus can't be turned off in v1.32.0; its HTTP routes reach the authorizer, which refuses them unaudited."""
-    for path in (f"/namespaces/{NAMESPACE}/task-queues/q/nexus-services/s/operations/o",
-                 "/nexus/endpoints/e/services/s/operations/o"):  # fmt: skip
+    """Nexus can't be turned off in v1.32.0. Of its three HTTP routes, only the dispatch by namespace and task queue
+    reaches the authorizer, which refuses it (403), unaudited (the closed class). The dispatch by endpoint answers 404
+    before authorizing (no endpoint can exist: creating one is refused), and the completion callback rejects a missing
+    token before authorizing (no Nexus operation runs to mint one): each is recorded as unreachable, not as covered
+    (the review's I2)."""
+    before = len(_decisions(server, NAMESPACE))
+    status, _ = _http(server, "POST", f"/namespaces/{NAMESPACE}/task-queues/q/nexus-services/s/o", {})
+    record({"environment": f"d12-{server.config}", "nexus_route": "namespace and task queue", "status": status})
+    assert status == 403
+    assert len(_decisions(server, NAMESPACE)) == before  # closed: refused without an audit write
+    for name, path, unreachable in (("endpoint", "/nexus/endpoints/e/services/s/o", 404),
+                                    ("callback", f"/namespaces/{NAMESPACE}/nexus/callback", 400)):  # fmt: skip
         status, _ = _http(server, "POST", path, {})
-        record({"environment": f"d12-{server.config}", "nexus_route": path, "status": status})
-        assert status in (403, 404), status
+        record({"environment": f"d12-{server.config}", "nexus_route": name, "status": status,
+                "reaches_the_authorizer": False})  # fmt: skip
+        assert status == unreachable, (name, status)
 
 
 # ---- D12.4 ----------------------------------------------------------------------------------------------------------

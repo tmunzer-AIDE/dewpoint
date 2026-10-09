@@ -26,7 +26,13 @@ def record(line: dict[str, object]) -> None:
 
 
 def pytest_runtest_logreport(report: pytest.TestReport) -> None:
-    if report.when == "call" or (report.when == "setup" and report.outcome != "passed"):
+    """Each case's call; its setup when it didn't pass (a skip, a failure); its teardown when it failed (the review's
+    I3: a failed cleanup is part of the record)."""
+    if (
+        report.when == "call"
+        or (report.when in ("setup", "teardown") and report.outcome == "failed")
+        or (report.when == "setup" and report.outcome == "skipped")
+    ):
         if "/proofs/d6/" in report.nodeid or "/proofs/d12/" in report.nodeid:
             record(
                 {

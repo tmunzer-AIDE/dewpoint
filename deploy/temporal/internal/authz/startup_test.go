@@ -42,6 +42,12 @@ func TestAConfigurationTheRulesCantHoldOnIsRefused(t *testing.T) {
 			delete(c.Services, "internal-frontend")
 			return "internal-frontend"
 		},
+		"an internal frontend with an HTTP API": func(c *config.Config) string {
+			internal := c.Services["internal-frontend"]
+			internal.RPC.HTTPPort = 7246
+			c.Services["internal-frontend"] = internal
+			return "internal-frontend httpPort"
+		},
 		"internode without client certificates": func(c *config.Config) string {
 			c.Global.TLS.Internode.Server.RequireClientAuth = false
 			return "internode"

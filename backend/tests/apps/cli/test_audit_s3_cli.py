@@ -85,6 +85,10 @@ def test_the_monitor_is_set_up_stays_quiet_when_healthy_and_alerts(pg_url, _test
     state.unlink()
     lost = runner.invoke(app, watched)
     assert lost.exit_code == 1 and "ALERT audit_monitor_state_lost" in lost.output
+    # the review's M5: it stays alerted on, the state not made afresh, until someone sets it up again knowingly
+    assert not state.exists()
+    still = runner.invoke(app, watched)
+    assert still.exit_code == 1 and "ALERT audit_monitor_state_lost" in still.output
 
 
 def test_the_monitor_needs_the_bucket(pg_url, _test_users, monkeypatch, tmp_path: Path) -> None:

@@ -109,3 +109,15 @@ def test_every_process_connects_through_this_helper_alone() -> None:
     found = sorted(str(path.relative_to(source)) for path in source.rglob("*.py")
                    if "Client.connect(" in path.read_text() and path.name != "temporal_connect.py")  # fmt: skip
     assert found == []
+
+
+def test_an_empty_setting_is_unset(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The review's M1: `DEWPOINT_TEMPORAL_TLS_CERT=` and `…_KEY=` (empty, as a template leaves them) authenticate no
+    client: with nothing else, refused at startup, never a server-only TLS connection that fails later."""
+    monkeypatch.setenv("DEWPOINT_TEMPORAL_TLS_CERT", "")
+    monkeypatch.setenv("DEWPOINT_TEMPORAL_TLS_KEY", " ")
+    with pytest.raises(TemporalConfigError, match="client authentication"):
+        options(TemporalConnection(), PRODUCTION)
+    token = files(tmp_path, token=b"a.jwt.token")["token"]
+    monkeypatch.setenv("DEWPOINT_TEMPORAL_BEARER_TOKEN_FILE", token)
+    assert options(TemporalConnection(), PRODUCTION)["api_key"] == "a.jwt.token"  # the empty pair isn't a second mode

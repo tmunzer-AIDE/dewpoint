@@ -10,7 +10,9 @@
 #   DEWPOINT_AUTHZ_CERT_ROLES.
 # - The internal frontend, history, matching and the worker listen on loopback only, internode mutual TLS. The
 #   internal frontend is how the server's own system workers (schedules among them) reach the frontend; it runs
-#   the same authorizer. Membership is on loopback for the internode services; the frontend's membership port shares
+#   the same authorizer. It has no HTTP API: Temporal would serve it with the frontend's TLS and its internal
+#   claim mapper (system admin, no credential needed), so the server refuses to start with one (the review's I1).
+#   Membership is on loopback for the internode services; the frontend's membership port shares
 #   its address (Temporal binds both on one IP) and is reachable on the container network only.
 log:
   stdout: true
@@ -72,7 +74,7 @@ services:
   frontend:
     rpc: {grpcPort: 7233, httpPort: 7243, membershipPort: 6933, bindOnIP: 0.0.0.0}
   internal-frontend:
-    rpc: {grpcPort: 7236, httpPort: 7246, membershipPort: 6936, bindOnIP: 127.0.0.1}
+    rpc: {grpcPort: 7236, membershipPort: 6936, bindOnIP: 127.0.0.1}  # no HTTP API: see the header
   history:
     rpc: {grpcPort: 7234, membershipPort: 6934, bindOnIP: 127.0.0.1}
   matching:

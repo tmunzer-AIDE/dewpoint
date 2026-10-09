@@ -58,6 +58,9 @@ func Violation(c Config) string {
 		return "no retention: one of at most 30 days is required"
 	case r.Seconds < 0 || r.Nanos < 0:
 		return "a negative retention"
+	case r.Nanos > 999_999_999:
+		// a protobuf duration's nanos stay within a second; Temporal stores them unchecked and reads more as seconds
+		return "a malformed retention (nanos beyond a second)"
 	case r.Seconds > MaxRetentionSeconds || (r.Seconds == MaxRetentionSeconds && r.Nanos > 0):
 		return fmt.Sprintf("a retention above 30 days (%d s)", r.Seconds)
 	case c.History == ArchivalEnabled:

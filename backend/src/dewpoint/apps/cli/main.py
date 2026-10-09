@@ -325,9 +325,10 @@ def audit_monitor(
     problems, database, now = asyncio.run(_run())
     alerts, updated = watch(rostered, marks, database, newest, now, init=init)
     alerts = [("audit_verify_failed", "", problem) for problem in found + problems] + alerts
-    written = state.with_name(state.name + ".new")
-    written.write_text(json.dumps(updated, sort_keys=True))
-    os.replace(written, state)
+    if marks is not None or init:  # a lost state isn't made afresh: it stays alerted on until set up knowingly (--init)
+        written = state.with_name(state.name + ".new")
+        written.write_text(json.dumps(updated, sort_keys=True))
+        os.replace(written, state)
     for event, scope, what in alerts:
         log.error(event, scope=scope, what=what)
         typer.echo(f"ALERT {event}{' ' + scope if scope else ''}: {what}")

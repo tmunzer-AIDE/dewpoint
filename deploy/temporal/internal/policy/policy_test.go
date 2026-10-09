@@ -59,6 +59,9 @@ func TestRetentionAboveThirtyDaysIsRefusedAndAudited(t *testing.T) {
 		"the largest proto":  {Set: true, Seconds: 315_576_000_000},
 		"unset, on register": {},
 		"negative":           {Set: true, Seconds: -1},
+		// the review's C1: Temporal stores nanos it doesn't range-check, and reads 2^31-1 of them as 2.1 s
+		"nanos past a second":    {Set: true, Seconds: 30*day - 1, Nanos: 2_147_483_647},
+		"a whole second's nanos": {Set: true, Seconds: 30*day - 1, Nanos: 1_000_000_000},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := &fake{role: true}

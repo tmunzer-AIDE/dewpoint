@@ -97,3 +97,19 @@ async def test_the_api_role_writes_boundaries_only_through_the_function(api_sess
         with pytest.raises(DBAPIError, match="permission denied"):
             async with s.begin():
                 await s.execute(text("insert into namespace_boundaries (name) values ('forged')"))
+
+
+async def test_the_admin_role_can_mark_a_boundary_lost_but_no_longer_insert_one(
+    admin_sessionmaker, owner_sessionmaker
+) -> None:
+    """The review's I4: a direct insert as the key admin would skip every refusal of the function (any environment,
+    any namespace, no evidence) and the platform admin's second factor; finding one lost stays the admin's."""
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text("insert into namespace_boundaries (name) values ('seeded')"))
+    async with admin_sessionmaker() as s:
+        with pytest.raises(DBAPIError, match="permission denied"):
+            async with s.begin():
+                await s.execute(text("insert into namespace_boundaries (name) values ('forged')"))
+    async with admin_sessionmaker() as s, s.begin():
+        await s.execute(text("update namespace_boundaries set lost_at = now()"))
+    assert [row[0] for row in await stored(owner_sessionmaker)] == ["seeded"]

@@ -19,7 +19,8 @@ const (
 // CheckConfig refuses a configuration the namespace rules can't hold on, before the server starts:
 //   - archival other than disabled, for the cluster or as a new namespace's default (erasure requires it off);
 //   - no internal frontend: the server's system workers (schedules among them) reach the frontend through it, with
-//     this authorizer, rather than through the public frontend with a credential of their own;
+//     this authorizer, rather than through the public frontend with a credential of their own; or one with an HTTP
+//     API, which Temporal serves without internode TLS and grants system admin with no credential;
 //   - the frontend or internode without TLS, or internode without client certificates;
 //   - configuration A without client certificates required, or B without a key set and an audience.
 func CheckConfig(cfg *config.Config, mode string) error {
@@ -34,8 +35,11 @@ func CheckConfig(cfg *config.Config, mode string) error {
 			problems = append(problems, what+" must be disabled")
 		}
 	}
-	if _, ok := cfg.Services[string(primitives.InternalFrontendService)]; !ok {
+	if internal, ok := cfg.Services[string(primitives.InternalFrontendService)]; !ok {
 		problems = append(problems, "no internal-frontend service")
+	} else if internal.RPC.HTTPPort != 0 {
+		// Temporal serves it with the frontend's TLS and the internal claim mapper: system admin for any caller
+		problems = append(problems, "internal-frontend httpPort must be unset (an HTTP API there needs no credential)")
 	}
 	tls := cfg.Global.TLS
 	if tls.Frontend.Server.CertFile == "" {

@@ -86,14 +86,17 @@ func Endpoints(cfg *config.Config) []Endpoint {
 		if !frontend {
 			note = "internode only: mutual TLS, the container network"
 		} else if name == string(primitives.InternalFrontendService) {
-			note = "internode mutual TLS; Temporal's internal claim mapper (system admin), this authorizer"
+			note = "gRPC only, internode mutual TLS; Temporal's internal claim mapper (system admin), this authorizer"
 		}
 		endpoints = append(endpoints, Endpoint{name, "grpc", at(rpc.GRPCPort), frontend, note})
 		if rpc.HTTPPort != 0 {
 			endpoints = append(endpoints, Endpoint{name, "http", at(rpc.HTTPPort), frontend, note})
 		}
-		endpoints = append(endpoints, Endpoint{name, "membership", at(rpc.MembershipPort), false,
-			"internode only: the container network"})
+		reach := "loopback: inside the server's network namespace only"
+		if rpc.BindOnIP != "127.0.0.1" {
+			reach = "no TLS, Temporal's ring: reachable on the container network (its bind address is the frontend's)"
+		}
+		endpoints = append(endpoints, Endpoint{name, "membership", at(rpc.MembershipPort), false, reach})
 	}
 	return endpoints
 }
