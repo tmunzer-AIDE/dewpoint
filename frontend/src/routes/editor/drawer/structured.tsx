@@ -76,7 +76,7 @@ function ListItems({ spec, value }: { spec: FieldSpec; value: unknown }) {
         );
       })}
       {drawer.editable && (
-        <Button ref={add} size="sm" className="self-start" onClick={append}>Add to {spec.label}</Button>
+        <Button ref={add} data-add size="sm" className="self-start" onClick={append}>Add to {spec.label}</Button>
       )}
     </>
   );
@@ -172,7 +172,7 @@ function MapEntries({ spec, value }: { spec: FieldSpec; value: unknown }) {
         );  // prettier-ignore
       })}
       {drawer.editable && (
-        <Button ref={add} size="sm" className="self-start" onClick={append}>Add to {spec.label}</Button>
+        <Button ref={add} data-add size="sm" className="self-start" onClick={append}>Add to {spec.label}</Button>
       )}
     </>
   );

@@ -9,6 +9,13 @@ import type { GraphDoc, GraphEdge, GraphNode, NodeType } from "./workflows";
 
 export const ENVELOPE = "$value";
 export const MAX_FORMULA = 16_384; // engine/graph/values.py's MAX_CEL
+
+/** Why a formula can't be written, or null. Past the engine's limit it's kept whole and held, never cut: a browser's
+ * own limit would drop its end silently and change what it says (the review of 97235e3). */
+export const formulaProblem = (text: string): string | null =>
+  text.length > MAX_FORMULA
+    ? `A formula can be at most ${MAX_FORMULA.toLocaleString("en-US")} characters: this one has ${text.length.toLocaleString("en-US")}, so it isn't saved.`
+    : null;
 export const CEL_WORDS: ReadonlySet<string> = new Set(["in", "true", "false", "null"]); // CEL can't select them
 const KEY = /^[a-z][a-z0-9_]{0,62}$/; // engine/graph/model.py's KEY_PATTERN: a draft breaking it isn't saved
 const PORT = /^[a-z][a-z0-9_]{0,30}$/; // and its PORT_PATTERN, which every edge's port must match

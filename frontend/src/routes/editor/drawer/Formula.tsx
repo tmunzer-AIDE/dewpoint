@@ -5,7 +5,7 @@
 // never shown (M25). A formula the graph's format refuses is held by the editor, with why (ruling 18).
 import { Button } from "../../../components/Button";
 import { controlClass } from "../../../components/Field";
-import { MAX_FORMULA, formula, formulaOf, kindOf, referenceText } from "../../../lib/config";
+import { formula, formulaOf, formulaProblem, kindOf, referenceText } from "../../../lib/config";
 import type { Expression } from "../../../lib/workflows";
 import { useDrawer } from "./context";
 import type { Described } from "./FieldFrame";
@@ -24,11 +24,12 @@ export function FormulaControl({ spec, value, id, describedBy, invalid, disabled
   );
   return (
     <textarea
-      id={id} value={held?.text ?? text} rows={3} maxLength={MAX_FORMULA} spellCheck={false} autoCapitalize="off" disabled={disabled}
+      id={id} value={held?.text ?? text} rows={3} spellCheck={false} autoCapitalize="off" disabled={disabled}
       aria-describedby={describedBy} aria-invalid={invalid}
       onChange={(e) => {
         setText(e.target.value);
-        const why = onChange(e.target.value.trim() === "" ? undefined : formula(e.target.value), true);
+        // Never cut: past the engine's limit it's held whole, with why, and the draft keeps what it had.
+        const why = formulaProblem(e.target.value) ?? onChange(e.target.value.trim() === "" ? undefined : formula(e.target.value), true);
         if (why === null) drawer.release("formula", spec.pointer);
         else drawer.hold("formula", spec.pointer, { path: spec.path, label: spec.label, text: e.target.value, why, entry: spec.entry });
       }}

@@ -1761,3 +1761,15 @@ it("goes to a held entry name from the list of edits not applied, at its name", 
   await goBackTo("map · Fields, the name old");
   await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Name: old")));
 });
+
+it("keeps a formula past the limit out of the draft, held and counted, never cut (the review of 97235e3)", async () => {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, IF]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.if@1", { condition: formula("false") }, "check") }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "check" }));
+  await userEvent.click(screen.getByLabelText("Condition"));
+  await userEvent.keyboard("{Control>}a{/Control}");
+  await userEvent.paste(`true${" ".repeat(16_380)}&& false`); // over the whole formula: cut, it would read `true`
+  expect(stepConfig("check")).toEqual({ condition: formula("false") });
+  expect(screen.getByRole("button", { name: "1 edit not applied" })).toBeTruthy();
+});

@@ -107,7 +107,10 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
       const label = box?.querySelector<HTMLLabelElement>("label[for]");
       const control = label ? document.getElementById(label.htmlFor) : null;
       const usable = control && control.tagName !== "OUTPUT" && !(control as HTMLInputElement).disabled ? control : null;
-      (usable ?? box?.querySelector<HTMLElement>("input:not([disabled]), textarea:not([disabled]), select:not([disabled])"))?.focus();
+      // A list or a map emptied has no control left, only its Add (the review of 97235e3).
+      (usable ??
+        box?.querySelector<HTMLElement>("input:not([disabled]), textarea:not([disabled]), select:not([disabled])") ??
+        box?.querySelector<HTMLElement>("[data-add]:not([disabled])"))?.focus();
     });
   const held = OWN.map((k) => drawer.held(k, spec.pointer)).find((u) => u !== undefined);
   const disabled = !drawer.editable;

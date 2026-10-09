@@ -3,7 +3,7 @@ import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { formula, literal } from "../../../lib/config";
-import { FILTER, IF, REMOTE, SWITCH, TRANSFORM, typeWith } from "../../../test/nodeTypes";
+import { FILTER, IF, REMOTE, RUN_WORKFLOW, SWITCH, TRANSFORM, typeWith } from "../../../test/nodeTypes";
 import { STALE } from "../../../lib/unapplied";
 import { NODE_ID, fakeApi, problem, showFields } from "./harness";
 
@@ -525,4 +525,29 @@ it("keeps an emptied list item blank without calling it missing", async () => {
   expect(config().tags).toEqual(["", "b"]); // blank, in its place
   expect(screen.queryByText("Required")).toBeNull();
   expect(first.getAttribute("aria-invalid")).toBe("false");
+});
+
+// The review of 97235e3: a formula past the limit is never cut; Clear on an empty container lands on its Add.
+
+it("holds a formula past the engine's limit whole, never cut, and leaves the draft as it was", async () => {
+  const { config, held } = showFields(IF, { config: { condition: formula("false") } });
+  const long = `true${" ".repeat(16_380)}&& false`; // cut at 16,384 it would read `true`, and change the logic
+  await userEvent.clear(screen.getByLabelText("Condition"));
+  await userEvent.paste(long);
+  expect(screen.getByLabelText<HTMLTextAreaElement>("Condition").value).toHaveLength(16_392); // every character kept
+  expect(config()).toEqual({}); // the clear wrote nothing over a formula; the long text never reached the draft
+  expect(held().map((u) => [u.kind, u.text.length])).toEqual([["formula", 16_392]]);
+  expect(screen.getByText("A formula can be at most 16,384 characters: this one has 16,392, so it isn't saved.")).toBeTruthy();
+});
+
+it("lands on Add after a map is cleared", async () => {
+  showFields(RUN_WORKFLOW, { config: { workflow_id: "w2", input: { a: 1 } } });
+  await userEvent.click(screen.getByRole("button", { name: "Clear Input" }));
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Add to Input" })));
+});
+
+it("lands on Add after a list is cleared", async () => {
+  showFields(REMOTE, { config: { tags: ["a"] } });
+  await userEvent.click(screen.getByRole("button", { name: "Clear Tags" }));
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Add to Tags" })));
 });

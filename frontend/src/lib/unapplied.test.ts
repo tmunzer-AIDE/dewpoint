@@ -192,3 +192,10 @@ describe("which edits a change covers", () => {
     });
   });
 });
+
+it("never applies a formula past the engine's limit, and says why (the review of 97235e3)", () => {
+  const doc: GraphDoc = { graph_format: 1, nodes: [{ id: A, key: "check", type: "flow.if@1", config: { condition: formula("true") } }] };
+  const long = `true${" ".repeat(16_380)}&& false`; // 16,392 characters: cut at 16,384 it would read `true`
+  const result = applyUnapplied(doc, held(doc, "formula", "/condition", ["condition"], long), IF);
+  expect(result).toEqual({ problem: "A formula can be at most 16,384 characters: this one has 16,392, so it isn't saved." });
+});

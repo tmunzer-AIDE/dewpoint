@@ -4,8 +4,8 @@
 // never the control, so a tab, a toggle or a closed drawer can't lose them. Each is applied when it can be, and said,
 // with its reason, while it can't.
 import {
-  admission, formula, keyProblem, literal, parseJson, renameEntry, renameKey, renamePort, rootOf, setConfig, setOptions,
-  valueAt, type Changed,
+  admission, formula, formulaProblem, keyProblem, literal, parseJson, renameEntry, renameKey, renamePort, rootOf,
+  setConfig, setOptions, valueAt, type Changed,
 } from "./config";  // prettier-ignore
 import { findNode, idKey, portOf, sameId } from "./graph";
 import { isObject, type Path } from "./schemaForm";
@@ -131,8 +131,11 @@ function attempt(doc: GraphDoc, node: GraphNode, u: Unapplied, type: NodeType | 
       const parsed = parseNumber(u.text, u.whole ?? false);
       return "problem" in parsed ? parsed : quiet(setConfig(doc, u.node, u.path, written(parsed.value, u), type));
     }
-    case "formula":
+    case "formula": {
+      const tooLong = formulaProblem(u.text);
+      if (tooLong !== null) return { problem: tooLong };
       return quiet(setConfig(doc, u.node, u.path, u.text.trim() === "" ? written(undefined, u) : formula(u.text), type));
+    }
     case "port": {
       if (!type) return { problem: "This step's type isn't on this server." };
       const name = u.text.trim();
