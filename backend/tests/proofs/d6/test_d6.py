@@ -186,11 +186,14 @@ def test_d6_2_deleting_the_version_is_refused_to_the_writer_and_to_root(pg_url, 
     prefix = _prefix()
     _anchor(monkeypatch, pg_url, lab, prefix)
     version = _only_anchor(lab, prefix)
-    for client in (environment.s3(lab.writer), lab.root):
+    # the refusal is the property, and the version still there after it; the code MinIO gives is recorded, not
+    # assumed (R2's rerun: a locked version's delete answered InvalidRequest, where the test had assumed AccessDenied)
+    for who, client in (("writer", environment.s3(lab.writer)), ("root", lab.root)):
         with pytest.raises(ClientError) as refused:
             client.delete_object(Bucket=BUCKET, Key=version["Key"], VersionId=version["VersionId"])
-        assert refused.value.response["Error"]["Code"] == "AccessDenied"
-    assert len(_versions(lab, version["Key"])) == 1
+        record({"environment": "d6", "case": "d6.2 refusal", "who": who,
+                "code": refused.value.response["Error"]["Code"]})  # fmt: skip
+    assert [v["VersionId"] for v in _versions(lab, version["Key"])] == [version["VersionId"]]
 
 
 def test_d6_3_shortening_or_changing_the_lock_is_refused(pg_url, _test_users, monkeypatch, lab: Lab) -> None:

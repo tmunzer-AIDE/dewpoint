@@ -89,6 +89,17 @@ def test_a_version_not_locked_in_compliance_mode_for_long_enough_is_refused(mode
     ]
 
 
+def test_a_lock_dated_a_moment_before_its_version_is_long_enough() -> None:
+    """A real server dates a version's lock and its last-modified time apart, by milliseconds (R2's lesson on MinIO):
+    a lock a moment short of the period by that is no problem, one short by more than a minute is."""
+    moment, short = FakeS3(lock_lag=timedelta(milliseconds=3)), FakeS3(lock_lag=timedelta(minutes=2))
+    written(moment, ("platform", 1))
+    written(short, ("platform", 1))
+    assert read_anchors(moment, BUCKET, PREFIX, kept=KEPT).problems == []  # type: ignore[arg-type]
+    [problem] = read_anchors(short, BUCKET, PREFIX, kept=KEPT).problems  # type: ignore[arg-type]
+    assert "less than 435 days" in problem
+
+
 def test_a_listing_longer_than_a_page_is_verified_whole() -> None:
     """D6.7: a tampered version on a later page is caught."""
     bucket = FakeS3()

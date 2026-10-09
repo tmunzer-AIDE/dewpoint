@@ -27,6 +27,9 @@ from dewpoint.core.audit.anchor import signed_message
 
 ANCHORS = "anchors/"
 PAGE = 1000  # S3's own maximum keys a listing page
+# A server dates a version's lock and its last-modified time apart (by milliseconds, at the write): a lock that short
+# of the period by no more than this is long enough
+LOCK_SLACK = timedelta(minutes=1)
 
 
 def anchor_key(prefix: str, scope: str, seq: int) -> str:
@@ -85,7 +88,7 @@ def _lock_problem(client: Any, bucket: str, key: str, version: dict[str, Any], k
     if retention.get("Mode") != "COMPLIANCE":
         return f"not in compliance mode ({retention.get('Mode')})"
     until: datetime = retention["RetainUntilDate"]
-    if until < version["LastModified"] + kept:
+    if until < version["LastModified"] + kept - LOCK_SLACK:
         return f"kept until {until.date().isoformat()}, less than {kept.days} days"
     return None
 

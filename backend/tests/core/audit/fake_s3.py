@@ -31,8 +31,10 @@ class Version:
 
 class FakeS3:
     def __init__(self, *, mode: str | None = "COMPLIANCE", days: int | None = 435, enabled: bool = True,
-                 now: datetime | None = None) -> None:  # fmt: skip
-        self.mode, self.days, self.enabled = mode, days, enabled
+                 now: datetime | None = None, lock_lag: timedelta = timedelta(0)) -> None:  # fmt: skip
+        """`lock_lag`: how much earlier than the version's own time the server dates its lock (a real server takes
+        the two times apart, by milliseconds)."""
+        self.mode, self.days, self.enabled, self.lock_lag = mode, days, enabled, lock_lag
         self.now = now or datetime(2026, 10, 9, 12, tzinfo=UTC)
         self.versions: list[Version] = []  # oldest first
         self.puts: list[dict[str, Any]] = []
@@ -47,7 +49,7 @@ class FakeS3:
         current = self._current(Key)
         if IfNoneMatch == "*" and current is not None and current.body is not None:
             raise _error("PreconditionFailed", 412)
-        retain = self.now + timedelta(days=self.days) if self.mode and self.days else None
+        retain = self.now + timedelta(days=self.days) - self.lock_lag if self.mode and self.days else None
         version = Version(Key, bytes(Body), self.mode if retain else None, retain, self.now)
         self.versions.append(version)
         return {"VersionId": version.version_id}
