@@ -54,6 +54,17 @@ class Settings(TemporalConnection):  # Temporal's §10.4 security settings with 
     # The platform's audit retention (engine 2b spec §10.2): `dewpoint audit prune` deletes older entries, never newer
     # than 30 days, and only in a development deployment until an off-host anchor sink exists (#3).
     audit_retention_days: int = Field(default=400, ge=30)
+    # D6's off-host anchor sink (#3; 2b-4b M4): an S3 bucket with Object Lock in compliance mode. The anchor writer's
+    # credentials are put-only, the verifier's and the monitor's read-only, each from its own environment (AWS's own
+    # variables or profile), none on the database host.
+    audit_s3_bucket: str | None = None  # set: anchors go to this bucket, not DEWPOINT_AUDIT_ANCHOR_PATH's file
+    audit_s3_prefix: str = "dewpoint/"
+    audit_s3_endpoint_url: str | None = None  # another S3-compatible server (D6's proof: the pinned MinIO)
+    audit_s3_region: str | None = None
+    audit_signing_key_id: str = "audit-1"  # signed into each anchor; its public key kept by this id (rotation)
+    audit_public_keys: str | None = None  # JSON {key id: base64 raw Ed25519 public key}: what verifies, alone
+    # The bucket's lock covers the audit retention plus this: a restored backup's entries stay verifiable (D6.9).
+    backup_retention_days: int = Field(default=35, ge=0)
 
 
 @lru_cache

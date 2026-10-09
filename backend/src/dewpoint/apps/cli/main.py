@@ -6,12 +6,14 @@ import os
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import httpx
+import structlog
 import typer
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.api.workflowservice.v1 import DescribeNamespaceRequest
@@ -30,7 +32,9 @@ from dewpoint.apps.worker.health import WorkerUnhealthyError
 from dewpoint.apps.worker.main import run as run_worker
 from dewpoint.core import logs
 from dewpoint.core.audit import service as audit_log
-from dewpoint.core.audit.anchor import FileAnchorSink, anchor_all, anchor_freshness, verify_anchors
+from dewpoint.core.audit.anchor import AnchorSink, FileAnchorSink, anchor_all, anchor_freshness, verify_anchors
+from dewpoint.core.audit.monitor import Roster, Scope, watch
+from dewpoint.core.audit.s3 import S3AnchorSink, bucket_problems, read_anchors
 from dewpoint.core.auth.sessions import SESSION_COOKIE
 from dewpoint.core.auth.users import PasswordPolicyError, create_user
 from dewpoint.core.config import Settings, get_settings
@@ -67,6 +71,7 @@ from dewpoint.core.tenancy.service import NotKeyAdminError, ensure_tenant_event_
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.sdk import ManifestError
 
+log = structlog.get_logger("dewpoint.cli")
 app = typer.Typer(no_args_is_help=True)
 
 
@@ -137,6 +142,40 @@ def _signing_key() -> Ed25519PrivateKey:
     return Ed25519PrivateKey.from_private_bytes(base64.b64decode(raw))
 
 
+def _s3_client(settings: Settings) -> Any:
+    """An S3 client with this process's own credentials (AWS's variables or profile): the anchor writer's put-only
+    ones, the verifier's or the monitor's read-only ones (D6)."""
+    import boto3
+
+    return boto3.client("s3", endpoint_url=settings.audit_s3_endpoint_url, region_name=settings.audit_s3_region)
+
+
+def _kept(settings: Settings) -> timedelta:
+    """How long the bucket must lock each anchor: the audit retention plus the backup period (D6.9)."""
+    return timedelta(days=settings.audit_retention_days + settings.backup_retention_days)
+
+
+def _sink() -> AnchorSink:
+    settings = get_settings()
+    if settings.audit_s3_bucket:
+        return S3AnchorSink(_s3_client(settings), settings.audit_s3_bucket, settings.audit_s3_prefix, _signing_key(),
+                            settings.audit_signing_key_id)  # fmt: skip
+    return FileAnchorSink(_anchor_path(), _signing_key())
+
+
+def _public_keys(settings: Settings) -> dict[str, Ed25519PublicKey]:
+    """The keys anchors are verified with, by id: DEWPOINT_AUDIT_PUBLIC_KEYS, every id kept (rotation); else, in
+    development, the signing key's own. A verifier needs no private key."""
+    if not settings.audit_public_keys:
+        return {settings.audit_signing_key_id: _signing_key().public_key()}
+    try:
+        given = json.loads(settings.audit_public_keys)
+        return {str(kid): Ed25519PublicKey.from_public_bytes(base64.b64decode(raw)) for kid, raw in given.items()}
+    except (ValueError, TypeError, AttributeError):
+        typer.echo("ERROR: DEWPOINT_AUDIT_PUBLIC_KEYS isn't a JSON object of key ids to base64 Ed25519 public keys")
+        raise typer.Exit(2) from None
+
+
 def _anchor_path() -> Path:
     path = get_settings().audit_anchor_path
     if not path:
@@ -147,8 +186,9 @@ def _anchor_path() -> Path:
 
 @audit.command("anchor")
 def audit_anchor() -> None:
-    """Write current chain heads to the external anchor sink. Run as a dewpoint_auditor login, e.g. every 15 min."""
-    sink = FileAnchorSink(_anchor_path(), _signing_key())
+    """Write current chain heads to the external anchor sink (DEWPOINT_AUDIT_S3_BUCKET's, else the file). Run as a
+    dewpoint_auditor login, off the database host, e.g. every 15 min."""
+    sink = _sink()
 
     async def _run() -> int:
         engine = make_engine(get_settings().database_url)
@@ -168,7 +208,7 @@ def audit_prune() -> None:
     dewpoint_auditor login. Refused outside a development deployment until an off-host anchor sink exists (#3)."""
     from dewpoint.core.audit.prune import PruningDisabledError, prune
 
-    sink = FileAnchorSink(_anchor_path(), _signing_key())
+    sink = _sink()
 
     async def _run() -> dict[str, int]:
         engine = make_engine(get_settings().database_url)
@@ -190,17 +230,23 @@ def audit_prune() -> None:
 @audit.command("verify")
 def audit_verify() -> None:
     """Recompute every chain and check it against the signed external anchors. Exit 1 on any problem,
-    including when no anchors exist, so a broken anchor job can't look healthy."""
-    key = _signing_key()
-    sink = FileAnchorSink(_anchor_path(), key)
+    including when no anchors exist, so a broken anchor job can't look healthy. With DEWPOINT_AUDIT_S3_BUCKET: every
+    version and delete marker in the bucket, each one's lock, and the bucket's default retention (D6), verified with
+    the public keys alone."""
+    settings = get_settings()
 
     async def _run() -> list[str]:
-        engine = make_engine(get_settings().database_url)
-        try:
-            async with make_sessionmaker(engine)() as s:
-                return await verify_anchors(s, sink.entries(), key.public_key())
-        finally:
-            await engine.dispose()
+        if settings.audit_s3_bucket:
+            client, kept = _s3_client(settings), _kept(settings)
+            listing = read_anchors(client, settings.audit_s3_bucket, settings.audit_s3_prefix, kept=kept)
+            found = bucket_problems(client, settings.audit_s3_bucket, kept=kept) + listing.problems
+            keys = _public_keys(settings)
+            async with _auditing() as s:
+                return found + await verify_anchors(s, listing.entries, keys)
+        key = _signing_key()
+        sink = FileAnchorSink(_anchor_path(), key)
+        async with _auditing() as s:
+            return await verify_anchors(s, sink.entries(), key.public_key())
 
     problems = asyncio.run(_run())
     for problem in problems:
@@ -208,6 +254,81 @@ def audit_verify() -> None:
     if problems:
         raise typer.Exit(1)
     typer.echo("audit chain verified against external anchors")
+
+
+@asynccontextmanager
+async def _auditing() -> AsyncIterator[AsyncSession]:
+    engine = make_engine(get_settings().database_url)
+    try:
+        async with make_sessionmaker(engine)() as s:
+            yield s
+    finally:
+        await engine.dispose()
+
+
+_SCOPES = text(
+    "select scope, max(seq) from (select scope, seq from audit_log union all select scope, seq from audit_checkpoints)"
+    " kept group by scope"
+)
+_UNANCHORED = text("select min(created_at) from audit_log where scope = :s and seq > :after")
+
+
+@audit.command("monitor")
+def audit_monitor(
+    roster_file: str = typer.Option(..., "--roster", help="the expected scopes and cadences, off the database host"),
+    state_file: str = typer.Option(..., "--state", help="this monitor's high-water marks, off the database host"),
+    init: bool = typer.Option(False, "--init", help="set the marks up: no state yet is no alert, this once"),
+) -> None:
+    """D6's independent monitor (#3), run on a schedule off the database host with read-only credentials: `audit
+    verify` against the bucket, then a scope gone from the database, an anchor overdue past its cadence, or a
+    high-water mark lost or rolled back. Each alert is logged and printed; exit 1 on any, so a monitor that can't see
+    can't look healthy. Its alert destination is the operator's (the owner's ruling: chosen and tested before
+    readiness)."""
+    settings, roster, state = get_settings(), Path(roster_file), Path(state_file)
+    if not settings.audit_s3_bucket:
+        typer.echo("ERROR: the monitor reads the anchors' bucket: set DEWPOINT_AUDIT_S3_BUCKET")
+        raise typer.Exit(2)
+    try:
+        given = json.loads(roster.read_text())
+        cadences = {str(k): timedelta(minutes=int(v)) for k, v in given.get("scopes", {}).items()}
+        rostered = Roster(default=timedelta(minutes=int(given["default_cadence_minutes"])), scopes=cadences)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        typer.echo("ERROR: the roster isn't readable JSON with default_cadence_minutes and scopes")
+        raise typer.Exit(2) from None
+    try:
+        marks: dict[str, int] | None = {str(k): int(v) for k, v in json.loads(state.read_text()).items()}
+    except (OSError, ValueError, TypeError, AttributeError):
+        marks = None  # lost: alerted on, unless --init
+    client, kept = _s3_client(settings), _kept(settings)
+    listing = read_anchors(client, settings.audit_s3_bucket, settings.audit_s3_prefix, kept=kept)
+    found = bucket_problems(client, settings.audit_s3_bucket, kept=kept) + listing.problems
+    newest: dict[str, int] = {}
+    for entry in listing.entries:
+        newest[str(entry["scope"])] = max(newest.get(str(entry["scope"]), 0), int(entry["seq"]))
+    keys = _public_keys(settings)
+
+    async def _run() -> tuple[list[str], dict[str, Scope], datetime]:
+        async with _auditing() as s:
+            problems = await verify_anchors(s, listing.entries, keys)
+            now: datetime = (await s.execute(text("select statement_timestamp()"))).scalar_one()  # the entries' clock
+            database: dict[str, Scope] = {}
+            for scope, top in (await s.execute(_SCOPES)).all():
+                oldest = (await s.execute(_UNANCHORED, {"s": scope, "after": newest.get(scope, 0)})).scalar()
+                database[str(scope)] = Scope(newest=int(top), oldest_unanchored=oldest)
+            return problems, database, now
+
+    problems, database, now = asyncio.run(_run())
+    alerts, updated = watch(rostered, marks, database, newest, now, init=init)
+    alerts = [("audit_verify_failed", "", problem) for problem in found + problems] + alerts
+    written = state.with_name(state.name + ".new")
+    written.write_text(json.dumps(updated, sort_keys=True))
+    os.replace(written, state)
+    for event, scope, what in alerts:
+        log.error(event, scope=scope, what=what)
+        typer.echo(f"ALERT {event}{' ' + scope if scope else ''}: {what}")
+    if alerts:
+        raise typer.Exit(1)
+    typer.echo(f"audit monitor: healthy, {len(updated)} scope(s)")
 
 
 @audit.command("freshness")

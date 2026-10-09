@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 import json
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Protocol
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
@@ -11,8 +13,22 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from dewpoint.core.audit.service import verify_chain
 
 
-def _message(scope: str, seq: int, hash_hex: str, at: str) -> bytes:
-    return f"dewpoint-audit-anchor|{scope}|{seq}|{hash_hex}|{at}".encode()
+def signed_message(scope: str, seq: int, hash_hex: str, at: str, kid: str | None = None) -> bytes:
+    """What an anchor's signature covers; its key's id too when it names one (D6: verifying keeps every key id, for
+    rotation), so an anchor can't be passed off as another key's."""
+    base = f"dewpoint-audit-anchor|{scope}|{seq}|{hash_hex}|{at}"
+    return (base if kid is None else f"{base}|{kid}").encode()
+
+
+_message = signed_message
+
+
+class AnchorSink(Protocol):
+    """Where anchors are signed to: a file (evaluation), or D6's S3 bucket (`core/audit/s3.py`)."""
+
+    name: str
+
+    def write(self, scope: str, seq: int, hash_: bytes) -> str: ...
 
 
 class FileAnchorSink:
@@ -57,7 +73,7 @@ async def _held_by_standbys(s: AsyncSession) -> None:
         await c.commit()
 
 
-async def anchor_all(s: AsyncSession, sink: FileAnchorSink) -> int:
+async def anchor_all(s: AsyncSession, sink: AnchorSink) -> int:
     """Each scope's head not anchored yet, signed to `sink` once the configured synchronous standbys acknowledge it,
     then recorded."""
     heads = (
@@ -86,12 +102,13 @@ async def anchor_all(s: AsyncSession, sink: FileAnchorSink) -> int:
 async def verify_anchors(
     s: AsyncSession,
     entries: list[dict[str, object]],
-    public_key: Ed25519PublicKey,
+    public_key: Ed25519PublicKey | Mapping[str, Ed25519PublicKey],
     *,
     max_lag: timedelta = timedelta(hours=1),
     now: datetime | None = None,
 ) -> list[str]:
-    """Fail closed: missing anchors, unanchored old rows, broken chains and mismatches are all problems."""
+    """Fail closed: missing anchors, unanchored old rows, broken chains and mismatches are all problems. `public_key`:
+    the one key, or every key by its id (D6: an anchor names its key's id; one whose id isn't known is a problem)."""
     problems: list[str] = []
     if not entries:
         problems.append("no external anchors found")
@@ -114,8 +131,13 @@ async def verify_anchors(
     anchored: dict[str, int] = {}
     for e in entries:
         scope, seq, hash_hex, at = str(e["scope"]), int(e["seq"]), str(e["hash"]), str(e["at"])  # type: ignore[call-overload]
+        kid = str(e["kid"]) if e.get("kid") is not None else None
+        key = public_key.get(kid or "") if isinstance(public_key, Mapping) else public_key
+        if key is None:
+            problems.append(f"{scope}:{seq}: anchor signed with an unknown key ({kid})")
+            continue
         try:
-            public_key.verify(bytes.fromhex(str(e["sig"])), _message(scope, seq, hash_hex, at))
+            key.verify(bytes.fromhex(str(e["sig"])), signed_message(scope, seq, hash_hex, at, kid))
         except (InvalidSignature, ValueError):
             problems.append(f"{scope}:{seq}: bad anchor signature")
             continue
