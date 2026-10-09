@@ -62,3 +62,36 @@ def test_conditions_are_shown_as_cel() -> None:
     assert nodes["flow.if"]["properties"]["condition"]["x-widget"] == "cel"
     assert nodes["flow.filter"]["properties"]["predicate"]["x-widget"] == "cel"
     assert nodes["flow.switch"]["$defs"]["SwitchCase"]["properties"]["when"]["x-widget"] == "cel"
+
+
+def _field_titles(schema: dict[str, Any]) -> dict[str, Any]:
+    """Each config field's title, a nested model's fields as `Model.field`."""
+    out = {name: sub.get("title") for name, sub in schema.get("properties", {}).items()}
+    for model, sub in schema.get("$defs", {}).items():
+        out |= {f"{model}.{name}": p.get("title") for name, p in sub.get("properties", {}).items()}
+    return out
+
+
+def test_every_config_field_has_a_written_title() -> None:
+    """The step drawer labels a field by its title (4c-1), so none is left to pydantic's `Duration S`. Titles are
+    display annotations: flow@1's contract hashes don't move (pinned)."""
+    found = {n["type"]: _field_titles(n["config_schema"]) for n in PLUGIN.manifest()["nodes"]}
+    assert found == {
+        "flow.if": {"condition": "Condition"},
+        "flow.switch": {"cases": "Cases", "SwitchCase.port": "Port name", "SwitchCase.when": "Condition"},
+        "flow.loop": {
+            "items": "Items",
+            "concurrency": "Items at a time, at most",
+            "item_cap": "Items, at most",
+            "on_item_error": "When an item fails",
+            "collect": "Output for each item",
+        },
+        "flow.filter": {"items": "Items", "predicate": "Keep an item when"},
+        "flow.set_variables": {"assignments": "Variables"},
+        "flow.delay": {"duration_s": "Duration, in seconds"},
+        "flow.wait_until": {"until": "Date and time"},
+        "flow.stop": {},
+        "flow.fail": {"message": "Message"},
+        "flow.run_workflow": {"workflow_id": "Workflow", "input": "Input"},
+        "flow.transform": {"fields": "Fields"},
+    }
