@@ -204,8 +204,8 @@ for development: they aren't a promise with a real Temporal or with more binding
 Events cost what their requests cost to start: an event becomes a request for each of its endpoint's enabled bindings
 that matches it, and a dispatcher starts them one at a time (about 35 ms each on the dev server, [measured
 below](#measured)). So a deployment's rates come from the starts measured on its own Temporal, with headroom, and how
-much webhook work it holds outstanding from a wait its operators agree to. A platform admin sets the three values, none set by
-default, through the API (D11; [deployment](deployment.md#the-ingress-capacity)): `dewpoint platform
+much webhook work it holds outstanding from a wait its operators agree to. A platform admin sets the three values,
+none set by default, through the API (D11; [deployment](deployment.md#the-ingress-capacity)): `dewpoint platform
 set-ingress-capacity` signs in and asks it, and the change is audited with the admin's id and an attestation:
 
 - `--starts-per-s`: the sustained starts a second a tenant's runs reached on this deployment's own Temporal and
@@ -229,16 +229,20 @@ was; `--unset` unsets all three.
 - **Ingress's room.** Ingress fills the limit but 19, an event's most bindings but the one its credit holds: those
   are kept for events whose bindings grew since they were accepted, so they're never starved behind new deliveries.
 - **Admission, at ingress.** A tenant's share is ingress's room divided by the tenants with work outstanding once
-  it's admitted, and one more: a share is always kept for a tenant yet to come. A delivery is accepted only if:
+  it's admitted, and one more, so that a share is kept for a tenant yet to come. It's a bound on occupancy, not a
+  promise that every tenant or delivery gets in. A delivery is accepted only if:
   - the tenant then holds at most its share (half the room when it's alone), but a single event may take more when
     the tenant holds nothing, as an event can't be split; and
   - all the tenants then hold at most the room but that share, but a single event may come into a deployment holding
     nothing else.
 
-  So neither one tenant nor several arriving one after another take the room from a newcomer: one share stays free,
-  and a newcomer can always get some of it. Otherwise the whole delivery is refused, 429 `backlog_full`, and nothing is
-  stored; `Retry-After` is how long the budget's starts take to free what's missing (1 to 60 s), or 30 s while the
-  capacity is unset. A delivery of several events worth more than half the room could never fit, even alone in an
+  So neither one tenant nor several arriving one after another can fill, through their shares, the share kept for a
+  newcomer. It isn't a guarantee of room. A single event may fill an otherwise empty deployment: at the least limit,
+  an event of 20 bindings holds 20 of ingress's 21, and a newcomer, even with a delivery worth 1, gets nothing until
+  that work drains. And shares round down: once enough tenants have work outstanding, a share is 0, and a newcomer
+  gets nothing until work drains. Otherwise the whole delivery is refused, 429 `backlog_full`, and nothing is stored;
+  `Retry-After` is how long the budget's starts take to free what's missing (1 to 60 s), or 30 s while the capacity
+  is unset. A delivery of several events worth more than half the room could never fit, even alone in an
   otherwise empty deployment: 413 `over_limit`. One database row holds the deployment's count, locked as each delivery
   is admitted, so deliveries at once, from any tenants and any ingress process, never pass the limit.
 - **Matching.** An event's requests take its credit. Bindings enabled since it was accepted need the limit's room for
@@ -248,13 +252,15 @@ was; `--unset` unsets all three.
   request leaving `queued` or `starting` (started, cancelled, dead) or deleted gives back 1; a tenant's erasure gives
   back all it held. The database counts each as the change commits, whatever code makes it.
 - **Held by the database.** A commit that adds to the count past the limit (and past where it started) is refused,
-  whatever code wrote it; one adding nothing net, a match within its event's credit or a start, always goes through,
-  so even a count drifted above the limit drains. During an upgrade to this version, a dispatcher still on the code
+  whatever code wrote it; one adding nothing net, a match within its event's credit or a start, is never refused for
+  it, so even a count drifted above the limit drains. During an upgrade to this version, a dispatcher still on the code
   before it matches without asking: its matches can use the 19 kept for top-ups, never more than the limit. A match
   refused that way is rolled back and its event left pending, but the older dispatcher tries it again every cycle,
   logging `event_match_failed` each time, and goes on to its tenant's later events, so their order isn't kept until
   the upgrade completes. An older ingress process answers 500 to the new refusals (`backlog_full`, `over_limit`); only
   development records events. The shares and the reserve hold only for ingress and the dispatchers of this version.
+  Before any online production upgrade, the older ingress's 500s and the older dispatcher's ordering need a compatible
+  rollout or an explicit drain.
 - **Changing the capacity.** A change that would take the limit below the work already outstanding is refused, 409
   `ingress_capacity_below_outstanding`, until enough has drained; the change waits for any admission in flight, so
   what it counts includes it.
@@ -266,12 +272,16 @@ was; `--unset` unsets all three.
 steady traffic, a large one waits until the room it needs is free at once, which they can keep from happening. At the
 least limit (40, 21 for ingress), an event of 20 bindings comes in only when the deployment holds nothing else; and
 once many tenants have work outstanding, so that a share is smaller than one event's credit, such an event needs room
-beyond the share kept, which steady traffic rarely leaves. Send smaller deliveries, or size the limit for the fan-out. The drift check compares the deployment's total only: one tenant's count off one way and
-another's off the other, or a wrong count of tenants with work outstanding (which every share divides by), goes unseen.
-`Retry-After` is an estimate: a refused delivery still spends its rate budget (as every refused attempt does, above),
-so the retry may then wait on its rate instead, and a refusal for a tenant's share is reckoned on the whole deployment's
-starts, not the tenant's part of them (a refusal of a newcomer clears as other tenants' work leaves, not as starts
-free it), so it can be shorter or longer than the wait. Moving from the development limit to a small one may be
+beyond the share kept, which steady traffic rarely leaves. Send smaller deliveries, or size the limit for the
+fan-out. Whether production gets a reservation for large deliveries or a supported delivery and fan-out policy is
+decided at M4, before production approval. The drift check compares the deployment's total only: one tenant's count
+off one way and another's off the other, or a wrong count of tenants with work outstanding (which every share divides
+by), goes unseen.
+`Retry-After` says when to try again, not that the delivery will fit then, and it's an estimate: a refused delivery
+still spends its rate budget (as every refused attempt does, above), so the retry may then wait on its rate instead,
+and a refusal for a tenant's share is reckoned on the whole deployment's starts, not the tenant's part of them (a
+refusal of a newcomer clears as other tenants' work leaves, not as starts free it), so it can be shorter or longer
+than the wait. Moving from the development limit to a small one may be
 refused while ingress keeps admitting under the development one: lower it in steps, or set it while traffic is low.
 
 **The limit isn't a wait guarantee.** It bounds how much is outstanding, not how long an accepted event waits for its
