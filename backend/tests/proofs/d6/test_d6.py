@@ -154,8 +154,11 @@ def test_d6_0_the_writer_and_the_verifier_are_demonstrably_apart(lab: Lab) -> No
                                                                   Body=b"{}"),
         "verifier put": lambda: verifier.put_object(Bucket=BUCKET, Key=f"{key}.forged", Body=b"{}"),
         "verifier delete": lambda: verifier.delete_object(Bucket=BUCKET, Key=key),
+        # a later date than the lock already holds: MinIO checks a retention's date before its permission
+        # (R2's first run: "now" answered MalformedXML), so only a valid request shows the verifier can't change it
         "verifier retention": lambda: verifier.put_object_retention(
-            Bucket=BUCKET, Key=key, Retention={"Mode": "COMPLIANCE", "RetainUntilDate": datetime.now(UTC)}),
+            Bucket=BUCKET, Key=key,
+            Retention={"Mode": "COMPLIANCE", "RetainUntilDate": datetime.now(UTC) + timedelta(days=500)}),
     }  # fmt: skip
     for what, call in refused.items():
         with pytest.raises(ClientError) as denied:
