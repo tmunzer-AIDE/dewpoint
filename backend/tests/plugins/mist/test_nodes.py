@@ -75,6 +75,11 @@ def test_the_plugin_manifest_passes_the_catalog() -> None:
     assert validate_plugin_manifest(PLUGIN.manifest()) == []
 
 
+def test_the_rogue_aps_list_keeps_its_acronym_in_the_title() -> None:
+    """Seen 2026-10-09 in GET /node-types: "List site rogue ps"."""
+    assert node("mist.site_rogue_aps.list").title == "List site rogue APs"
+
+
 def test_a_config_names_the_connection_and_the_path_values_but_never_the_org() -> None:
     schema = node_manifest(node("mist.org_wlans.get"))["config_schema"]
     assert schema["properties"]["connection"][CONNECTION] == "mist" and schema["properties"]["connection"][LITERAL]
