@@ -1033,6 +1033,13 @@ function Editor({
 
   const healed = asking?.kind === "node" ? deleteNode(doc, asking.id).healed : null;
   const open = panel ? findNode(shownDoc, panel) : undefined; // the step of what's on the screen
+  // The declassify entries an edit removed, shown above the canvas for each step whose drawer isn't saying it (closed,
+  // or showing a version): an edit applied on the way out (an export, a publication, a version view) has none open.
+  // `change` says it, so this isn't a live region; the notices' clearing never hides it.
+  const lostElsewhere =
+    unlistedBy !== null && unlistedBy.doc === doc
+      ? [...unlistedBy.lost].filter(([id]) => viewing !== null || panel === null || !sameId(panel, id))
+      : [];
 
   return (
     <div
@@ -1125,6 +1132,9 @@ function Editor({
           {notice.action && <Button size="sm" onClick={notice.action.run}>{notice.action.label}</Button>}
         </div>
       )}
+      {lostElsewhere.map(([id, n]) => (
+        <p key={id} className="border-b border-line bg-surface px-5 py-2.5 text-small text-ink">{`${keyOf(id)}: ${unlistedNote(n)}`}</p>
+      ))}
       <p role="status" className={trouble ? "border-b border-line bg-surface px-5 py-2.5 text-small text-muted" : undefined}>{trouble}</p>
       {sync.status === "conflict" && (
         <div role="alert" className="flex flex-wrap items-center gap-3 border-b border-danger bg-danger-bg px-5 py-2.5 text-small text-ink">

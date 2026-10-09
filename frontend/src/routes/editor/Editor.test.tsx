@@ -1415,6 +1415,40 @@ it("says a declassify entry's removal, beyond the drawer", async () => {
   );
 });
 
+/** a's decision declassified, and a JSON edit changing it typed into the cases, not applied: the drawer closed on it. */
+async function holdChangedCase() {
+  await openSwitch([{ node: "id-pick", field: "/cases/0/when" }]);
+  await userEvent.click(within(screen.getByRole("group", { name: "Cases" })).getAllByRole("button", { name: "Edit as JSON" })[0]!);
+  await userEvent.clear(screen.getByLabelText("Cases"));
+  await userEvent.paste(JSON.stringify([{ port: "a", when: formula("trigger.n > 1") }, { port: "b", when: formula("false") }]));
+  await userEvent.keyboard("{Escape}");
+  expect(screen.queryByRole("complementary", { name: "pick" })).toBeNull();
+  expect(declassifyOf()).toEqual([{ node: "id-pick", field: "/cases/0/when" }]);
+}
+const removedOnScreen =
+  "pick: Removed 1 declassify entry: the list item it named is gone, or was changed in an edit of the whole list. That " +
+  "decision is no longer declassified; Undo puts the entry back.";
+
+it("shows a declassify entry's removal with its drawer closed: an edit applied on the way out", async () => {
+  answers.set(`GET ${BASE}/export`, () => json({ format: "dewpoint.workflow", format_version: 1, name: "Nightly", graph: {}, bindings: [] }));
+  await holdChangedCase();
+  await userEvent.click(screen.getByRole("button", { name: "Export" })); // applies it first, then exports
+  await vi.waitFor(() => expect(downloads).toHaveLength(1));
+  expect(declassifyOf()).toEqual([]);
+  expect(screen.getByText(removedOnScreen).closest(".sr-only")).toBeNull(); // on the screen, not only said
+  await userEvent.keyboard("{Control>}z{/Control}");
+  expect(declassifyOf()).toEqual([{ node: "id-pick", field: "/cases/0/when" }]);
+  expect(screen.queryByText(removedOnScreen)).toBeNull();
+});
+
+it("keeps showing a declassify entry's removal through the publication that applied it", async () => {
+  await holdChangedCase();
+  await confirmPublish(1); // applies it before asking, and clears the notices when it starts
+  await screen.findByText("Saved · published as v1", {}, { timeout: 3000 });
+  expect(declassifyOf()).toEqual([]);
+  expect(screen.getByText(removedOnScreen).closest(".sr-only")).toBeNull();
+});
+
 it("never says the draft's removed declassify entries in a version's drawer", async () => {
   answers.set(`GET ${BASE}/versions`, () => json([version(1, true)]));
   answers.set(`GET ${BASE}/versions/v1`, () => json({ ...version(1, true), graph: switched(), expressions: [] }));
