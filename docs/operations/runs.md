@@ -86,16 +86,22 @@ sees `trigger.rows` (one object per row, each column by its name) and `trigger.r
   (`tests/probes/test_csv_rss.py`, the worst shape, through the commit, on one macOS development machine, 2026-10-09):
   two worst-case jobs at once raised the process's physical footprint (its resident memory with its compressed pages,
   the allocator's overhead included) about 465 MiB above idle, one about 325 MiB, and the allocator kept most of it
-  afterwards: **size an API process for its peak, about 250 MiB a slot plus the process itself**. Two slots are
-  provisional, not a production memory limit: a Linux container's allocator (glibc's, with an arena per thread) isn't
-  measured yet.
+  afterwards. **In the API's own Linux container** (`tests/probes/csv_container.py`: the app image, Docker's
+  linux/arm64, a 1 GiB limit, two worst-case uploads then two worst-case starts a round, 2026-10-09), the API process
+  idled at 127 MiB and peaked at 630 MiB in the first round; the same work again kept more each time, its peak
+  settling at about 746 MiB (the container's own, page cache with it, 726 MiB) from the fourth round of eight, and
+  about 475 MiB kept between rounds. It was never killed for its memory. Limiting glibc's arenas
+  (`MALLOC_ARENA_MAX=2`) changed little (a 735 MiB peak). So **size an API process with two slots for about 750 MiB
+  at its peak, about 310 MiB a slot beside its 130 MiB idle**, and leave headroom: a 1 GiB limit kept a quarter
+  free. Two slots stay provisional; another architecture or Python may differ.
 - **The CPU work runs off the event loop**, in a thread, inside the request's slot: an upload's parse and preview,
   a start's rows, and the input's check against the trigger's schema and its split (at the caps the check and the
   split take about 3 s each; they held the API's event loop up to 12 s for two starts at once). The database session
   stays on the loop. With two worst-case starts in one process, the loop's longest wait was 0.24 s (the rows' encoding
   for their claim stays on it) and a cheap request answered in 43 ms at the median, 0.8 s at the 95th percentile and
   0.9 s at most; the starts themselves took longer (35 s for the two, against 25 s on the loop), the CPU shared
-  under Python's global lock.
+  under Python's global lock. In the API's Linux container, through eight rounds of two worst-case starts (17 to 21 s
+  each round), the cheap request answered in 0.28 to 0.35 s at the 95th percentile and 0.92 s at most.
 - **A loop over the rows** needs no `declassify` entry: their count is `trigger.row_count`, already public. Rows that
   together pass 64 KiB are one claim, and the loop gives each iteration a handle to its row: a step's reference to a
   cell is read in its own activity, but CEL over a cell (a condition on `item.status`) runs in `cel.evaluate`, one
