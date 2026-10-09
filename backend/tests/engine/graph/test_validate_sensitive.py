@@ -98,6 +98,37 @@ def test_a_fixed_template_or_formula_assigned_to_a_sensitive_variable_is_refused
     assert diagnostics(g) == [("sensitive.literal", "/assignments/key")]
 
 
+LOGIN = {"type": ["object", "null"], "properties": {"user": {"type": "string"}, "pw": SECRET}}
+UNUSED_SECRET = {"$defs": {"unused": SECRET}}  # a sensitive definition no position reaches
+LOGIN_VARS = {"type": "object", "properties": {"login": LOGIN}} | UNUSED_SECRET
+LOGIN_BEHIND_REF = {"type": "object", "properties": {"login": {"$ref": "#/$defs/login"}}, "$defs": {"login": LOGIN}}
+PLAIN_LOGIN_VARS = {"type": "object", "properties": {"login": {"type": ["object", "null"]}}} | UNUSED_SECRET
+
+
+@pytest.mark.parametrize(
+    ("value", "vars_schema", "refused"),
+    [
+        (ref("trigger.login", default={"user": "ops", "pw": "pa55word"}), LOGIN_VARS, True),
+        (ref("trigger.login", default={"user": "ops"}), LOGIN_VARS, False),  # no sensitive part written
+        (ref("trigger.login"), LOGIN_VARS, False),
+        (cel('{"user": "ops", "pw": "pa55word"}'), LOGIN_VARS, True),
+        (cel('{"user": "ops"}'), LOGIN_VARS, True),  # its parts aren't known at publish
+        (cel('{"user": "ops"}'), LOGIN_BEHIND_REF, True),
+        (cel('{"user": "ops"}'), PLAIN_LOGIN_VARS, False),  # an unused sensitive definition marks nothing here
+    ],
+)
+def test_a_default_or_a_fixed_formula_holding_a_sensitive_part_is_refused(
+    value: Any, vars_schema: dict[str, Any], refused: bool
+) -> None:
+    """A reference's default is a literal: refused where a literal is, at a part the schema marks. A formula that reads
+    nothing can't be split into parts at publish, so it's refused wherever the schema marks one."""
+    g = G().node("v", SET, {"assignments": {"login": value}})
+    trigger = {"type": "object", "properties": {"login": {**LOGIN, "type": "object"}}, "required": ["login"]}
+    g.settings = {"input_schema": trigger, "vars_schema": vars_schema}
+    found = [d for d in diagnostics(g) if d[0] != "vars.no_default"]  # `login` isn't sensitive as a whole
+    assert found == ([("sensitive.literal", "/assignments/login")] if refused else [])
+
+
 def test_a_reference_without_a_default_and_plain_literals_are_fine() -> None:
     g = G().node("s", SEND, {"token": ref("trigger.tok"), "detail": "plain text"})
     g.settings = {"input_schema": {"type": "object", "properties": {"tok": SECRET}, "required": ["tok"]}}

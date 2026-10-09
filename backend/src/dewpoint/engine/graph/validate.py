@@ -330,24 +330,42 @@ def _reads_nothing(expr: str) -> bool:
     return not cel_ast.global_idents(parsed.expr)
 
 
+def _holds_marked(schema: Mapping[str, Any]) -> bool:
+    """Whether a standalone schema marks any part of its instances sensitive: nested, in a union's branch, or in a
+    definition it reaches through a local `$ref`. A definition it doesn't reach marks nothing here."""
+    seen: set[int] = set()
+    stack: list[Any] = [schema]
+    while stack:
+        node = stack.pop()
+        if not isinstance(node, Mapping) or id(node) in seen:
+            continue
+        seen.add(id(node))
+        if node.get(SENSITIVE) is True:
+            return True
+        stack += [sub for suffix, sub in subschemas(node) if not suffix.startswith("/$defs/")]
+        ref = node.get("$ref")
+        if isinstance(ref, str) and ref.startswith(REF_PREFIX):
+            stack.append(resolve(schema, ref))
+    return False
+
+
 def _writes_sensitive(
     value: Value, root: Mapping[str, Any], pointer: Pointer, target: Mapping[str, Any] | None
 ) -> bool:
-    """Whether a value envelope writes a literal at a sensitive position (§3.8): the literal itself, a part of it the
-    target schema marks, a reference's or a template's default, a template's text (all of it, without a reference),
-    or a CEL expression that reads nothing. Null and the empty string are written too; empty text beside a reference
-    writes nothing."""
+    """Whether a value envelope writes a literal at a sensitive position (§3.8): the literal itself or a reference's
+    default, at it or holding a part the target schema marks; a template's default or text (all of it, without a
+    reference); a CEL expression that reads nothing, wherever the target marks a part, since publish can't tell which
+    parts it writes. Null and the empty string are written too; empty text beside a reference writes nothing."""
+    marked = is_marked(root, pointer)
     if isinstance(value, LiteralValue):
-        return is_marked(root, pointer) or bool(target is not None and marked_positions(value.value, target))
-    if not is_marked(root, pointer):
-        return False
+        return marked or bool(target is not None and marked_positions(value.value, target))
     if isinstance(value, RefValue):
-        return value.has_default
-    if isinstance(value, TemplateValue):
-        refs = [p for p in value.parts if isinstance(p, TemplateRef)]
-        text = "".join(p for p in value.parts if isinstance(p, str))
-        return not refs or bool(text) or any(p.default is not None for p in refs)
-    return _reads_nothing(value.expr)
+        return value.has_default and (marked or bool(target is not None and marked_positions(value.default, target)))
+    if isinstance(value, CelValue):
+        return (marked or (target is not None and _holds_marked(target))) and _reads_nothing(value.expr)
+    refs = [p for p in value.parts if isinstance(p, TemplateRef)]
+    text = "".join(p for p in value.parts if isinstance(p, str))
+    return marked and (not refs or bool(text) or any(p.default is not None for p in refs))
 
 
 _SCHEMA_LITERALS = ("default", "enum", "const", "examples")  # what a schema writes of its instances
