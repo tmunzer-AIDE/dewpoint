@@ -539,8 +539,9 @@ claims are.
   time, so about 7,500 could time out). Past the timeout the step or loop that started it fails with `internal_error`,
   and a sub-flow whose outputs hold that many fails itself. A list held as one claim crosses as one, with the claims
   nested in it. A sub-flow's input is also read whole, to check it against the child's schema: since 2b-4b M3 its
-  closure is read once, a thousand claims a statement (each checked as one read alone is), and granted as read. Measured
-  on the dev server (`tests/probes/test_crossing_run.py`, 2026-10-09): a CSV start of 10,000 sites, each with a
+  closure is read once, a thousand claims a statement (each checked as one read alone is), and granted as read, its
+  values let go a group at a time but for the first 16 MiB of them, kept for the check (any other is read again alone).
+  Measured on the dev server (`tests/probes/test_crossing_run.py`, 2026-10-09): a CSV start of 10,000 sites, each with a
   sensitive key (10,000 claims nested in the rows' claim), ran a sub-flow that ran its own; each crossing granted 10,001
   claims on its first attempt, in 1.6 and 1.7 s of its minute (98 and 119 statements, against 26 and 29 for 1,000), and
   the whole run took 4.1 s. Read a claim a session before, the same crossings took 38.5 and 23.3 s, and about 15,000
