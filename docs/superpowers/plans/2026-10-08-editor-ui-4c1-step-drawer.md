@@ -2,8 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Revision 3 (2026-10-09).** For the owner's review. It answers the reviews of revision 1 (02fe8a6) and revision 2
-(38afd9c), both pasted in chat on 2026-10-09: "Changes from revision 1" and "Changes from revision 2" below say how. Nothing is built before the owner approves this plan. Nothing is
+**Revision 4 (2026-10-09).** For the owner's review. It answers the reviews of revisions 1 (02fe8a6), 2 (38afd9c) and
+3 (83fc8d7), each pasted in chat on 2026-10-09: the "Changes from revision N" sections below say how. Nothing is built before the owner approves this plan. Nothing is
 pushed and no PR is opened without the owner's OK in chat.
 
 **Goal:** A person who may edit a workflow opens a step and sets it up in a drawer generated from its type's schema:
@@ -134,6 +134,31 @@ Revision 3 answers each correction in the review of revision 2, all within rulin
    - Beside it, "Download the edits not applied" writes them as a file of their own (`dewpoint.unapplied-edits`),
      never into the graph (Tasks 3, 8).
 
+## Changes from revision 3
+
+Revision 4 answers each correction in the review of revision 3. The review also accepted two policies, recorded in
+ruling 7 for the owner to confirm. Its corrections:
+1. **The leave loop's document.** The editor's history is written at once: `commitHistory`, through which `change` and
+   undo/redo go. Every drawer write and every settlement reads `latest()`, so a settlement after an awaited save
+   builds on that save, never on an older document (Tasks 7, 8).
+2. **A pending edit keeps its reading.** A held edit keeps the `literal` reading it began with, whatever the value under
+   it becomes. And it's never applied where that value has changed (next item).
+3. **What an edit was typed over.**
+   - Each held edit records its `base`: the value it was typed over, as JSON. That's the value with its kind, a port's
+     or the key's name, a limit, or, for an entry's name, whether the entry is still there.
+   - Where the base has changed (an undo that moves a list's items under it, a literal turned to data), the edit is
+     never applied, nor typed through to the draft, unasked.
+   - The field says so and offers "Apply here" or "Discard". Exits ask about it like any edit they can't apply
+     (Tasks 3, 6, 7, 9, 12).
+4. **What's held shows first.** A field with a held edit shows that edit's control before any other branch: a
+   reference brought back by an undo, a hidden secret (never shown: the held text is the person's own), another mode
+   (Task 6).
+5. **Live choices.**
+   - A failed refresh of the connections, which keeps the old list cached, keeps loading off and says why.
+   - A chosen option writes as typing does: written, it releases the text held before it; refused, it's held, with
+     why (Task 11).
+6. **Task 3's order test** expects the rank order, the deepest first.
+
 ## Global Constraints
 
 - **CSP.** It stays exactly `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src
@@ -206,7 +231,7 @@ the task that owns it.
   - The cases:
     - a fast typist's undo;
     - a tab change, a JSON toggle, a closed drawer, an undo under held text;
-    - a list reordered, or an entry renamed, over an unapplied edit;
+    - a list reordered, or an entry renamed, over an unapplied edit, and an undo that moves items under it;
     - a canceled port question;
     - a write refused as the editor turns read only;
     - leaving, signing out, publishing, exporting, viewing a version, and typing while leaving waits for a save;
@@ -215,20 +240,24 @@ the task that owns it.
   - Tests:
     - Task 3: `keeps an edit that takes ports away for its question`, `applies a value before its entry's rename,
       whatever the order they were typed in`, `keeps a rename while an edit inside its entry can't be applied`,
-      `writes edits not applied as a file of their own, never into the graph`;
+      `writes edits not applied as a file of their own, never into the graph`, `keeps an edit where what it was typed
+      over has changed, as an undo does`;
     - Task 4: `makes one step of a field's edits while it keeps its mark`;
     - Task 6: `makes one mark of a field's typing while it keeps focus`, `keeps unapplied JSON through a change of
       view, applying what's valid first`, `keeps a held number shown when the value under it changes, as an undo
       does`, `shows a held JSON edit, and its reason, when the drawer reopens`, `keeps what a refused write turned
-      away, with its reason`;
+      away, with its reason`, `keeps held text visible when an undo brings back a reference under it`, `keeps a
+      pending literal edit a literal, and asks before applying it over what changed`, `writes nothing by showing a
+      field`;
     - Task 7: `makes a field's typing one undo step`, `keeps an unapplied edit when the tab changes or the drawer
       closes`;
     - Task 8: `applies what it can before publishing, and asks about the rest`, `asks before leaving with an edit it
-      can't apply`, `settles what's typed while leaving waits for a save`, `keeps an edit not applied shown, and
-      counted, when the editor turns read only`, `downloads the edits not applied as a file of their own, and says
-      the draft's file doesn't hold them`;
+      can't apply`, `settles what's typed while leaving waits for a save`, `settles what's typed during a save against
+      the draft that save made, never an older one`, `keeps an edit not applied shown, and counted, when the editor
+      turns read only`, `downloads the edits not applied as a file of their own, and says the draft's file doesn't
+      hold them`;
     - Task 9: `moves an item only once the edits inside it are applied`, `renames an entry only once the edit inside
-      it is applied`;
+      it is applied`, `never writes a held edit over another item after an undo moves it`;
     - Task 12: `keeps a limit a refused write turned away, with its reason`.
 - **Numbers and nesting the server would refuse or change.**
   - The cases: `1e400`; `9007199254740993` written plain, as `…993.0` or as `…993e0`; nesting past 64 levels; more
@@ -260,7 +289,8 @@ the task that owns it.
     - Task 2: `counts the formulas that mention it`;
     - Task 11: `never loads on render`, `asks for a connection before loading`, `drops choices when their connection
       changes, and ignores an answer for the old one`, `never shows an old answer when the connection changes away
-      and back`, `keeps loading off while the connection's revision isn't known`;
+      and back`, `keeps loading off while the connection's revision isn't known`, `keeps loading off when a refresh
+      of the connections fails`, `releases text a write turned away once a choice is written`;
     - Task 13: `disables an open rename when the draft can't change, and never says it renamed`, `says which formulas
       mention the old key, until the next edit`.
 
@@ -344,6 +374,10 @@ These join the ledger as rulings 96 onward when the slice is approved.
    - A required field the person empties says "Required".
    - A number that doesn't parse says so and isn't saved, and so does JSON that doesn't parse. So does a number that
      parsing would change: one too large to be finite, or a whole number past 2^53, in whatever notation it's written.
+   - That last rule refuses `1e300` too. It is a conservative editor input policy: not an engine requirement, and no
+     promise that decimals are kept exactly. The review of revision 3 accepted it as such; the owner confirms.
+   - Opening the drawer never rewrites a value already in the draft, even one the editor would refuse as typed. The
+     review of revision 3 asked for this; the owner confirms. Pinned by Task 6's `writes nothing by showing a field`.
    - These are checked before any write, since the graph's format refuses a draft that breaks them and it wouldn't be
      saved at all (4b ruling 9; `_admission_problems`):
      - a key, a port's name, and the attempts and timeout bounds;
@@ -445,6 +479,12 @@ These join the ledger as rulings 96 onward when the slice is approved.
       held: JSON as JSON, a formula as a formula.
     - A control writes first and releases its held text only when the write lands. A refused write (an editor turned
       read only, the graph's admission) keeps the text and says why.
+    - **What it was typed over.** Each held edit records its base, the value it was typed over. Where that has changed
+      since (an undo moving a list's items, a literal turned to data), the edit is applied, or typed through, only
+      when the person chooses "Apply here". Otherwise it's discarded, or asked about at an exit. It keeps the reading
+      it began with, a literal's or not.
+    - What's held shows first, before what the value under it has become: a reference, a hidden secret, another mode.
+    - Every write and settlement reads the editor's latest document, written at once with its history.
     - The toolbar's save state counts them ("1 edit not applied") beside the draft's own state.
     - Leaving the editor (the router, sign-out, an ended session), publishing, exporting and viewing a version first
       apply every one that can be applied, as one undo step. Those that can't (refused, or taking ports away) are
@@ -1633,14 +1673,17 @@ git commit -m "feat(editor): a step's config, options and key as documents, chec
 - Produces, from `lib/unapplied.ts` (ruling 18):
   - Types:
     - `type UnappliedKind = "text" | "json" | "number" | "formula" | "port" | "name" | "key" | "limit"`;
-    - `interface Unapplied { id; node; kind; pointer; path: Path; label; text; why: string | null; entry?; literal?;
-      whole?; from? }`;
-    - `type Holding = Omit<Unapplied, "id" | "node" | "kind" | "pointer">`: what a control supplies;
+    - `interface Unapplied { id; node; kind; pointer; path: Path; label; text; why: string | null; base: string; entry?;
+      literal?; whole?; from? }`: `base` is what the edit was typed over, as JSON;
+    - `type Holding = Omit<Unapplied, "id" | "node" | "kind" | "pointer" | "base">`: what a control supplies; the
+      editor records `base`;
     - `interface Applied extends Changed { said: string | null; note: string | null }`;
     - `type Limit = "max_attempts" | "timeout_s"`.
   - Functions:
     - `unappliedId(node, kind, pointer): string`;
     - `within(node, pointer): (u: Unapplied) => boolean`: a part and what's below it; `""` is the whole step;
+    - `baseOf(doc, u): string`, `isStale(doc, u): boolean`, `STALE`: an edit is applied only where what it was typed
+      over is still what's there (an undo can move a list's items under it, or turn a literal into data);
     - `parseNumber(text, whole): { value: number | undefined } | { problem: string }`;
     - `limitProblem(name: Limit, text: string): string | null`: empty text is the type's default, so null;
     - `applyUnapplied(doc, u, type): Applied | { problem: string }`;
@@ -1662,7 +1705,8 @@ import { IF, SWITCH, TRANSFORM } from "../test/nodeTypes";
 import { formula, literal } from "./config";
 import type { Path } from "./schemaForm";
 import {
-  applyAll, applyUnapplied, parseNumber, unappliedFile, unappliedId, within, type Unapplied, type UnappliedKind,
+  STALE, applyAll, applyUnapplied, baseOf, isStale, parseNumber, unappliedFile, unappliedId, within, type Unapplied,
+  type UnappliedKind,
 } from "./unapplied";  // prettier-ignore
 import type { GraphDoc, GraphNode, NodeType } from "./workflows";
 
@@ -1671,10 +1715,11 @@ const B = "00000000-0000-4000-8000-00000000000b";
 const TYPES: Record<string, NodeType> = { "flow.switch@1": SWITCH, "flow.if@1": IF, "flow.transform@1": TRANSFORM };
 const typeOf = (n: GraphNode) => TYPES[n.type];
 
-/** An edit held for step A. */
-const held = (kind: UnappliedKind, pointer: string, path: Path, text: string, more: Partial<Unapplied> = {}): Unapplied => ({
-  id: unappliedId(A, kind, pointer), node: A, kind, pointer, path, label: pointer, text, why: null, ...more,
-});  // prettier-ignore
+/** An edit held for step A, typed over what `doc` holds there now, as the editor records it. */
+function held(doc: GraphDoc, kind: UnappliedKind, pointer: string, path: Path, text: string, more: Partial<Unapplied> = {}): Unapplied {
+  const u: Unapplied = { id: unappliedId(A, kind, pointer), node: A, kind, pointer, path, label: pointer, text, why: null, base: "", ...more };
+  return { ...u, base: baseOf(doc, u) };
+}
 /** Step A, `fetch`, a transform with this config. */
 const fetch = (config: Record<string, unknown>): GraphDoc => ({
   graph_format: 1,
@@ -1701,21 +1746,23 @@ it("keeps a number exactly as typed, or says why not", () => {
 });
 
 it("applies JSON, and keeps a literal envelope a literal", () => {
+  const doc = fetch({});
   const text = '{"x": {"$value": {"kind": "ref", "path": "trigger.x"}}}';
-  const result = applied(applyUnapplied(fetch({}), held("json", "/fields", ["fields"], text, { literal: true }), TRANSFORM));
+  const result = applied(applyUnapplied(doc, held(doc, "json", "/fields", ["fields"], text, { literal: true }), TRANSFORM));
   expect(result.doc.nodes![0]!.config).toEqual({ fields: literal({ x: { $value: { kind: "ref", path: "trigger.x" } } }) });
   expect(result.said).toBeNull(); // a field's own edit is never announced (ruling 8)
 });
 
 it("refuses what the graph's format would, with its reason", () => {
-  expect(applyUnapplied(fetch({}), held("json", "/fields", ["fields"], '{"n": 1e400}'), TRANSFORM)).toEqual({
+  const empty = fetch({});
+  expect(applyUnapplied(empty, held(empty, "json", "/fields", ["fields"], '{"n": 1e400}'), TRANSFORM)).toEqual({
     problem: "A number here is too large to keep, so it isn't saved.",
   });
   const crowded = fetch({ fields: Object.fromEntries(Array.from({ length: 2000 }, (_, i) => [`f${i}`, formula("1")])) });
-  expect(applyUnapplied(crowded, held("formula", "/fields/more", ["fields", "more"], "2"), TRANSFORM)).toEqual({
+  expect(applyUnapplied(crowded, held(crowded, "formula", "/fields/more", ["fields", "more"], "2"), TRANSFORM)).toEqual({
     problem: "A workflow can hold at most 2,000 references, templates and formulas.",
   });
-  expect(applyUnapplied(fetch({}), held("limit", "/options/max_attempts", ["max_attempts"], "25"), TRANSFORM)).toEqual({
+  expect(applyUnapplied(empty, held(empty, "limit", "/options/max_attempts", ["max_attempts"], "25"), TRANSFORM)).toEqual({
     problem: "A whole number from 1 to 20.",
   });
 });
@@ -1728,11 +1775,11 @@ it("renames a key, saying which formulas mention the old one", () => {
       { id: B, key: "use", type: "flow.if@1", config: { condition: formula("steps.fetch.output.n > 1") } },
     ],
   };  // prettier-ignore
-  const result = applied(applyUnapplied(doc, held("key", "", [], "load"), TRANSFORM));
+  const result = applied(applyUnapplied(doc, held(doc, "key", "", [], "load"), TRANSFORM));
   expect(result.doc.nodes![0]!.key).toBe("load");
   expect(result.note).toBe("1 formula mentions fetch and keeps its text: check it.");
   expect(result.said).toBe("Renamed fetch to load. 1 formula mentions fetch and keeps its text: check it.");
-  expect(applyUnapplied(doc, held("key", "", [], "use"), TRANSFORM)).toEqual({ problem: "Another step is already called use." });
+  expect(applyUnapplied(doc, held(doc, "key", "", [], "use"), TRANSFORM)).toEqual({ problem: "Another step is already called use." });
 });
 
 it("keeps an edit that takes ports away for its question", () => {
@@ -1744,37 +1791,40 @@ it("keeps an edit that takes ports away for its question", () => {
     ],
     edges: [{ from: { node: A, port: "b" }, to: { node: B } }],
   };  // prettier-ignore
-  const cut = held("json", "/cases", ["cases"], '[{"port": "a", "when": {"$value": {"kind": "cel", "expr": "true"}}}]');
+  const cut = held(doc, "json", "/cases", ["cases"], '[{"port": "a", "when": {"$value": {"kind": "cel", "expr": "true"}}}]');
   const { doc: next, applied: done, left } = applyAll(doc, [cut], typeOf, () => true);
   expect(next).toBe(doc);
   expect(done).toEqual([]);
   expect(left.map((u) => u.why)).toEqual(["Not applied: it removes the port b and its edge to right."]);
 });
 
-it("applies each held edit in turn, as one document, and keeps those it can't", () => {
+it("applies each held edit in turn, as one document, the deepest first, and keeps those it can't", () => {
+  const doc = fetch({});
   const edits = [
-    held("number", "/n", ["n"], "12", { whole: true }),
-    held("number", "/m", ["m"], "1x"),
-    held("limit", "/options/max_attempts", ["max_attempts"], "5"),
+    held(doc, "number", "/n", ["n"], "12", { whole: true }),
+    held(doc, "number", "/m", ["m"], "1x"),
+    held(doc, "limit", "/options/max_attempts", ["max_attempts"], "5"),
   ];
-  const { doc: next, applied: done, left } = applyAll(fetch({}), edits, typeOf, () => true);
+  const { doc: next, applied: done, left } = applyAll(doc, edits, typeOf, () => true);
   expect(next.nodes![0]).toMatchObject({ config: { n: 12 }, options: { max_attempts: 5 } });
-  expect(done.map((u) => u.pointer)).toEqual(["/n", "/options/max_attempts"]);
+  expect(done.map((u) => u.pointer)).toEqual(["/options/max_attempts", "/n"]); // rank order, not insertion order
   expect(left.map((u) => [u.pointer, u.why])).toEqual([["/m", "A number, like 42 or 2.5."]]);
 });
 
 it("applies a value before its entry's rename, whatever the order they were typed in", () => {
-  const rename = held("name", "/fields/old", ["fields"], "new", { from: "old" });
-  const value = held("number", "/fields/old", ["fields", "old"], "1");
-  const { doc: next, left } = applyAll(fetch({ fields: { old: 2 } }), [rename, value], typeOf, () => true);
+  const doc = fetch({ fields: { old: 2 } });
+  const rename = held(doc, "name", "/fields/old", ["fields"], "new", { from: "old" });
+  const value = held(doc, "number", "/fields/old", ["fields", "old"], "1");
+  const { doc: next, left } = applyAll(doc, [rename, value], typeOf, () => true);
   expect(left).toEqual([]);
   expect(next.nodes![0]!.config).toEqual({ fields: { new: 1 } }); // never `{new: 1, old: …}`
 });
 
 it("keeps a rename while an edit inside its entry can't be applied", () => {
-  const rename = held("name", "/fields/old", ["fields"], "new", { from: "old" });
-  const value = held("number", "/fields/old", ["fields", "old"], "1x");
-  const { doc: next, left } = applyAll(fetch({ fields: { old: 2 } }), [rename, value], typeOf, () => true);
+  const doc = fetch({ fields: { old: 2 } });
+  const rename = held(doc, "name", "/fields/old", ["fields"], "new", { from: "old" });
+  const value = held(doc, "number", "/fields/old", ["fields", "old"], "1x");
+  const { doc: next, left } = applyAll(doc, [rename, value], typeOf, () => true);
   expect(next.nodes![0]!.config).toEqual({ fields: { old: 2 } });
   expect(left.map((u) => [u.kind, u.why])).toEqual([
     ["number", "A number, like 42 or 2.5."],
@@ -1782,8 +1832,21 @@ it("keeps a rename while an edit inside its entry can't be applied", () => {
   ]);
 });
 
+it("keeps an edit where what it was typed over has changed, as an undo does", () => {
+  const moved = fetch({ sizes: [7, 5] });
+  const typed = held(moved, "number", "/sizes/1", ["sizes", 1], "50", { whole: true }); // over the 5
+  const undone = fetch({ sizes: [5, 7] }); // the move undone: the second item is the 7 now
+  expect(isStale(undone, typed)).toBe(true);
+  expect(applyUnapplied(undone, typed, TRANSFORM)).toEqual({ problem: STALE });
+  expect(applied(applyUnapplied(moved, typed, TRANSFORM)).doc.nodes![0]!.config).toEqual({ sizes: [7, 50] });
+  const data = fetch({ q: literal({ a: 1 }) });
+  const json = held(data, "json", "/q", ["q"], '{"a": 2}', { literal: true });
+  expect(isStale(fetch({ q: { a: 1 } }), json)).toBe(true); // a literal turned to data under it: asked, never guessed
+});
+
 it("writes edits not applied as a file of their own, never into the graph", () => {
-  const file = unappliedFile([held("number", "/n", ["n"], "5x", { label: "Count", why: "A number, like 42 or 2.5." })], () => "fetch");
+  const doc = fetch({});
+  const file = unappliedFile([held(doc, "number", "/n", ["n"], "5x", { label: "Count", why: "A number, like 42 or 2.5." })], () => "fetch");
   expect(file).toEqual({
     format: "dewpoint.unapplied-edits",
     edits: [{ step: "fetch", field: "Count", at: "/n", text: "5x", why: "A number, like 42 or 2.5." }],
@@ -1792,14 +1855,16 @@ it("writes edits not applied as a file of their own, never into the graph", () =
 
 describe("which edits a change covers", () => {
   it("covers a part and what's below it, never a sibling that shares its prefix", () => {
-    const at = (pointer: string) => held("json", pointer, [], "");
+    const doc = fetch({});
+    const at = (pointer: string) => held(doc, "json", pointer, [], "");
     expect([at("/fields"), at("/fields/x"), at("/fieldsx")].map(within(A, "/fields"))).toEqual([true, true, false]);
     expect(within(B, "/fields")(at("/fields"))).toBe(false);
-    expect(within(A, "")(held("key", "", [], "load"))).toBe(true); // the whole step: a deletion's
+    expect(within(A, "")(held(doc, "key", "", [], "load"))).toBe(true); // the whole step: a deletion's
   });
 
   it("says when an edit's step is gone", () => {
-    expect(applyUnapplied(fetch({}), { ...held("json", "/x", ["x"], "1"), node: B }, TRANSFORM)).toEqual({
+    const doc = fetch({});
+    expect(applyUnapplied(doc, { ...held(doc, "json", "/x", ["x"], "1"), node: B }, TRANSFORM)).toEqual({
       problem: "Its step is no longer in the draft.",
     });
   });
@@ -1822,11 +1887,11 @@ Create `frontend/src/lib/unapplied.ts`:
 // never the control, so a tab, a toggle or a closed drawer can't lose them. Each is applied when it can be, and said,
 // with its reason, while it can't.
 import {
-  admission, formula, keyProblem, literal, parseJson, renameEntry, renameKey, renamePort, setConfig, setOptions,
+  admission, formula, keyProblem, literal, parseJson, renameEntry, renameKey, renamePort, setConfig, setOptions, valueAt,
   type Changed,
 } from "./config";  // prettier-ignore
 import { findNode, idKey, portOf, sameId } from "./graph";
-import type { Path } from "./schemaForm";
+import { isObject, type Path } from "./schemaForm";
 import type { GraphDoc, GraphEdge, GraphNode, NodeType } from "./workflows";
 
 export type UnappliedKind = "text" | "json" | "number" | "formula" | "port" | "name" | "key" | "limit";
@@ -1840,14 +1905,15 @@ export interface Unapplied {
   label: string; // the field's label, for the question that lists it
   text: string;
   why: string | null; // why it isn't in the draft; null while it's being typed
+  base: string; // what it was typed over, as JSON (baseOf): it's applied only where that's still what's there
   entry?: boolean; // emptied, a list's item or a map's entry blanks to null rather than going
   literal?: boolean; // its value is a `literal` envelope's payload, written back as one (ruling 15)
   whole?: boolean; // a number: whole
   from?: string; // a map entry's name in the draft
 }
 
-/** What a control supplies; the editor adds its step, its kind and where it goes. */
-export type Holding = Omit<Unapplied, "id" | "node" | "kind" | "pointer">;
+/** What a control supplies; the editor adds its step, its kind, where it goes and what it was typed over. */
+export type Holding = Omit<Unapplied, "id" | "node" | "kind" | "pointer" | "base">;
 
 export interface Applied extends Changed {
   said: string | null; // what to announce: a field's own edit says nothing (ruling 8)
@@ -1859,6 +1925,24 @@ export const unappliedId = (node: string, kind: UnappliedKind, pointer: string):
 /** The edits of a step at a part and below it: what a change to that part applies first. "" is the whole step. */
 export const within = (node: string, pointer: string) => (u: Unapplied): boolean =>
   sameId(u.node, node) && (pointer === "" || u.pointer === pointer || u.pointer.startsWith(`${pointer}/`));
+
+export const STALE = "Not applied: what's here changed since this was typed (an undo, another edit). Apply it here, or discard it.";
+
+/** What an edit is typed over, as JSON: the value at its place (a `literal` envelope included, so its kind counts),
+ * a port's or the key's name, a limit; for an entry's name, whether the entry is still there. Its place is a pointer,
+ * and an undo can put another item there: an edit is applied only where its base still is (the review of revision 3). */
+export function baseOf(doc: GraphDoc, u: Pick<Unapplied, "node" | "kind" | "path" | "from">): string {
+  const node = findNode(doc, u.node);
+  if (!node) return "gone";
+  if (u.kind === "key") return JSON.stringify(node.key);
+  if (u.kind === "limit") return JSON.stringify(node.options?.[u.path[0] as Limit]) ?? "undefined";
+  const at = valueAt(node.config ?? {}, u.path);
+  if (u.kind === "name") return JSON.stringify(isObject(at) && Object.hasOwn(at, u.from ?? ""));
+  return JSON.stringify(at) ?? "undefined";
+}
+
+/** Whether what an edit was typed over has changed: it's then applied only when the person says so (Apply here). */
+export const isStale = (doc: GraphDoc, u: Unapplied): boolean => baseOf(doc, u) !== u.base;
 
 /** A number typed (rulings 7 and 18). What the draft keeps must be what was typed: never an infinity, never a whole
  * number past 2^53, in whatever notation, which Number() rounds. Empty text is no value. */
@@ -1949,6 +2033,7 @@ function attempt(doc: GraphDoc, node: GraphNode, u: Unapplied, type: NodeType | 
 export function applyUnapplied(doc: GraphDoc, u: Unapplied, type: NodeType | undefined): Applied | { problem: string } {
   const node = findNode(doc, u.node);
   if (!node) return { problem: "Its step is no longer in the draft." };
+  if (isStale(doc, u)) return { problem: STALE };
   const result = attempt(doc, node, u, type);
   if ("problem" in result) return result;
   const refused = admission(result.doc);
@@ -2012,7 +2097,7 @@ export function unappliedFile(edits: Unapplied[], keyOf: (node: string) => strin
 - [ ] **Step 4: Run the tests to see them pass**
 
 Run: `npx -y pnpm@12.6.0 exec vitest run src/lib/unapplied.test.ts`
-Expected: PASS, 11 tests.
+Expected: PASS, 12 tests.
 
 - [ ] **Step 5: Typecheck and lint**
 
@@ -2295,6 +2380,7 @@ git commit -m "feat(ui): token-styled Radix Tabs 1.1.21, pinned, in the notices 
       - `options(options: StepOptions, mark?)`;
       - `held(kind, pointer): Unapplied | undefined`, `hold(kind, pointer, holding: Holding)`, `release(kind,
         pointer)`, `discard(pointer)`, `apply(kind, pointer)`;
+      - `stale(kind, pointer): boolean`, `rebase(kind, pointer)`;
       - `restructure(pointer, change?: { path: Path; make: (current: unknown) => unknown })`.
     - `interface Drawer extends DrawerActions { node: GraphNode; type: NodeType | undefined; editable: boolean;
       tenantId: string; workflowId: string; problems: Diagnostic[]; expressions: Expression[] }`;
@@ -2315,7 +2401,7 @@ git commit -m "feat(ui): token-styled Radix Tabs 1.1.21, pinned, in the notices 
   - From `harness.tsx` (tests only):
     - `NODE_ID`, `type Edit`;
     - `showFields(type, options?, children?)`, which returns `{ edits, config(), node(), held(), replace(config),
-      remount(), refuse(why) }`;
+      remount(), refuse(why), client }`;
     - `problem(field, message): Diagnostic`.
 
 - [ ] **Step 1: Export the control's classes**
@@ -2349,7 +2435,9 @@ import { act, render } from "@testing-library/react";
 import { useState, type ReactNode } from "react";
 import { admission, setConfig, setOptions, valueAt, type Changed, type StepOptions } from "../../../lib/config";
 import { fieldsOf, type Path } from "../../../lib/schemaForm";
-import { applyAll, applyUnapplied, droppedWhy, unappliedId, within, type Unapplied, type UnappliedKind } from "../../../lib/unapplied";
+import {
+  applyAll, applyUnapplied, baseOf, droppedWhy, isStale, unappliedId, within, type Unapplied, type UnappliedKind,
+} from "../../../lib/unapplied";  // prettier-ignore
 import type { Diagnostic, Expression, GraphDoc, NodeType } from "../../../lib/workflows";
 import { DrawerContext, type Drawer } from "./context";
 import { FieldView } from "./FieldView";
@@ -2424,9 +2512,22 @@ function Harness({ type, options, edits, state, children }: {
     },
     options: (next) => write(setOptions(state.doc, NODE_ID, next, type)),
     held: (kind, pointer) => state.held.get(id(kind, pointer)),
-    hold: (kind, pointer, holding) => keep({ ...holding, id: id(kind, pointer), node: NODE_ID, kind, pointer }),
+    hold: (kind, pointer, holding) => {
+      // What it's typed over is recorded when the edit begins, and kept while it's typed (the editor's way too).
+      const was = state.held.get(id(kind, pointer));
+      const u = { ...holding, id: id(kind, pointer), node: NODE_ID, kind, pointer, base: "" };
+      keep({ ...u, base: was?.base ?? baseOf(state.doc, u) });
+    },
     release: (kind, pointer) => drop([id(kind, pointer)]),
     discard: (pointer) => drop([...state.held.values()].filter(within(NODE_ID, pointer)).map((u) => u.id)),
+    stale: (kind, pointer) => {
+      const u = state.held.get(id(kind, pointer));
+      return u !== undefined && isStale(state.doc, u);
+    },
+    rebase: (kind, pointer) => {
+      const u = state.held.get(id(kind, pointer));
+      if (u) keep({ ...u, base: baseOf(state.doc, u), why: null });
+    },
     apply: (kind, pointer) => {
       // A name moves its entry: what's typed inside it is applied first, or the name waits (the editor's way too).
       if (kind === "name") return restructure(pointer);
@@ -2486,6 +2587,7 @@ export function showFields(type: NodeType, options: Options = {}, children?: Rea
     refuse: (why: string | null) => {
       state.refusing = why;
     },
+    client,
   };
 }
 
@@ -2506,6 +2608,7 @@ import userEvent from "@testing-library/user-event";
 import { expect, it } from "vitest";
 import { formula, literal } from "../../../lib/config";
 import { FILTER, IF, REMOTE, typeWith } from "../../../test/nodeTypes";
+import { STALE } from "../../../lib/unapplied";
 import { NODE_ID, problem, showFields } from "./harness";
 
 /** A step of every plain shape: a required text, numbers, a choice, a yes or no, JSON and a group. */
@@ -2694,6 +2797,37 @@ it("keeps what a refused write turned away, with its reason", async () => {
   expect(screen.getAllByText("Not written: the draft can't be changed now.")).toHaveLength(2);
 });
 
+it("keeps held text visible when an undo brings back a reference under it", async () => {
+  const { replace } = showFields(PLAIN, { config: { count: 5 } });
+  await userEvent.type(screen.getByLabelText("Count"), "x");
+  replace({ count: { $value: { kind: "ref", path: "trigger.n" } } });
+  expect(screen.getByLabelText<HTMLInputElement>("Count").value).toBe("5x"); // still there, not behind the reference
+  expect(screen.getByText(STALE)).toBeTruthy();
+});
+
+it("keeps a pending literal edit a literal, and asks before applying it over what changed", async () => {
+  const data = { limit: { $value: { kind: "ref", path: "trigger.n" } } };
+  const { config, replace } = showFields(PLAIN, { config: { query: literal(data) } });
+  await userEvent.clear(screen.getByLabelText("Query"));
+  await userEvent.paste('{"limit": {"$value": {"kind": "ref", "path": "trigger.m"}}'); // not finished
+  replace({ query: { limit: 1 } }); // an undo: data, no longer a literal
+  await userEvent.click(screen.getByLabelText("Query"));
+  await userEvent.paste("}");
+  await userEvent.tab();
+  expect(config()).toEqual({ query: { limit: 1 } }); // never applied over what changed unasked
+  expect(screen.getByText(STALE)).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Apply here: Query" }));
+  expect(config()).toEqual({ query: literal({ limit: { $value: { kind: "ref", path: "trigger.m" } } }) }); // data still
+});
+
+it("writes nothing by showing a field", () => {
+  const { edits, held } = showFields(PLAIN, {
+    config: { ratio: 1e300, name: literal("x"), count: { $value: { kind: "ref", path: "trigger.n" } } },
+  });
+  expect(edits).toEqual([]); // a value the drawer would refuse as typed is still never rewritten by opening it
+  expect(held()).toEqual([]);
+});
+
 it("edits a literal as its payload, and keeps it a literal", async () => {
   const data = { limit: { $value: { kind: "ref", path: "trigger.n" } } }; // data, not a reference
   const { config } = showFields(PLAIN, { config: { name: literal("hi"), query: literal(data) } });
@@ -2811,6 +2945,10 @@ export interface DrawerActions {
   discard: (pointer: string) => void;
   /** Applies what's typed for a field now: when focus leaves it, on Enter. */
   apply: (kind: UnappliedKind, pointer: string) => string | null;
+  /** Whether what an edit was typed over has changed since (an undo, another edit): it's then never applied unasked. */
+  stale: (kind: UnappliedKind, pointer: string) => boolean;
+  /** "Apply here": the edit is taken as typed over what's there now. */
+  rebase: (kind: UnappliedKind, pointer: string) => void;
   /** Applies every unapplied edit at `pointer` and below; then, with `change`, writes what `make` makes of the value
    * at `path`, as one undo step. An edit that can't be applied stops it, its control saying why. */
   restructure: (pointer: string, change?: { path: Path; make: (current: unknown) => unknown }) => string | null;
@@ -3006,7 +3144,8 @@ export function TextControl({ spec, value, literal, id, describedBy, invalid, di
         const why = onChange(text === "" ? undefined : text, true);
         // Released only once it's written; refused, it stays the person's, with why (ruling 18).
         if (why === null) drawer.release("text", spec.pointer);
-        else drawer.hold("text", spec.pointer, { path: spec.path, label: spec.label, text, why, literal, entry: spec.entry });
+        // The edit keeps the reading it began with, a literal's or not, whatever an undo does under it.
+        else drawer.hold("text", spec.pointer, { path: spec.path, label: spec.label, text, why, literal: held?.literal ?? literal, entry: spec.entry });
       }}
       className={controlClass(invalid)}
     />
@@ -3039,7 +3178,7 @@ export function NumberControl({ spec, value, literal, id, describedBy, invalid, 
         const why = "problem" in parsed ? parsed.problem : onChange(parsed.value, true);
         // Released only once it's written; refused, it stays the person's, with why (ruling 18).
         if (why === null) drawer.release("number", spec.pointer);
-        else drawer.hold("number", spec.pointer, { path: spec.path, label: spec.label, text: typed, why, whole, literal, entry: spec.entry });
+        else drawer.hold("number", spec.pointer, { path: spec.path, label: spec.label, text: typed, why, whole, literal: held?.literal ?? literal, entry: spec.entry });
       }}
       className={controlClass(invalid)}
     />
@@ -3091,7 +3230,9 @@ export function JsonControl({ spec, value, literal, id, describedBy, invalid, di
       aria-describedby={describedBy} aria-invalid={invalid}
       onChange={(e) => {
         if (e.target.value === shown) drawer.release("json", spec.pointer);
-        else drawer.hold("json", spec.pointer, { path: spec.path, label: spec.label, text: e.target.value, why: null, literal, entry: spec.entry });
+        // The edit keeps the reading it began with: text typed as a literal's data stays data, whatever an undo does
+        // under it (the review of revision 3).
+        else drawer.hold("json", spec.pointer, { path: spec.path, label: spec.label, text: e.target.value, why: null, literal: held?.literal ?? literal, entry: spec.entry });
       }}
       onBlur={() => {
         if (held) drawer.apply("json", spec.pointer);
@@ -3250,7 +3391,7 @@ import { useState, type ReactNode } from "react";
 import { Button } from "../../../components/Button";
 import { fixedOf, formula, isPlainRef, kindOf, literal, referenceText, valueAt } from "../../../lib/config";
 import { canFixed, canFormula, emptyOf, startsAsFormula, type FieldSpec, type Widget } from "../../../lib/schemaForm";
-import type { UnappliedKind } from "../../../lib/unapplied";
+import { STALE, type UnappliedKind } from "../../../lib/unapplied";
 import { problemsAt, useDrawer, useSession } from "./context";
 import { FieldFrame, GroupFrame, type Described } from "./FieldFrame";
 import { FormulaControl, ModeSwitch, ReferenceView, SensitiveView, runsText, type Mode } from "./Formula";
@@ -3263,6 +3404,23 @@ import { ContainerParts, isContainer, partNames } from "./structured";
 type Control = (props: ControlProps) => ReactNode;
 const OWN: UnappliedKind[] = ["text", "json", "number", "formula", "port"]; // what a field's own control may hold
 const NEITHER = "This field takes only references or text with references, which can't be set in this drawer.";
+
+/** The control for what's held, of this kind: it shows first, whatever the value under it has become (ruling 18). A
+ * field with live choices keeps its own control, so its choices stay a click away. */
+function heldControl(kind: UnappliedKind, spec: FieldSpec): Control | null {
+  switch (kind) {
+    case "text":
+      return (spec.widget === "options" ? controlFor("options") : null) ?? TextControl;
+    case "number":
+      return NumberControl;
+    case "json":
+      return JsonControl;
+    case "formula":
+      return FormulaControl;
+    default:
+      return null;
+  }
+}
 
 /** The control for a fixed value of this widget, or null when the drawer has none: its type's is used then. */
 function controlFor(widget: Widget): Control | null {
@@ -3317,14 +3475,22 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
   // What's held decides how the field shows, so a remount, an undo or a closed drawer never hides it (ruling 18).
   const heldMode: Mode | null = held === undefined || held.kind === "port" ? null : held.kind === "formula" ? "formula" : "fixed";
   const mode: Mode = fixedOk && formulaOk ? (heldMode ?? chosen) : fixedOk ? "fixed" : "formula"; // the engine decides
+  const stale = held !== undefined && drawer.stale(held.kind, spec.pointer);
   const write = (next: unknown, typed: boolean): string | null => {
     setTouched(true);
+    // Typed over what has since changed (an undo, another edit): never written there unasked (ruling 18).
+    if (stale) {
+      setLocal(STALE);
+      return STALE;
+    }
     const why = drawer.set(spec.path, next === undefined ? emptyOf(spec) : next, typed ? mark() : undefined);
     setLocal(why);
     return why;
   };
-  // A literal's payload is written back as a literal: its kind changes only on purpose (ruling 15).
-  const writeFixed = (next: unknown, typed: boolean) => write(next !== undefined && kind === "literal" ? literal(next) : next, typed);
+  // A literal's payload is written back as a literal: its kind changes only on purpose (ruling 15). An edit begun as a
+  // literal's keeps that reading.
+  const asLiteral = held?.literal ?? kind === "literal";
+  const writeFixed = (next: unknown, typed: boolean) => write(next !== undefined && asLiteral ? literal(next) : next, typed);
   /** A change to the whole value: what's typed beneath it is applied first, or the change waits (ruling 18). */
   const reshape = (make: (current: unknown) => unknown, then: () => void) => {
     const why = drawer.restructure(spec.pointer, { path: spec.path, make });
@@ -3369,6 +3535,18 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
       {mode === "fixed" && fixedOk && !computed && !hidden && kind === null && isContainer(spec.base) && !spec.holdsSensitive && (
         <Button size="sm" aria-pressed={json} onClick={toggleJson}>Edit as JSON</Button>
       )}
+      {!disabled && held && stale && (
+        <Button
+          size="sm"
+          aria-label={`Apply here: ${spec.label}`}
+          onClick={() => {
+            drawer.rebase(held.kind, spec.pointer);
+            setLocal(drawer.apply(held.kind, spec.pointer));
+          }}
+        >
+          Apply here
+        </Button>
+      )}
       {!disabled && held && (
         <Button
           size="sm"
@@ -3388,13 +3566,26 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
     </>
   );
   const frame = (control: (c: Described) => ReactNode, hint: string | null = spec.hint, below?: ReactNode) => (
-    <FieldFrame label={spec.label} required={required} hint={hint} local={held?.why ?? local ?? missing} problems={problems} actions={actions} below={below}>
+    <FieldFrame label={spec.label} required={required} hint={hint} local={stale ? STALE : (held?.why ?? local ?? missing)} problems={problems} actions={actions} below={below}>
       {control}
     </FieldFrame>
   );
   const Control: Control = json ? JsonControl : (controlFor(spec.widget === "formula" ? spec.base : spec.widget) ?? controlFor(spec.base) ?? JsonControl);
+  const Held = held ? heldControl(held.kind, spec) : null;
   let body: ReactNode;
-  if (hidden) {
+  if (held && Held) {
+    // What's held shows first, before what the value under it has become (a reference, a hidden secret, another
+    // mode): it stays visible, and recoverable, until it's applied or discarded (the review of revision 3).
+    body = frame(
+      (c) => (
+        <Held
+          key={generation} {...c} spec={spec} value={hidden ? undefined : held.kind === "formula" ? value : fixed}
+          literal={held.literal ?? false} disabled={disabled} onChange={held.kind === "formula" ? write : writeFixed}
+        />
+      ),
+      joined(spec.hint, held.literal ? LITERAL_NOTE : held.kind === "json" ? JSON_NOTE : null),
+    );  // prettier-ignore
+  } else if (hidden) {
     body = frame((c) => (
       <SensitiveView
         {...c} toFormula={formulaOk} disabled={disabled}
@@ -3461,7 +3652,7 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
 - [ ] **Step 11: Run the tests to see them pass**
 
 Run: `npx -y pnpm@12.6.0 exec vitest run src/routes/editor/drawer/FieldView.test.tsx`
-Expected: PASS, 22 tests.
+Expected: PASS, 25 tests.
 
 - [ ] **Step 12: Run every frontend test, then typecheck and lint**
 
@@ -3488,7 +3679,8 @@ git commit -m "feat(editor): a step's field, fixed or a formula, its unapplied t
 **Interfaces:**
 - Consumes:
   - from Task 2: `setConfig`, `setOptions`, `admission`, `valueAt`, `Changed`;
-  - from Task 3: `Unapplied`, `UnappliedKind`, `unappliedId`, `within`, `applyUnapplied`, `applyAll`, `droppedWhy`;
+  - from Task 3: `Unapplied`, `UnappliedKind`, `unappliedId`, `within`, `applyUnapplied`, `applyAll`, `droppedWhy`,
+    `baseOf`, `isStale`;
   - from Task 4: `record(h, next, mark)`;
   - from Task 5: `Tabs`;
   - from Task 6: `FieldView`, `DrawerContext`, `DrawerActions`, `problemsAt`, `segment`.
@@ -3499,6 +3691,8 @@ git commit -m "feat(editor): a step's field, fixed or a formula, its unapplied t
   - `type Nudge` (moved from `StepPanel.tsx`).
   - `chipText(node: GraphNode, type: NodeType | undefined): string`.
   - In `Editor.tsx`:
+    - `historyNow` and `commitHistory(next)`: the history written at once, which `change` and undo/redo go through;
+      `latest()` is its present, the document every drawer write and settlement reads (the review of revision 3);
     - `change(next, message: string | null, then?, mark?): boolean`: whether it landed;
     - the unapplied edits: `unapplied` (state), `unappliedRef`, `keep(u)`, `drop(ids)`;
     - `writeDraft(changed, how?: { mark?; release?: string[]; said?: string | null }): string | null`;
@@ -3869,7 +4063,7 @@ In `frontend/src/routes/editor/Editor.tsx`:
 import { admission, setConfig, setOptions, valueAt, type Changed } from "../../lib/config";
 import type { Path } from "../../lib/schemaForm";
 import {
-  applyAll, applyUnapplied, droppedWhy, unappliedId, within, type Unapplied, type UnappliedKind,
+  applyAll, applyUnapplied, baseOf, droppedWhy, isStale, unappliedId, within, type Unapplied, type UnappliedKind,
 } from "../../lib/unapplied";  // prettier-ignore
 import type { DrawerActions } from "./drawer/context";
 ```
@@ -3900,7 +4094,24 @@ const CANT = "Not written: the draft can't be changed now."; // a conflict, an e
 
 and change the `asking` state to `useState<Asking | null>(null)`.
 
-(c) After the `asking` state, add the unapplied edits:
+(c) After `const doc = history.present;`, add the history as of now:
+
+```ts
+  // The history as of now, written at once (the review of revision 3): a decision made between renders (an exit
+  // awaiting a save) settles against the document that save made, never one captured before it waited. `change` and
+  // undo/redo go through `commitHistory`; the drawer's writes read `latest()`.
+  const historyNow = useRef(history);
+  const commitHistory = (next: History<GraphDoc>) => {
+    historyNow.current = next;
+    setHistory(next);
+  };
+  const latest = () => historyNow.current.present;
+```
+
+In `onEditorKey`, undo and redo read and write it: `const next = e.shiftKey ? redo(historyNow.current) :
+undo(historyNow.current); if (next === historyNow.current) return; commitHistory(next);`, the rest as it is.
+
+After the `asking` state, add the unapplied edits:
 
 ```ts
   // What's typed in the drawer but not in the draft (ruling 18): the editor's, never a control's, so a tab, a toggle
@@ -3929,7 +4140,7 @@ and change the `asking` state to `useState<Asking | null>(null)`.
    * is null: a field's edits aren't announced, its control says what it holds. Whether it landed. */
   function change(next: GraphDoc, message: string | null, then?: string, mark?: string): boolean {
     if (!mayEdit()) return false; // read only now: a conflict, an exit agreed to, a version view, a publication
-    setHistory((h) => record(h, next, mark));
+    commitHistory(record(historyNow.current, next, mark));
     saver.current?.change(next);
     if (message !== null) announce(message);
     if (then) focus(then);
@@ -3957,8 +4168,9 @@ and change the `asking` state to `useState<Asking | null>(null)`.
     const u = unappliedRef.current.get(id);
     if (!u) return null;
     if (u.kind === "name") return restructureStep(u.node, u.pointer);
-    const node = findNode(doc, u.node);
-    const result = applyUnapplied(doc, u, node ? typeOf(node) : undefined);
+    const now = latest();
+    const node = findNode(now, u.node);
+    const result = applyUnapplied(now, u, node ? typeOf(node) : undefined);
     // Asked before it takes ports away: until the answer, and after a Cancel, its control says why (ruling 9).
     const why =
       "problem" in result ? result.problem
@@ -3971,7 +4183,8 @@ and change the `asking` state to `useState<Asking | null>(null)`.
   /** The unapplied edits at `pointer` and below in a step applied; then, with `then`, what `make` makes of the value
    * at `path` written: one undo step (ruling 18). An edit that can't be applied stops it, said at its control. */
   function restructureStep(nodeId: string, pointer: string, then?: { path: Path; make: (current: unknown) => unknown }): string | null {
-    const { doc: settled, applied, left } = applyAll(doc, unappliedRef.current.values(), typeOf, within(nodeId, pointer));
+    const now = latest();
+    const { doc: settled, applied, left } = applyAll(now, unappliedRef.current.values(), typeOf, within(nodeId, pointer));
     for (const u of left) keep(u);
     if (left.length > 0) return left[0]!.why;
     let changed: Changed = { doc: settled, dropped: [] };
@@ -3981,7 +4194,7 @@ and change the `asking` state to `useState<Asking | null>(null)`.
       const made = then.make(current);
       if (made !== current) changed = setConfig(settled, nodeId, then.path, made, typeOf(node));
     }
-    if (changed.doc === doc) return null;
+    if (changed.doc === now) return null;
     return writeDraft(changed, { release: applied.map((u) => u.id) });
   }
 
@@ -3989,17 +4202,30 @@ and change the `asking` state to `useState<Asking | null>(null)`.
   function actionsFor(nodeId: string): DrawerActions {
     const id = (kind: UnappliedKind, pointer: string) => unappliedId(nodeId, kind, pointer);
     const stepType = () => {
-      const node = findNode(doc, nodeId);
+      const node = findNode(latest(), nodeId);
       return node ? typeOf(node) : undefined;
     };
     return {
-      set: (path, value, mark) => writeDraft(setConfig(doc, nodeId, path, value, stepType()), { mark }),
-      options: (options, mark) => writeDraft(setOptions(doc, nodeId, options, stepType()), { mark }),
+      set: (path, value, mark) => writeDraft(setConfig(latest(), nodeId, path, value, stepType()), { mark }),
+      options: (options, mark) => writeDraft(setOptions(latest(), nodeId, options, stepType()), { mark }),
       held: (kind, pointer) => unapplied.get(id(kind, pointer)),
-      hold: (kind, pointer, holding) => keep({ ...holding, id: id(kind, pointer), node: nodeId, kind, pointer }),
+      hold: (kind, pointer, holding) => {
+        // What it's typed over is recorded when the edit begins, and kept while it's typed (ruling 18).
+        const was = unappliedRef.current.get(id(kind, pointer));
+        const u: Unapplied = { ...holding, id: id(kind, pointer), node: nodeId, kind, pointer, base: "" };
+        keep({ ...u, base: was?.base ?? baseOf(latest(), u) });
+      },
       release: (kind, pointer) => drop([id(kind, pointer)]),
       discard: (pointer) => drop([...unappliedRef.current.values()].filter(within(nodeId, pointer)).map((u) => u.id)),
       apply: (kind, pointer) => applyEdit(id(kind, pointer)),
+      stale: (kind, pointer) => {
+        const u = unappliedRef.current.get(id(kind, pointer));
+        return u !== undefined && isStale(latest(), u);
+      },
+      rebase: (kind, pointer) => {
+        const u = unappliedRef.current.get(id(kind, pointer));
+        if (u) keep({ ...u, base: baseOf(latest(), u), why: null });
+      },
       restructure: (pointer, then) => restructureStep(nodeId, pointer, then),
     };
   }
@@ -4113,7 +4339,7 @@ git commit -m "feat(editor): the step drawer: settings on Setup and Options, una
     - `goBack(u: Unapplied)`: Task 14 makes it focus the field;
     - `downloadUnapplied()`: the edits not applied as a file of their own (`unappliedFile`, Task 3);
   - the leave decision settles and saves in one loop, until nothing is unapplied or unsaved: what's typed while a
-    save is awaited is settled too;
+    save is awaited is settled too, against the latest document (`latest()`, Task 7);
   - `guardLeaving` and the page's `beforeunload` count unapplied edits as unsaved work;
   - every "Download my version" says the edits not applied aren't in it, beside their own download.
 
@@ -4192,6 +4418,35 @@ it("settles what's typed while leaving waits for a save", async () => {
   expect(ask.textContent).toContain("wait · Duration S: A whole number, like 42.");
   await userEvent.click(within(ask).getByRole("button", { name: "Stay" }));
   expect(await decision).toBe(false);
+});
+
+it("settles what's typed during a save against the draft that save made, never an older one", async () => {
+  const PAIR = typeWith(
+    { type: "object", properties: { first: { title: "First" }, second: { title: "Second" } } },
+    { ref: "acme.pair@1", type: "acme.pair", title: "Pair" },
+  );
+  let answer: () => void = () => undefined;
+  let puts = 0;
+  answers.set(`PUT ${BASE}/draft`, () => {
+    puts++;
+    const saved = json({ draft_revision: puts + 1, unpublished_changes: true, graph_hash: `h${puts + 1}`, active_version_id: null, active_version_number: null });
+    return puts === 1 ? new Promise<Response>((resolve) => (answer = () => resolve(saved))) : saved;
+  });
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, PAIR]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("acme.pair@1", { first: [1], second: [2] }, "pair") }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "pair" }));
+  await userEvent.clear(screen.getByLabelText("First"));
+  await userEvent.paste("[11]"); // focus stays: not applied yet
+  const decision = mayLeave(); // applies it, then awaits its save
+  await userEvent.clear(screen.getByLabelText("Second"));
+  await userEvent.paste("[22]"); // typed while that save is awaited
+  await act(async () => answer());
+  expect(await decision).toBe(true);
+  expect(stepConfig("pair")).toEqual({ first: [11], second: [22] }); // never `first: [1]` again
+  const last = sent.filter((r) => r.method === "PUT").at(-1)!.body as GraphDoc;
+  expect(last.nodes![0]!.config).toEqual({ first: [11], second: [22] });
+  act(() => cancelLeaving());
 });
 
 it("keeps an edit not applied shown, and counted, when the editor turns read only", async () => {
@@ -4281,7 +4536,9 @@ In `frontend/src/routes/editor/Editor.tsx`:
    * (ruling 18). */
   function settleAll(): Unapplied[] {
     const all = [...unappliedRef.current.values()];
-    const { doc: next, applied, left } = applyAll(doc, all, typeOf, () => true);
+    // The latest document, not the render's: after a save was awaited, this render's `doc` is older (the review of
+    // revision 3).
+    const { doc: next, applied, left } = applyAll(latest(), all, typeOf, () => true);
     for (const u of left) keep(u);
     if (applied.length === 0) return left;
     if (!change(next, applied.length === 1 ? "Applied an edit" : `Applied ${applied.length} edits`)) return all;
@@ -4481,6 +4738,19 @@ it("moves an item only once the edits inside it are applied", async () => {
   await userEvent.type(screen.getByLabelText("Sizes, item 2"), "5");
   await userEvent.click(screen.getByRole("button", { name: "Move up: Sizes, item 2" }));
   expect(config()).toEqual({ sizes: [5, 1] });
+});
+
+it("never writes a held edit over another item after an undo moves it", async () => {
+  const sizes = typeWith({ type: "object", properties: { sizes: { type: "array", title: "Sizes", items: { type: "integer" } } } });
+  const { config, replace } = showFields(sizes, { config: { sizes: [5, 7] } });
+  await userEvent.click(screen.getByRole("button", { name: "Move up: Sizes, item 2" })); // [7, 5]
+  await userEvent.type(screen.getByLabelText("Sizes, item 2"), "x"); // "5x", over the 5
+  replace({ sizes: [5, 7] }); // the move undone: the second item is the 7 now
+  await userEvent.type(screen.getByLabelText("Sizes, item 2"), "{Backspace}0"); // "50": a number, typed over the 5
+  expect(config()).toEqual({ sizes: [5, 7] }); // never [5, 50] unasked
+  expect(screen.getByText(STALE)).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Apply here: Sizes, item 2" })); // the person's choice
+  expect(config()).toEqual({ sizes: [5, 50] });
 });
 
 it("adds a case with the first free port name", async () => {
@@ -4691,6 +4961,11 @@ function NameField({ map, name }: { map: FieldSpec; name: string }) {
         className={`${controlClass(why !== null)} font-mono`}
       />
       {why !== null && <p id={`${id}-p`} className="text-small text-danger">{why}</p>}
+      {held && drawer.editable && (
+        <Button size="sm" className="self-start" aria-label={`Discard the new name for ${name}`} onClick={() => drawer.release("name", pointer)}>
+          Discard
+        </Button>
+      )}
     </div>
   );  // prettier-ignore
 }
@@ -4778,6 +5053,7 @@ export function PortControl({ spec, value, id, describedBy, invalid, disabled }:
 
 In `frontend/src/routes/editor/drawer/FieldView.tsx`:
 - import `PortControl` from `./structured`;
+- add `case "port": return PortControl;` to `heldControl`'s switch, before `default`;
 - `partNames(spec)` becomes `partNames(spec, fixed)`;
 - `<ContainerParts spec={spec} />` becomes `<ContainerParts spec={spec} value={fixed} />`;
 - the control is chosen with the port first:
@@ -5152,7 +5428,7 @@ Create `frontend/src/routes/editor/drawer/LiveOptions.test.tsx`:
 
 ```tsx
 // SPDX-License-Identifier: Apache-2.0
-import { screen } from "@testing-library/react";
+import { act, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { REMOTE } from "../../../test/nodeTypes";
@@ -5247,6 +5523,30 @@ it("never shows an old answer when the connection changes away and back", async 
   expect(screen.getByRole<HTMLButtonElement>("button", { name: "Show choices" }).disabled).toBe(false); // ask again
 });
 
+it("keeps loading off when a refresh of the connections fails", async () => {
+  let calls = 0;
+  fakeApi({ [CONNECTIONS]: () => (++calls === 1 ? both() : json({ error: "http_error" }, 500)) });
+  const { client } = showFields(REMOTE, { config: { connection: C1 } });
+  await screen.findByRole("option", { name: "Prod · verified" });
+  await act(() => client.invalidateQueries()); // refreshed, and failed: the old list stays cached
+  expect(await screen.findByText("Connections couldn't load, so the choices can't either.")).toBeTruthy();
+  expect(screen.getByRole<HTMLButtonElement>("button", { name: "Show choices" }).disabled).toBe(true);
+});
+
+it("releases text a write turned away once a choice is written", async () => {
+  fakeApi({ [CONNECTIONS]: both, [OPTIONS]: () => json({ options: [{ value: "s1", label: "HQ" }] }) });
+  const { config, held, refuse } = showFields(REMOTE, { config: { connection: C1 } });
+  await screen.findByRole("option", { name: "Prod · verified" });
+  refuse("Not written: the draft can't be changed now.");
+  await userEvent.type(screen.getByLabelText("Site"), "old-text"); // held, never written
+  refuse(null);
+  await userEvent.click(screen.getByRole("button", { name: "Show choices" }));
+  await userEvent.selectOptions(await screen.findByLabelText("Choices for Site"), "HQ (s1)");
+  expect(config().site_id).toBe("s1");
+  expect(screen.getByLabelText<HTMLInputElement>("Site").value).toBe("s1");
+  expect(held()).toEqual([]);
+});
+
 it("keeps loading off while the connection's revision isn't known", async () => {
   fakeApi({ [CONNECTIONS]: () => json({ error: "http_error" }, 500) });
   showFields(REMOTE, { config: { connection: C1 } });
@@ -5339,7 +5639,7 @@ export function OptionsControl({ spec, value, id, describedBy, invalid, disabled
   const blocked = takes && chosen === null;
   // Its scope isn't known until the connection's revision is: while the list loads, when it fails, when it doesn't
   // name the connection (the review of revision 2).
-  const unsettled = takes && chosen !== null && revision === null;
+  const unsettled = takes && chosen !== null && (revision === null || listed.isError); // a failed refresh keeps old data
   const typed = drawer.held("text", spec.pointer); // what a refused write turned away (ruling 18)
   const text = typed?.text ?? (typeof value === "string" ? value : "");
   async function load() {
@@ -5387,7 +5687,11 @@ export function OptionsControl({ spec, value, id, describedBy, invalid, disabled
         <select
           aria-label={`Choices for ${spec.label}`} value="" disabled={disabled} className={controlClass(false)}
           onChange={(e) => {
-            onChange(e.target.value, false);
+            // A choice writes as typing does: written, the text held before it goes; refused, it's held, with why.
+            const choice = e.target.value;
+            const why = onChange(choice, false);
+            if (why === null) drawer.release("text", spec.pointer);
+            else drawer.hold("text", spec.pointer, { path: spec.path, label: spec.label, text: choice, why, entry: spec.entry });
             document.getElementById(id)?.focus();
           }}
         >
@@ -5541,9 +5845,10 @@ Expected: FAIL. `ErrorHandling` isn't exported, and the chip is text, not a butt
 Append to `frontend/src/routes/editor/drawer/ErrorHandling.tsx`, adding the imports at its top:
 
 ```tsx
+import { Button } from "../../../components/Button";
 import { Field, Select } from "../../../components/Field";
 import type { StepOptions } from "../../../lib/config";
-import { limitProblem, type Limit } from "../../../lib/unapplied";
+import { STALE, limitProblem, type Limit } from "../../../lib/unapplied";
 import { useDrawer, useSession } from "./context";
 import { useText } from "./scalars";
 ```
@@ -5563,21 +5868,47 @@ function LimitField({ name, label, fallback }: { name: Limit; label: string; fal
     (t, v) => (t.trim() === "" ? v === undefined : Number(t) === v),
     held?.text,
   );
+  const stale = held !== undefined && drawer.stale("limit", pointer);
   return (
-    <div onFocus={onFocus}>
+    <div onFocus={onFocus} className="flex flex-col gap-1.5">
       <Field
-        label={label} hint={`If empty: ${fallback}.`} error={held?.why ?? undefined} value={held?.text ?? text}
+        label={label} hint={`If empty: ${fallback}.`} error={stale ? STALE : (held?.why ?? undefined)} value={held?.text ?? text}
         disabled={!drawer.editable}
         onChange={(e) => {
           const typed = e.target.value;
           setText(typed);
           const t = typed.trim();
-          const why = limitProblem(name, typed) ?? drawer.options({ ...own, [name]: t === "" ? undefined : Number(t) }, mark());
+          // Typed over a limit that has since changed (an undo): never written unasked (ruling 18).
+          const why = limitProblem(name, typed) ?? (stale ? STALE : drawer.options({ ...own, [name]: t === "" ? undefined : Number(t) }, mark()));
           // Released only once it's written; refused, it stays the person's, with why (ruling 18).
           if (why === null) drawer.release("limit", pointer);
           else drawer.hold("limit", pointer, { path: [name], label, text: typed, why });
         }}
       />
+      {held && drawer.editable && (
+        <div className="flex flex-wrap gap-2">
+          {stale && (
+            <Button
+              size="sm" aria-label={`Apply here: ${label}`}
+              onClick={() => {
+                drawer.rebase("limit", pointer);
+                drawer.apply("limit", pointer);
+              }}
+            >
+              Apply here
+            </Button>
+          )}
+          <Button
+            size="sm" aria-label={`Discard the edit to ${label}`}
+            onClick={() => {
+              drawer.release("limit", pointer);
+              setText(typeof own[name] === "number" ? String(own[name]) : "");
+            }}
+          >
+            Discard
+          </Button>
+        </div>
+      )}
     </div>
   );  // prettier-ignore
 }
@@ -5764,6 +6095,8 @@ export function KeyField({ onRenamed }: { onRenamed: () => void }) {
   const apply = () => {
     if (disabled) return;
     if (!held || held.text.trim() === current) return close();
+    // Rename is the person's explicit act on the step as it is now, whatever the key was when they began typing.
+    drawer.rebase("key", "");
     if (drawer.apply("key", "") !== null) return; // refused: its reason shows at the field, never as done
     setOpen(false);
     onRenamed();
@@ -6283,15 +6616,18 @@ Nothing is pushed and no PR is opened without the owner's OK.
     - no Mist calls: Tasks 11 and 15;
     - AI tells: the guard in every task's suite run, and the checkpoint.
   - Data pills, the condition builder, samples, triggers and the Test tab are 4c-2, 4c-3 and 4d (ruling 1).
-- **The reviews of revisions 1 and 2.** Each correction maps to a ruling and its tasks in "Changes from revision 1"
-  and "Changes from revision 2". Their tests sit in the Review Focus lines.
+- **The reviews of revisions 1, 2 and 3.** Each correction maps to a ruling and its tasks in the "Changes from
+  revision N" sections. Their tests sit in the Review Focus lines.
 - **Placeholders.** None: every code step has its code. Where the running app decides a label (Task 15's "+" names and
   the Mist step's key), the step says how to check it and record the difference.
 - **Names across tasks.**
   - `setConfig`, `setOptions`, `renamePort`, `renameEntry`, `freePort`, `keyProblem`, `renameKey`, `parseJson` and
     `admission` (Task 2) are the names Tasks 3, 6, 7 and 9 call.
-  - `Unapplied`, `Holding`, `applyUnapplied`, `applyAll`, `within`, `droppedWhy`, `parseNumber`, `limitProblem` and
-    `unappliedFile` (Task 3) are what the harness, the editor and the controls use (Tasks 6, 7, 8, 12).
+  - `Unapplied`, `Holding`, `applyUnapplied`, `applyAll`, `within`, `droppedWhy`, `parseNumber`, `limitProblem`,
+    `unappliedFile`, `baseOf`, `isStale` and `STALE` (Task 3) are what the harness, the editor and the controls use
+    (Tasks 6, 7, 8, 9, 12).
+  - `DrawerActions.stale` and `rebase` (Task 6) are implemented by the harness and by `actionsFor` (Task 7), and
+    used by the field, the limits and the rename (Tasks 6, 12, 13).
   - The harness's `replace`, `remount` and `refuse` (Task 6) are what Tasks 6, 9 and 12 drive an undo, a reopened
     drawer and a late read-only editor with.
   - `record(h, next, mark)` (Task 4) is what `change` calls (Task 7).
