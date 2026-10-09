@@ -2200,7 +2200,7 @@ export interface components {
             /** Field */
             field: string;
             /** Node */
-            node: string;
+            node: string | null;
         };
         /** TenantIn */
         TenantIn: {
