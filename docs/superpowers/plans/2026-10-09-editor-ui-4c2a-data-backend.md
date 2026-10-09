@@ -3,16 +3,56 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or
 > superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Revision 1, 2026-10-09.** Nothing is built before the owner approves this plan. Nothing is pushed and no PR is
-opened without the owner's OK in chat.
+**Revision 2, 2026-10-09.** Nothing is built before the owner approves this plan. Nothing is pushed and no PR is
+opened without the owner's OK in chat. Revision 1 (06962fd2) was held by a review pasted in chat for eight defects in
+its code; "Changes from revision 1" below says how each was answered.
 
 The plan's code was checked before review on a scratch copy of 93a0dd61, never on a branch. Its blocks were applied
-as written, its tests run, and the plan corrected where they failed:
-- the engine's tests: 1,194 passed;
-- the database tests the tasks touch, retention and erasure included: all passed;
+as written, its tests run, and the plan corrected where they failed; revision 2's corrections were checked the same
+way, each with a test that reproduces the review's counterexample:
+- the engine's tests: 1,194 passed (revision 1), then the graph tests with revision 2's: 424 passed;
+- the database and API tests the tasks touch (samples, scope, the worker's record, retention, the migration chain,
+  OpenAPI, the workflow routes): passed;
 - ruff, mypy (strict) and the import contracts: clean.
 The whole backend suite wasn't run; Task 5 runs it, with the owner's OK. The executor still runs every step: the
 check is evidence, not a substitute.
+
+## Changes from revision 1
+
+Each answers a finding of the review of 06962fd2, pasted in chat on 2026-10-09; each is pinned by a test that fails
+on revision 1's code.
+
+1. **P1, a union's surroundings were overwritten** (`{**around, **branch}` replaced shared `properties`, so a valid
+   `common` field became `ref.unknown_field`). A position is now a list of ways, each a conjunction: what surrounds a
+   union stays beside each branch, and every member of an `allOf` applies. Ruling 1; Task 2: `a field around a union
+   keeps its type`, `reads every member of an all of`.
+2. **P1, the bound didn't bound the read** (a four-way schema reached 256 frontier entries past the limit of 64).
+   Ways are merged when equal at every position, the frontier is held to 64, and one budget of 4,096 unfolded schemas
+   bounds the whole read, `declared_optional` and `declared_nullable` included. Ruling 1; Task 2: `bounds the whole
+   read, not only one position` (counts the work), `merges alternatives that are the same`.
+3. **P1, a second revision opened in one attempt was lost** (the key kept the first). The revision is part of the
+   record's key: every revision an attempt opened is kept. Ruling 8; Task 8's migration; Task 9: `records each
+   revision an attempt opens`.
+4. **P2, the scope hid `vars.unassigned`.** An entry is resolved as validation resolves it; what the resolver reports
+   becomes the entry's `problem`, and it offers no formula. Ruling 5; Task 4: `says why a variable not yet set can't be
+   read`.
+5. **P2, the availability guard added sensitivity.** `has(steps.k.output)` reads the run's shape, as `cel_check`
+   says, so it adds none. Ruling 7; Task 4: `an availability guard reads no data`; Task 5's sensitivity test now
+   covers a public field beside a sensitive one, on a branch.
+6. **P2, "is there" was true for a value only null.** The scope says when "is there" tests null (`null_test`): the
+   value may be null, is untyped, or is only null. Ruling 6; Task 4: `tests null where a value may be null, untyped or
+   only null`; Task 5: `is there is false for a value only null`.
+7. **P2, runs that hadn't ended took places in the window.** Only runs with an end time are candidates, filtered
+   before the limit, newest ended first (`runs_workflow_ended`). Ruling 9; Task 10: `runs that haven't ended never
+   fill the window`.
+8. **P2, text was taken for a connection binding.** A step names a connection only in a field its type marks for one,
+   read from its manifest: the worker's own rule. Ruling 10; Task 10: `names a connection only through a field its
+   type marks`.
+9. **The two selection choices the review asked to treat explicitly.** The answer is the newest captured row among
+   the window's runs (B7's wording kept), and it says how many runs it searched, so "no sample" never claims "never".
+   Rulings 9 and 10; Task 10: `takes the newest captured row, not the newest run`, `says how many runs it searched`.
+10. **The environment.** Every command runs in the worktree's own environment made from the lock (`uv sync
+    --frozen`, the owner's OK asked first), no longer the main checkout's venv. "How to run things".
 
 **Goal:** Give the editor what its data features need from the server: alternatives in output schemas read
 conservatively by the validator, every reference a step's field can read (B6), whether each step may not run, and
@@ -102,7 +142,8 @@ the task that owns it.
   - Tests:
     - Task 2: `follows nested alternatives up to the bound, then says any value`, `ends on a definition that refers
       to itself`, `reads a device's name as text in every kind of device`, `never promises less than the data holds`
-      (a property test).
+      (a property test), `a field around a union keeps its type`, `reads every member of an all of`, `bounds the
+      whole read, not only one position` (a work count), `merges alternatives that are the same`.
 - **A step whose liveness the analysis can't settle.**
   - The cases: liveness too complex to analyse (`None`); a step in a loop body, inside a branch; a step after an
     error port.
@@ -118,6 +159,15 @@ the task that owns it.
   - Tests:
     - Task 4: `shows a key a reference can't name, disabled`, `offers no formula for a key CEL can't select`,
       `stops at the reference length limit`.
+- **A value the scope must refuse or describe exactly.**
+  - The cases: a sensitive variable that has no default and nothing sure to set it; a public field beside a sensitive
+    one, from a step that may not run; a field that is only ever null.
+  - The first is shown with validation's own problem and no formula; the second stays public (an availability guard
+    reads no data); "is there" is never true for the third.
+  - Tests:
+    - Task 4: `says why a variable not yet set can't be read`, `an availability guard reads no data`, `tests null
+      where a value may be null, untyped or only null`;
+    - Task 5: `is there is false for a value only null`, and the sensitivity test over the fixture's transform.
 - **A guarded read meeting awkward data at run time.**
   - The cases: a step that didn't run, a missing field, null, an empty list, and any value at all where the schema
     declares nothing (a string where a list might be, a list where an object might be).
@@ -134,7 +184,11 @@ the task that owns it.
     - a run from before connections were recorded;
     - a connection renamed (no new revision), changed (a new revision) or deleted;
     - a step whose type or config differs in the draft;
-    - a loop's iterations `l:2` and `l:10`.
+    - a loop's iterations `l:2` and `l:10`;
+    - a run that ended later holding an older row;
+    - 200 newer runs that haven't ended, or 200 newer ended runs without the step;
+    - a connection changed between two opens in one attempt;
+    - text in a step's config that happens to hold a connection's id.
   - Each answers as B7 says: never another tenant's or past-retention data, a stale sample says it's stale, and
     "first" is the lowest index.
   - Tests:
@@ -142,7 +196,10 @@ the task that owns it.
       sub-flow's run of this workflow`, `says a simulated sample used no connection`, `tells the four connection
       states` (unknown for a run before records), `says what each connection is now` (changed, gone, and renamed
       but unchanged), `marks a sample stale when the config differs`, `takes the first iteration by number, not by
-      text`, `takes the highest attempt`.
+      text`, `takes the highest attempt`, `takes the newest captured row, not the newest run`, `runs that haven't
+      ended never fill the window`, `says how many runs it searched`, `names a connection only through a field its
+      type marks`;
+    - Task 9: `records each revision an attempt opens`.
 
 ## Rulings this plan proposes
 
@@ -150,8 +207,12 @@ These join the ledger as rulings 114 onward once the owner accepts the plan. Eac
 it's wrong.
 
 1. **Alternatives are read together, conservatively** (`navigate`, Task 2; engine-core spec §4.3 amended).
-   - `anyOf` and `oneOf` are unfolded, nested ones too, up to 8 levels and 64 alternatives; beyond that, the value
-     is "any value". The schema around a union applies to each alternative, as `_strip_null` already does for one.
+   - `anyOf` and `oneOf` are unfolded, nested ones too. Each way a value may match is a conjunction: what surrounds
+     a union stays beside each branch, never overwritten by it, and every member of an `allOf` applies (so `allOf`
+     is now read, as a conjunction, by `navigate` and `json_types` alike).
+   - The bounds: 8 levels of nesting; 64 ways at a position, duplicates merged first; and one budget of 4,096
+     unfolded schemas for the whole read, every position counted, `declared_optional` and `declared_nullable`
+     included. Past any of them, the value is "any value".
    - Reading a field or an index follows every alternative:
      - the value's type is what any alternative allows there;
      - it may be missing when an alternative may lack it (it doesn't require it, a closed one doesn't declare it, its
@@ -162,11 +223,14 @@ it's wrong.
      alternative counts). A position that is only `null` stays a plain null value, as today.
    - `declared_optional` and `declared_nullable` read through a union only when every alternative declares the
      field. Otherwise the data is open there, and nothing is reported (spec §4.3: undeclared data needs no guard).
-   - `allOf` stays unread, as today.
+   - Within a way, a field declared by one of its schemas has that schema (all of them, when several declare it); it
+     is required when one of them requires it; the way is closed to an undeclared field when one of them is closed.
    - Why: the owner's ruling, and the data tree must type a device's `name` as text, as validation does. The cost:
      an existing draft may meet new diagnostics when it's next validated: a reference now typed that mismatches its
      field (`ref.type_mismatch`), a formula field declared optional in every alternative (`cel.conditional_ref`), or
-     `has()` on a list now typed (`cel.has_on_typed_path`). Published versions are untouched.
+     `has()` on a list now typed (`cel.has_on_typed_path`). Reading `allOf` types two Mist schemas
+     (`site_setting_switch`, in `mist.site_settings.get` and `.update`) that were "any value". Published versions are
+     untouched.
 2. **"May be missing" and "may be null" are told apart.** `Resolved` gains `missing` and `nullable`, filled by
    `navigate` and by the resolver (a step that may not run); the scope adds a variable not yet set. `conditional`
    stays their union, so every existing check is unchanged. Why: a default replaces both, but the tree and the builder say them
@@ -198,8 +262,10 @@ it's wrong.
    - `sensitive`: what a reference to it holds (engine 2b spec §4.1);
    - `nameable`: false for a key a reference can't name (a dash, a space), shown disabled;
    - `children`;
-   - `formula`: null when CEL can't select one of its fields (`in`, `true`, `false`, `null`); otherwise its `guards`
-     and whether a formula reading it reads sensitive data.
+   - `formula`: null when CEL can't select one of its fields (`in`, `true`, `false`, `null`) or when `problem` is set;
+     otherwise its `guards`, whether a formula reading it reads sensitive data, and `null_test`;
+   - `problem`: what validation reports for reading it here, as validation says it: a sensitive variable that has no
+     default and that no step sure to run sets (`vars.unassigned`). Such an entry is shown, and refused.
    Why: the 4c-2 mockups and their ten rulings. The cost: none.
 6. **Guards come from the server, as data** (`present`, `not_null`, `is_map`, `is_list`, `min_size`).
    - For each step of the path:
@@ -211,9 +277,10 @@ it's wrong.
    - Never `has()` on a list always there (`cel.has_on_typed_path`).
    - Tests prove a formula made of the guards and the read publishes with no guard diagnostic, and is never an error
      at run time.
-   - "is there" is the guards, and `path != null` when the entry may be null or is untyped (`nullable`, or no
-     `types`); "is missing" is its negation. A list always there can't be compared with null in CEL (`list != null`
-     doesn't compile), and needs no such test. 4c-2b's builder renders them.
+   - "is there" is the guards, and `path != null` when the scope's `null_test` says so: the value may be null, is
+     untyped, or is only null (a `type: "null"` field is never "there"). "is missing" is its negation. A list always
+     there can't be compared with null in CEL (`list != null` doesn't compile), and needs no such test. 4c-2b's
+     builder renders them from `guards` and `null_test`, never re-deriving the rules.
    - Why: the owner's ruling for per-comparison guards with defined "is missing" and "is there"; D18 (the server
      alone checks): the same rules make and check them. The cost: the builder can't guard data the scope doesn't
      list.
@@ -221,32 +288,39 @@ it's wrong.
    - A formula reading `X[0].f` reads the list `X` whole: CEL's chains stop at an index.
    - A guard reads its operand whole: `trigger.owner != null` or `type(trigger.who) == map` reads that object, and
      an object open to undeclared fields counts as sensitive (engine 2b spec §4.1). A `has()` guard reads only the
-     field it tests.
+     field it tests, and `has(steps.k.output)` reads only whether the step ran (the run's shape), never its output.
    - So `formula.sensitive` can differ from `sensitive`. A test holds it equal to what validation finds.
    - Why: a condition on `results[0].name` needs declassifying even though the pill isn't sensitive; the tree says so
      before the person builds it. The cost: none.
 8. **Each attempt records the connections it opens** (B7, slot 0045).
-   - Table `run_step_connections`, keyed `(run_id, step_id, iteration_key, attempt, connection_id)`.
+   - Table `run_step_connections`, keyed `(run_id, step_id, iteration_key, attempt, connection_id, revision)`:
+     every revision an attempt opened is kept, so a connection changed between two opens in one attempt shows both.
    - It holds the connection's type, name and revision, and its non-secret config as it was (`context`, at most
      4 KiB as canonical JSON, otherwise `{}`), with the time.
    - The worker writes it when an attempt opens the connection, before the node uses it, inside the activity: no
      ABI change. Opening it twice in one attempt records it once.
    - A write the database doesn't answer fails the attempt as nothing sent (retryable), like the connection's own
-     load. Any other failure is a bug, raised.
+     load. Any other failure is a bug, raised. Opening the same revision again records nothing more.
    - A simulated attempt opens no connection, so records nothing. Neither do flow steps.
    - Why: B7: a connection keeps its id while its config changes. The cost: one insert per opened connection per
      attempt.
 9. **Which sample** (B7):
-   - Candidates: the newest 200 ended runs of this workflow, of any kind (a run, a sub-flow's run, a failure
-     handler's run), newest queued first.
+   - Candidates: the newest 200 runs of this workflow that have ended (an end time recorded, not running), of any
+     kind (a run, a sub-flow's run, a failure handler's run), newest ended first. A run that hasn't ended never takes
+     a place in the window: the filter comes before the limit.
    - Each candidate must be within retention through its root.
-   - The answer is the first candidate with a succeeded row for the step. Within that run: the asked iteration, else
-     the first by number (`l:2` before `l:10`), and its highest attempt.
-   - Migration 0045 adds the index `runs_workflow_recent (workflow_id, queued_at DESC, id DESC)` for it.
+   - Within each candidate, the asked iteration, else the first by number (`l:2` before `l:10`), and its highest
+     attempt. Among the candidates, the answer is the one whose row ended last: B7's "newest succeeded row", within
+     the window.
+   - The answer says how many runs it searched (`searched_runs`, at most `search_limit`, 200). "No sample" then
+     means none in those runs, never "this step has never run": 4c-2b's copy says which.
+   - Migration 0045 adds the index `runs_workflow_ended (workflow_id, ended_at DESC, id DESC) WHERE ended_at IS NOT
+     NULL` for it.
    - Why: B7's selection; sub-flows run this workflow's steps too. The cost: a sample older than the newest 200 ended
-     runs isn't found.
+     runs isn't found, and the answer says so.
 10. **A sample's answer:**
-    - `run_id`, the run's kind and mode, its version id and number;
+    - `run_id`, the run's kind and mode, its version id and number, and the search's `searched_runs` and
+      `search_limit` (ruling 9);
     - the iteration and attempt, and `captured_at` (the row's end);
     - the node's `type@version` in that version, with `same_type` and `same_config` against the saved draft;
     - `output`: the stored preview, markers as they are;
@@ -254,7 +328,10 @@ it's wrong.
       - `recorded`, with each connection's state: `unchanged`, `changed` (another revision now) or `deleted`;
       - `none`: the step names no connection;
       - `simulated`: none used;
-      - `unknown`: the step names one, but no record exists;
+      - `unknown`: the step names one, but no record exists.
+      A step "names" a connection only in a top-level field its type marks for one (`x-dewpoint-connection`, read
+      from the node type's manifest), naming one of its version's connections: the worker's own rule
+      (`DbConnections.named_by`). Text that happens to hold a connection's id names nothing.
     - `stale`: true when the type, the config or a connection differs.
     - A renamed connection is unchanged: a rename doesn't change a revision. The current name shows, or the
       recorded one when the connection is gone.
@@ -313,28 +390,25 @@ Changed:
 
 Every command runs from the plan's worktree (see "Executing this plan"). `$WT` is that worktree's root.
 
-- Python, from `$WT/backend`: the main checkout's venv, whose `uv.lock` matches this one (`cmp` them first), with
-  this worktree's source first on the path:
+- Python, from `$WT/backend`: the worktree's own environment, made from the lock (the review of revision 1).
+  `uv sync --frozen` installs exactly `uv.lock` into `$WT/backend/.venv`; it installs packages, so the owner's OK is
+  asked at the start (an earlier session's tooling refused it unasked). If the owner declines, the fallback is the
+  main checkout's venv with an identical lock (`cmp` them) and `PYTHONPATH=src:.`, as revision 1 said. Then:
   ```bash
-  export PY="/Users/tmunzer/4_dev/mist_dewpoint/backend/.venv/bin/python"
-  PYTHONPATH=src:. $PY -c 'import dewpoint; print(dewpoint.__file__)'   # must print $WT/backend/src/...
+  export PY="uv run --frozen python"
+  $PY -c 'import dewpoint; print(dewpoint.__file__)'   # must print $WT/backend/src/...
   ```
-- The database tests start PostgreSQL in Docker (testcontainers) and migrate it with `uv run alembic upgrade head`;
-  run them with Docker reachable, and make `uv run` use that venv without syncing:
-  ```bash
-  UV_NO_SYNC=1 UV_PROJECT_ENVIRONMENT=/Users/tmunzer/4_dev/mist_dewpoint/backend/.venv \
-    PYTHONPATH=src:. $PY -m pytest -q -n auto tests/engine/graph
-  ```
+- The database tests start PostgreSQL in Docker (testcontainers) and migrate it with `uv run alembic upgrade head`,
+  which uses the same environment. Run them with Docker reachable: `$PY -m pytest -q -n auto tests/engine/graph`.
+  Below, `… $PY -m pytest` means that, from `$WT/backend`.
 - One test: `… $PY -m pytest -q tests/engine/graph/test_scope.py::test_name`.
-- Lint and types: `ruff format src tests && ruff check src tests` (the formatter rewraps new code; existing files
-  are already formatted); `PYTHONPATH=src $PY -m mypy src`;
-  `PYTHONPATH=src $PY -m importlinter` (the `lint-imports` entry point: `PYTHONPATH=src $PY -c 'from importlinter.cli
-  import lint_imports_command; lint_imports_command()'` if the script isn't on the path).
+- Lint and types: `uv run --frozen ruff format src tests && uv run --frozen ruff check src tests` (the formatter
+  rewraps new code; existing files are already formatted); `$PY -m mypy src`; `uv run --frozen lint-imports`.
 - The whole backend suite (`-n auto`): about the CI job's 12 minutes, so the owner is asked before it runs. It runs at
   milestone ends only; each task runs its own directories.
 - The OpenAPI document, from `$WT/backend`:
   ```bash
-  PYTHONPATH=src:. $PY -B -c 'import json; from dewpoint.apps.api.openapi import schema; print(json.dumps(schema(), indent=2, sort_keys=True))' > ../frontend/src/api/openapi.json
+  uv run --frozen dewpoint api openapi > ../frontend/src/api/openapi.json
   ```
   then, from `$WT/frontend` (after `npx -y pnpm@12.6.0 install --frozen-lockfile`, the locked packages only):
   `npx -y pnpm@12.6.0 gen:api`, `check:api`, `typecheck`, `test`.
@@ -342,7 +416,9 @@ Every command runs from the plan's worktree (see "Executing this plan"). `$WT` i
 
 ## Executing this plan
 
-- Inline in one session, with the owner's reviews at the milestone pauses; test-first, as each task's steps say.
+- Inline: one implementing agent in one session, with the owner's reviews at the milestone pauses (the engine after
+  Milestone 1, a fresh independent review at the end); test-first, as each task's steps say. The review of revision
+  1 recommends it for these tightly coupled tasks; the owner chooses.
 - The branch is settled with the owner at the start (memory: the branch point is the owner's). The default proposed:
   `feat/editor-4c2a` from `origin/main`, in its own worktree, this plan's docs branch merged into it first. A later
   main is merged in, never rebased.
@@ -392,8 +468,9 @@ entry follows its index, not its case, when cases are moved or removed.
 
 ### 4c-2a plan (2026-10-09)
 
-`docs/superpowers/plans/2026-10-09-editor-ui-4c2a-data-backend.md`, revision 1. Its rulings (1–11) are proposed,
-and join this ledger as 114 onward only when the owner accepts the plan.
+`docs/superpowers/plans/2026-10-09-editor-ui-4c2a-data-backend.md`. A review pasted in chat held revision 1
+(06962fd2) for eight defects in its code; revision 2 answers them, each with a test that fails on revision 1's code.
+Its rulings (1–11) are proposed, and join this ledger as 114 onward only when the owner accepts the plan.
 ```
 
 - [ ] **Step 2: Commit**
@@ -423,15 +500,19 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `Resolved(schema, conditional, taint=CLEAN, missing=False, nullable=False)`: `navigate` and the resolver fill
     `missing` (may be absent) and `nullable` (the value may be null); `conditional` stays `missing or nullable` where
     they're filled.
-  - `alternatives(root: Mapping[str, Any], schema: Any) -> tuple[list[Mapping[str, Any]], bool] | None`: the
-    alternatives at a position and whether it may also be null; None when unknown.
-  - `MAX_ALTERNATIVES = 64`, `MAX_UNION_DEPTH = 8`.
+  - `Way = tuple[Schema, ...]`: one way a value may match, a conjunction of schemas;
+  - `alternatives(root: Schema, schemas: Any, budget: _Budget | None = None) -> tuple[list[Way], bool] | None`: the
+    ways at a position (one schema, or a conjunction) and whether it may also be null; None when unknown or past the
+    bounds;
+  - `MAX_ALTERNATIVES = 64`, `MAX_UNION_DEPTH = 8`, `MAX_STEPS = 4096`;
+  - `json_types` reads an `allOf` as what all its members allow.
 
 - [ ] **Step 1: Write the failing tests for `navigate`**
 
 Append to `backend/tests/engine/graph/test_schemas.py` (add `import json`, `from typing import Any`,
-`from hypothesis import given, settings`, `from hypothesis import strategies as st` to its imports, and
-`MAX_ALTERNATIVES, MAX_UNION_DEPTH` to the `schemas` import):
+`from hypothesis import given, settings`, `from hypothesis import strategies as st` and
+`from dewpoint.engine.graph import schemas` to its imports, and `MAX_ALTERNATIVES, MAX_STEPS, MAX_UNION_DEPTH` to the
+`schemas` import):
 
 ```python
 # Alternatives, read together (4c-2a ruling 1; engine-core spec §4.3).
@@ -646,6 +727,62 @@ def test_never_promises_less_than_the_data_holds(data: st.DataObject) -> None:
             assert r.nullable or r.schema is None or json_types(r.schema) == {"null"}, (json.dumps(schema), path)
         elif r.schema is not None:
             assert _JSON[type(found)] in (json_types(r.schema) or {_JSON[type(found)]}), (json.dumps(schema), path)
+
+
+# The review of revision 1: what surrounds a union stays, and the whole read is bounded.
+def test_a_field_around_a_union_keeps_its_type() -> None:
+    """What surrounds a union applies to each branch beside it, never overwritten by it."""
+    around = {
+        "type": "object",
+        "properties": {"common": {"type": "string"}},
+        "required": ["common"],
+        "anyOf": [
+            {"properties": {"a": {"type": "integer"}}, "required": ["a"], "additionalProperties": False},
+            {"properties": {"b": {"type": "integer"}}, "required": ["b"], "additionalProperties": False},
+        ],
+    }
+    common = navigate(around, ["common"])
+    assert json_types(common.schema) == {"string"} and not common.conditional
+    a = navigate(around, ["a"])
+    assert json_types(a.schema) == {"integer"} and a.missing  # the other branch is closed without it
+
+
+def test_reads_every_member_of_an_all_of() -> None:
+    both = {"allOf": [{"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]},
+                      {"type": "object", "properties": {"b": {"type": "integer"}}}]}  # fmt: skip
+    assert json_types(navigate(both, ["a"]).schema) == {"string"} and not navigate(both, ["a"]).conditional
+    assert json_types(navigate(both, ["b"]).schema) == {"integer"} and navigate(both, ["b"]).missing
+    assert json_types({"allOf": [{"type": ["string", "integer"]}, {"type": "string"}]}) == {"string"}
+
+
+def _tree(depth: int, tag: str, required: bool = True) -> dict[str, Any]:
+    """Four ways at every level, each leading to its own: 4 ** depth distinct ways at the bottom."""
+    if depth == 0:
+        return {"const": tag}
+    return {"anyOf": [{"type": "object", "properties": {"x": _tree(depth - 1, f"{tag}{i}", required)},
+                       "required": ["x"] if required else []} for i in range(4)]}  # fmt: skip
+
+
+def test_bounds_the_whole_read_not_only_one_position(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert json_types(navigate(_tree(2, "t"), ["x", "x"]).schema) == {"string"}  # 16 ways: within the bound
+    spent: list[int] = []
+    real = schemas._Budget.spend
+    monkeypatch.setattr(schemas._Budget, "spend", lambda self, n=1: spent.append(n) or real(self, n))
+    assert navigate(_tree(4, "t"), ["x"] * 4).schema is None  # 256 ways: past the bound, any value
+    assert sum(spent) <= MAX_STEPS
+    spent.clear()
+    # it stops at the position where the ways pass 64
+    assert declared_optional(_tree(5, "t", required=False), ["x"] * 5) == (0, 1, 2, 3)
+    assert sum(spent) <= MAX_STEPS
+
+
+def test_merges_alternatives_that_are_the_same() -> None:
+    same = {"anyOf": [{"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]}] * 40}
+    deep: dict[str, Any] = {"type": "string"}
+    for _ in range(6):
+        deep = {"anyOf": [{"type": "object", "properties": {"x": deep}, "required": ["x"]}] * 4}
+    assert json_types(navigate(same, ["x"]).schema) == {"string"}
+    assert json_types(navigate(deep, ["x"] * 6).schema) == {"string"} and not navigate(deep, ["x"] * 6).conditional
 ```
 
 - [ ] **Step 2: Write the failing validator tests**
@@ -722,77 +859,152 @@ class Resolved:
     nullable: bool = False  # the value itself may be null
 ```
 
-Add, after `standalone`:
+In `json_types`, after the `anyOf`/`oneOf` loop and before its last `return None`, read an `allOf` as what all its
+members allow:
 
 ```python
-MAX_ALTERNATIVES = 64  # alternatives followed at one position; past it, any value
-MAX_UNION_DEPTH = 8  # unions inside unions, unfolded
-
-
-def alternatives(root: Schema, schema: Any) -> tuple[list[Schema], bool] | None:
-    """The schemas a value here may match, with unions (`anyOf`, `oneOf`, nested) unfolded and each dereferenced, and
-    whether the value may also be null. The schema around a union applies to each of its alternatives. A position that
-    is only null gives no alternative and "may be null": its reader decides (a field read from it is missing; read
-    itself, null is its value). None: unknown (a `$ref` that doesn't resolve, an alternative that isn't a schema, an
-    empty union, or past the bounds)."""
-    out: list[Schema] = []
-    nulls = 0
-    stack: list[tuple[Any, int]] = [(schema, 0)]
-    while stack:
-        current, depth = stack.pop()
-        s = _deref(root, current)
-        if s is None or depth > MAX_UNION_DEPTH:
-            return None
-        union = next((key for key in ("anyOf", "oneOf") if key in s), None)
-        if union is not None:
-            options = s[union]
-            if not isinstance(options, list) or not options:
-                return None
-            around = {k: v for k, v in s.items() if k != union}
-            for option in reversed(options):  # popped in order
-                inner = _deref(root, option)
-                if inner is None:
-                    return None
-                stack.append(({**around, **inner}, depth + 1))
-            continue
-        kind = s.get("type")
-        if kind == "null" or (isinstance(kind, list) and kind and set(kind) == {"null"}):
-            nulls += 1
-            continue
-        if isinstance(kind, list) and "null" in kind:
-            nulls += 1
-            others = [x for x in kind if x != "null"]
-            s = {**s, "type": others[0] if len(others) == 1 else others}
-        out.append(s)
-        if len(out) > MAX_ALTERNATIVES:
-            return None
-    return out, nulls > 0
+    members = s.get("allOf")
+    if isinstance(members, list):  # every member applies: what they all allow (4c-2a ruling 1)
+        common: frozenset[str] | None = None
+        for member in members:
+            types = json_types(standalone(schema, member)) if isinstance(member, Mapping) else None
+            if types is not None:
+                common = types if common is None else common & types
+        return common
 ```
 
-Replace `navigate` with:
+Then replace everything from `def navigate(` up to `def element_schema(` (that is `navigate`, `declared_optional` and
+`declared_nullable`) with:
 
 ```python
-def _step(root: Schema, schema: Schema, seg: str | int) -> tuple[Any, bool] | PathError | None:
-    """One alternative, one segment: the schema there and whether it may be absent; a PathError when this alternative
+MAX_ALTERNATIVES = 64  # ways a value may match at one position, duplicates merged; past it, any value
+MAX_UNION_DEPTH = 8  # unions and `allOf` nested in one another, unfolded
+MAX_STEPS = 4096  # schemas one read unfolds in all, every position counted; past it, any value
+Way = tuple[Schema, ...]  # one way a value may match: schemas that all apply to it (a branch, and what surrounds it)
+
+
+class _Budget:
+    """The work one read may do (4c-2a ruling 1): shared by every position it unfolds."""
+
+    def __init__(self) -> None:
+        self.left = MAX_STEPS
+
+    def spend(self, n: int = 1) -> bool:
+        self.left -= n
+        return self.left >= 0
+
+
+def _key(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, default=str)
+
+
+def _merged(ways: list[Way]) -> list[Way]:
+    return list({_key(w): w for w in ways}.values())
+
+
+def _product(left: list[Way], right: list[Way], budget: _Budget) -> list[Way] | None:
+    """Every way of both: what one allows and the other allows too (a conjunction)."""
+    if not budget.spend(len(left) * len(right)):
+        return None
+    out = _merged([a + b for a in left for b in right])
+    return out if len(out) <= MAX_ALTERNATIVES else None
+
+
+def _ways(root: Schema, schema: Any, depth: int, budget: _Budget) -> list[Way] | None:
+    """The ways a value may match `schema`, each a conjunction of schemas with no union or `allOf` left on top. The
+    schema around a union or an `allOf` is kept beside each branch, never overwritten by it."""
+    if not budget.spend():
+        return None
+    s = _deref(root, schema)
+    if s is None or depth > MAX_UNION_DEPTH:
+        return None
+    key = next((k for k in ("allOf", "anyOf", "oneOf") if k in s), None)
+    if key is None:
+        return [(s,)]
+    options = s[key]
+    if not isinstance(options, list) or not options:
+        return None
+    ways = _ways(root, {k: v for k, v in s.items() if k != key}, depth + 1, budget)
+    if ways is None:
+        return None
+    if key == "allOf":  # every member applies
+        for option in options:
+            member = _ways(root, option, depth + 1, budget)
+            ways = None if member is None else _product(ways, member, budget)
+            if ways is None:
+                return None
+        return ways
+    branches: list[Way] = []  # one of them applies
+    for option in options:
+        branch = _ways(root, option, depth + 1, budget)
+        if branch is None:
+            return None
+        branches += branch
+    return _product(ways, _merged(branches), budget)
+
+
+def _types(root: Schema, way: Way) -> frozenset[str] | None:
+    """The JSON types a value matching every schema of `way` may have; None: any."""
+    out: frozenset[str] | None = None
+    for schema in way:
+        types = json_types(standalone(root, schema))
+        if types is not None:
+            out = types if out is None else out & types
+    return out
+
+
+def alternatives(root: Schema, schemas: Any, budget: _Budget | None = None) -> tuple[list[Way], bool] | None:
+    """The ways a value matching every schema of `schemas` (one schema, or a conjunction) may match, and whether it may
+    also be null. A way only null is dropped and counted as "may be null"; one no value matches (its types
+    contradict) is dropped. A position that is only null gives no way and "may be null": its reader decides. None:
+    unknown (a `$ref` that doesn't resolve, an alternative that isn't a schema, an empty union, past the bounds)."""
+    budget = budget or _Budget()
+    ways: list[Way] = [()]
+    for schema in schemas if isinstance(schemas, tuple) else (schemas,):
+        found = _ways(root, schema, 0, budget)
+        ways = None if found is None else _product(ways, found, budget)  # type: ignore[assignment]
+        if ways is None:
+            return None
+    out: list[Way] = []
+    nulls = False
+    for way in ways:
+        types = _types(root, way)
+        if types is not None and not types:
+            continue
+        if types is not None and "null" in types:
+            nulls = True
+            if types == {"null"}:
+                continue
+            way = (*way, {"type": sorted(types - {"null"})})
+        out.append(way)
+    return out, nulls
+
+
+def _step(root: Schema, way: Way, seg: str | int) -> tuple[Way, bool] | PathError | None:
+    """One way, one segment: the schemas there (all apply) and whether it may be absent; a PathError when this way
     can't hold it; None when it says nothing about it (any value)."""
-    types = json_types(standalone(root, schema))
+    types = _types(root, way)
     if isinstance(seg, int):
         if types is not None and "array" not in types:
             return PathError(f"[{seg}] indexes a value that isn't a list")
-        items = schema.get("items")
-        if not isinstance(items, Mapping) or not items:
-            return None
-        return items, True  # the list may be shorter
-    props = schema.get("properties")
-    if isinstance(props, Mapping) and seg in props:
-        required = schema.get("required")
-        return props[seg], not (isinstance(required, list) and seg in required)
+        items = tuple(s["items"] for s in way if isinstance(s.get("items"), Mapping) and s["items"])
+        return (items, True) if items else None  # the list may be shorter
+    declared = tuple(
+        s["properties"][seg] for s in way if isinstance(s.get("properties"), Mapping) and seg in s["properties"]
+    )
+    if declared:
+        required = any(isinstance(s.get("required"), list) and seg in s["required"] for s in way)
+        return declared, not required
     if types is not None and "object" not in types:
         return PathError(f"`{seg}` reads a field of a value that isn't an object")
-    extra = schema.get("additionalProperties")
-    if isinstance(extra, Mapping) and extra:
+    extra = tuple(
+        s["additionalProperties"]
+        for s in way
+        if isinstance(s.get("additionalProperties"), Mapping) and s["additionalProperties"]
+    )
+    if extra:
         return extra, True
-    if extra is False:  # only a closed object rules the field out; otherwise it may exist
+    if any(s.get("additionalProperties") is False for s in way):  # only a closed object rules the field out
         return PathError(f"there is no field `{seg}`")
     return None
 
@@ -802,88 +1014,96 @@ def navigate(root: Any, path: Sequence[str | int], start: Any = None) -> Resolve
 
     Alternatives are followed together, on the safe side (engine-core spec §4.3; 4c-2a ruling 1): the value may be
     anything one of them allows there; it may be missing when one of them may lack it; it is any value when one of them
-    says nothing about it."""
+    says nothing about it. What surrounds a union, and every member of an `allOf`, applies to each of its branches."""
     if not isinstance(root, Mapping):
         return Resolved(None, bool(path), missing=bool(path))
-    current: list[Any] = [root if start is None else start]
+    budget = _Budget()
+    frontier: list[Way] = [(root if start is None else start,)]
     missing = False
     for seg in path:
-        found: list[Any] = []
+        found: list[Way] = []
         refused: PathError | None = None
-        for schema in current:
-            unfolded = alternatives(root, schema)
+        for position in frontier:
+            unfolded = alternatives(root, position, budget)
             if unfolded is None:
                 return Resolved(None, True, missing=True)
-            options, nullable = unfolded
+            ways, nullable = unfolded
             missing |= nullable  # a null value has no fields and no items
-            for option in options or [{"type": "null"}]:  # only null: it refuses the read, as before
-                step = _step(root, option, seg)
+            for way in ways or [({"type": "null"},)]:  # only null: it refuses the read, as before
+                step = _step(root, way, seg)
                 if step is None:
                     return Resolved(None, True, missing=True)
                 if isinstance(step, PathError):
-                    missing, refused = True, refused or step  # when the value is this alternative, it's missing
+                    missing, refused = True, refused or step  # when the value is this way, it's missing
                     continue
                 found.append(step[0])
                 missing |= step[1]
         if not found:
             raise refused or PathError(f"there is no field `{seg}`")
-        current = found
-    return _end(root, current, missing)
+        frontier = _merged(found)
+        if len(frontier) > MAX_ALTERNATIVES:
+            return Resolved(None, True, missing=True)
+    return _end(root, frontier, missing, budget)
 
 
-def _end(root: Schema, current: list[Any], missing: bool) -> Resolved:
+def _end(root: Schema, frontier: list[Way], missing: bool, budget: _Budget) -> Resolved:
     schemas: list[Schema] = []
     nullable = False
-    for schema in current:
-        if _deref(root, schema) is None:  # a boolean schema, or one that doesn't resolve: any value, as before
+    for position in frontier:
+        known = tuple(s for s in position if _deref(root, s) is not None)
+        if not known:  # a boolean schema, or one that doesn't resolve: any value, as before
             return Resolved(None, missing, missing=missing)
-        unfolded = alternatives(root, schema)
+        unfolded = alternatives(root, known, budget)
         if unfolded is None:
             return Resolved(None, True, missing=True)
-        options, maybe_null = unfolded
+        ways, maybe_null = unfolded
         nullable |= maybe_null
-        schemas += options
+        schemas += [way[0] if len(way) == 1 else {"allOf": list(way)} for way in ways]
     if not schemas:  # only null: null is its value, as before
         return Resolved(standalone(root, {"type": "null"}), missing, missing=missing)
-    unique = list({json.dumps(s, sort_keys=True, default=str): s for s in schemas}.values())
+    unique = list({_key(s): s for s in schemas}.values())
     merged = unique[0] if len(unique) == 1 else {"anyOf": unique}
     return Resolved(standalone(root, merged), missing or nullable, missing=missing, nullable=nullable)
-```
 
-Replace `declared_optional` and `declared_nullable` with:
 
-```python
 def _declared(root: Any, path: Sequence[str | int], start: Any, nullable: bool) -> tuple[int, ...]:
     """Positions in `path` of fields every alternative declares, where one of them doesn't require it (or where one of
     them says it may be null). It stops where the schema stops describing the data: a field one alternative doesn't
-    declare, an unknown schema, a list index. Open data carries no such promise (spec §4.3)."""
+    declare, an unknown schema, a list index, past the bounds. Open data carries no such promise (spec §4.3)."""
     if not isinstance(root, Mapping):
         return ()
-    current: list[Any] = [root if start is None else start]
+    budget = _Budget()
+    frontier: list[Way] = [(root if start is None else start,)]
     out: list[int] = []
     for i, seg in enumerate(path):
         if isinstance(seg, int):
             break
-        options: list[Schema] = []
-        for schema in current:
-            unfolded = alternatives(root, schema)
+        ways: list[Way] = []
+        for position in frontier:
+            unfolded = alternatives(root, position, budget)
             if unfolded is None:
                 return tuple(out)
-            options += unfolded[0]
-        fields: list[Any] = []
-        for option in options:
-            props = option.get("properties")
-            if not isinstance(props, Mapping) or seg not in props:
+            ways += unfolded[0]
+        fields: list[Way] = []
+        optional = False
+        for way in ways:
+            declared = tuple(
+                s["properties"][seg] for s in way if isinstance(s.get("properties"), Mapping) and seg in s["properties"]
+            )
+            if not declared:
                 return tuple(out)
-            fields.append(props[seg])
+            fields.append(declared)
+            optional |= not any(isinstance(s.get("required"), list) and seg in s["required"] for s in way)
         if not fields:
             return tuple(out)
         if nullable:
-            if any((found := alternatives(root, f)) is not None and found[1] for f in fields):
+            if any((found := alternatives(root, f, budget)) is not None and found[1] for f in fields):
                 out.append(i)
-        elif any(not (isinstance(o.get("required"), list) and seg in o["required"]) for o in options):
+        elif optional:
             out.append(i)
-        current = fields
+        frontier = _merged(fields)
+        if len(frontier) > MAX_ALTERNATIVES:
+            return tuple(out)
     return tuple(out)
 
 
@@ -897,7 +1117,10 @@ def declared_nullable(root: Any, path: Sequence[str | int], start: Any = None) -
     return _declared(root, path, start, nullable=True)
 ```
 
-Keep `_strip_null`: `target_schema`'s `_steps` still uses it (grep to confirm; delete nothing else).
+Keep `_strip_null`: `target_schema`'s `_steps` still uses it. A position's state is a list of ways, each a
+conjunction (`Way`): what surrounds a union stays beside each branch, never overwritten by it (the review of
+revision 1); every member of an `allOf` applies. Duplicates are merged at every position, and one budget
+(`MAX_STEPS`) bounds the whole read, `declared_optional` and `declared_nullable` included.
 
 In `backend/src/dewpoint/engine/graph/validate.py`, make the resolver carry `missing`:
 - In `_resolve_loop`, `return Resolved(None, bool(p.rest))` becomes `return Resolved(None, bool(p.rest), missing=bool(p.rest))`.
@@ -918,8 +1141,9 @@ In `docs/superpowers/specs/2026-09-25-engine-core-design.md` §4.3, insert befor
     ruling 1). A field or an index read through them may be any type one alternative allows there. It may be missing
     when one alternative may lack it (doesn't require it, is closed without it, isn't an object or a list there, its
     list may be shorter, or is null). It is any value when one alternative says nothing about it. A field no
-    alternative can hold is `ref.unknown_field`. A union with `null` makes the value nullable. CEL's guards follow
-    alternatives only where every one of them declares the field; elsewhere the data is open. `allOf` isn't read.
+    alternative can hold is `ref.unknown_field`. A union with `null` makes the value nullable. What surrounds a union
+    applies to each branch, and every member of an `allOf` applies: a field one of them declares has its schema.
+    CEL's guards follow alternatives only where every one of them declares the field; elsewhere the data is open.
 ```
 
 - [ ] **Step 6: Run the tests to see them pass, then the engine's graph tests**
@@ -933,7 +1157,7 @@ the code is wrong.
 
 - [ ] **Step 7: Lint, types, commit**
 
-Run: `ruff format src tests && ruff check src tests && PYTHONPATH=src $PY -m mypy src`
+Run: `ruff format src tests && ruff check src tests && $PY -m mypy src`
 Expected: no findings (the formatter may rewrap the new code; that's expected).
 
 ```bash
@@ -1084,8 +1308,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - in `validate.py`: `Analysis(settings, pickers, structural, structure, validator)`,
     `analyze(graph: Graph, ctx: ValidationContext) -> Analysis`, `site_of(s: Structure, node: uuid.UUID, field: str)
     -> _Site`;
-  - in `scope.py`: `Guard(kind, path, size=None)` with `.cel() -> str`; `FormulaUse(guards, sensitive)`;
-    `Entry(path, parent, name, root, step, types, format, missing, nullable, sensitive, nameable, children, formula)`;
+  - in `scope.py`: `Guard(kind, path, size=None)` with `.cel() -> str`; `FormulaUse(guards, sensitive, null_test)`;
+    `Entry(path, parent, name, root, step, types, format, missing, nullable, sensitive, nameable, children, formula,
+    problem=None)`;
     `Scope(entries=(), more=False, problem=None, unavailable=None)`;
     `scope(graph: Graph, ctx: ValidationContext, node: uuid.UUID, field: str, *, under: str | None = None,
     at: str | None = None, find: str | None = None) -> Scope`; `MAX_CHILDREN = 500`, `FIND_DEPTH = 6`,
@@ -1130,28 +1355,36 @@ INPUT: dict[str, Any] = {
         # A nullable parent (`!= null` before its fields), and unions whose alternatives aren't all objects or all
         # lists (`type(…) == map`, `type(…) == list` before a field or an index).
         "owner": {"type": ["object", "null"], "properties": {"name": {"type": "string"}}, "required": ["name"]},
-        "who": {"anyOf": [{"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
-                          {"type": "string"}]},
+        "who": {
+            "anyOf": [
+                {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
+                {"type": "string"},
+            ]
+        },
         "labels": {"anyOf": [{"type": "array", "items": {"type": "string"}}, {"type": "string"}]},
+        "nothing": {"type": "null"},  # only null: "is there" is never true
     },
-    "required": ["site", "events", "owner", "who", "labels"],
+    "required": ["site", "events", "owner", "who", "labels", "nothing"],
 }
 
 
 def graph() -> G:
-    """`c` reads everything upstream; `maybe` runs on one branch; `f` filters, `l` loops over `x`."""
+    """`c` reads everything upstream. `maybe` and the transform `t` run on one branch (`t` holds a public field and a
+    sensitive one); `f` filters, `l` loops over `x`. `token` is a sensitive variable nothing sets."""
     g = (
         G().node("get", "testkit.echo@1", {"value": 1})
         .node("devices", "mist.site_devices.list@1", {"site_id": SITE_ID})
         .node("br", "flow.if@1", {"condition": True}).node("maybe", "testkit.echo@1", {"value": 1})
+        .node("t", "flow.transform@1", {"fields": {"open": 1, "hidden": ref("trigger.secret")}})
         .node("c", "flow.if@1", {"condition": True})
         .node("f", "flow.filter@1", {"items": ref("trigger.events"), "predicate": cel("true")})
         .node("l", "flow.loop@1", {"items": ref("trigger.events")}).node("x", "testkit.echo@1", {"value": 1})
-        .edge("get", "devices").edge("devices", "br").edge("br", "maybe", port="true").edge("maybe", "c")
-        .edge("br", "c", port="false").edge("c", "f", port="true").edge("f", "l").edge("l", "x", port="body")
+        .edge("get", "devices").edge("devices", "br").edge("br", "maybe", port="true").edge("maybe", "t")
+        .edge("t", "c").edge("br", "c", port="false").edge("c", "f", port="true").edge("f", "l")
+        .edge("l", "x", port="body")
     )  # fmt: skip
-    count = {"type": "integer", "default": 0}
-    g.settings = {"input_schema": INPUT, "vars_schema": {"type": "object", "properties": {"count": count}}}
+    variables = {"count": {"type": "integer", "default": 0}, "token": {"type": "string", "x-sensitive": True}}
+    g.settings = {"input_schema": INPUT, "vars_schema": {"type": "object", "properties": variables}}
     return g
 
 
@@ -1245,6 +1478,33 @@ def test_says_why_there_is_no_scope() -> None:
     )
     loop = G().node("a", "testkit.echo@1").node("b", "testkit.echo@1").edge("a", "b").edge("b", "a")
     assert scope(loop.build(), CTX, nid("a"), "/value").unavailable is not None  # a cycle stops the analysis
+
+
+def test_says_why_a_variable_not_yet_set_cant_be_read() -> None:
+    """A sensitive variable without a default is null until a step sets it; its type refuses null. No default and no
+    guard can make that read valid, so the entry carries validation's own problem and offers no formula."""
+    token = by_path(at("c", "/condition"))["vars.token"]
+    assert token.problem is not None and token.problem.code == "vars.unassigned" and token.formula is None
+    assert by_path(at("c", "/condition"))["vars.count"].problem is None
+
+
+def test_an_availability_guard_reads_no_data() -> None:
+    """`has(steps.t.output)` asks whether `t` ran (the run's shape), so a public field stays public beside a sensitive
+    one."""
+    under = by_path(at("c", "/condition", under="steps.t.output"))
+    public, hidden = under["steps.t.output.open"], under["steps.t.output.hidden"]
+    assert public.formula is not None and [g.cel() for g in public.formula.guards] == ["has(steps.t.output)"]
+    assert not public.sensitive and not public.formula.sensitive
+    assert hidden.sensitive and hidden.formula is not None and hidden.formula.sensitive
+
+
+def test_tests_null_where_a_value_may_be_null_untyped_or_only_null() -> None:
+    entries = by_path(at("c", "/condition"))
+    assert entries["trigger.nothing"].formula.null_test  # type: ignore[union-attr]  # only null
+    assert entries["trigger.note"].formula.null_test  # type: ignore[union-attr]  # may be null
+    assert entries["steps.get.output.value"].formula.null_test  # type: ignore[union-attr]  # untyped
+    assert not entries["trigger.site"].formula.null_test  # type: ignore[union-attr]
+    assert not entries["steps.devices.output.results"].formula.null_test  # type: ignore[union-attr]  # `list != null`
 ```
 
 - [ ] **Step 2: Run them to see them fail**
@@ -1403,7 +1663,8 @@ class Guard:
 @dataclass(frozen=True)
 class FormulaUse:
     guards: tuple[Guard, ...]
-    sensitive: bool  # a formula reading it reads sensitive data: through an index, the whole list (ruling 7)
+    sensitive: bool  # a formula reading it, with its guards, reads sensitive data (ruling 7)
+    null_test: bool  # "is there" also tests `!= null`: it may be null, is untyped, or is only null (ruling 6)
 
 
 @dataclass(frozen=True)
@@ -1420,7 +1681,8 @@ class Entry:
     sensitive: bool  # a reference to it holds sensitive data (engine 2b spec §4.1)
     nameable: bool  # a reference can name it; false for a key like `ap-name`, shown disabled
     children: bool
-    formula: FormulaUse | None  # None when CEL can't select one of its fields (`in`, `null`, …)
+    formula: FormulaUse | None  # None when CEL can't select one of its fields (`in`, `null`, …), or `problem` is set
+    problem: Diagnostic | None = None  # why reading it here is refused, as validation says it (`vars.unassigned`)
 
 
 @dataclass(frozen=True)
@@ -1513,15 +1775,25 @@ class _Reader:
 
     # ---- entries --------------------------------------------------------------------------------------------
 
+    def reported(self, p: RefPath) -> tuple[Resolved | None, list[Diagnostic]]:
+        """The resolver's answer and what it reports (`vars.unassigned`, `ref.unknown_step`, …), leaving none behind."""
+        mark = len(self.v.diags)
+        r = self.v._resolve(self.site, p)
+        problems = self.v.diags[mark:]
+        del self.v.diags[mark:]
+        return r, problems
+
     def entry(self, text: str) -> Entry | None:
-        found = self.resolve(text)
-        if found is None:
+        try:
+            p = parse_ref(text)
+        except RefSyntaxError:
             return None
-        p, r = found
+        r, problems = self.reported(p)
+        if r is None:
+            return None
         parent, name = _split(p)
         types = json_types(r.schema)
         fmt = r.schema.get("format") if r.schema is not None else None
-        unset = p.root == "vars" and p.name in self.v.unset and not self.v._set_before(self.site, str(p.name))
         return Entry(
             path=text,
             parent=parent,
@@ -1530,12 +1802,13 @@ class _Reader:
             step=self._step(p),
             types=tuple(sorted(types)) if types is not None and types <= JSON_TYPES else (),
             format=fmt if isinstance(fmt, str) else None,
-            missing=r.missing or unset,
+            missing=r.missing,
             nullable=r.nullable,
             sensitive=r.taint.tainted,
             nameable=True,
             children=bool(self.child_names(r.schema)),
-            formula=self.formula(p),
+            formula=None if problems else self.formula(p),
+            problem=problems[0] if problems else None,
         )
 
     def _step(self, p: RefPath) -> str | None:
@@ -1550,13 +1823,14 @@ class _Reader:
         if unfolded is None:
             return []
         names: dict[str | int, None] = {}
-        for option in unfolded[0]:
-            props = option.get("properties")
-            if isinstance(props, dict):
-                names.update(dict.fromkeys(k for k in props if isinstance(k, str)))
-            items = option.get("items")
-            if isinstance(items, dict) and items:
-                names[0] = None
+        for way in unfolded[0]:
+            for part in way:
+                props = part.get("properties")
+                if isinstance(props, dict):
+                    names.update(dict.fromkeys(k for k in props if isinstance(k, str)))
+                items = part.get("items")
+                if isinstance(items, dict) and items:
+                    names[0] = None
         return list(names)
 
     def child(self, parent: str, name: str | int) -> Entry | None:
@@ -1615,14 +1889,11 @@ class _Reader:
             p = parse_ref(text)
         except RefSyntaxError as e:
             return Scope(problem=Diagnostic(code="value.syntax", message=f"`{text}`: {e}"))
-        mark = len(self.v.diags)
-        r = self.v._resolve(self.site, p)  # reported: its problem is the validator's own
-        problems = self.v.diags[mark:]
-        del self.v.diags[mark:]
+        r, problems = self.reported(p)  # its problem is the validator's own
         if r is None:
             return Scope(problem=problems[0] if problems else None)
         entry = self.entry(text)
-        return Scope((entry,) if entry is not None else ())
+        return Scope((entry,) if entry is not None else (), problem=problems[0] if problems else None)
 
     def find(self, text: str) -> Scope:
         needle = text.casefold()
@@ -1682,8 +1953,15 @@ class _Reader:
             if isinstance(seg, str) and step.missing:
                 guards.append(Guard("present", path))  # never on a list always there: it isn't missing
             schema, nullable, prefix = step.schema, step.nullable, path
-        reads = {p.text, *(g.path for g in guards)}
-        return FormulaUse(tuple(guards), any(self.reads_sensitive(parse_ref(text)) for text in reads))
+        # `has(steps.k.output)` reads the run's shape (whether the step ran), never the output (cel_check's `shape`).
+        reads = {
+            p.text,
+            *(g.path for g in guards if not (g.kind == "present" and g.path == head and p.root == "steps")),
+        }
+        sensitive = any(self.reads_sensitive(parse_ref(text)) for text in reads)
+        types = json_types(whole.schema) if not p.rest else json_types(schema)
+        null_test = nullable or types is None or types == frozenset({"null"})
+        return FormulaUse(tuple(guards), sensitive, null_test)
 
     def reads_sensitive(self, p: RefPath) -> bool:
         """Whether a formula reading `p` reads sensitive data: CEL's chain stops at the first index, so through one it
@@ -1696,9 +1974,13 @@ class _Reader:
 ```
 
 Notes for the executor:
-- `_split` must give `trigger.events` for `trigger.events[0]` and `steps.a.output` for `steps.a.output.x`; the test
-  `test_at_answers_one_path…` and the entries' `parent` hold it. If the arithmetic is off by one, fix it test-first
-  (a unit test of `_split` is welcome).
+- `_split` gives `trigger.events` for `trigger.events[0]` and `steps.a.output` for `steps.a.output.x`; the entries'
+  `parent` in `test_at_answers_one_path…` holds it.
+- An entry is resolved as validation resolves it (`reported`): what the resolver reports there (`vars.unassigned`)
+  becomes the entry's `problem`, and such an entry offers no formula. No default and no guard can make that read
+  valid (the review of revision 1).
+- `has(steps.k.output)` reads the run's shape, never the output (`cel_check._references`' `shape`), so it adds no
+  sensitivity; every other guard reads its operand.
 - `reads_sensitive`'s rule is pinned against validation by Task 5. If Task 5 shows a mismatch, the rule changes to
   match validation, never the reverse.
 - mypy's `type: ignore` comments are only where `parse_ref`'s `str` meets `Root`; prefer a `cast(Root, p.root)` if
@@ -1707,12 +1989,12 @@ Notes for the executor:
 - [ ] **Step 5: Run the tests to see them pass**
 
 Run: `… $PY -m pytest -q tests/engine/graph/test_scope.py`
-Expected: PASS, 11 tests.
+Expected: PASS, 14 tests.
 
 - [ ] **Step 6: The engine's graph tests, lint, types, imports; commit**
 
 Run: `… $PY -m pytest -q -n auto tests/engine/graph`, `ruff format src tests && ruff check src tests`,
-`PYTHONPATH=src $PY -m mypy src`, the import linter.
+`$PY -m mypy src`, the import linter.
 Expected: PASS; no findings (the engine still imports neither `core` nor `apps`).
 
 ```bash
@@ -1821,10 +2103,10 @@ def test_every_guarded_read_publishes_without_a_guard_problem() -> None:
 
 
 def there(e: Entry) -> str:
-    """"is there" (4c-2a ruling 6): the guards, and not null where it may be null or is untyped."""
+    """ "is there" (4c-2a ruling 6): the guards, and not null where it may be null or is untyped."""
     assert e.formula is not None
     tests = [g.cel() for g in e.formula.guards]
-    if e.nullable or not e.types:
+    if e.formula.null_test:
         tests.append(f"{e.path} != null")
     return " && ".join(tests) or "true"
 
@@ -1917,6 +2199,13 @@ def test_a_guarded_read_is_never_an_error_at_run_time(data: st.DataObject) -> No
     for path, program in programs():
         result = evaluate(program, bindings)
         assert result.kind == "value", (path, result.message)
+
+
+def test_is_there_is_false_for_a_value_only_null() -> None:
+    nothing = next(e for e in entries() if e.path == "trigger.nothing")
+    program = compile_checked(there(nothing), _DECLS)
+    result = evaluate(program, {"trigger": {"nothing": None}, "steps": {}, "vars": {}, "loops": {}, "run": {}})
+    assert (result.kind, result.value) == ("value", False)
 ```
 
 Check before running: `evaluate`'s and `compile_checked`'s signatures in `engine/cel/runtime.py` (the 4c-2 mockup
@@ -2075,7 +2364,6 @@ Create `backend/tests/apps/api/test_draft_data.py`:
 # SPDX-License-Identifier: Apache-2.0
 """The editor's data routes (B6, B7; 4c-2a rulings 4–10): what a field can read, and a step's newest sample."""
 
-import json
 import uuid
 from typing import Any
 
@@ -2110,8 +2398,12 @@ async def test_answers_what_a_field_can_read(app, owner_sessionmaker, api_settin
     assert value["step"] == str(nid("a")) and value["nameable"] and value["types"] == []  # the echo's value: any
     # Data the schema doesn't describe counts as sensitive (engine 2b spec §4.1), so a formula on it would need
     # declassifying; `a` always runs before `c`, so nothing guards it.
-    assert value["sensitive"] and value["formula"] == {"guards": [], "sensitive": True}
-    assert next(e for e in body["entries"] if e["path"] == "run.now")["formula"] == {"guards": [], "sensitive": False}
+    assert value["sensitive"] and value["formula"] == {"guards": [], "sensitive": True, "null_test": True}
+    assert next(e for e in body["entries"] if e["path"] == "run.now")["formula"] == {
+        "guards": [],
+        "sensitive": False,
+        "null_test": False,
+    }
 
 
 async def test_a_viewer_reads_the_scope_too(app, owner_sessionmaker, api_settings) -> None:
@@ -2239,14 +2531,18 @@ def scope_answer(found: scopes.Scope) -> dict[str, object]:
     return {
         "state": "unavailable" if found.unavailable is not None else "ok",
         "reason": found.unavailable,
-        "entries": [dataclasses.asdict(e) for e in found.entries],
+        "entries": [
+            {**dataclasses.asdict(e), "problem": e.problem.to_json() if e.problem is not None else None}
+            for e in found.entries
+        ],
         "more": found.more,
         "problem": found.problem.to_json() if found.problem is not None else None,
     }
 ```
 
 (Add `import dataclasses`. `dataclasses.asdict` keeps the tuples of `types` and `guards` as tuples, which the
-response model accepts as lists; it drops `Guard.cel`, a method.)
+response model accepts as lists; it drops `Guard.cel`, a method. An entry's `problem` is a `Diagnostic`, whose node is
+a UUID: it goes out through `Diagnostic.to_json`, as validate's diagnostics do.)
 
 - [ ] **Step 4: Name the answer**
 
@@ -2265,6 +2561,7 @@ class GuardOut(_Answer):
 class FormulaUseOut(_Answer):
     guards: list[GuardOut]
     sensitive: bool  # a formula reading it, with its guards, reads sensitive data (4c-2a ruling 7)
+    null_test: bool  # "is there" also tests `!= null`: it may be null, is untyped, or is only null (ruling 6)
 
 
 class ScopeEntryOut(_Answer):
@@ -2280,7 +2577,8 @@ class ScopeEntryOut(_Answer):
     sensitive: bool
     nameable: bool  # false: a key a reference can't name, shown disabled
     children: bool
-    formula: FormulaUseOut | None  # null: CEL can't select one of its fields
+    formula: FormulaUseOut | None  # null: CEL can't select one of its fields, or `problem` refuses the read
+    problem: DiagnosticOut | None  # why reading it here is refused, as validation says it (`vars.unassigned`)
 
 
 class ScopeOut(_Answer):
@@ -2376,8 +2674,9 @@ clean; commit it (`docs(editor-4): 4c-2a milestone 2`). No pause: Milestone 3 fo
 **Interfaces:**
 - Consumes: nothing.
 - Produces: table `run_step_connections (tenant_id, run_id, step_id, iteration_key, attempt, connection_id, type,
-  name, revision, context, opened_at)`, primary key `(run_id, step_id, iteration_key, attempt, connection_id)`; model
-  `RunStepConnection`; index `runs_workflow_recent (workflow_id, queued_at DESC, id DESC)`.
+  name, revision, context, opened_at)`, primary key `(run_id, step_id, iteration_key, attempt, connection_id,
+  revision)`; model `RunStepConnection`; index `runs_workflow_ended (workflow_id, ended_at DESC, id DESC) WHERE ended_at
+  IS NOT NULL`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2503,7 +2802,8 @@ A connection keeps its id while its config changes (`connections.revision`), so 
 from the graph: the worker records its id, type, name, revision and non-secret config when an attempt opens it. No
 foreign key to `connections`, which can be deleted; the record goes with its run.
 
-Also `runs_workflow_recent`, for a step's newest sample among every kind of run of a workflow (4c-2a ruling 9).
+Also `runs_workflow_ended`, a workflow's ended runs, newest first: where a step's newest sample is looked for
+(4c-2a ruling 9).
 
 Slot 0045 is the owner's reservation for B7 (the editor-ui-4 ledger); slot numbers name ownership, not order, so it is
 chained after main's head when it was written, 0047."""
@@ -2540,7 +2840,7 @@ def upgrade() -> None:
         sa.Column("connection_id", pg.UUID(as_uuid=True), primary_key=True),
         sa.Column("type", sa.String(64), nullable=False),
         sa.Column("name", sa.String(100), nullable=False),
-        sa.Column("revision", sa.Integer, nullable=False),
+        sa.Column("revision", sa.Integer, primary_key=True),  # each revision an attempt opened (ruling 8)
         sa.Column("context", pg.JSONB, nullable=False, server_default=sa.text("'{}'::jsonb")),
         sa.Column("opened_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
         sa.ForeignKeyConstraint(
@@ -2549,11 +2849,16 @@ def upgrade() -> None:
     )
     for statement in ACCESS:
         op.execute(statement)
-    op.create_index("runs_workflow_recent", "runs", ["workflow_id", sa.text("queued_at DESC"), sa.text("id DESC")])
+    op.create_index(
+        "runs_workflow_ended",
+        "runs",
+        ["workflow_id", sa.text("ended_at DESC"), sa.text("id DESC")],
+        postgresql_where=sa.text("ended_at IS NOT NULL"),
+    )
 
 
 def downgrade() -> None:
-    op.drop_index("runs_workflow_recent", table_name="runs")
+    op.drop_index("runs_workflow_ended", table_name="runs")
     op.drop_table("run_step_connections")
 ```
 
@@ -2583,7 +2888,7 @@ class RunStepConnection(Base):
     connection_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)  # no key: may be deleted
     type: Mapped[str] = mapped_column(String(64))
     name: Mapped[str] = mapped_column(String(100))
-    revision: Mapped[int] = mapped_column(Integer)
+    revision: Mapped[int] = mapped_column(Integer, primary_key=True)  # each revision an attempt opened
     context: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))  # its non-secret config
     opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 ```
@@ -2702,6 +3007,32 @@ async def test_a_simulated_attempt_records_nothing(owner_sessionmaker, worker_se
         await attempt.connection(cid)
     await attempt.aclose()
     assert await _records(owner_sessionmaker) == []
+
+
+async def test_records_each_revision_an_attempt_opens(owner_sessionmaker, worker_sessionmaker) -> None:
+    """A connection changed between two opens in one attempt: the attempt used both revisions, and says so."""
+    tenant = uuid.uuid4()
+    await seed_step(owner_sessionmaker, named=[None], tenant=tenant)
+    cid = await add_connection(owner_sessionmaker, tenant, config={"base_url": "https://dewpoint.test:1"})
+    seeded = await seed_step(owner_sessionmaker, named=[cid], tenant=tenant, node_type="testkit.http_call@1")
+    network = Network(guard=guard({}, []), connections=DbConnections(worker_sessionmaker),
+                      sessionmaker=worker_sessionmaker, keys=FixtureKeys(), types=types_for_testkit())  # fmt: skip
+
+    async def remember(*_: Any) -> None:
+        return None
+
+    attempt = network.attempt(
+        tenant_id=tenant, run_id=seeded.run, step_id=seeded.step, root_run_id=seeded.run, node=HttpCall,
+        simulated=False, remember=remember, beat=lambda: None,
+    )  # fmt: skip
+    try:
+        await attempt.connection(cid)
+        async with owner_sessionmaker() as s, s.begin():
+            await s.execute(text("update connections set revision = 2 where id = :c"), {"c": cid})
+        await attempt.connection(cid)
+    finally:
+        await attempt.aclose()
+    assert sorted(r["revision"] for r in await _records(owner_sessionmaker)) == [1, 2]
 ```
 
 `Network`'s `ssl_context` defaults to None, and `guard(answers, entries=…)` is `tests/support/netfakes.py`'s: neither
@@ -2709,7 +3040,7 @@ attempt here sends anything.
 
 - [ ] **Step 2: Run them to see them fail**
 
-Run: `… $PY -m pytest -q tests/apps/worker/test_activities_network.py -k "record or twice or simulated"`
+Run: `… $PY -m pytest -q tests/apps/worker/test_activities_network.py -k "record or twice or simulated or revision"`
 Expected: FAIL: no rows; `Network.attempt()` takes no `iteration_key`.
 
 - [ ] **Step 3: Write the record**
@@ -2802,14 +3133,16 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   `backend/tests/apps/api/test_openapi.py`
 
 **Interfaces:**
-- Consumes: `RunStepConnection`, `runs_workflow_recent` (Task 8); the worker's records (Task 9).
+- Consumes: `RunStepConnection`, `runs_workflow_ended` (Task 8); the worker's records (Task 9); the node types'
+  manifests (`core/plugins/registry.load_node_types`) for a step's connection fields.
 - Produces:
   - `samples.SCAN_RUNS = 200`; `samples.UsedConnection(connection_id, type, name, revision, current_revision,
     context)` with `.state -> Literal["unchanged", "changed", "deleted"]`; `samples.Sample(run_id, run_kind, mode,
     version_id, version_number, iteration_key, attempt, captured_at, output, node, connections, names_connection)`;
-  - `samples.newest(s, tenant_id, workflow_id, step_id, *, iteration_key: str | None, at: Cutoff) -> Sample | None`;
+  - `samples.Search(sample: Sample | None, searched: int)`;
+  - `samples.newest(s, tenant_id, workflow_id, step_id, *, iteration_key: str | None, at: Cutoff) -> Search`;
   - `GET /api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/samples?node=[&iteration=]` → `SamplesOut
-    {draft_revision, node, sample}`.
+    {draft_revision, node, sample, searched_runs, search_limit}`.
 
 - [ ] **Step 1: Write the failing core tests**
 
@@ -2825,14 +3158,21 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import pytest
 from sqlalchemy import text
 
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.retention.cutoff import cutoff
 from dewpoint.core.runs import samples
 from tests.support.connections import Seeded, add_connection, seed_step
+from tests.support.registry import sync_test_plugins
 
 NOW = datetime.now(UTC)
+
+
+@pytest.fixture(autouse=True)
+async def synced(admin_sessionmaker) -> None:
+    await sync_test_plugins(admin_sessionmaker)  # a step's connection fields come from its type (ruling 10)
 
 
 async def _run(
@@ -2855,25 +3195,31 @@ async def _run(
     return run
 
 
-async def _row(owner: Any, seeded: Seeded, run: uuid.UUID, *, iteration: str = "", attempt: int = 1,
-               status: str = "succeeded", output: Any = None) -> None:  # fmt: skip
+async def _row(
+    owner: Any, seeded: Seeded, run: uuid.UUID, *, iteration: str = "", attempt: int = 1, status: str = "succeeded",
+    output: Any = None, ended: datetime | None = None,
+) -> None:  # fmt: skip
     async with owner() as s, s.begin():
         await s.execute(
             text(
                 "insert into run_steps (tenant_id, run_id, step_id, iteration_key, attempt, node_key, status, "
                 "ended_at, output_preview) values (:t, :r, :s, :i, :a, 'call', :st, :e, cast(:o as jsonb))"
             ),
-            {"t": seeded.tenant, "r": run, "s": seeded.step, "i": iteration, "a": attempt, "st": status, "e": NOW,
-             "o": json.dumps(output if output is not None else {"n": attempt})},
+            {"t": seeded.tenant, "r": run, "s": seeded.step, "i": iteration, "a": attempt, "st": status,
+             "e": ended or NOW, "o": json.dumps(output if output is not None else {"n": attempt})},
         )  # fmt: skip
 
 
-async def _newest(api: Any, seeded: Seeded, iteration: str | None = None) -> samples.Sample | None:
+async def _search(api: Any, seeded: Seeded, iteration: str | None = None) -> samples.Search:
     async with api() as s, s.begin():
         await tenant_scope(s, seeded.tenant)
         wf = (await s.execute(text("select workflow_id from runs where id = :r"), {"r": seeded.run})).scalar_one()
         return await samples.newest(s, seeded.tenant, wf, seeded.step, iteration_key=iteration,
                                     at=await cutoff(s, seeded.tenant))  # fmt: skip
+
+
+async def _newest(api: Any, seeded: Seeded, iteration: str | None = None) -> samples.Sample | None:
+    return (await _search(api, seeded, iteration)).sample
 
 
 async def test_takes_the_newest_succeeded_row_of_an_ended_run(owner_sessionmaker, api_sessionmaker) -> None:
@@ -2932,8 +3278,11 @@ async def test_never_answers_another_tenants_run(owner_sessionmaker, api_session
     async with api_sessionmaker() as s, s.begin():
         await tenant_scope(s, mine.tenant)
         at = await cutoff(s, mine.tenant)
-        for tenant in (mine.tenant, theirs.tenant):  # their ids, asked from my tenant: row-level security and the filter
-            assert await samples.newest(s, tenant, their_wf, theirs.step, iteration_key=None, at=at) is None
+        for tenant in (
+            mine.tenant,
+            theirs.tenant,
+        ):  # their ids, asked from my tenant: row-level security and the filter
+            assert (await samples.newest(s, tenant, their_wf, theirs.step, iteration_key=None, at=at)).sample is None
     assert await _newest(api_sessionmaker, theirs) is not None  # and from theirs, it's there
 
 
@@ -2958,6 +3307,79 @@ async def test_says_what_each_connection_is_now(owner_sessionmaker, api_sessionm
     assert found is not None
     states = {c.connection_id: (c.state, c.name) for c in found.connections}
     assert states == {same: ("unchanged", "Renamed too"), changed: ("changed", "Renamed"), gone: ("deleted", "Then")}
+
+
+async def _ended_runs(owner: Any, seeded: Seeded, n: int, *, ended: bool = True) -> None:
+    """`n` newer runs of the workflow without the step: ended a second apart, or not ended at all."""
+    async with owner() as s, s.begin():
+        wf = (await s.execute(text("select workflow_id from runs where id = :r"), {"r": seeded.run})).scalar_one()
+        await s.execute(
+            text(
+                "insert into runs (id, tenant_id, workflow_id, workflow_version_id, mode, status, queued_at, ended_at) "
+                "select gen_random_uuid(), :t, :w, :v, 'live', 'succeeded', now(), "
+                "case when :ended then now() - make_interval(secs => n) end from generate_series(1, :n) as n"
+            ),
+            {"t": seeded.tenant, "w": wf, "v": seeded.version, "n": n, "ended": ended},
+        )
+
+
+async def test_takes_the_newest_captured_row_not_the_newest_run(owner_sessionmaker, api_sessionmaker) -> None:
+    """B7's "newest succeeded row": a run that ended later may hold an older row."""
+    seeded = await seed_step(owner_sessionmaker, named=[None])
+    later, earlier = await _run(owner_sessionmaker, seeded, ago=1), await _run(owner_sessionmaker, seeded, ago=5)
+    await _row(owner_sessionmaker, seeded, later, output={"v": "older row"}, ended=NOW - timedelta(minutes=60))
+    await _row(owner_sessionmaker, seeded, earlier, output={"v": "newer row"}, ended=NOW - timedelta(minutes=2))
+    found = await _newest(api_sessionmaker, seeded)
+    assert found is not None and found.output == {"v": "newer row"}
+
+
+async def test_runs_that_havent_ended_never_fill_the_window(owner_sessionmaker, api_sessionmaker) -> None:
+    seeded = await seed_step(owner_sessionmaker, named=[None])
+    await _row(owner_sessionmaker, seeded, await _run(owner_sessionmaker, seeded, ago=10))
+    await _ended_runs(owner_sessionmaker, seeded, samples.SCAN_RUNS, ended=False)  # newer, but no end recorded
+    search = await _search(api_sessionmaker, seeded)
+    assert search.sample is not None and search.searched == 1
+
+
+async def test_says_how_many_runs_it_searched(owner_sessionmaker, api_sessionmaker) -> None:
+    seeded = await seed_step(owner_sessionmaker, named=[None])
+    await _row(owner_sessionmaker, seeded, await _run(owner_sessionmaker, seeded, ago=60))  # older than all below
+    await _ended_runs(owner_sessionmaker, seeded, samples.SCAN_RUNS)
+    search = await _search(api_sessionmaker, seeded)
+    assert search.sample is None and search.searched == samples.SCAN_RUNS  # none in the window, not "never"
+
+
+async def test_names_a_connection_only_through_a_field_its_type_marks(owner_sessionmaker, api_sessionmaker) -> None:
+    """The worker's own rule: a connection field of the step's type. Text that happens to hold an id isn't one."""
+    seeded = await seed_step(owner_sessionmaker, named=[None])
+    cid = await add_connection(owner_sessionmaker, seeded.tenant)
+    named = await seed_step(owner_sessionmaker, named=[cid], tenant=seeded.tenant)  # `call` names it, as http_call does
+    version = uuid.uuid4()
+    echo = {"id": str(seeded.step), "key": "call", "type": "testkit.echo@1", "config": {"value": str(cid)}}
+    async with owner_sessionmaker() as s, s.begin():
+        wf = (await s.execute(text("select workflow_id from runs where id = :r"), {"r": seeded.run})).scalar_one()
+        await s.execute(
+            text(
+                "insert into workflow_versions (id, tenant_id, workflow_id, number, graph, node_refs, engine_abi, "
+                "cel_profile, input_schema, output_schema, vars_schema, closure_version_ids, closure_workflow_ids, "
+                "closure_node_refs, closure_cel_profiles, closure_depth, graph_hash, version_hash, connection_ids) "
+                "select :v, tenant_id, workflow_id, 2, cast(:g as jsonb), node_refs, engine_abi, cel_profile, "
+                "input_schema, output_schema, vars_schema, array[cast(:v as uuid)], closure_workflow_ids, "
+                "closure_node_refs, closure_cel_profiles, closure_depth, 'h2', 'h2', array[cast(:c as uuid)] "
+                "from workflow_versions where id = :old"
+            ),
+            {"v": version, "g": json.dumps({"graph_format": 1, "nodes": [echo], "edges": []}), "c": cid,
+             "old": seeded.version},
+        )  # fmt: skip
+        await s.execute(text("insert into runs (id, tenant_id, workflow_id, workflow_version_id, mode, status, "
+                             "ended_at) values (:r, :t, :w, :v, 'live', 'succeeded', now())"),
+                        {"r": (run := uuid.uuid4()), "t": seeded.tenant, "w": wf, "v": version})  # fmt: skip
+    await _row(owner_sessionmaker, seeded, run)
+    found = await _newest(api_sessionmaker, seeded)
+    assert found is not None and found.node is not None and not found.names_connection
+    await _row(owner_sessionmaker, named, await _run(owner_sessionmaker, named))
+    their = await _newest(api_sessionmaker, named)
+    assert their is not None and their.names_connection
 ```
 
 `seed_step` gives a run whose status is `running`; `_run` adds ended ones. Check before running: the `Seeded` export from
@@ -2978,7 +3400,10 @@ Create `backend/src/dewpoint/core/runs/samples.py`:
 # SPDX-License-Identifier: Apache-2.0
 """A step's newest sample (sub-project 4, B7; 4c-2a rulings 9, 10): the preview of its output in an ended run of its
 workflow, with the version it ran as and the connections it opened, so the editor can say whether it still
-represents the draft. Only API reads use it, within the tenant's retention (core/retention/cutoff.py)."""
+represents the draft. Only API reads use it, within the tenant's retention (core/retention/cutoff.py).
+
+The search is bounded: the newest SCAN_RUNS ended runs of the workflow. So "no sample" means none there, which the
+answer says by how many runs it searched."""
 
 import uuid
 from collections.abc import Mapping
@@ -2994,7 +3419,9 @@ from sqlalchemy.orm import aliased
 from dewpoint.core.models.connections import Connection
 from dewpoint.core.models.runs import Run, RunStep, RunStepConnection
 from dewpoint.core.models.workflows import WorkflowVersion
+from dewpoint.core.plugins import registry
 from dewpoint.core.retention.cutoff import Cutoff, kept
+from dewpoint.sdk.fields import CONNECTION
 
 SCAN_RUNS = 200  # the newest ended runs of a workflow a sample is looked for in (ruling 9)
 
@@ -3027,8 +3454,14 @@ class Sample:
     captured_at: datetime | None
     output: Any  # the stored preview: redacted and cut where it was (engine-core spec §8)
     node: Mapping[str, Any] | None  # the step as its version wrote it
-    connections: tuple[UsedConnection, ...]
-    names_connection: bool  # the step, as its version wrote it, names one of the version's connections
+    connections: tuple[UsedConnection, ...]  # one per connection and revision the attempt opened
+    names_connection: bool  # the step, as its version wrote it, names a connection in a field its type marks for one
+
+
+@dataclass(frozen=True)
+class Search:
+    sample: Sample | None
+    searched: int  # the ended runs looked in, at most SCAN_RUNS
 
 
 async def newest(
@@ -3039,17 +3472,18 @@ async def newest(
     *,
     iteration_key: str | None,
     at: Cutoff,
-) -> Sample | None:
+) -> Search:
     root = aliased(Run)
-    candidates = (
-        select(Run.id, Run.kind, Run.mode, Run.workflow_version_id, Run.queued_at)
+    candidates = (  # ended ones only, before the limit: a run still going never takes a place (the review's P2)
+        select(Run.id, Run.kind, Run.mode, Run.workflow_version_id, Run.ended_at)
         .join(root, (root.id == Run.root_run_id) & (root.tenant_id == Run.tenant_id))
-        .where(Run.tenant_id == tenant_id, Run.workflow_id == workflow_id, Run.status != "running")
-        .where(kept(root.ended_at, at))
-        .order_by(Run.queued_at.desc(), Run.id.desc())
+        .where(Run.tenant_id == tenant_id, Run.workflow_id == workflow_id)
+        .where(Run.status != "running", Run.ended_at.is_not(None), kept(root.ended_at, at))
+        .order_by(Run.ended_at.desc(), Run.id.desc())
         .limit(SCAN_RUNS)
         .subquery("candidates")
     )
+    searched = await s.scalar(select(func.count()).select_from(candidates)) or 0
     # "l:3/m:10" → {3,10}: the first iteration is the lowest index, by number (`l:2` before `l:10`).
     number = cast(
         func.string_to_array(func.regexp_replace(RunStep.iteration_key, "[a-z][a-z0-9_]*:", "", "g"), "/"),
@@ -3076,12 +3510,13 @@ async def newest(
             )
             .select_from(candidates)
             .join(picked, true())
-            .order_by(candidates.c.queued_at.desc(), candidates.c.id.desc())
+            # the newest captured: the row's end first, then its run's (B7's "newest succeeded row")
+            .order_by(picked.c.ended_at.desc().nulls_last(), candidates.c.ended_at.desc(), candidates.c.id.desc())
             .limit(1)
         )
     ).first()  # fmt: skip
     if found is None:
-        return None
+        return Search(None, searched)
     version = (
         await s.execute(
             select(WorkflowVersion.number, WorkflowVersion.graph, WorkflowVersion.connection_ids).where(
@@ -3091,9 +3526,6 @@ async def newest(
     ).one()
     nodes = version.graph.get("nodes", []) if isinstance(version.graph, dict) else []
     node = next((n for n in nodes if isinstance(n, dict) and n.get("id") == str(step_id)), None)
-    recorded = {str(c) for c in version.connection_ids or ()}
-    written = node.get("config") if node is not None else None
-    config: dict[str, Any] = written if isinstance(written, dict) else {}
     used = await s.execute(
         select(
             RunStepConnection.connection_id, RunStepConnection.type, RunStepConnection.name,
@@ -3108,26 +3540,50 @@ async def newest(
             RunStepConnection.run_id == found.id, RunStepConnection.step_id == step_id,
             RunStepConnection.iteration_key == found.iteration_key, RunStepConnection.attempt == found.attempt,
         )
-        .order_by(RunStepConnection.connection_id)
+        .order_by(RunStepConnection.connection_id, RunStepConnection.revision)
     )  # fmt: skip
-    return Sample(
-        run_id=found.id,
-        run_kind=found.kind,
-        mode=found.mode,
-        version_id=found.workflow_version_id,
-        version_number=version.number,
-        iteration_key=found.iteration_key,
-        attempt=found.attempt,
-        captured_at=found.ended_at,
-        output=found.output_preview,
-        node=node,
-        connections=tuple(
-            UsedConnection(r.connection_id, r.type, r.now_name if r.now_name is not None else r.name, r.revision,
-                           r.now_revision, dict(r.context))  # fmt: skip
-            for r in used
+    return Search(
+        Sample(
+            run_id=found.id,
+            run_kind=found.kind,
+            mode=found.mode,
+            version_id=found.workflow_version_id,
+            version_number=version.number,
+            iteration_key=found.iteration_key,
+            attempt=found.attempt,
+            captured_at=found.ended_at,
+            output=found.output_preview,
+            node=node,
+            connections=tuple(
+                UsedConnection(
+                    r.connection_id,
+                    r.type,
+                    r.now_name if r.now_name is not None else r.name,
+                    r.revision,
+                    r.now_revision,
+                    dict(r.context),
+                )  # fmt: skip
+                for r in used
+            ),
+            names_connection=await _names_connection(s, node, {str(c) for c in version.connection_ids or ()}),
         ),
-        names_connection=any(isinstance(v, str) and v in recorded for v in config.values()),
+        searched,
     )
+
+
+async def _names_connection(s: AsyncSession, node: Mapping[str, Any] | None, recorded: set[str]) -> bool:
+    """Whether the step names one of its version's connections in a field its type marks for one: the worker's own
+    rule (`DbConnections.named_by`), never a value that merely looks like a connection's id."""
+    ref = node.get("type") if node is not None else None
+    written = node.get("config") if node is not None else None
+    if not isinstance(ref, str) or not isinstance(written, dict):
+        return False
+    for row in await registry.load_node_types(s, {ref}):
+        props = row.manifest.get("config_schema", {}).get("properties", {})
+        fields = [name for name, prop in props.items() if isinstance(prop, dict) and prop.get(CONNECTION)]
+        if any(isinstance(written.get(f), str) and written[f] in recorded for f in fields):
+            return True
+    return False
 ```
 
 Check before running: SQLAlchemy's `.lateral()` and `select_from(...).join(lateral, true())` in the installed
@@ -3137,11 +3593,11 @@ SQLAlchemy (2.x), the `Connection` model's module, and that `RunStep.tenant_id` 
 - [ ] **Step 4: Run the core tests to see them pass**
 
 Run: `… $PY -m pytest -q tests/core/runs/test_samples.py`
-Expected: PASS, 7 tests.
+Expected: PASS, 11 tests.
 
 - [ ] **Step 5: Write the route's failing tests**
 
-Append to `backend/tests/apps/api/test_draft_data.py` (add `from sqlalchemy import text` and
+Append to `backend/tests/apps/api/test_draft_data.py` (add `import json`, `from sqlalchemy import text` and
 `from tests.support.workflows import PROFILE` to its imports):
 
 ```python
@@ -3188,7 +3644,11 @@ async def test_answers_a_steps_newest_sample(app, owner_sessionmaker, api_settin
     assert (sample["run_id"], sample["mode"], sample["version_number"], sample["attempt"]) == (run, "live", 1, 1)
     assert sample["output"] == {"value": "[redacted]"}  # as stored: the API never unmasks
     assert (sample["type"], sample["same_type"], sample["same_config"], sample["stale"]) == (
-        "testkit.echo@1", True, True, False)
+        "testkit.echo@1",
+        True,
+        True,
+        False,
+    )
     assert sample["connections"] == {"state": "none", "items": []}  # an echo names no connection
 
 
@@ -3220,6 +3680,7 @@ async def test_has_no_sample_for_a_step_without_one(app, owner_sessionmaker, api
         none_yet = await c.get(f"{base}/draft/samples", params={"node": str(nid("a"))})
         not_there = await c.get(f"{base}/draft/samples", params={"node": str(uuid.uuid4())})
     assert none_yet.json()["sample"] is None and not_there.json()["sample"] is None
+    assert (none_yet.json()["searched_runs"], none_yet.json()["search_limit"]) == (0, 200)  # no run yet: none searched
 ```
 
 The "unknown" connection state (a step that names a connection, a run before records) is a case of `sample_answer`,
@@ -3287,6 +3748,8 @@ class SamplesOut(_Answer):
     draft_revision: int
     node: str
     sample: SampleOut | None
+    searched_runs: int  # the ended runs looked in: no sample means none there, not "never" (4c-2a ruling 9)
+    search_limit: int
 ```
 
 In `backend/src/dewpoint/apps/workflow_ops.py`:
@@ -3347,15 +3810,18 @@ async def draft_samples(
     tenant's retention."""
     wf = await _get(db, ctx, workflow_id)
     drafted = workflow_ops.draft_node(wf.draft, node)
-    found = None
+    search = samples.Search(None, 0)
     if drafted is not None:
-        found = await samples.newest(
+        search = await samples.newest(
             db, ctx.tenant_id, workflow_id, node, iteration_key=iteration, at=await cutoff(db, ctx.tenant_id)
         )
+    found = search.sample
     return {
         "draft_revision": wf.draft_revision,
         "node": str(node),
         "sample": workflow_ops.sample_answer(found, drafted) if found is not None and drafted is not None else None,
+        "searched_runs": search.searched,
+        "search_limit": samples.SCAN_RUNS,
     }
 ```
 
