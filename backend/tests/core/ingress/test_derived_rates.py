@@ -38,24 +38,39 @@ async def bound(owner: Any, tenant: uuid.UUID, endpoint_id: uuid.UUID, n: int, *
                              "u": user})  # fmt: skip
 
 
-# The buckets refill at their configured rate while a test sets up, a token or so: each test asks enough to see past it
-
-
 def events(n: int, at: int = 0) -> list[tuple[bytes | None, bytes | None, bytes]]:
     return [(key(at + i), digest(at + i), b"event") for i in range(n)]
+
+
+async def drained(owner: Any, *, endpoint_id: uuid.UUID | None = None, tenant: uuid.UUID | None = None) -> None:
+    """A bucket spent just now, so an attempt waits its events at the rate: buckets refill while a test sets up."""
+    async with owner() as s, s.begin():
+        if endpoint_id is not None:
+            await s.execute(text("update webhook_endpoints set event_tokens = 0, refilled_at = clock_timestamp() "
+                                 "where id = :e"), {"e": endpoint_id})  # fmt: skip
+        if tenant is not None:
+            await s.execute(text("update tenant_event_counters set event_tokens = 0, "
+                                 "refilled_at = clock_timestamp() where tenant_id = :t"), {"t": tenant})  # fmt: skip
+
+
+async def limited(ingress: Any, endpoint_id: uuid.UUID, n: int, at: int) -> int:
+    """How long an attempt of `n` events is told to wait."""
+    outcome = await record(ingress, endpoint_id, events(n, at))
+    assert outcome["outcome"] == "rate_limited", outcome
+    return int(outcome["retry_after"])
 
 
 async def test_an_endpoints_rate_is_its_share_of_the_measured_starts_by_its_enabled_bindings(
     owner_sessionmaker, ingress_sessionmaker
 ) -> None:  # fmt: skip
-    tenant, endpoint_id = await endpoint(owner_sessionmaker, event_tokens=0)  # its burst spent
+    tenant, endpoint_id = await endpoint(owner_sessionmaker)
     await bound(owner_sessionmaker, tenant, endpoint_id, 4)
     await bound(owner_sessionmaker, tenant, endpoint_id, 1, enabled=False)
-    configured = await record(ingress_sessionmaker, endpoint_id, events(2))
-    assert configured == {"outcome": "rate_limited", "retry_after": 1}  # 2 events at its 10 a second
+    await drained(owner_sessionmaker, endpoint_id=endpoint_id)
+    assert await limited(ingress_sessionmaker, endpoint_id, 10, 0) == 1  # 10 events at its 10 a second
     await capacity(owner_sessionmaker, 8.0, 0.5)  # 4 starts a second: an event a second for 4 enabled bindings
-    derived = await record(ingress_sessionmaker, endpoint_id, events(6))  # what refilled meanwhile: a token or so
-    assert derived["outcome"] == "rate_limited" and 4 <= derived["retry_after"] <= 6, derived
+    await drained(owner_sessionmaker, endpoint_id=endpoint_id)
+    assert 8 <= await limited(ingress_sessionmaker, endpoint_id, 10, 10) <= 10
 
 
 async def test_a_tenants_rate_is_the_share_of_the_measured_starts_and_a_lower_configured_rate_stays(
@@ -64,13 +79,15 @@ async def test_a_tenants_rate_is_the_share_of_the_measured_starts_and_a_lower_co
     tenant, endpoint_id = await endpoint(owner_sessionmaker, event_tokens=1_000, event_per_s=1_000)
     await bound(owner_sessionmaker, tenant, endpoint_id, 1)
     async with owner_sessionmaker() as s, s.begin():
-        await s.execute(text("insert into tenant_event_counters (tenant_id, event_tokens) values (:t, 0)"),
-                        {"t": tenant})  # fmt: skip
-    assert await record(ingress_sessionmaker, endpoint_id, events(8)) == {"outcome": "rate_limited", "retry_after": 1}
-    await capacity(owner_sessionmaker, 8.0, 0.5)  # 4 a second for the tenant: 8 events wait 2 s
-    assert await record(ingress_sessionmaker, endpoint_id, events(8)) == {"outcome": "rate_limited", "retry_after": 2}
+        await s.execute(text("insert into tenant_event_counters (tenant_id) values (:t)"), {"t": tenant})
+    await drained(owner_sessionmaker, tenant=tenant)
+    assert await limited(ingress_sessionmaker, endpoint_id, 10, 0) == 1  # at its configured 10 a second
+    await capacity(owner_sessionmaker, 8.0, 0.5)  # 4 a second for the tenant: 10 events wait 2.5 s
+    await drained(owner_sessionmaker, tenant=tenant)
+    assert 2 <= await limited(ingress_sessionmaker, endpoint_id, 10, 10) <= 3
     await capacity(owner_sessionmaker, 800.0, 0.5)  # 400 a second: its configured 10 stays
-    assert await record(ingress_sessionmaker, endpoint_id, events(8)) == {"outcome": "rate_limited", "retry_after": 1}
+    await drained(owner_sessionmaker, tenant=tenant)
+    assert await limited(ingress_sessionmaker, endpoint_id, 10, 20) == 1
 
 
 async def test_a_tenants_rate_is_divided_by_its_largest_fan_out_whichever_endpoint_its_events_reach(
@@ -91,9 +108,8 @@ async def test_a_tenants_rate_is_divided_by_its_largest_fan_out_whichever_endpoi
                              "bearer_digest, dedupe_key, event_tokens, event_per_s) values (:e, :t, 'narrow', :u, "
                              "'bearer', :d, 'sealed-dedupe-key', 1000, 1000)"),
                         {"e": narrow, "t": tenant, "u": user, "d": hashlib.sha256(b"token").digest()})  # fmt: skip
-        await s.execute(text("insert into tenant_event_counters (tenant_id, event_tokens) values (:t, 0)"),
-                        {"t": tenant})  # fmt: skip
+        await s.execute(text("insert into tenant_event_counters (tenant_id) values (:t)"), {"t": tenant})
     await bound(owner_sessionmaker, tenant, narrow, 1)
     await capacity(owner_sessionmaker, 8.0, 0.5)  # 4 starts a second; 4 bindings at most: an event a second
-    limited = await record(ingress_sessionmaker, narrow, events(6))  # at 4 a second, about 2
-    assert limited["outcome"] == "rate_limited" and 4 <= limited["retry_after"] <= 6, limited
+    await drained(owner_sessionmaker, tenant=tenant)
+    assert 8 <= await limited(ingress_sessionmaker, narrow, 10, 0) <= 10  # at 4 a second, 3
