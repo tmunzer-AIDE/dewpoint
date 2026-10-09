@@ -1,0 +1,118 @@
+# enable-template
+# SPDX-License-Identifier: Apache-2.0
+# D12's Temporal target (2b-4b M4), configuration B: a JWT bearer token only.
+# Read by deploy/temporal's server through Temporal's own loader; the template fills the database address and
+# password from the environment, never this file.
+#
+# - Archival disabled for the cluster and as every new namespace's default: the server refuses to start otherwise.
+# - The frontend's gRPC and HTTP API are the only listeners on the container's network address, with TLS;
+#   configuration B asks for no client certificate: a JWT bearer token, verified against the key set and its
+#   audience by Temporal's JWT claim mapper, carries the caller's permissions.
+# - The internal frontend, history, matching and the worker listen on loopback only, internode mutual TLS. The
+#   internal frontend is how the server's own system workers (schedules among them) reach the frontend; it runs
+#   the same authorizer. Membership is on loopback for the internode services; the frontend's membership port shares
+#   its address (Temporal binds both on one IP) and is reachable on the container network only.
+log:
+  stdout: true
+  level: info
+
+persistence:
+  defaultStore: default
+  visibilityStore: visibility
+  numHistoryShards: 4
+  datastores:
+    default:
+      sql:
+        pluginName: postgres12
+        databaseName: temporal
+        connectAddr: '{{ env "DEWPOINT_TEMPORAL_DB_ADDRESS" | default "postgres:5432" }}'
+        connectProtocol: tcp
+        user: temporal
+        password: '{{ env "DEWPOINT_TEMPORAL_DB_PASSWORD" }}'
+        maxConns: 20
+        maxIdleConns: 20
+        maxConnLifetime: 1h
+    visibility:
+      sql:
+        pluginName: postgres12
+        databaseName: temporal_visibility
+        connectAddr: '{{ env "DEWPOINT_TEMPORAL_DB_ADDRESS" | default "postgres:5432" }}'
+        connectProtocol: tcp
+        user: temporal
+        password: '{{ env "DEWPOINT_TEMPORAL_DB_PASSWORD" }}'
+        maxConns: 10
+        maxIdleConns: 10
+        maxConnLifetime: 1h
+
+global:
+  membership:
+    maxJoinDuration: 30s
+    broadcastAddress: 127.0.0.1
+  tls:
+    internode:
+      server:
+        certFile: /etc/temporal/tls/internode.pem
+        keyFile: /etc/temporal/tls/internode-key.pem
+        requireClientAuth: true
+        clientCaFiles: [/etc/temporal/tls/internode-ca.pem]
+      client:
+        serverName: internode.dewpoint-m4.test
+        rootCaFiles: [/etc/temporal/tls/internode-ca.pem]
+    frontend:
+      server:
+        certFile: /etc/temporal/tls/frontend.pem
+        keyFile: /etc/temporal/tls/frontend-key.pem
+        requireClientAuth: false
+      client:
+        serverName: temporal.dewpoint-m4.test
+        rootCaFiles: [/etc/temporal/tls/ca.pem]
+  authorization:
+    jwtKeyProvider:
+      keySourceURIs: ['{{ env "DEWPOINT_TEMPORAL_JWKS_URL" | default "http://jwks:8080/jwks.json" }}']
+      refreshInterval: 1m
+    permissionsClaimName: permissions
+    audience: dewpoint-temporal
+
+services:
+  frontend:
+    rpc: {grpcPort: 7233, httpPort: 7243, membershipPort: 6933, bindOnIP: 0.0.0.0}
+  internal-frontend:
+    rpc: {grpcPort: 7236, httpPort: 7246, membershipPort: 6936, bindOnIP: 127.0.0.1}
+  history:
+    rpc: {grpcPort: 7234, membershipPort: 6934, bindOnIP: 127.0.0.1}
+  matching:
+    rpc: {grpcPort: 7235, membershipPort: 6935, bindOnIP: 127.0.0.1}
+  worker:
+    rpc: {grpcPort: 7239, membershipPort: 6939, bindOnIP: 127.0.0.1}
+
+clusterMetadata:
+  enableGlobalNamespace: false
+  failoverVersionIncrement: 10
+  masterClusterName: active
+  currentClusterName: active
+  clusterInformation:
+    active:
+      enabled: true
+      initialFailoverVersion: 1
+      rpcName: frontend
+      rpcAddress: 127.0.0.1:7233
+
+dcRedirectionPolicy:
+  policy: noop
+
+archival:
+  history:
+    state: disabled
+  visibility:
+    state: disabled
+
+namespaceDefaults:
+  archival:
+    history:
+      state: disabled
+    visibility:
+      state: disabled
+
+dynamicConfigClient:
+  filepath: /etc/temporal/dynamicconfig.yaml
+  pollInterval: 60s
