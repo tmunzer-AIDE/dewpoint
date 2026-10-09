@@ -342,6 +342,22 @@ def test_a_literal_checked_against_its_target_never_says_the_value() -> None:
         assert invalid and all("tok-9f2c" not in d.message for d in result.diagnostics)
 
 
+def test_properties_missing_together_are_one_problem() -> None:
+    # jsonschema reports `required` once per missing property; its sentence names them all, so it's said once: for a
+    # step's own config (`_schema_errors`) and for a value checked against the field it fills (`_check_instance`).
+    empty = check(G().node("f", "flow.filter@1", {}))
+    assert [(d.code, d.field, d.message) for d in empty.diagnostics] == [
+        ("config.invalid", "", "Needs `items`, `predicate`.")
+    ]
+    place = {"type": "object", "properties": {"a": {"type": "integer"}, "b": {"type": "integer"}}}
+    place |= {"required": ["a", "b"], "default": {"a": 1, "b": 2}}
+    g = G().node("s", SET, {"assignments": {"place": ref("trigger.place", default={})}})
+    g.settings["vars_schema"] = {"type": "object", "properties": {"place": place}}
+    assert [(d.code, d.field, d.message) for d in check(g).diagnostics] == [
+        ("config.invalid", "/assignments/place", "Needs `a`, `b`.")
+    ]
+
+
 def test_variables() -> None:
     ok = G().node("s", SET, {"assignments": {"count": 1}}).node("b", ECHO, {"value": ref("vars.count")}).edge("s", "b")
     assert codes(_vars(ok)) == []
