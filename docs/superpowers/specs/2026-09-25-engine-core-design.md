@@ -332,6 +332,18 @@ Tenant-scoped tables use FORCE RLS with the foundations policy pattern.
     dominators would wrongly reject. A property test checks it against simulated executions.
   - Conditional refs, and schema-optional fields, need a `default` (ref, template) or a `has()` guard (CEL). A
     `default` replaces a missing *or* null value.
+  - Alternatives (`anyOf`, `oneOf`, nested ones too) are read together, on the safe side (sub-project 4, 4c-2a
+    ruling 1). A field or an index read through them may be any type one alternative allows there. It may be missing
+    when one alternative may lack it (doesn't require it, is closed without it, isn't an object or a list there, its
+    list may be shorter, or is null). It is any value when one alternative says nothing about it. A field no
+    alternative can hold is `ref.unknown_field`. A union with `null` makes the value nullable. What surrounds a union
+    applies to each branch, and every member of an `allOf` applies: a field one of them declares has its schema.
+    Types meet as JSON Schema says (an integer is a number), and object keywords speak only of objects. CEL's guards
+    follow every alternative that declares the field; an open one that doesn't makes the data undeclared from there.
+  - In CEL, a field the schema says may be something other than an object (a scalar or a list, beside an object,
+    however spelt) is guarded with `type(x) == map` before anything below it is read, a `has()` test included:
+    `has()` on a scalar fails too. Data whose type the schema doesn't say, and an element read by index, keep the
+    rules below.
   - In CEL:
     - a step that may not have run is guarded with `has(steps.<key>.output)` (or `has(steps.<key>.error)`);
     - a field the schema declares but doesn't require, and every such ancestor, is guarded with `has()` on that field,

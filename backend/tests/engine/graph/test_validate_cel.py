@@ -4,9 +4,11 @@
 from typing import Any
 
 import pytest
+from jsonschema import Draft202012Validator
 
 from dewpoint.engine.cel import types as T
 from dewpoint.engine.cel.record import ExpressionRecord, Projection
+from dewpoint.engine.cel.runtime import compile_checked, evaluate
 from dewpoint.engine.graph.validate import ValidationContext, ValidationResult, validate
 from dewpoint.plugins.flow import PLUGIN
 from tests.support.catalog import catalog
@@ -352,3 +354,111 @@ def test_workflow_outputs_can_use_cel(expr: str) -> None:
     g.settings = {"input_schema": INPUT, "outputs": {"o": cel(expr)}}
     [r] = check(g).expressions
     assert (r.node, r.field) == (None, "/settings/outputs/o")
+
+
+# Alternatives (4c-2a ruling 1): a formula reads a field every alternative declares as typed, and guards it when one
+# of them doesn't require it; where one of them doesn't declare it, the data is open (spec §4.3).
+UNION_INPUT: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "device": {
+            "anyOf": [
+                {"type": "object", "properties": {"name": {"type": "string"}, "site": {"type": "string"},
+                                                  "ports": {"type": "integer"}}, "required": ["name"]},
+                {"type": "object", "properties": {"name": {"type": "string"}, "site": {"type": "string"}},
+                 "required": ["name"]},
+            ]
+        }
+    },
+    "required": ["device"],
+}  # fmt: skip
+
+
+def test_a_field_every_alternative_declares_but_one_doesnt_require_needs_a_guard() -> None:
+    assert codes(one("trigger.device.site == 'a'", input_schema=UNION_INPUT)) == ["cel.conditional_ref"]
+    assert codes(one("has(trigger.device.site) && trigger.device.site == 'a'", input_schema=UNION_INPUT)) == []
+    assert codes(one("trigger.device.name == 'a'", input_schema=UNION_INPUT)) == []  # required in every one
+    assert codes(one("trigger.device.ports == 1", input_schema=UNION_INPUT)) == []  # open data: one doesn't declare it
+
+
+# The reviews of revisions 2 and 3: a value its schema says may not be an object is guarded with `type(x) == map`
+# before any read below it, a presence test included, whatever the spelling; an integer is a number.
+_OBJECT: dict[str, Any] = {
+    "type": "object",
+    "properties": {"n": {"type": "integer"}},
+    "required": ["n"],
+    "additionalProperties": False,
+}
+SPELLINGS: dict[str, dict[str, Any]] = {
+    "a type list": {**_OBJECT, "type": ["object", "string"]},
+    "anyOf": {"anyOf": [_OBJECT, {"type": "string"}]},
+    "oneOf": {"oneOf": [_OBJECT, {"type": "string"}]},
+    "allOf and anyOf": {"allOf": [{"anyOf": [_OBJECT, {"type": "string"}]}]},
+    "allOf and oneOf": {"allOf": [{"oneOf": [_OBJECT, {"type": "string"}]}, {"type": ["object", "string"]}]},
+}
+SAFE = "type(trigger.variant) == map && has(trigger.variant.n) && trigger.variant.n > 0"
+UNSAFE = ("trigger.variant.n > 0", "has(trigger.variant.n) && trigger.variant.n > 0")
+
+
+def holder(variant: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {"variant": variant},
+        "required": ["variant"],
+        "additionalProperties": False,
+    }
+
+
+@pytest.mark.parametrize("spelling", SPELLINGS)
+def test_a_value_that_may_not_be_an_object_is_guarded_before_any_read(spelling: str) -> None:
+    schema = holder(SPELLINGS[spelling])
+    scalar, record = {"variant": "accepted scalar"}, {"variant": {"n": 3}}
+    assert all(Draft202012Validator(schema).is_valid(w) for w in (scalar, record))  # both are data it admits
+    for expr in UNSAFE:  # publish refuses them: on the scalar, CEL fails
+        shape = [
+            d.message for d in check(one(expr, input_schema=schema)).diagnostics if "may not be an object" in d.message
+        ]
+        assert shape == [
+            "`trigger.variant` may not be an object in its schema, so reading its fields fails when it isn't."
+        ]
+        failed = evaluate(compile_checked(expr, {"trigger": T.MAP}), {"trigger": scalar})
+        assert failed.kind == "error", expr
+    assert codes(one(SAFE, input_schema=schema)) == []
+    for witness, expected in ((scalar, False), (record, True)):  # and the guarded read is a value on both
+        found = evaluate(compile_checked(SAFE, {"trigger": T.MAP}), {"trigger": witness})
+        assert (found.kind, found.value) == ("value", expected)
+
+
+def test_equivalent_spellings_get_the_same_obligations() -> None:
+    """The review of revision 3: the same constraints, spelt as a type list or through combinators, owe the same
+    guards: the object test, and the presence test for a field one way lacks."""
+    said = {
+        spelling: sorted(d.message for d in check(one(UNSAFE[0], input_schema=holder(variant))).diagnostics)
+        for spelling, variant in SPELLINGS.items()
+    }
+    assert len({tuple(m) for m in said.values()}) == 1, said
+    assert said["anyOf"] == [
+        "`trigger.variant.n` is optional in its schema, so it may be missing.",
+        "`trigger.variant` may not be an object in its schema, so reading its fields fails when it isn't.",
+    ]
+
+
+def test_a_name_bound_as_map_is_no_object_test() -> None:
+    """The review of revision 4: a comprehension may bind `map`; then `type(x) == map` compares with that variable,
+    not the built-in type, and guards nothing."""
+    schema = holder(SPELLINGS["anyOf"])
+    shadowed = "[string].all(map, " + SAFE + ")"
+    said = [d.message for d in check(one(shadowed, input_schema=schema)).diagnostics]
+    assert "`trigger.variant` may not be an object in its schema, so reading its fields fails when it isn't." in said
+    failed = evaluate(compile_checked(shadowed, {"trigger": T.MAP}), {"trigger": {"variant": "accepted scalar"}})
+    assert failed.kind == "error"  # its "guard" was true for the scalar: why publish refuses it
+
+
+def test_open_data_and_indexes_keep_their_rules() -> None:
+    """Spec §4.3, unchanged: data the schema doesn't type needs no shape guard, and an element read by index is
+    read freely."""
+    untyped = holder({"properties": {"n": {"type": "integer"}}})
+    said = " ".join(d.message for d in check(one("trigger.variant.n > 0", input_schema=untyped)).diagnostics)
+    assert "may not be an object" not in said
+    listed = holder({"type": "array", "items": {"anyOf": [_OBJECT, {"type": "string"}]}})
+    assert codes(one("trigger.variant[0].n > 0", input_schema=listed)) == []

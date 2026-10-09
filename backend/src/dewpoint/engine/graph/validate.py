@@ -30,6 +30,7 @@ from dewpoint.engine.graph.schemas import (
     allowed_kinds,
     compatible,
     contains_literal,
+    declared_non_object,
     declared_nullable,
     declared_optional,
     describe,
@@ -1068,7 +1069,7 @@ class _Validator:
             return Resolved({"type": "integer"}, False)
         item = self.item_schema.get(loop)
         if item is None:
-            return Resolved(None, bool(p.rest))
+            return Resolved(None, bool(p.rest), missing=bool(p.rest))
         return navigate(item, p.rest)
 
     def _resolve_step(self, site: _Site, p: RefPath) -> Resolved | None:
@@ -1114,15 +1115,17 @@ class _Validator:
                 return None
             available = on_error == "port" and self._implies(home, consumer_key, consumer, producer, "err", region)
             r = navigate(ERROR_SCHEMA, p.rest)
-            return Resolved(r.schema, r.conditional or not available)
+            return dataclasses.replace(
+                r, conditional=r.conditional or not available, missing=r.missing or not available
+            )
         available = on_error != "continue" and self._implies(home, consumer_key, consumer, producer, "ok", region)
         if site.at_exit and site.region is None and self.has_stop:
             available = False  # `stop` may end the run while this step is still pending
         schema = self.out_schema.get(producer)
         if schema is None:  # only when the producer is already reported (unknown sub-flow): don't add noise
-            return Resolved(None, not available)
+            return Resolved(None, not available, missing=not available)
         r = navigate(schema, p.rest)
-        return Resolved(r.schema, r.conditional or not available)
+        return dataclasses.replace(r, conditional=r.conditional or not available, missing=r.missing or not available)
 
     def _consumer(
         self, site: _Site, home: uuid.UUID | None, producer: uuid.UUID
@@ -1156,6 +1159,10 @@ class _Validator:
     def _declared_optional(self, site: _Site, p: RefPath) -> tuple[int, ...]:
         """Positions in `p.rest` the schema declares optional (spec §4.3): CEL guards them, references default them."""
         return self._declared(site, p, declared_optional)
+
+    def _declared_non_object(self, site: _Site, p: RefPath) -> tuple[int, ...]:
+        """Positions in `p.rest` the schema declares may not be objects: CEL guards reads below them (4c-2a)."""
+        return self._declared(site, p, declared_non_object)
 
     def _declared_nullable(self, site: _Site, p: RefPath) -> tuple[int, ...]:
         """Positions in `p.rest` the schema declares may be null (spec §4.3): CEL guards reads below them."""
@@ -1311,6 +1318,9 @@ class _CelSite:
 
     def nullable_fields(self, path: RefPath) -> tuple[int, ...]:
         return self.v._declared_nullable(self.site, path)
+
+    def non_object_fields(self, path: RefPath) -> tuple[int, ...]:
+        return self.v._declared_non_object(self.site, path)
 
     def error(self, code: str, message: str, *, fix: str | None = None, severity: Severity = "error") -> None:
         self.v.err(code, message, node=self.site.node, fld=self.site.field, fix=fix, severity=severity)

@@ -573,3 +573,27 @@ def test_a_name_with_a_trailing_newline_is_refused() -> None:
     g = G().node("a", ECHO)
     g.settings["outputs"] = {"x\n": "fixed"}
     assert codes(g) == ["settings.output_name"]
+
+
+def test_a_reference_through_alternatives_is_typed() -> None:
+    """4c-2a ruling 1: a field every alternative declares as text is text, so it can't fill a number."""
+    union = {
+        "type": "object",
+        "properties": {"device": {"anyOf": [
+            {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
+            {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
+        ]}},
+        "required": ["device"],
+    }  # fmt: skip
+    g = G().node("wait", "flow.delay@1", {"duration_s": ref("trigger.device.name")})
+    g.settings = {"input_schema": union}
+    found = [d for d in check(g).diagnostics if d.code == "ref.type_mismatch"]
+    assert [d.message for d in found] == ["`trigger.device.name` is string, but this field expects integer."]
+
+
+def test_a_number_that_must_be_an_integer_fills_an_integer() -> None:
+    """The review of revision 2: `allOf: [number, integer]` is an integer, and 5 passes it."""
+    g = G().node("wait", "flow.delay@1", {"duration_s": ref("trigger.count")})
+    g.settings = {"input_schema": {"type": "object", "properties": {"count": {"allOf": [{"type": "number"},
+                  {"type": "integer"}]}}, "required": ["count"]}}  # fmt: skip
+    assert [d.code for d in check(g).diagnostics if d.code == "ref.type_mismatch"] == []
