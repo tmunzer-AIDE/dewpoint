@@ -219,8 +219,9 @@ class MistOperation(Node):
 
 
 def _title(op_id: str) -> str:
-    words = re.findall(r"[A-Z]{2,}(?![a-z])|[A-Z]?[a-z0-9]+", op_id)
-    text = " ".join(w if w.isupper() and len(w) > 1 else w.lower() for w in words)
+    # An acronym, maybe plural ("APs"), a word, or a lone capital ("ToARogue"): every letter is in a word.
+    words = re.findall(r"[A-Z]{2,}s?(?![a-z])|[A-Z]?[a-z0-9]+|[A-Z]", op_id)
+    text = " ".join(w if re.fullmatch(r"[A-Z][A-Z0-9]+s?", w) else w.lower() for w in words)  # AP, APs, E911
     return text[:1].upper() + text[1:]
 
 

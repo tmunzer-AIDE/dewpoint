@@ -3,6 +3,7 @@
 OAS: config (the connection, path values, query, body, a page cap, an update's mode) and output (the 2xx answer)
 schemas, the map's side effect and capability; each kind's run through the connection's HTTP."""
 
+import re
 import uuid
 from collections.abc import Iterator
 from typing import Any
@@ -10,8 +11,8 @@ from typing import Any
 import pytest
 
 from dewpoint.engine.registry.catalog import validate_plugin_manifest
-from dewpoint.plugins.mist import PLUGIN, policy
-from dewpoint.plugins.mist.nodes import MistOperation
+from dewpoint.plugins.mist import PLUGIN, oas, policy
+from dewpoint.plugins.mist.nodes import MistOperation, _title
 from dewpoint.plugins.mist.schemas import SCHEMA_LIST, SCHEMA_MAP, SCHEMA_ONE
 from dewpoint.plugins.mist.utilities import MistUtility
 from dewpoint.sdk import FatalError, Node, node_manifest
@@ -71,6 +72,39 @@ def test_every_allowed_operation_has_its_node_and_no_other() -> None:
 
 def test_the_plugin_manifest_passes_the_catalog() -> None:
     assert validate_plugin_manifest(PLUGIN.manifest()) == []
+
+
+def test_the_rogue_aps_list_keeps_its_acronym_in_the_title() -> None:
+    """Seen 2026-10-09 in GET /node-types: "List site rogue ps"."""
+    assert node("mist.site_rogue_aps.list").title == "List site rogue APs"
+
+
+@pytest.mark.parametrize(
+    ("op_id", "title"),
+    [
+        ("listOrgSites", "List org sites"),
+        ("getOrgWLAN", "Get org WLAN"),
+        ("getSiteRogueAP", "Get site rogue AP"),
+        ("listSiteRogueAPs", "List site rogue APs"),  # an acronym's plural
+        ("createOrgAAMWProfile", "Create org AAMW profile"),  # an acronym's last capital starting a word
+        ("getOrgE911Report", "Get org E911 report"),  # a capital and digits
+        ("deauthSiteWirelessClientsConnectedToARogue", "Deauth site wireless clients connected to a rogue"),
+        ("site_id", "Site id"),  # a path value's name
+    ],
+)
+def test_a_title_is_the_operation_id_in_words(op_id: str, title: str) -> None:
+    assert _title(op_id) == title
+
+
+def test_a_title_keeps_every_letter_of_its_operation_id_and_path_values() -> None:
+    """A character no word matched was skipped: "listSiteRogueAPs" lost its "A"."""
+
+    def letters(text: str) -> str:
+        return re.sub(r"[^a-z0-9]", "", text.lower())
+
+    ops = oas.operations().values()
+    names = {op.id for op in ops} | {p["name"] for op in ops for p in op.parameters if p["in"] == "path"}
+    assert sorted(n for n in names if letters(_title(n)) != letters(n)) == []
 
 
 def test_a_config_names_the_connection_and_the_path_values_but_never_the_org() -> None:
