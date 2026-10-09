@@ -293,6 +293,21 @@ development machine, **not production capacity**:
   a tenant alone on its dispatcher keeps up with about 8 events a second; at fan-out 20, one every two seconds. Past
   that, events are accepted and matched, and their requests wait queued, up to the deployment's outstanding-work
   limit; the ingress capacity lowers the rates and sets the limit ([above](#the-ingress-capacity));
+- **the deployment's budget, under load** (`tests/probes/test_ingress_budget_load.py`: a CLI dev server, one
+  dispatcher a cycle at a time, slots enough that only it bounds the starts, 2026-10-09): a limit of 120 (30 starts a
+  second, all for ingress, a 4 s wait; 101 for ingress), three tenants sending steadily for 40 s (1 binding at 8
+  events a second, 5 at 2, 10 at 1) and a fourth in bursts (2 bindings; 10, 12 and 30 events at 10, 20 and 30 s). The
+  outstanding work peaked at 89, four tenants at once, and the counters equalled the truth at the end. The steady
+  tenants were each refused 53 to 58% of their deliveries (`backlog_full`) and started 3.6 to 4.3 runs a second; the
+  bursts of 20 and 24 requests' worth got in beside them, the one of 60 didn't. **From an event's acceptance to its
+  runs' start: 4.1 to 5.4 s at the median, 6.7 to 10.0 s at the 95th percentile, 11.2 s at most** (measured, not
+  promised: another machine, another Temporal, or more tenants, and they differ). Before shares kept one aside, the
+  three steady tenants held the whole limit between them, and both bursts were refused;
+- **what the budget's row costs** (`contention`: 16 tenants recording one event a call): 313 recordings a second on
+  one connection, 837 on 8 and 769 on 32 (2.5, 8.0 and 34 ms at the median, 153 ms at the 99th percentile on 32),
+  against 368, 1,223 and 1,453 before it: each recording, a refused one too, holds the row until it commits. Starts
+  cost the dispatcher what they did (30 to 33 ms each, `test_ingress_starts.py`), their releases counted as they
+  commit;
 - **each limit on its own** (`buckets`, `quotas`), at its default: every rate bucket accepted what its burst and rate
   allow over the time taken, within one call (an endpoint's events 1,029 of 1,030; its bytes 15.5 of 16.0 MiB; a
   tenant's events 5,000 of 5,030, in calls of 100 events, so the 30 refilled never made a whole one; its bytes 76 of
