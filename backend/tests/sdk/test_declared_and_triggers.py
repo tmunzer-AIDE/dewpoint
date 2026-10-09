@@ -78,6 +78,27 @@ def test_a_declared_model_refuses_what_its_schema_refuses(value: Any, locations:
     assert {tuple(err["loc"]) for err in e.value.errors()} == locations
 
 
+def test_a_rule_a_declared_model_finds_broken_at_one_place_is_one_error() -> None:
+    """jsonschema reports `required` once per missing property, `dependentRequired` once per missing dependency and a
+    `propertyNames` rule once per name it refuses: each place and rule is one error."""
+    model = declared_model(
+        "Pairs",
+        {
+            "type": "object",
+            "required": ["a", "b"],
+            "dependentRequired": {"c": ["x", "y"]},
+            "propertyNames": {"maxLength": 1},
+        },
+    )
+    with pytest.raises(ValidationError) as e:
+        model.model_validate({"c": 1, "dd": 2, "ee": 3})
+    assert sorted((err["loc"], err["ctx"]["rule"]) for err in e.value.errors()) == [
+        ((), "dependentRequired"),
+        ((), "maxLength"),
+        ((), "required"),
+    ]
+
+
 def test_a_declared_models_error_never_quotes_the_value() -> None:
     """The 3b-1 review's L5: the error's text, as any log or message would print it, holds no input."""
     model = declared_model("WlanConfig", CONFIG)

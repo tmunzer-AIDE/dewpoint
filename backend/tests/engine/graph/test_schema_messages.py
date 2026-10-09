@@ -65,6 +65,14 @@ def test_a_property_named_like_a_keyword_is_still_a_property() -> None:
     assert explain(e) == "Must be at most 2 characters long."
 
 
+def test_every_property_whose_dependencies_are_missing_is_named() -> None:
+    """jsonschema reports `dependentRequired` once per missing dependency, each worded at its place: the sentence names
+    each present property missing some of its dependencies, and only the missing ones (the owner's ruling)."""
+    schema = {"dependentRequired": {"a": ["x"], "b": ["y", "v", "z"], "c": ["w"], "d": ["v"]}}
+    errors = list(Draft202012Validator(schema).iter_errors({"a": SECRET, "b": 2, "d": 3, "v": 4}))
+    assert [explain(e) for e in errors] == ["Needs `x` beside `a`; `y`, `z` beside `b`."] * 3
+
+
 def test_a_keyword_without_words_of_its_own_still_says_nothing_of_the_value() -> None:
     e = next(Draft202012Validator({"maxContains": 1, "contains": {}}).iter_errors([SECRET, SECRET]))
     assert SECRET not in explain(e) and explain(e) == "Doesn't satisfy its schema's `maxContains`."
