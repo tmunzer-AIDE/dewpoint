@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Node types for tests, as GET /api/v1/node-types serves them: the flow plugin's config schemas as its catalog prints
-// them (main 0838e4f), and a made-up service's step that takes a connection, live options and a secret (D24: never
+// them (main 16406885), and a made-up service's step that takes a connection, live options and a secret (D24: never
 // Mist's own).
 import type { NodeType } from "../lib/workflows";
 
@@ -25,8 +25,8 @@ export const SWITCH = flow("switch", "Switch", ["default"], {
     SwitchCase: {
       additionalProperties: false,
       properties: {
-        port: { pattern: "^[a-z][a-z0-9_]{0,30}$", title: "Port", type: "string", "x-dewpoint-literal": true },
-        when: { title: "When", type: "boolean", "x-widget": "cel" },
+        port: { pattern: "^[a-z][a-z0-9_]{0,30}$", title: "Port name", type: "string", "x-dewpoint-literal": true },
+        when: { title: "Condition", type: "boolean", "x-widget": "cel" },
       },
       required: ["port", "when"], title: "SwitchCase", type: "object",
     },
@@ -40,10 +40,10 @@ export const LOOP = flow("loop", "Loop", ["body", "done"], {
   additionalProperties: false,
   properties: {
     items: { items: {}, title: "Items", type: "array" },
-    concurrency: { default: 1, maximum: 10, minimum: 1, title: "Concurrency", type: "integer", "x-dewpoint-literal": true },
-    item_cap: { default: 10000, maximum: 10000, minimum: 1, title: "Item Cap", type: "integer", "x-dewpoint-literal": true },
-    on_item_error: { default: "stop", enum: ["stop", "continue"], title: "On Item Error", type: "string", "x-dewpoint-literal": true },
-    collect: { default: null, title: "Collect" },
+    concurrency: { default: 1, maximum: 10, minimum: 1, title: "Items at a time, at most", type: "integer", "x-dewpoint-literal": true },
+    item_cap: { default: 10000, maximum: 10000, minimum: 1, title: "Items, at most", type: "integer", "x-dewpoint-literal": true },
+    on_item_error: { default: "stop", enum: ["stop", "continue"], title: "When an item fails", type: "string", "x-dewpoint-literal": true },
+    collect: { default: null, title: "Output for each item" },
   },
   required: ["items"], title: "LoopConfig", type: "object",
 });  // prettier-ignore
@@ -52,14 +52,14 @@ export const FILTER = flow("filter", "Filter", ["out"], {
   additionalProperties: false,
   properties: {
     items: { items: {}, title: "Items", type: "array" },
-    predicate: { title: "Predicate", type: "boolean", "x-dewpoint-kinds": ["cel"], "x-widget": "cel" },
+    predicate: { title: "Keep an item when", type: "boolean", "x-dewpoint-kinds": ["cel"], "x-widget": "cel" },
   },
   required: ["items", "predicate"], title: "FilterConfig", type: "object",
 });  // prettier-ignore
 
 export const DELAY = flow("delay", "Delay", ["out"], {
   additionalProperties: false,
-  properties: { duration_s: { maximum: 2592000, minimum: 0, title: "Duration S", type: "integer" } },
+  properties: { duration_s: { maximum: 2592000, minimum: 0, title: "Duration, in seconds", type: "integer" } },
   required: ["duration_s"], title: "DelayConfig", type: "object",
 });  // prettier-ignore
 
@@ -72,7 +72,7 @@ export const TRANSFORM = flow("transform", "Transform", ["out"], {
 export const RUN_WORKFLOW = flow("run_workflow", "Run workflow", ["out"], {
   additionalProperties: false,
   properties: {
-    workflow_id: { format: "uuid", title: "Workflow Id", type: "string", "x-dewpoint-literal": true },
+    workflow_id: { format: "uuid", title: "Workflow", type: "string", "x-dewpoint-literal": true },
     input: { additionalProperties: true, title: "Input", type: "object" },
   },
   required: ["workflow_id"], title: "RunWorkflowConfig", type: "object",

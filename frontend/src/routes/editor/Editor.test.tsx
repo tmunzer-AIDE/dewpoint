@@ -320,7 +320,7 @@ it("makes a field's typing one undo step", async () => {
   await userEvent.click(screen.getByRole("button", { name: "wait" }));
   const drawer = screen.getByRole("complementary", { name: "wait" });
   expect(within(drawer).getByRole("tab", { name: "Setup" }).getAttribute("aria-selected")).toBe("true");
-  await userEvent.type(within(drawer).getByLabelText("Duration S"), "120");
+  await userEvent.type(within(drawer).getByLabelText("Duration, in seconds"), "120");
   expect(stepConfig("wait")).toEqual({ duration_s: 120 });
   await userEvent.click(within(drawer).getByRole("heading", { name: "wait" })); // focus leaves the field
   await userEvent.keyboard("{Control>}z{/Control}");
@@ -343,7 +343,7 @@ it("shows a step's settings read only to a viewer", async () => {
   answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.delay@1", { duration_s: 5 }) }));
   await show();
   await userEvent.click(screen.getByRole("button", { name: "wait" }));
-  expect(screen.getByLabelText<HTMLInputElement>("Duration S").disabled).toBe(true);
+  expect(screen.getByLabelText<HTMLInputElement>("Duration, in seconds").disabled).toBe(true);
 });
 
 it("opens on Options when the type requires nothing", async () => {
@@ -394,13 +394,13 @@ it("keeps an unapplied edit when the tab changes or the drawer closes", async ()
   answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.delay@1", {}) }));
   await show();
   await userEvent.click(screen.getByRole("button", { name: "wait" }));
-  await userEvent.type(screen.getByLabelText("Duration S"), "1x");
+  await userEvent.type(screen.getByLabelText("Duration, in seconds"), "1x");
   await userEvent.click(screen.getByRole("tab", { name: "Options" }));
   await userEvent.click(screen.getByRole("tab", { name: "Setup" }));
-  expect(screen.getByLabelText<HTMLInputElement>("Duration S").value).toBe("1x");
+  expect(screen.getByLabelText<HTMLInputElement>("Duration, in seconds").value).toBe("1x");
   await userEvent.click(screen.getByRole("button", { name: "Close" }));
   await userEvent.click(screen.getByRole("button", { name: "wait" }));
-  expect(screen.getByLabelText<HTMLInputElement>("Duration S").value).toBe("1x");
+  expect(screen.getByLabelText<HTMLInputElement>("Duration, in seconds").value).toBe("1x");
   expect(screen.getByText("A whole number, like 42.")).toBeTruthy();
   expect(stepConfig("wait")).toEqual({ duration_s: 1 }); // "1" was a number; "1x" never reached the draft
 });
@@ -1217,17 +1217,17 @@ async function unappliedDuration() {
   answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.delay@1", { duration_s: 5 }) }));
   await show();
   await userEvent.click(screen.getByRole("button", { name: "wait" }));
-  await userEvent.type(screen.getByLabelText("Duration S"), "x");
+  await userEvent.type(screen.getByLabelText("Duration, in seconds"), "x");
 }
 
 it("counts the edits not applied in the toolbar, and lists them with their text", async () => {
   await unappliedDuration();
   await userEvent.click(screen.getByRole("button", { name: "1 edit not applied" }));
   const list = screen.getByRole("complementary", { name: "Edits not applied" });
-  expect(list.textContent).toContain("wait · Duration S");
+  expect(list.textContent).toContain("wait · Duration, in seconds");
   expect(list.textContent).toContain("5x");
   expect(list.textContent).toContain("A whole number, like 42.");
-  await userEvent.click(within(list).getByRole("button", { name: "Discard: wait · Duration S" }));
+  await userEvent.click(within(list).getByRole("button", { name: "Discard: wait · Duration, in seconds" }));
   expect(screen.queryByRole("button", { name: /edits? not applied/ })).toBeNull();
   expect(stepConfig("wait")).toEqual({ duration_s: 5 });
 });
@@ -1236,7 +1236,7 @@ it("applies what it can before publishing, and asks about the rest", async () =>
   await unappliedDuration();
   await userEvent.click(await screen.findByRole("button", { name: "Publish v1" }));
   const ask = screen.getByRole("dialog", { name: "Edits not applied" });
-  expect(ask.textContent).toContain("wait · Duration S: A whole number, like 42.");
+  expect(ask.textContent).toContain("wait · Duration, in seconds: A whole number, like 42.");
   await userEvent.click(within(ask).getByRole("button", { name: "Discard and publish" }));
   expect(screen.getByRole("dialog", { name: "Publish version 1" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: /edits? not applied/ })).toBeNull();
@@ -1261,10 +1261,10 @@ it("asks before leaving with an edit it can't apply", async () => {
   await unappliedDuration();
   const decision = mayLeave();
   const ask = await screen.findByRole("dialog", { name: "Your latest changes aren't saved" });
-  expect(ask.textContent).toContain("wait · Duration S: A whole number, like 42.");
+  expect(ask.textContent).toContain("wait · Duration, in seconds: A whole number, like 42.");
   await userEvent.click(within(ask).getByRole("button", { name: "Stay" }));
   expect(await decision).toBe(false);
-  expect(screen.getByLabelText<HTMLInputElement>("Duration S").value).toBe("5x"); // still there to fix
+  expect(screen.getByLabelText<HTMLInputElement>("Duration, in seconds").value).toBe("5x"); // still there to fix
 });
 
 it("settles what's typed while leaving waits for a save", async () => {
@@ -1278,12 +1278,12 @@ it("settles what's typed while leaving waits for a save", async () => {
   answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.delay@1", { duration_s: 5 }) }));
   await show();
   await userEvent.click(screen.getByRole("button", { name: "wait" }));
-  await userEvent.type(screen.getByLabelText("Duration S"), "0"); // 50: a save, held unanswered
+  await userEvent.type(screen.getByLabelText("Duration, in seconds"), "0"); // 50: a save, held unanswered
   const decision = mayLeave(); // waits on that save
-  await userEvent.type(screen.getByLabelText("Duration S"), "x"); // typed meanwhile: can't be applied
+  await userEvent.type(screen.getByLabelText("Duration, in seconds"), "x"); // typed meanwhile: can't be applied
   await act(() => Promise.resolve(answer())); // the held save answers, inside an async act
   const ask = await screen.findByRole("dialog", { name: "Your latest changes aren't saved" });
-  expect(ask.textContent).toContain("wait · Duration S: A whole number, like 42.");
+  expect(ask.textContent).toContain("wait · Duration, in seconds: A whole number, like 42.");
   await userEvent.click(within(ask).getByRole("button", { name: "Stay" }));
   expect(await decision).toBe(false);
 });
@@ -1322,7 +1322,7 @@ it("keeps an edit not applied shown, and counted, when the editor turns read onl
   await unappliedDuration(); // "5x" held
   await userEvent.click(screen.getByRole("button", { name: "Move wait right" })); // an edit whose save conflicts
   await screen.findByText(/This draft was changed elsewhere, so your changes since then aren't saved/, {}, { timeout: 3000 }); // after the 1 s save delay
-  const field = screen.getByLabelText<HTMLInputElement>("Duration S");
+  const field = screen.getByLabelText<HTMLInputElement>("Duration, in seconds");
   expect([field.value, field.disabled]).toEqual(["5x", true]);
   expect(screen.getByRole("button", { name: "1 edit not applied" })).toBeTruthy();
 });
@@ -1344,8 +1344,8 @@ it("goes back to the edits not applied, and from there to the field", async () =
   await userEvent.click(screen.getByRole("button", { name: "Export" }));
   await userEvent.click(within(screen.getByRole("dialog", { name: "Edits not applied" })).getByRole("button", { name: "Go back to them" }));
   const list = screen.getByRole("complementary", { name: "Edits not applied" });
-  await userEvent.click(within(list).getByRole("button", { name: "Go to it: wait · Duration S" }));
-  expect(within(screen.getByRole("complementary", { name: "wait" })).getByLabelText<HTMLInputElement>("Duration S").value).toBe("5x");
+  await userEvent.click(within(list).getByRole("button", { name: "Go to it: wait · Duration, in seconds" }));
+  expect(within(screen.getByRole("complementary", { name: "wait" })).getByLabelText<HTMLInputElement>("Duration, in seconds").value).toBe("5x");
   expect(downloads).toEqual([]);
 });
 
@@ -1500,7 +1500,7 @@ it("follows a case a JSON edit of the cases keeps as it was, and removes, saying
 
 it("renames a case's port in place, its edges following", async () => {
   await openSwitch();
-  const port = within(screen.getByRole("group", { name: "Cases, item 2" })).getByLabelText("Port");
+  const port = within(screen.getByRole("group", { name: "Cases, item 2" })).getByLabelText("Port name");
   await userEvent.clear(port);
   await userEvent.type(port, "big{Enter}"); // applies on Enter, or when focus leaves
   expect(drawn.at(-1)!.doc.edges).toEqual([{ from: { node: "id-pick", port: "big" }, to: { node: "id-transform" } }]);
@@ -1577,18 +1577,18 @@ async function slowVersionOfWait() {
   await userEvent.click(screen.getByRole("button", { name: "Versions" }));
   await userEvent.click(await screen.findByRole("button", { name: "View version 1" })); // its read is held
   await userEvent.click(screen.getByRole("button", { name: "wait" })); // the draft's drawer, meanwhile
-  await userEvent.type(screen.getByLabelText("Duration S"), "x"); // "5x": typed while the version is read
+  await userEvent.type(screen.getByLabelText("Duration, in seconds"), "x"); // "5x": typed while the version is read
   await act(() => Promise.resolve(answer())); // the version arrives
   return screen.getByRole("dialog", { name: "Edits not applied" });
 }
 
 it("asks about an edit typed while a version is read, and never shows it in the version", async () => {
   const ask = await slowVersionOfWait();
-  expect(ask.textContent).toContain("wait · Duration S: A whole number, like 42.");
+  expect(ask.textContent).toContain("wait · Duration, in seconds: A whole number, like 42.");
   await userEvent.click(within(ask).getByRole("button", { name: "Discard and view the version" }));
   await screen.findByText("Viewing version 1, read only. The draft is unchanged.");
   await userEvent.click(screen.getByRole("button", { name: "wait" }));
-  const field = within(screen.getByRole("complementary", { name: "wait" })).getByLabelText<HTMLInputElement>("Duration S");
+  const field = within(screen.getByRole("complementary", { name: "wait" })).getByLabelText<HTMLInputElement>("Duration, in seconds");
   expect([field.value, field.disabled]).toEqual(["3", true]); // the version's own value, never the draft's "5x"
   expect(screen.queryByRole("button", { name: /edits? not applied/ })).toBeNull();
 });
@@ -1613,12 +1613,12 @@ it("asks about an edit typed while an export waits for its save", async () => {
   answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.delay@1", { duration_s: 5 }) }));
   await show();
   await userEvent.click(screen.getByRole("button", { name: "wait" }));
-  await userEvent.type(screen.getByLabelText("Duration S"), "0"); // 50: a save, held unanswered
+  await userEvent.type(screen.getByLabelText("Duration, in seconds"), "0"); // 50: a save, held unanswered
   await userEvent.click(screen.getByRole("button", { name: "Export" })); // waits on that save
-  await userEvent.type(screen.getByLabelText("Duration S"), "x"); // typed meanwhile: can't be applied
+  await userEvent.type(screen.getByLabelText("Duration, in seconds"), "x"); // typed meanwhile: can't be applied
   await act(() => Promise.resolve(answer())); // the save answers
   const ask = await screen.findByRole("dialog", { name: "Edits not applied" });
-  expect(ask.textContent).toContain("wait · Duration S: A whole number, like 42.");
+  expect(ask.textContent).toContain("wait · Duration, in seconds: A whole number, like 42.");
   expect(sent.some((r) => r.path.endsWith("/export"))).toBe(false); // nothing asked for before the person decides
   await userEvent.click(within(ask).getByRole("button", { name: "Discard and export" }));
   await vi.waitFor(() => expect(downloads).toEqual(["nightly.dewpoint.json"]));
@@ -1636,7 +1636,7 @@ it("keeps focus in the list when its last entry is discarded", async () => {
   await unappliedDuration();
   await userEvent.click(screen.getByRole("button", { name: "1 edit not applied" }));
   const list = screen.getByRole("complementary", { name: "Edits not applied" });
-  await userEvent.click(within(list).getByRole("button", { name: "Discard: wait · Duration S" })); // the count goes too
+  await userEvent.click(within(list).getByRole("button", { name: "Discard: wait · Duration, in seconds" })); // the count goes too
   await vi.waitFor(() => expect(document.activeElement).toBe(within(list).getByRole("heading", { name: "Edits not applied" })));
 });
 
@@ -1738,7 +1738,7 @@ async function goTo(field: string) {
 
 it("goes to a problem's field: the drawer opens on its tab, the field focused (ruling 83)", async () => {
   await goTo("/concurrency");
-  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Concurrency")));
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Items at a time, at most")));
   expect(screen.getByRole("tab", { name: "Options · 1 problem" }).getAttribute("aria-selected")).toBe("true");
 });
 
@@ -1757,8 +1757,8 @@ it("goes to an edit not applied from its list, at its field", async () => {
   await userEvent.click(screen.getByRole("button", { name: "Close" }));
   await userEvent.click(screen.getByRole("button", { name: "1 edit not applied" }));
   const list = screen.getByRole("complementary", { name: "Edits not applied" });
-  await userEvent.click(within(list).getByRole("button", { name: "Go to it: wait · Duration S" }));
-  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Duration S")));
+  await userEvent.click(within(list).getByRole("button", { name: "Go to it: wait · Duration, in seconds" }));
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Duration, in seconds")));
 });
 
 it("gives a viewer's drawer controls a disabled look, their values legible (the owner's ruling O2)", async () => {

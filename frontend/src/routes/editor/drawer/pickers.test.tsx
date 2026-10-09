@@ -54,7 +54,7 @@ it("shows a connection that isn't in this tenant until it's changed", async () =
 it("lists this tenant's other workflows", async () => {
   fakeApi({ "GET /api/v1/t/t1/workflows": () => json([{ id: "w1", name: "This one" }, { id: "w2", name: "Nightly" }]) });
   const { config } = showFields(RUN_WORKFLOW);
-  const select = await screen.findByLabelText<HTMLSelectElement>("Workflow Id");
+  const select = await screen.findByLabelText<HTMLSelectElement>("Workflow");
   expect([...select.options].map((o) => o.textContent)).toEqual(["Choose a workflow", "Nightly"]);
   await userEvent.selectOptions(select, "Nightly");
   expect(config().workflow_id).toBe("w2");
