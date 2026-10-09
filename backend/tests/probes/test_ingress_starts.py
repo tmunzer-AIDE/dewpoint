@@ -43,9 +43,14 @@ pytestmark = [
     pytest.mark.skipif(not os.environ.get("DEWPOINT_PROBE"), reason="a probe, run by hand (DEWPOINT_PROBE)"),
     pytest.mark.usefixtures("development_deployment"),
 ]
-# (bindings an endpoint, events, the tenant's runs at once: None for the default, 5): 200 runs each; the last with
-# slots enough that only the dispatcher's own path bounds its starts
-CASES = ((1, 200, None), (20, 10, None), (20, 10, 1_000))
+# (bindings an endpoint, events, the tenant's runs at once: None for the default, 5, the ingress capacity: None for
+# none set): 200 runs a case but the last; slots enough in the last two that only the dispatcher bounds the starts
+CASES = (
+    (1, 200, None, None),
+    (20, 10, None, None),
+    (20, 10, 1_000, None),
+    (20, 20, 1_000, (8.0, 0.5, 30)),
+)  # the last capped: (starts, headroom, wait) give a 120-request queue
 DEADLINE_S = float(os.environ.get("DEWPOINT_PROBE_DEADLINE_S", "300"))
 FAST = {  # the endpoint's and the tenant's buckets never refuse: the backlog is recorded at once
     "request_per_s": 1e6, "request_burst": 10**7, "event_per_s": 1e6, "event_burst": 10**7, "byte_per_s": 1e9,
@@ -68,10 +73,10 @@ def _pct(values: list[float], p: float) -> float:
     return ordered[min(len(ordered) - 1, int(p * len(ordered)))]
 
 
-@pytest.mark.parametrize(("fan_out", "events", "limit"), CASES)
+@pytest.mark.parametrize(("fan_out", "events", "limit", "capacity"), CASES)
 async def test_a_backlog_of_events_becomes_runs_on_a_real_temporal(
     server, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, worker_sessionmaker,
-    api_settings, fan_out: int, events: int, limit: int | None,
+    api_settings, fan_out: int, events: int, limit: int | None, capacity: tuple[float, float, int] | None,
 ) -> None:  # fmt: skip
     ready = await inbound(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings)
     await bind(owner_sessionmaker, ready)
@@ -81,6 +86,9 @@ async def test_a_backlog_of_events_becomes_runs_on_a_real_temporal(
         await bind(owner_sessionmaker, ready, workflow)
     await workers(owner_sessionmaker)
     async with owner_sessionmaker() as s, s.begin():
+        if capacity is not None:  # the owner's ruling 2 on the M3 checkpoint 2: a tenant's queue capped
+            await s.execute(text("update platform_settings set ingress_starts_per_s = :s, ingress_headroom = :h, "
+                                 "ingress_queue_wait_s = :w"), dict(zip("shw", capacity, strict=True)))  # fmt: skip
         if limit is not None:
             await s.execute(text("insert into tenant_run_limits (tenant_id, max_concurrent) values (:t, :n)"),
                             {"t": ready.tenant_id, "n": limit})  # fmt: skip
@@ -102,7 +110,8 @@ async def test_a_backlog_of_events_becomes_runs_on_a_real_temporal(
     runs = events * fan_out
     left = text("select count(*) from runs where tenant_id = :t and (status = 'running' or started_at is null)")
     made = text("select count(*) from runs where tenant_id = :t")
-    cycles, dispatched, dispatching = 0, Counter[str](), 0.0
+    cycles, dispatched, dispatching, most_queued = 0, Counter[str](), 0.0, 0
+    queued = text("select count(*) from run_requests where tenant_id = :t and status = 'queued'")
     began = time.monotonic()
     async with serving(server.client, DbRunStore(worker_sessionmaker, FixtureKeys())):
         # A cycle's own work (its matching, its dispatch), then its sleep: `main.cycle` itself would read the current
@@ -110,7 +119,9 @@ async def test_a_backlog_of_events_becomes_runs_on_a_real_temporal(
         while time.monotonic() - began < DEADLINE_S:
             async with owner_sessionmaker() as s, s.begin():  # the worker checks in, as a live one does (90 s window)
                 await s.execute(text("update worker_instances set checked_at = statement_timestamp()"))
-            await matching.match_once(dispatch_sessionmaker, KEYS, verified, busy=busy)
+            dispatched.update(await matching.match_once(dispatch_sessionmaker, KEYS, verified, busy=busy))
+            async with owner_sessionmaker() as s:
+                most_queued = max(most_queued, (await s.execute(queued, {"t": ready.tenant_id})).scalar_one())
             passed = time.perf_counter()
             dispatched.update(
                 await dispatch.dispatch_once(dispatch_sessionmaker, server.client, KEYS, api_settings, BUILD, rotation)
@@ -134,6 +145,9 @@ async def test_a_backlog_of_events_becomes_runs_on_a_real_temporal(
         requests_by = {f"{st}:{why}": n for st, why, n in (await s.execute(text(
             "select status, coalesce(reason, ''), count(*) from run_requests where tenant_id = :t group by 1, 2"),
             {"t": ready.tenant_id})).all()}  # fmt: skip
+        in_queue = [float(w) for (w,) in (await s.execute(text(
+            "select extract(epoch from r.started_at - q.queued_at) from runs r join run_requests q on q.id = r.id "
+            "where r.tenant_id = :t and r.started_at is not null"), {"t": ready.tenant_id})).all()]  # fmt: skip
     starts = [float(a) for a, _, _ in rows if a is not None]
     ends = [float(b) for _, b, _ in rows if b is not None]
     result = {
@@ -142,11 +156,14 @@ async def test_a_backlog_of_events_becomes_runs_on_a_real_temporal(
         "statuses": {status: sum(1 for *_, x in rows if x == status) for status in {x for *_, x in rows}},
         "events_by_status": events_by, "requests_by_status": requests_by,
         "cycles": cycles, "elapsed_s": round(elapsed, 1), "starts_per_s": round(len(starts) / elapsed, 2),
-        "dispatched": dict(dispatched), "dispatch_s": round(dispatching, 1),
+        "dispatched": dict(dispatched), "dispatch_s": round(dispatching, 1), "capacity": capacity,
+        "most_queued": most_queued,
         "dispatch_ms_per_start": round(1000 * dispatching / max(1, dispatched["started"]), 1),
         "to_start_s": {"p50": round(_pct(starts, 0.5), 1), "p95": round(_pct(starts, 0.95), 1),
                        "max": round(max(starts), 1)} if starts else None,
         "to_end_s": {"p50": round(_pct(ends, 0.5), 1), "max": round(max(ends), 1)} if ends else None,
+        "queued_to_start_s": {"p50": round(_pct(in_queue, 0.5), 1), "p95": round(_pct(in_queue, 0.95), 1),
+                              "max": round(max(in_queue), 1)} if in_queue else None,
     }  # fmt: skip
     RESULTS.append(result)
     print(json.dumps(result))
