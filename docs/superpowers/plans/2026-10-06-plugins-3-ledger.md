@@ -1930,3 +1930,5 @@ shaped it: technical recommendations only.
   across the OAS only the two documented corrections change a title's letters; the mxedge / "Mist Edge" siblings and
   the compound field titles ("Nacrule ID") are naming choices. Technical closure only: no ruling sign-off or push
   authorization.
+
+The owner signed off this ruling, its two corrections included (2026-10-09: "signed off"), and authorized push and PR.
