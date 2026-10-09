@@ -22,8 +22,8 @@ import { guardLeaving } from "../../lib/leaving";
 import type { Path } from "../../lib/schemaForm";
 import { useDocumentTitle } from "../../lib/title";
 import {
-  applyAll, applyUnapplied, baseOf, droppedWhy, isStale, lineageOf, unappliedId, within, type Unapplied,
-  type UnappliedKind,
+  STALE, applyAll, applyUnapplied, baseOf, droppedWhy, isStale, lineageOf, unappliedFile, unappliedId, within,
+  type Unapplied, type UnappliedKind,
 } from "../../lib/unapplied";  // prettier-ignore
 import {
   canEdit, canPublish, nodeTypesQuery, notPortable, tenantQuery, versionsQuery, workflowQuery, type Diagnostic,
@@ -41,13 +41,14 @@ import { ProblemsPanel, type PublishProblems } from "./ProblemsPanel";
 import { SaveState } from "./SaveState";
 import { type Problems } from "./StepCard";
 import { StepPicker, type PickMode } from "./StepPicker";
+import { UnappliedPanel } from "./UnappliedPanel";
 import { VersionsPanel } from "./VersionsPanel";
 import { Toolbar } from "./Toolbar";
 
 type Opened = { workflow: WorkflowDetail; types: NodeType[]; role: string | null };
 
 /** The editor's right column: a step's panel, the problems, or the versions (Task 15). */
-type Side = { kind: "step"; node: string } | { kind: "problems" } | { kind: "versions" } | null;
+type Side = { kind: "step"; node: string } | { kind: "problems" } | { kind: "versions" } | { kind: "unapplied" } | null;
 const NO_DIAGNOSTICS: Diagnostic[] = []; // one empty list, so a memo over it holds
 
 /** Whether a request's outcome is unknown: no answer reached the editor (the network), or a 5xx came in the API's
@@ -62,7 +63,9 @@ type Confirm = { kind: "publish"; expected: number; elsewhere?: boolean } | { ki
 type Asking =
   | { kind: "node"; id: string }
   | { kind: "edge"; edge: GraphEdge }
-  | { kind: "ports"; next: GraphDoc; dropped: GraphEdge[]; release: string[] };
+  | { kind: "ports"; next: GraphDoc; dropped: GraphEdge[]; release: string[] }
+  // edits that can't be applied, before what needs the draft settled: an export, a publication, a version view
+  | { kind: "unapplied"; action: string; left: Unapplied[]; then: () => void };
 
 /** Which ports a change takes away, and where their edges led (ruling 9). */
 function portsQuestion(dropped: GraphEdge[], keyOf: (id: string) => string): string {
@@ -209,14 +212,17 @@ function Editor({
   decide.current = (by) => {
     joined.current.add(by); // recorded before it shares the decision, whichever exit came first
     if (deciding.current) return deciding.current;
+    const ask = () => new Promise<boolean>((resolve) => setLeaveQuestion(() => resolve));
     const run = (async () => {
-      const s = saver.current;
-      if (agreed.current || !s?.unsaved) return true;
-      try {
-        await s.flush();
-        return true;
-      } catch {
-        return new Promise<boolean>((resolve) => setLeaveQuestion(() => resolve));
+      // Settling and saving are one transaction (ruling 18; the review of revision 2): what's typed but not applied
+      // goes in where it can, then the save is awaited; anything typed meanwhile goes round again. The person is asked
+      // when an edit can't be applied or the save fails. Nothing is left unasked when this answers "leave".
+      for (;;) {
+        if (agreed.current) return true;
+        if (settleAll().length > 0) return ask();
+        const s = saver.current;
+        if (!s?.unsaved) return true; // settled just now, synchronously: nothing typed since
+        if (!(await s.flush().then(() => true, () => false))) return ask();
       }
     })().then((leave) => {
       deciding.current = null;
@@ -242,7 +248,7 @@ function Editor({
   useEffect(
     () =>
       guardLeaving({
-        unsaved: () => saver.current?.unsaved ?? false,
+        unsaved: () => (saver.current?.unsaved ?? false) || unappliedRef.current.size > 0,
         decide: () => decide.current("guard"),
         stayed: () => withdraw("guard"), // the sign-out it agreed to failed
       }),
@@ -261,7 +267,7 @@ function Editor({
   const router = useRouter();
   useBlocker({
     shouldBlockFn: async ({ next }) => !isHome(next.routeId, next.params as Record<string, unknown>) && !(await decide.current("router")),
-    enableBeforeUnload: () => saver.current?.unsaved ?? false,
+    enableBeforeUnload: () => (saver.current?.unsaved ?? false) || unappliedRef.current.size > 0,
   });
   useEffect(
     () =>
@@ -746,6 +752,43 @@ function Editor({
     };
   }
 
+  /** Every unapplied edit that can be applied, applied as one undo step; those that can't, returned with their reasons
+   * (ruling 18). */
+  function settleAll(): Unapplied[] {
+    const all = [...unappliedRef.current.values()];
+    // The latest document, not the render's: after a save was awaited, this render's `doc` is older (the review of
+    // revision 3).
+    const { doc: next, applied, left } = applyAll(draftNow(), all, typeOf, () => true);
+    for (const u of left) keep(u);
+    if (applied.length === 0) return left;
+    if (!change(next, applied.length === 1 ? "Applied an edit" : `Applied ${applied.length} edits`)) return all;
+    drop(applied.map((u) => u.id));
+    return left;
+  }
+
+  /** `then`, once every unapplied edit is in the draft; when one can't be, the person decides first (ruling 18). */
+  function whenSettled(action: string, then: () => void) {
+    const left = settleAll();
+    if (left.length === 0) then();
+    else setAsking({ kind: "unapplied", action, left, then });
+  }
+
+  /** Back to the edits not applied: their list, where each can be read, gone to or discarded, its field gone or not. */
+  function goBack() {
+    setSide({ kind: "unapplied" });
+  }
+
+  const describe = (u: Unapplied) => `${keyOf(u.node)} · ${u.label}: ${u.why ?? "still being typed"}`;
+
+  /** The edits not applied, as a file of their own: never written into the graph to keep them, as the graph is what
+   * runs (ruling 18; the review of revision 2). */
+  const downloadUnapplied = () =>
+    downloadJson(fileName(workflow.name, ".unapplied.json"), unappliedFile([...unappliedRef.current.values()], keyOf));
+  /** Said beside every "Download my version": that file is the draft, and the edits not applied aren't in it. */
+  const notInMine = (n: number) =>
+    n === 0 ? "" : `Your version's file doesn't hold the ${n === 1 ? "1 edit" : `${n} edits`} not applied: download ${n === 1 ? "it" : "them"} separately.`;
+  const downloadLabel = (n: number) => (n === 1 ? "Download the edit not applied" : "Download the edits not applied");
+
   const firstPort = (nodeId: string): PortRef | null => {
     const port = portMap.get(idKey(nodeId))?.[0];
     return port ? { node: nodeId, port } : null;
@@ -787,6 +830,12 @@ function Editor({
 
   function confirmDelete() {
     if (!asking) return;
+    if (asking.kind === "unapplied") {
+      drop(asking.left.map((u) => u.id)); // discarded, on purpose
+      setAsking(null);
+      asking.then();
+      return;
+    }
     if (asking.kind === "ports") {
       const ports = [...new Set(asking.dropped.map(portOf))].join(", ");
       const edges = asking.dropped.length === 1 ? "its edge" : `${asking.dropped.length} edges`;
@@ -803,6 +852,7 @@ function Editor({
       const inbound = edgesOf(doc).find((e) => sameId(e.to.node, asking.id));
       const back = inbound ? item.node(inbound.from.node) : START;
       if (panel !== null && sameId(panel, asking.id)) setSide(null);
+      drop([...unappliedRef.current.values()].filter(within(asking.id, "")).map((u) => u.id));
       change(next, `Deleted ${keyOf(asking.id)}${healed ? `; ${keyOf(healed.from.node)} now leads to ${keyOf(healed.to.node)}` : ""}`, back);
     } else {
       change(deleteEdge(doc, asking.edge), `Deleted the edge from ${keyOf(asking.edge.from.node)} to ${keyOf(asking.edge.to.node)}`, item.node(asking.edge.from.node));
@@ -942,6 +992,11 @@ function Editor({
         state={
           <>
             <SaveState state={sync} />
+            {unapplied.size > 0 && (
+              <Button size="md" aria-expanded={side?.kind === "unapplied"} onClick={() => setSide(side?.kind === "unapplied" ? null : { kind: "unapplied" })}>
+                {unapplied.size === 1 ? "1 edit not applied" : `${unapplied.size} edits not applied`}
+              </Button>
+            )}
             {sync.status === "error" && (
               <Button size="md" onClick={() => saver.current?.retry()}>Retry</Button>
             )}
@@ -968,14 +1023,16 @@ function Editor({
         <Button ref={versionsButton} size="md" aria-expanded={side?.kind === "versions"} onClick={() => setSide(side?.kind === "versions" ? null : { kind: "versions" })}>
           Versions
         </Button>
-        <Button size="md" onClick={() => void exportFile()}>Export</Button>
+        <Button size="md" onClick={() => whenSettled("export", () => void exportFile())}>Export</Button>
         {publisher && viewing === null && (
           <Button
             ref={publishButton}
             variant="primary"
             size="md"
             disabled={busy !== null || latest === null}
-            onClick={() => latest !== null && setConfirm({ kind: "publish", expected: latest })}
+            onClick={() => {
+              if (latest !== null) whenSettled("publish", () => setConfirm({ kind: "publish", expected: latest }));
+            }}
           >
             {latest === null ? "Publish" : `Publish v${latest + 1}`}
           </Button>
@@ -1019,6 +1076,12 @@ function Editor({
             This draft was changed elsewhere, so your changes since then aren&apos;t saved. Reload to see the saved draft, or
             download your version to keep it.
           </span>
+          {unapplied.size > 0 && (
+            <>
+              <span className="basis-full">{notInMine(unapplied.size)}</span>
+              <Button size="sm" onClick={downloadUnapplied}>{downloadLabel(unapplied.size)}</Button>
+            </>
+          )}
           <Button size="sm" onClick={downloadMine}>Download my version</Button>
           <Button size="sm" variant="primary" onClick={() => setReloading(true)}>Reload</Button>
         </div>
@@ -1085,11 +1148,22 @@ function Editor({
             }}
           />
         )}
+        {side?.kind === "unapplied" && (
+          <UnappliedPanel
+            edits={[...unapplied.values()]}
+            keyOf={(id) => findNode(doc, id)?.key ?? null}
+            reason={(u) => (isStale(draftNow(), u) ? STALE : (u.why ?? "Still being typed."))}
+            onGo={(u) => setSide({ kind: "step", node: u.node })}
+            onDiscard={(u) => drop([u.id])}
+            onDownload={downloadUnapplied}
+            onClose={() => setSide(null)}
+          />
+        )}
         {side?.kind === "versions" && (
           <VersionsPanel
             versions={versions.data ?? []}
             publisher={publisher && busy === null}
-            onView={(v) => void view(v)}
+            onView={(v) => whenSettled("view the version", () => void view(v))}
             onActivate={(version) => setConfirm({ kind: "activate", version })}
             onClose={() => {
               setSide(null);
@@ -1133,20 +1207,30 @@ function Editor({
       )}
       <ConfirmDialog
         open={asking !== null}
-        title={asking?.kind === "edge" ? "Delete an edge" : asking?.kind === "ports" ? "Remove a port" : "Delete a step"}
-        confirmLabel={asking?.kind === "ports" ? "Remove" : "Delete"}
+        title={
+          asking?.kind === "unapplied" ? "Edits not applied"
+          : asking?.kind === "edge" ? "Delete an edge" : asking?.kind === "ports" ? "Remove a port" : "Delete a step"
+        }
+        confirmLabel={asking?.kind === "unapplied" ? `Discard and ${asking.action}` : asking?.kind === "ports" ? "Remove" : "Delete"}
+        cancelLabel={asking?.kind === "unapplied" ? "Go back to them" : "Cancel"}
         onConfirm={confirmDelete}
-        onCancel={() => setAsking(null)}
+        onCancel={() => {
+          if (asking?.kind === "unapplied") goBack();
+          setAsking(null);
+        }}
       >
         {asking?.kind === "node" && (
           <>
             {keyOf(asking.id)} and its edges are deleted.
             {healed && ` ${keyOf(healed.from.node)} will lead to ${keyOf(healed.to.node)}.`} Other steps that read its
             output will show a problem.
+            {[...unapplied.values()].some(within(asking.id, "")) && " Its edits not applied yet are discarded too."}
           </>
         )}
         {asking?.kind === "edge" && `${keyOf(asking.edge.to.node)} will no longer follow ${keyOf(asking.edge.from.node)}.`}
         {asking?.kind === "ports" && portsQuestion(asking.dropped, keyOf)}
+        {asking?.kind === "unapplied" &&
+          `${asking.left.length === 1 ? "This edit isn't applied, so it would be left out" : "These edits aren't applied, so they would be left out"}: ${asking.left.map(describe).join("; ")}.`}
       </ConfirmDialog>
       <ConfirmDialog
         open={confirm !== null}
@@ -1179,7 +1263,15 @@ function Editor({
       >
         {sync.status === "conflict"
           ? "This draft was changed elsewhere, so your changes since then can't be saved here. "
-          : "They couldn't be saved. Stay to try again, or keep a copy before you leave. "}
+          : sync.status !== "saved" ? "They couldn't be saved. Stay to try again, or keep a copy before you leave. " : ""}
+        {unapplied.size > 0 &&
+          `${unapplied.size === 1 ? "An edit isn't applied" : "Some edits aren't applied"}: ${[...unapplied.values()].map(describe).join("; ")}. Stay to fix ${unapplied.size === 1 ? "it" : "them"}. `}
+        {unapplied.size > 0 && (
+          <>
+            <span className="basis-full">{notInMine(unapplied.size)}</span>
+            <Button size="sm" onClick={downloadUnapplied}>{downloadLabel(unapplied.size)}</Button>
+          </>
+        )}
         <Button size="sm" onClick={downloadMine}>Download my version</Button>
       </ConfirmDialog>
       <ConfirmDialog
@@ -1193,6 +1285,8 @@ function Editor({
         onCancel={() => setReloading(false)}
       >
         Your version since the conflict is discarded. Download it first to keep it.
+        {unapplied.size > 0 && ` The ${unapplied.size === 1 ? "edit" : "edits"} not applied ${unapplied.size === 1 ? "is" : "are"} discarded too: ${notInMine(unapplied.size)}`}
+        {unapplied.size > 0 && <Button size="sm" onClick={downloadUnapplied}>{downloadLabel(unapplied.size)}</Button>}
       </ConfirmDialog>
     </div>
   );
