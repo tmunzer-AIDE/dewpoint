@@ -45,6 +45,8 @@ test("the served app carries its third-party notices: code, styles and fonts, wi
   const entries = [/^react \d/m, /^react-dom \d/m, /^tailwindcss \d/m, /^@fontsource\/instrument-sans \d/m, /^vite \d/m];
   // The canvas's packages too (4b): its code ships in a chunk loaded when a workflow opens, and the notices cover it.
   entries.push(/^@xyflow\/react \d/m, /^@xyflow\/system \d/m, /^@dagrejs\/dagre \d/m, /^@dagrejs\/graphlib \d/m);
+  // The step drawer's tabs (4c-1): bundled in the editor's chunk, and in the notices.
+  entries.push(/^@radix-ui\/react-tabs \d/m);
   for (const entry of entries) {
     expect(text).toMatch(entry);
   }
