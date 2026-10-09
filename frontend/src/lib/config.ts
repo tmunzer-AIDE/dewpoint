@@ -3,7 +3,7 @@
 // computed: `{"$value": {kind, ...}}` (engine/graph/values.py), a formula (`cel`), a reference (`ref`) or text with
 // references (`template`); a `literal` envelope is a fixed value written the long way. Each change returns a new
 // document and keeps what it doesn't touch as it was, byte for byte.
-import { edgesOf, findNode, nodesOf, portOf, portsOf, sameId } from "./graph";
+import { edgesOf, findNode, idKey, nodesOf, portOf, portsOf, sameId } from "./graph";
 import { isObject, type Path } from "./schemaForm";
 import type { GraphDoc, GraphEdge, GraphNode, NodeType } from "./workflows";
 
@@ -166,6 +166,130 @@ function withNode(doc: GraphDoc, nodeId: string, node: GraphNode): GraphDoc {
   return { ...doc, nodes: nodesOf(doc).map((n) => (sameId(n.id, nodeId) ? node : n)) };
 }
 
+// Declassify entries (engine/graph/model.py's DeclassifySite) name a decision by its step and a JSON pointer into its
+// config, and a switch's case by its place: `/cases/{i}/when`. A change that moves a list's items moves what those
+// pointers name, so an entry inside an item follows it, and goes with it. Left behind, it would declassify another
+// decision, which no one declassified (the finding at 93a0dd61).
+const INDEX = /^(0|[1-9][0-9]*)$/; // a list's index in a pointer (RFC 6901): no sign, no leading zero
+
+/** Whether two values are the same JSON, whatever the order of an object's keys. */
+function sameJson(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (Array.isArray(a)) {
+    return Array.isArray(b) && a.length === b.length && (a as unknown[]).every((x, i) => sameJson(x, (b as unknown[])[i]));
+  }
+  if (!isObject(a) || !isObject(b)) return false;
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length && keys.every((k) => Object.hasOwn(b, k) && sameJson(a[k], b[k]));
+}
+
+/** Where `old[i]` is in `next`, or null when it isn't, or can't be told. A list changed in place (a move, an addition)
+ * keeps its items: the item itself. A list written whole (a JSON edit) has only new ones: the one item equal to it,
+ * when no other item was. */
+function placeIn(old: unknown[], next: unknown, i: number): number | null {
+  if (!Array.isArray(next)) return null;
+  const list = next as unknown[];
+  const item = old[i];
+  const kept = list.flatMap((x, j) => (x === item ? [j] : []));
+  if (kept.length > 0 || list.some((x) => typeof x === "object" && x !== null && old.includes(x))) {
+    return kept.length === 1 ? kept[0]! : null;
+  }
+  if (old.filter((x) => sameJson(x, item)).length !== 1) return null;
+  const equal = list.flatMap((x, j) => (sameJson(x, item) ? [j] : []));
+  return equal.length === 1 ? equal[0]! : null;
+}
+
+/** Whether a pointer runs, in `after`, through a list's item that wasn't there in `before`: one the change added where
+ * it pointed (past a list's end, in a list where there was none). A value written inside an item that was there isn't
+ * one: it's that item's. */
+function addedOn(before: unknown, after: unknown, parts: string[]): boolean {
+  let [was, now] = [before, after];
+  for (const part of parts) {
+    if (Array.isArray(now)) {
+      if (!INDEX.test(part) || Number(part) >= now.length) return false; // it names nothing now
+      if (!Array.isArray(was) || Number(part) >= was.length) return true;
+      [was, now] = [(was as unknown[])[Number(part)], (now as unknown[])[Number(part)]];
+    } else if (isObject(now) && Object.hasOwn(now, part)) {
+      [was, now] = [isObject(was) ? was[part] : undefined, now[part]];
+    } else return false;
+  }
+  return false;
+}
+
+/** A pointer into a step's config `before` once `setAt(before, path, value)` is written (`after`): the same; another
+ * index, where its item moved; null, where its item went or can't be followed, or where it named no item and the change
+ * added one there, whose decision it would then declassify. One that names no item either way (past a list's end, an
+ * index with a leading zero) stays as it is. */
+function followPointer(before: unknown, after: unknown, path: Path, value: unknown, pointer: string): string | null {
+  if (!pointer.startsWith("/")) return pointer;
+  const raw = pointer.split("/").slice(1); // as written: an index has no escapes, so only it is rewritten
+  const parts = raw.map((s) => s.replace(/~1/g, "/").replace(/~0/g, "~"));
+  if (addedOn(before, after, parts)) return null;
+  const at = (d: number, index: number) => ["", ...raw.slice(0, d), String(index), ...raw.slice(d + 1)].join("/");
+  // A removal splices its list: the items after it move up one.
+  const removed = value === undefined && typeof path.at(-1) === "number" ? (path.at(-1) as number) : null;
+  const above = removed === null ? path : path.slice(0, -1);
+  if (parts.length <= above.length || above.some((k, d) => parts[d] !== String(k))) return pointer; // not below it
+  let old = valueAt(before, above);
+  if (removed !== null) {
+    const d = above.length;
+    if (!Array.isArray(old) || !INDEX.test(parts[d]!) || Number(parts[d]) >= old.length) return pointer;
+    const i = Number(parts[d]);
+    return i === removed ? null : i > removed ? at(d, i - 1) : pointer;
+  }
+  let next = value;
+  for (let d = above.length; d < parts.length; d++) {
+    if (old === next) return pointer;
+    const part = parts[d]!;
+    if (Array.isArray(old)) {
+      if (!INDEX.test(part) || Number(part) >= old.length) return pointer;
+      const j = placeIn(old as unknown[], next, Number(part));
+      return j === null ? null : j === Number(part) ? pointer : at(d, j);
+    }
+    if (!isObject(old) || !Object.hasOwn(old, part)) return pointer;
+    old = old[part];
+    next = isObject(next) ? next[part] : undefined;
+  }
+  return pointer; // what it names, written in place
+}
+
+/** The draft with the step's declassify entries following its config from `before` to `after`, `setAt(before, path,
+ * value)`; the settings as they were, the same object, when none moved or went. */
+function followEntries(doc: GraphDoc, nodeId: string, before: unknown, after: unknown, path: Path, value: unknown): GraphDoc {
+  const entries = doc.settings?.declassify;
+  if (!entries) return doc;
+  const kept = entries.flatMap((e) => {
+    if (!sameId(e.node, nodeId)) return [e];
+    const field = followPointer(before, after, path, value, e.field);
+    return field === null ? [] : field === e.field ? [e] : [{ ...e, field }];
+  });
+  if (kept.length === entries.length && kept.every((e, i) => e === entries[i])) return doc;
+  return { ...doc, settings: { ...doc.settings, declassify: kept } };
+}
+
+/** The declassify entries each step of `after` has lost since `before`, by its id (`idKey`): those a change removed,
+ * as the list item they named went or couldn't be followed. A deleted step's go with it and aren't counted. */
+export function unlisted(before: GraphDoc, after: GraphDoc): Map<string, number> {
+  const count = (doc: GraphDoc) => {
+    const n = new Map<string, number>();
+    for (const e of doc.settings?.declassify ?? []) n.set(idKey(e.node), (n.get(idKey(e.node)) ?? 0) + 1);
+    return n;
+  };
+  const [was, now] = [count(before), count(after)];
+  const lost = new Map<string, number>();
+  for (const node of nodesOf(after)) {
+    const n = (was.get(idKey(node.id)) ?? 0) - (now.get(idKey(node.id)) ?? 0);
+    if (n > 0) lost.set(idKey(node.id), n);
+  }
+  return lost;
+}
+
+/** What a step's drawer says of the declassify entries a change removed: nothing else shows them. */
+export const unlistedNote = (n: number): string =>
+  n === 1
+    ? "Removed 1 declassify entry: the list item it named is gone, or was changed in an edit of the whole list. That decision is no longer declassified; Undo puts the entry back."
+    : `Removed ${n} declassify entries: the list items they named are gone, or were changed in an edit of the whole list. Those decisions are no longer declassified; Undo puts the entries back.`;
+
 /** The document without the edges that left a port `before` had and `after` hasn't; edges from a port the step never
  * had (an import's) stay: the validator reports them. */
 function dropLost(doc: GraphDoc, before: GraphNode, after: GraphNode, type: NodeType | undefined): Changed {
@@ -180,7 +304,8 @@ export function setConfig(doc: GraphDoc, nodeId: string, path: Path, value: unkn
   const before = findNode(doc, nodeId);
   if (!before) return { doc, dropped: [] };
   const after = { ...before, config: setAt(before.config ?? {}, path, value) as Record<string, unknown> };
-  return dropLost(withNode(doc, nodeId, after), before, after, type);
+  const next = followEntries(withNode(doc, nodeId, after), nodeId, before.config ?? {}, after.config, path, value);
+  return dropLost(next, before, after, type);
 }
 
 /** What a step sets for itself; what it leaves out takes the type's defaults, and a failure fails the run by default,

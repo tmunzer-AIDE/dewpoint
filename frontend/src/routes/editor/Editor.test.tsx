@@ -1358,22 +1358,111 @@ it("discards a deleted step's edits not applied, and says so", async () => {
   expect(screen.queryByRole("button", { name: /edits? not applied/ })).toBeNull();
 });
 
-/** A switch whose case b leads to a transform. */
-const switched = () => ({
+/** A switch whose case b leads to a transform; `declassify`, the workflow's declassify entries, when given. */
+const switched = (declassify?: { node: string; field: string }[]) => ({
   graph_format: 1,
   nodes: [
     { id: "id-pick", key: "pick", type: "flow.switch@1", config: { cases: [{ port: "a", when: formula("true") }, { port: "b", when: formula("false") }] }, position: { x: 0, y: 140 } },
     { id: "id-transform", key: "transform", type: "flow.transform@1", position: { x: 0, y: 280 } },
   ],
   edges: [{ from: { node: "id-pick", port: "b" }, to: { node: "id-transform" } }],
+  ...(declassify ? { settings: { declassify } } : {}),
 });  // prettier-ignore
 
-async function openSwitch() {
+async function openSwitch(declassify?: { node: string; field: string }[]) {
   answers.set("GET /api/v1/node-types", () => json([...TYPES, SWITCH]));
-  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: switched() }));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: switched(declassify) }));
   await show();
   await userEvent.click(screen.getByRole("button", { name: "pick" }));
 }
+
+const declassifyOf = () => drawn.at(-1)!.doc.settings?.declassify;
+const drawerNote = () => within(screen.getByRole("complementary", { name: "pick" })).queryByRole("status")?.textContent ?? null;
+const undoInDrawer = async () => {
+  await userEvent.click(screen.getByRole("heading", { name: "pick" }));
+  await userEvent.keyboard("{Control>}z{/Control}");
+};
+
+it("moves a case's declassify entry with the case, in the move's undo step", async () => {
+  await openSwitch([{ node: "id-pick", field: "/cases/0/when" }]); // a's decision
+  await userEvent.click(screen.getByRole("button", { name: "Move down: Cases, item 1" }));
+  expect(stepConfig("pick")).toEqual({ cases: [{ port: "b", when: formula("false") }, { port: "a", when: formula("true") }] });
+  expect(declassifyOf()).toEqual([{ node: "id-pick", field: "/cases/1/when" }]); // still a's, never b's
+  expect(drawerNote()).toBeNull(); // followed: nothing to say
+  await undoInDrawer();
+  expect(drawn.at(-1)!.doc).toEqual(switched([{ node: "id-pick", field: "/cases/0/when" }]));
+  await userEvent.keyboard("{Control>}{Shift>}z{/Shift}{/Control}"); // redone: the entry follows a again
+  expect(declassifyOf()).toEqual([{ node: "id-pick", field: "/cases/1/when" }]);
+});
+
+it("removes a declassify entry that named no case when a case is added where it points", async () => {
+  await openSwitch([{ node: "id-pick", field: "/cases/2/when" }]); // past the end: stale, a draft from before the fix
+  await userEvent.click(screen.getByRole("button", { name: "Add to Cases" }));
+  expect(stepConfig("pick")).toEqual({ cases: [{ port: "a", when: formula("true") }, { port: "b", when: formula("false") }, { port: "case_1" }] });
+  expect(declassifyOf()).toEqual([]); // never the new case's
+  expect(drawerNote()).toContain("Removed 1 declassify entry");
+});
+
+it("says a declassify entry's removal, beyond the drawer", async () => {
+  const said: string[] = [];
+  const stop = onAnnounce((m) => said.push(m));
+  await openSwitch([{ node: "id-pick", field: "/cases/0/when" }]);
+  await userEvent.click(screen.getByRole("button", { name: "Remove: Cases, item 1" }));
+  stop();
+  expect(said).toContain(
+    "pick: Removed 1 declassify entry: the list item it named is gone, or was changed in an edit of the whole list. That " +
+      "decision is no longer declassified; Undo puts the entry back.",
+  );
+});
+
+it("never says the draft's removed declassify entries in a version's drawer", async () => {
+  answers.set(`GET ${BASE}/versions`, () => json([version(1, true)]));
+  answers.set(`GET ${BASE}/versions/v1`, () => json({ ...version(1, true), graph: switched(), expressions: [] }));
+  await openSwitch([{ node: "id-pick", field: "/cases/0/when" }]);
+  await userEvent.click(screen.getByRole("button", { name: "Remove: Cases, item 1" }));
+  expect(drawerNote()).toContain("Removed 1 declassify entry"); // the draft's drawer
+  await userEvent.click(screen.getByRole("button", { name: "Versions" }));
+  await userEvent.click(await screen.findByRole("button", { name: "View version 1" }));
+  await screen.findByText("Viewing version 1, read only. The draft is unchanged.");
+  await userEvent.click(screen.getByRole("button", { name: "pick" }));
+  expect(drawerNote()).toBeNull(); // the version's drawer: nothing was removed from it
+});
+
+it("removes a removed case's declassify entry, says so in the drawer, and an undo brings both back", async () => {
+  await openSwitch([{ node: "id-pick", field: "/cases/0/when" }, { node: "id-pick", field: "/cases/1/when" }]);
+  await userEvent.click(screen.getByRole("button", { name: "Remove: Cases, item 1" })); // a, which has no edge
+  expect(stepConfig("pick")).toEqual({ cases: [{ port: "b", when: formula("false") }] });
+  expect(declassifyOf()).toEqual([{ node: "id-pick", field: "/cases/0/when" }]); // b's, never a's on b
+  expect(drawerNote()).toBe(
+    "Removed 1 declassify entry: the list item it named is gone, or was changed in an edit of the whole list. That " +
+      "decision is no longer declassified; Undo puts the entry back.",
+  );
+  await undoInDrawer();
+  expect(drawn.at(-1)!.doc).toEqual(switched([{ node: "id-pick", field: "/cases/0/when" }, { node: "id-pick", field: "/cases/1/when" }]));
+  expect(drawerNote()).toBeNull();
+});
+
+it("removes a case with edges and its declassify entry once asked", async () => {
+  await openSwitch([{ node: "id-pick", field: "/cases/1/when" }]); // b's
+  await userEvent.click(screen.getByRole("button", { name: "Remove: Cases, item 2" }));
+  await userEvent.click(within(screen.getByRole("dialog", { name: "Remove a port" })).getByRole("button", { name: "Remove" }));
+  expect(stepConfig("pick")).toEqual({ cases: [{ port: "a", when: formula("true") }] });
+  expect(declassifyOf()).toEqual([]);
+  expect(drawerNote()).toContain("Removed 1 declassify entry");
+});
+
+it("follows a case a JSON edit of the cases keeps as it was, and removes, saying so, the entry of one it changed", async () => {
+  await openSwitch([{ node: "id-pick", field: "/cases/0/when" }, { node: "id-pick", field: "/cases/1/when" }]);
+  await userEvent.click(within(screen.getByRole("group", { name: "Cases" })).getAllByRole("button", { name: "Edit as JSON" })[0]!);
+  const text = screen.getByLabelText("Cases");
+  await userEvent.clear(text);
+  // b as it was, now first; a after it, deciding on something else.
+  await userEvent.paste(JSON.stringify([{ port: "b", when: formula("false") }, { port: "a", when: formula("trigger.n > 1") }]));
+  await userEvent.tab();
+  expect(stepConfig("pick")).toEqual({ cases: [{ port: "b", when: formula("false") }, { port: "a", when: formula("trigger.n > 1") }] });
+  expect(declassifyOf()).toEqual([{ node: "id-pick", field: "/cases/0/when" }]); // b's; a's changed decision isn't declassified
+  expect(drawerNote()).toContain("Removed 1 declassify entry");
+});
 
 it("renames a case's port in place, its edges following", async () => {
   await openSwitch();
