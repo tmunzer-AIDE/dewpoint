@@ -541,3 +541,117 @@ test("the list reflows at 320 px and stays AA (WCAG 1.4.10)", async ({ page }) =
   expect(overflow, "the workflows list scrolls sideways at 320 px").toBeLessThanOrEqual(0);
   await expectAccessible(page, "workflows at 320 px");
 });
+
+test("a step is set up in its drawer: a formula, error handling, one undo step per field, under the CSP", async ({ page }) => {
+  await newWorkflow(page, "Drawer flow");
+  await page.getByRole("button", { name: "Add the first step" }).click();
+  await page.getByRole("option", { name: /flow\.if@1/ }).click();
+  await page.getByRole("button", { name: /^if, If/ }).click();
+  const drawer = page.getByRole("complementary", { name: "if" });
+  await expect(drawer.getByRole("tab", { name: "Setup" })).toHaveAttribute("aria-selected", "true");
+  await drawer.getByRole("textbox", { name: "Condition" }).fill("trigger.count > 2");
+  await expect(page.getByText("Saved · not published")).toBeVisible({ timeout: 10_000 });
+  await expectAccessible(page, "editor: drawer, setup");
+  await drawer.getByRole("button", { name: "On error: fail the run" }).click();
+  await drawer.getByLabel("When it fails").selectOption("port");
+  await expect(drawer.getByRole("button", { name: "Connect error to…" })).toBeVisible();
+  await expectAccessible(page, "editor: drawer, error handling");
+  await drawer.getByRole("heading", { name: "if" }).click(); // focus leaves the fields
+  await page.keyboard.press("Control+z");
+  await expect(drawer.getByRole("button", { name: "On error: fail the run" })).toBeVisible();
+  await page.keyboard.press("Control+z");
+  await expect(drawer.getByRole("textbox", { name: "Condition" })).toHaveValue(""); // the whole formula, one step
+});
+
+test("a switch's case keeps its edges when its port is renamed, and removing it asks first", async ({ page }) => {
+  await newWorkflow(page, "Switch flow");
+  await page.getByRole("button", { name: "Add the first step" }).click();
+  await page.getByRole("option", { name: /flow\.switch@1/ }).click();
+  await page.getByRole("button", { name: /^switch, Switch/ }).click();
+  const drawer = page.getByRole("complementary", { name: "switch" });
+  await drawer.getByRole("button", { name: "Add to Cases" }).click();
+  const first = drawer.getByRole("group", { name: "Cases, item 1" });
+  await first.getByRole("textbox", { name: "Condition" }).fill("true");
+  await drawer.getByRole("button", { name: "Add a step after switch (case_1)" }).click(); // the drawer's twin of the canvas's "+"
+  await page.getByRole("option", { name: /flow\.transform@1/ }).click();
+  await page.getByRole("button", { name: /^switch, Switch/ }).click();
+  await first.getByRole("textbox", { name: "Port name" }).fill("big");
+  await first.getByRole("textbox", { name: "Port name" }).press("Enter");
+  await expect(page.getByRole("button", { name: "Insert a step between switch (big) and transform" })).toHaveCount(1);
+  await expectAccessible(page, "editor: drawer, a switch's cases");
+  await drawer.getByRole("button", { name: "Remove: Cases, item 1" }).click();
+  const dialog = page.getByRole("dialog", { name: "Remove a port" });
+  await expect(dialog).toContainText("The port big goes with this change, and its edge to transform is deleted.");
+  await expectAccessible(page, "editor: removing a port");
+  await dialog.getByRole("button", { name: "Remove" }).click();
+  await expect(page.getByRole("button", { name: "Insert a step between switch (big) and transform" })).toHaveCount(0);
+});
+
+test("a renamed step keeps the references to it, and says which formulas mention it", async ({ page }) => {
+  await importFile(page, "References", "e2e/fixtures/references.dewpoint.json");
+  await page.getByRole("button", { name: /^fetch, Transform/ }).click();
+  const fetch = page.getByRole("complementary", { name: "fetch" });
+  await fetch.getByRole("button", { name: "Rename" }).click();
+  await fetch.getByLabel("Key").fill("load");
+  await fetch.getByLabel("Key").press("Enter");
+  const load = page.getByRole("complementary", { name: "load" });
+  await expect(load.getByRole("heading", { name: "load" })).toBeFocused();
+  await expect(load.getByText("1 formula mentions fetch and keeps its text: check it.")).toBeVisible();
+  await page.getByRole("button", { name: /^use, Transform/ }).click();
+  const use = page.getByRole("complementary", { name: "use" });
+  await expect(use.locator('[data-pointer="/fields/copy"] output')).toHaveText("steps.load.output.n");
+  await expectAccessible(page, "editor: drawer, a reference and a map");
+});
+
+test("an edit not applied is kept through tabs, asked about before an export, and listed", async ({ page }) => {
+  await newWorkflow(page, "Unapplied flow");
+  await page.getByRole("button", { name: "Add the first step" }).click();
+  await page.getByRole("option", { name: /flow\.delay@1/ }).click();
+  await page.getByRole("button", { name: /^delay, Delay/ }).click();
+  const drawer = page.getByRole("complementary", { name: "delay" });
+  await drawer.getByRole("textbox", { name: "Duration, in seconds" }).fill("1x");
+  await expect(page.getByRole("button", { name: "1 edit not applied" })).toBeVisible();
+  await drawer.getByRole("tab", { name: "Options" }).click();
+  await drawer.getByRole("tab", { name: "Setup" }).click();
+  await expect(drawer.getByRole("textbox", { name: "Duration, in seconds" })).toHaveValue("1x");
+  await page.getByRole("button", { name: "Export" }).click();
+  const ask = page.getByRole("dialog", { name: "Edits not applied" });
+  await expect(ask).toContainText("delay · Duration, in seconds: A whole number, like 42.");
+  await expectAccessible(page, "editor: edits not applied");
+  await ask.getByRole("button", { name: "Go back to them" }).click();
+  const list = page.getByRole("complementary", { name: "Edits not applied" });
+  await expect(list).toContainText("1x");
+  await expectAccessible(page, "editor: the edits not applied");
+  await list.getByRole("button", { name: "Go to it: delay · Duration, in seconds" }).click();
+  await expect(drawer.getByRole("textbox", { name: "Duration, in seconds" })).toBeFocused();
+  await drawer.getByRole("textbox", { name: "Duration, in seconds" }).fill("30");
+  await expect(page.getByRole("button", { name: /edits? not applied/ })).toHaveCount(0);
+});
+
+test("a problem's Go to opens its step's drawer on the field", async ({ page }) => {
+  await newWorkflow(page, "Problem flow");
+  await page.getByRole("button", { name: "Add the first step" }).click();
+  await page.getByRole("option", { name: /flow\.delay@1/ }).click();
+  await page.getByRole("button", { name: /^delay, Delay/ }).click();
+  await page.getByRole("complementary", { name: "delay" }).getByRole("textbox", { name: "Duration, in seconds" }).fill("-5");
+  await expect(page.getByRole("button", { name: /^delay, Delay, 1 problem/ })).toBeVisible({ timeout: 10_000 });
+  await page.getByRole("button", { name: /^Problems · 1$/ }).click();
+  await page.getByRole("complementary", { name: "Problems" }).getByRole("button", { name: "Go to delay" }).click();
+  await expect(page.getByRole("complementary", { name: "delay" }).getByRole("textbox", { name: "Duration, in seconds" })).toBeFocused();
+});
+
+test("a Mist step's connection is chosen from the tenant's, and its choices never load by themselves", async ({ page }) => {
+  const options: string[] = [];
+  page.on("request", (r) => {
+    if (r.url().endsWith("/options")) options.push(r.url());
+  });
+  await newWorkflow(page, "Mist flow");
+  await page.getByRole("button", { name: "Add the first step" }).click();
+  await page.getByRole("option", { name: /mist\.site_devices\.list@1/ }).click();
+  await page.getByRole("button", { name: /^list, / }).click();
+  const drawer = page.getByRole("complementary", { name: "list" });
+  await drawer.getByLabel("Connection").selectOption({ label: "Acme Prod · not verified yet" });
+  await expect(page.getByText("Saved · not published")).toBeVisible({ timeout: 10_000 });
+  await expectAccessible(page, "editor: drawer, a connection");
+  expect(options).toEqual([]);
+});

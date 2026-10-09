@@ -5,6 +5,9 @@ import { useId, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttribu
 // Full width of its column, never wider: an input's own width (20 characters) would push a narrow screen sideways.
 const CONTROL = "min-h-11 w-full min-w-0 rounded-lg border bg-surface px-3 text-body-lg text-ink placeholder:text-muted";
 
+/** A control's classes: its boundary 3:1 against its surface (line-control), red when its value is refused. */
+export const controlClass = (invalid: boolean): string => `${CONTROL} ${invalid ? "border-danger" : "border-line-control"}`;
+
 interface Labelled {
   label: string;
   hint?: ReactNode;
@@ -20,7 +23,7 @@ function Frame({ label, hint, error, control }: Labelled & {
   return (
     <div className="flex flex-col gap-1.5">
       <label htmlFor={id} className="text-small font-semibold">{label}</label>
-      {control({ id, describedBy: described, className: `${CONTROL} ${error ? "border-danger" : "border-line-control"}` })}
+      {control({ id, describedBy: described, className: controlClass(!!error) })}
       {hint && <p id={`${id}-hint`} className="text-small text-muted">{hint}</p>}
       {error && <p id={`${id}-err`} className="text-small text-danger">{error}</p>}
     </div>

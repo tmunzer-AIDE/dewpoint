@@ -1173,3 +1173,387 @@ M40. **A value's schema problem is said without the value, and export refuses a 
       - the frontend's words.
     - The owner's ruling. - Messages say less than jsonschema did ("'ab' is too short" becomes "Must be at least 3
       characters long."): the field, named beside each, shows where.
+
+### Owner, 4c-1 plan (2026-10-09, in chat)
+
+The owner chose to have the 4c-1 plan (revision 6, deaa466) built: "go ahead", inline in one session, with a pause after
+milestone 2 (screenshots beside 1c) and at the final checkpoint. Two policies in ruling 7 were confirmed in the review
+of revision 4: rejecting `1e300` is a conservative editor input policy, not an engine requirement nor a promise to
+keep decimals exactly; and opening the drawer never rewrites existing values. Rulings 96 to 113 stay the plan's until
+the owner accepts the slice.
+
+### 4c-1, milestone 1 (2026-10-09)
+
+M41. **The branch starts from `main` at ab7fcfe, not 0838e4f** as the plan was written against: two backend-only fixes
+    had merged since (#67, #68). `feat/editor-4c1` is ab7fcfe with the plan merged in (0be88e1). - The plan says to
+    cut from `main` when execution starts. - None: neither touches the frontend.
+
+### 4c-1, milestone 2 (2026-10-09)
+
+M42. **The plan's `// prettier-ignore` markers stay** (Tasks 5 to 7). They were first dropped as noise, then restored
+    (bd0b614, comments only): 22 files already mark hand-formatted lines with them. - The codebase's convention. -
+    None: comments.
+M43. **The notices name Radix Tabs from Task 7, not Task 5**: the notices plugin lists only packages whose code lands
+    in a chunk, and nothing imports `Tabs` before the drawer. Task 7's build lists `@radix-ui/react-tabs 1.1.21`, and
+    the browser gate's notices test checks it. - The plugin's rule. - None.
+M44. **`e.relatedTarget` without a cast** (Tasks 6 and 9): lint refuses `as Node | null`, which React's types make
+    unnecessary. - The lint rule. - None: types.
+M45. **Two conflict tests look for the banner by its own words** (Task 8): the leave question is a native dialog
+    rendered while closed, so "This draft was changed elsewhere" matched it too. - The plan's query matched two
+    elements. - None: the same element.
+M46. **An async `act` in the codebase's form** (Task 8): `act(() => Promise.resolve(answer()))`, as lint refuses an
+    async arrow with no `await`. - None.
+
+### Owner, milestone 2 reviewed (2026-10-09, pasted)
+
+Four defects at 8bfc9e0, reproduced in tests and in Chromium with fake APIs: (1, high) a version's drawer showed the
+draft's pending text; (2) export skipped text typed while its save was awaited; (3) Clear discarded a stale edit but
+left the value; (4) the list of edits not applied left focus on the page body. Milestone 3 held. Five points the
+checkpoint raised got the review's recommendations, recorded as recommendations.
+
+### Owner, milestone 2 points ruled (2026-10-09, in chat)
+
+The owner's answers: O1, "Edit as JSON" gets a pressed look, in milestone 3; O2, a disabled look for the drawer's
+controls only; O3, the flow plugin's fields get written titles as a follow-up of their own (since #70); O4, "How its
+formulas run" drops the repeats, keeping the formulas no field says. The duplicate diagnostic and the Mist title became
+follow-ups (#69, #71, #72).
+
+### 4c-1, after the milestone 2 review (2026-10-09)
+
+M47. **The review's four findings, fixed** (f2bd150), each by a test that failed first:
+    - a version's read settles what was typed during it, or asks (Discard and view the version, or Go back to them);
+      a version's drawer gets read-only actions blind to the draft's edits not applied ("asks about an edit typed
+      while a version is read, and never shows it in the version"; "keeps an edit typed while a version is read, when
+      the person goes back to it"). No test can drive that guard once the read settles; the next review called it
+      enforcement of the version/draft boundary, not a product ruling;
+    - export settles and saves in one loop, as leaving does ("asks about an edit typed while an export waits for its
+      save"); publishing has no such gap: it disables editing and keeps its dialog open while it saves;
+    - Clear writes over a stale edit it discards, the editor's guards still answering ("clears the field on purpose,
+      even when what was typed in it is stale"; "clears nothing when the editor refuses the write, and says why");
+    - Close returns focus to the toolbar's count, else the canvas; a discarded entry lands on the list's heading
+      ("gives focus back to the count…"; "keeps focus in the list when its last entry is discarded").
+M48. **The removal/undo test waits for the removal's focus** (1b43b8b, test only): "never moves a held edit to an
+    equal item when a removal is undone" typed before the focus move to Add landed, so no edit was held (9 of 12 runs
+    failed alone). It now waits, and checks "5x" held and counted before the undo (12 of 12).
+
+### Owner, milestone 2 signed off (2026-10-09, pasted, confirmed in chat)
+
+A pasted review gave the visual sign-off of milestone 2's screens (the single column accepted for this slice; the
+mocked viewer shots show appearance, not authorization) and recommended merging `main`. The owner confirmed in chat:
+the sign-off stands, milestone 3 may start, and `main` at e9272e0a merges first.
+
+### 4c-1, milestone 3 (2026-10-09)
+
+M49. **The branch merges `main` at e9272e0a** (e35a792): #69 to #72, backend only. The branch's `backend/` and
+    `deploy/` equal `main`'s; the frontend suite and the browser gate passed on the merge, and milestone 2's evidence
+    was retaken on it (the flow plugin's written titles show).
+M50. **Two of Task 8's conflict tests wait 3 s for the banner** (275bc0e, test only): the save that meets the conflict
+    is sent 1 s after the edit, and the default 1 s wait lost the race under the full suite's load. 4b's conflict
+    tests wait 3 s.
+M51. **O1, O2 and O4, built** (66fc658), each by a test that failed first:
+    - O1: the toggle takes Segmented's pressed tokens under `aria-pressed` ("shows Edit as JSON pressed while it's
+      on…");
+    - O2: scoped on the drawer, so 4a's Field and Select inside it (error handling, the key) look disabled too and
+      4a's forms elsewhere don't; values in muted ink (about 6:1), as the disabled ink is under 3:1 on its fill ("gives
+      a viewer's drawer controls a disabled look, their values legible");
+    - O4: a field that says how its formula runs registers while shown; a formula on the other tab stays listed until
+      its tab opens ("says how a formula runs once, under its field, and lists only what no field says").
+
+### Owner, milestone 3 reviewed (2026-10-09, pasted)
+
+Three defects at 66fc658: (1) a rename applied with the rest lost its word on formulas; (2) "Go to it" missed held
+keys and limits; (3) "Go to" gave up before a picker's list loaded. The owner then chose, in chat, to run Task 15
+once they were fixed.
+
+### 4c-1, after the milestone 3 review (2026-10-09)
+
+M52. **The review's three findings, fixed** (b773518), each by a test that failed first:
+    - `applyAll`'s note carries its step, and bulk settling keeps it ("keeps a rename's word on formulas when it's
+      applied with the rest, as before an export"). Found beside it: the note showed in any open step's drawer, and
+      now only in its own ("says a rename's word only in the renamed step's drawer");
+    - "Go to it" routes by the edit's kind: a key to the key field, a limit to the error handling, opened, and an entry
+      name (the same gap) to its name ("goes to a held key…", "goes to a held limit…", "goes to a held entry name…");
+    - a Go to whose control is loading waits for it, watching the drawer, and gives way to the person's click or key,
+      another Go to, or the drawer closing ("goes to a field whose control is still loading…"; "drops a pending Go to
+      when the person moves on…"). Its test answers after several frames: it had passed by luck when the answer beat
+      the first one.
+
+### 4c-1, milestone 4 (2026-10-09)
+
+M53. **The drawer's browser flows read the running app's labels**: the flow plugin's written titles since #70 ("Duration,
+    in seconds", a case's "Condition" and "Port name"); text fields by role (`getByLabel` matched the Fixed/Formula
+    group too); the drawer's twin of a canvas "+", which shares its name. The gate: 33 passed, the 27 earlier flows
+    and 6 new, under the CSP and axe.
+
+### 4c-1, the final checkpoint (2026-10-09)
+
+A fresh reviewer read the whole branch (e9272e0a..55dd746) against the plan, outline §6, the Review Focus and these
+rulings: nothing critical, four important findings, nine minor, and no ruling judged wrong. It verified the pure layers
+against the engine's constants and grammar, found no AI tells, and checked the O2 contrast (6.0:1 light, 6.7:1 dark).
+
+M54. **The four important findings, fixed** (5b9f45f), each by a test that failed first:
+    - focus goes back to the field's control after its Discard, Apply here, Clear and Replace, and to a limit after
+      its own (WCAG 2.4.3): "keeps focus at the field after its Discard or its Clear", "…after Apply here", "gives
+      focus to the new control after a reference is replaced", "…after a sensitive field's fixed value is replaced",
+      "keeps focus at a limit after its Discard";
+    - a reference or a template in a sensitive field shows as one, as the engine allows (only a fixed value there is
+      hidden and offered a Clear): "shows a reference in a sensitive field as a reference, never as a fixed value to
+      clear";
+    - an emptied list item or map entry keeps its place, blank, never "Required" nor announced required: "keeps an
+      emptied list item blank without calling it missing";
+    - a sensitive part under `patternProperties` or `propertyNames` counts, as `engine/sensitive.py`'s positions do:
+      "finds a sensitive part under patternProperties or propertyNames, as the engine does".
+M55. **Nine minor findings, deferred** for the owner: hexadecimal and binary number notation read as decimal; a
+    formula over 16,384 characters truncated on paste; list items keyed by index (view state follows the position);
+    every "Show choices" button named alike; a picker's loading and "none yet" states labelled without a control; the
+    O2 contrast pair outside the token check; a limit's pointer colliding with a config property named `options` (no
+    installed type has one); valid JSON held through Escape (kept and counted, not applied); the heading's focus
+    before a pending Go to (a double announcement). What the reviewer set aside is each the plan's, the owner's or
+    4b's call, unchanged.
+
+### Owner, the final checkpoint reviewed (2026-10-09, pasted)
+
+Acceptance held at 97235e3 for two blockers: a formula pasted past the limit was cut by the browser and the rest
+written (`true` + 16,380 spaces + `&& false` saved as `true`), so M55's paste item isn't cosmetic; and clearing an
+optional list or map left focus on the page body. The milestone 3 fixes and the screenshots added no other blocker.
+
+### 4c-1, after the final checkpoint's review (2026-10-09)
+
+M56. **A formula past the engine's limit is held whole, never cut** (the paste item of M55, re-graded by its effect: a
+    silent change to the logic). The control has no `maxLength`; `formulaProblem` (16,384 characters, the engine's
+    `MAX_CEL`) holds longer text as an edit not applied, with why, in the control and when held edits are applied, and
+    the draft keeps what it had: "never applies a formula past the engine's limit, and says why", "holds a formula past
+    the engine's limit whole, never cut, and leaves the draft as it was", "keeps a formula past the limit out of the
+    draft, held and counted, never cut".
+M57. **Clearing an optional list or map lands on its Add**, the one control left: "lands on Add after a map is
+    cleared", "lands on Add after a list is cleared".
+
+### Review sign-off at c30d74e (2026-10-09, pasted)
+
+A pasted review signed off 4c-1 at c30d74e on the review side: both blockers corrected (its five failing cases pass,
+with two more: the exact 16,384/16,385-character boundary, and export refusing an oversized held formula while keeping
+its whole text); 710 tests, typecheck, lint, the API check and the build pass independently; the corrected zip names the
+new checkpoint and its 109 screenshots match the reviewed ones byte for byte. The browser gate and CodeQL stay as the
+implementer reported them. The eight deferred minors may stay tracked for the catalog as shipped, with one condition:
+the `options` collision is latent text loss, to fix before any type with `config.options` is enabled. The earlier
+unidentified suite failure stays unexplained. The owner's adoption of rulings 96 to 113 and the push and PR stay the
+owner's decisions; the review recommends keeping the isolated stack through CI and the merge.
+
+### Owner, 4c-1 accepted (2026-10-09, in chat)
+
+After the review side signed off at c30d74e, the owner, when asked, accepted slice 4c-1 and adopted its plan's rulings
+(a928f78, the review's sign-off recorded). Push and a PR followed, by the same answer; the eight deferred minors go to
+one GitHub issue, the `options` collision marked as latent text loss; the isolated stack stays through CI and the merge.
+As the plan's own section says, its rulings join this ledger now, as 96–113. They are copied as ruled. Inside them, a
+reference to a plan ruling from 1 to 18 means the ledger ruling numbered 95 higher (ruling 18 is 113); a higher number
+(83) is already this ledger's.
+
+96. **Accepted. 4c in three plans.** 4c-1 is the drawer; 4c-2 is data; 4c-3 is triggers (the owner, 2026-10-08).
+   - **4c-2, data:** B6's scope API; pills with the upstream tree; the condition builder; the "conditional" step
+     badge (ruling 70); the declassify list; B7's samples with the per-attempt connection record in slot 0045 (which
+     sub-project 3 didn't build). D8's surfaces come as static mockups first.
+   - **4c-3, triggers:** B13; the manual input form and CSV columns; schedules; webhook bindings and Settings →
+     Webhook endpoints; 1b's "What starts it?" and 1a's Trigger column (ruling 68); schedule sync errors raising
+     "needs attention" (ruling 71).
+   - Why: each is a 4b-sized piece with its own review. The cost: three plan reviews instead of one.
+97. **Accepted. The drawer replaces the step panel in the side column.**
+   - Its header holds:
+     - the key, renamable (Task 13);
+     - the type's title and reference, and how the step runs;
+     - the error-handling chip (Task 12).
+   - Then come the problems that belong to no field, then the Setup and Options tabs.
+   - Below the tabs:
+     - how the step's formulas run (4b's list, kept);
+     - the 4b actions: its "Add a step" twins (M32), Place and nudges, Connect, Delete.
+   - Viewers, a version view, a conflict and a publication in progress see the drawer read only, its controls
+     disabled.
+   - There's no Test tab until 4d: 1c's third tab, and its footer's Run and Simulate buttons, wait without a teaser
+     (D12's rule).
+   - Why: 1c, and §10.3. The cost: the drawer is long for a step with many fields.
+98. **Accepted. Setup holds the schema's required top-level fields; Options holds the rest, in the schema's order.**
+   - There's no `x-group`: no manifest uses it, and the plugins-3 ledger rules it out for flow steps.
+   - A step with nothing required opens on Options. A step with no fields says so, without tabs.
+   - A tab's label counts the problems in its fields ("Options · 2 problems").
+   - Why: §10.3's "required fields only". The cost: a plugin can't order fields except through its schema.
+99. **Accepted. A field's label is its schema `title`, or its name when there's none.**
+   - Titles are display annotations: `_schema_contract` keeps them out of a type's contract hash, so a plugin may
+     improve one within a version.
+   - The drawer shows the titles as the plugins write them ("Duration S").
+   - Why: plugins own their wording. The cost: some labels read stiffly until their plugin improves them.
+100. **Accepted. The widget comes from `x-widget`, then the engine's markers, then the field's type.**
+   - From `x-widget`: `cel` gives a formula; `pill-text` gives text in 4c-1 and pills in 4c-2; `connection` gives the
+     connection picker.
+   - From the markers:
+     - `x-dewpoint-connection` gives the connection picker;
+     - a field the type lists in its `options` (`x-dewpoint-options`) gives the live options;
+     - `flow.run_workflow`'s top-level `workflow_id` gives a workflow picker.
+   - From the type:
+     - a string enum is a select;
+     - a `date-time` string is a text field with an ISO 8601 hint;
+     - strings, numbers and booleans get their own inputs;
+     - an object with properties is a group of fields;
+     - an open object is a map of names to values;
+     - an array of one item schema is a list;
+     - anything else, an untyped field or a union, is JSON.
+   - A plugin widget the drawer doesn't have (`mist.api-operation`, `message-blocks`, `nested-update`: 4f) falls back
+     to its type's widget.
+   - **The form is bounded.** A field whose `$ref` repeats one above it, or one more than 8 parts deep, is shown as
+     JSON. One that holds a sensitive part shows a notice instead. A schema can't make the drawer expand forever.
+   - Why: §3.3; D24. The cost: a deep or recursive value is edited as JSON.
+101. **Accepted. A value is fixed, or a formula, where the engine takes it.** These are the engine's own rules (`allowed_kinds`,
+   `literal_on_path`, `contains_literal`, `sensitive.literal`):
+   - A field whose path carries `x-dewpoint-literal` takes a fixed value only, and so does a whole that holds such a
+     part (a switch's cases).
+   - A field whose `x-dewpoint-kinds` lacks `literal` takes no fixed value; one whose kinds lack `cel` takes no
+     formula.
+   - A field marked `x-sensitive` takes no fixed value.
+   - **A field that takes neither** (its kinds are only `ref` or `template`) offers neither. It shows its value read
+     only and says it can't be set in this drawer.
+   - Where both are allowed, a "Fixed / Formula" choice switches between them. A formula field, an untyped one or a
+     JSON one starts as a formula.
+   - Switching a fixed value to a formula writes the formula that gives it. When the value holds a sensitive part, the
+     formula starts empty: a hidden value is never copied into visible text (M25).
+   - A formula is the CEL formula mode of D19: a monospace text area, with the server's diagnostics and how it runs
+     (inline, or as a separate step with the reason).
+   - A reference or a template already in the draft shows read only, with "Replace with a fixed value" or "Replace
+     with a formula", each offered only where its kind is allowed: editing those is 4c-2's pills.
+   - A sensitive field holding a fixed value says so, never shows it, and offers to clear it or replace it with a
+     formula (M25).
+   - Why: D19. The cost: until 4c-2, references are typed as formulas.
+102. **Accepted. The browser checks only required fields, types, and what a save would refuse.**
+   - A required field the person empties says "Required".
+   - A number that doesn't parse says so and isn't saved, and so does JSON that doesn't parse. So does a number that
+     parsing would change: one too large to be finite, or a whole number past 2^53, in whatever notation it's written.
+   - That last rule refuses `1e300` too. It is a conservative editor input policy: not an engine requirement, and no
+     promise that decimals are kept exactly. Confirmed in the review of revision 4, pasted in chat on 2026-10-09.
+   - Opening the drawer never rewrites a value already in the draft, even one the editor would refuse as typed.
+     Confirmed in the same review. Pinned by Task 6's `writes nothing by showing a field`.
+   - These are checked before any write, since the graph's format refuses a draft that breaks them and it wouldn't be
+     saved at all (4b ruling 9; `_admission_problems`):
+     - a key, a port's name, and the attempts and timeout bounds;
+     - finite numbers, nesting at most 64 levels, at most 2,000 references, templates and formulas.
+   - The API's request size cap (`max_request_body_bytes`) is a deployment setting the browser doesn't know. A save
+     it refuses shows in the toolbar as an unsaved edit, as in 4b.
+   - Emptying a field removes it from the config, so its default applies. An optional field with a value offers
+     "Clear", which also discards any unapplied text in it.
+   - Everything else is the server's diagnostics, shown at the field whose pointer they name.
+   - Why: D19; ruling 81 (the server's own messages). The cost: none.
+103. **Accepted. One undo step per field per focus.**
+   - A field's typing while it keeps focus coalesces into one history entry. Leaving the field, or any other edit,
+     starts a new entry.
+   - A discrete choice is one entry each: a select, a checkbox, Fixed or Formula, Add, Remove, Move.
+   - Field edits aren't announced: the control says what it holds, and the toolbar says whether it's saved.
+   - Saves follow D17 unchanged.
+   - Why: undo by keystroke would make undo useless. The cost: none.
+104. **Accepted. Ports come and go with settings.**
+   - An edit that takes ports away deletes the edges that left them, after asking, as deleting a step does (ruling
+     79). The edits that can: removing a switch case, no longer routing errors to a port, a JSON edit of the cases.
+     One undo restores the setting and the edges.
+   - A canceled question leaves a JSON edit unapplied, its reason at its control (ruling 18).
+   - A case's port renamed in place keeps its edges. Its name applies when focus leaves or on Enter.
+   - A port name the graph's format refuses, or one another port of the step has, is refused there: edges hang on
+     port names.
+   - A new case gets the first free port name `case_N`.
+   - Why: a port's edges mean nothing without the port. The cost: none.
+105. **Accepted. The error-handling chip.**
+    - It says, in words, what a failure does ("On error: fail the run"), plus the attempts and timeout when they
+      differ from the type's.
+    - It opens a section with three settings:
+      - what a failure does: Fail the run, Continue with the next step, or Route to an error port;
+      - the attempts (1–20);
+      - the timeout (above 0, up to 86,400 s).
+    - Each setting left empty takes the type's default, named in its hint. "Fail the run" is the default, so it
+      isn't written.
+    - Why: §10.3's chip, and the graph's `Options` bounds. The cost: none.
+106. **Accepted. Key rename.**
+    - In the header. A key starts with a lowercase letter, then lowercase letters, digits or `_` (up to 63
+      characters). It isn't one of CEL's words (`in`, `true`, `false`, `null`), and it's unique.
+    - Every reference and template part reading `steps.<key>` or `loops.<key>` follows: in every step's config and in
+      the workflow's outputs.
+    - Formulas aren't rewritten (CEL text isn't parsed here). After a rename, the drawer says how many formulas
+      mention the old key as a word ("1 formula mentions fetch and keeps its text: check it"), until the next edit to
+      the draft. It doesn't claim each is a reference, nor that the server flags each.
+    - An open rename's controls are disabled while the draft can't change. A rename the editor refuses says so,
+      never as if it had worked.
+    - It's one undo step.
+    - Why: keys are how steps read each other. The cost: a formula needs its own fix.
+107. **Accepted. The connection picker.**
+    - It lists this tenant's connections of the field's type (every role may read them), named, with their status in
+      words.
+    - With none of that type, it says so: Mist links to Connections (D1); other types are added by an admin (4g's
+      forms come later).
+    - A value naming no listed connection shows as "A connection that isn't in this tenant" until it's changed.
+    - Why: §3.3. The cost: none.
+108. **Accepted. The workflow picker** (`flow.run_workflow`'s `workflow_id`).
+    - It lists this tenant's workflows other than this one.
+    - A value naming none shows as "A workflow that isn't in this tenant".
+    - Why: typing a UUID is no way to choose. The cost: none.
+109. **Accepted. Live options load on request, never on render.**
+    - A "Show choices" button loads them through `POST …/node-types/{ref}/options`, with the step's connection and the
+      text typed.
+    - When the type takes a connection and the step has none, the field asks for one first and sends nothing.
+    - Each failure is said in words, and a typed value is kept as typed: the list helps, it doesn't gate.
+    - **Choices belong to their scope**: the tenant, the step's type, the field, and the connection's id and revision.
+      Each change of scope starts a new era, never returned to. The shown choices go, an answer still on its way from
+      an older era is ignored even when the scope comes back, and another click is needed.
+    - Loading stays off until the connection's revision is known: while the list loads, when it fails, when it
+      doesn't name the connection. The last two are said.
+    - Why: an options call reaches the plugin's service (for Mist, Mist itself), so it is the person's act, never a
+      side effect of opening a drawer (D24). The cost: one click, again after a change of connection.
+110. **Accepted. JSON is the value as the engine reads it.**
+    - A `{"$value": …}` object in it is computed, as in an imported file, and its hint says so.
+    - It applies when focus leaves.
+    - "Edit as JSON" is offered on groups, lists and maps without a sensitive part. Untyped fields and unions are JSON
+      always.
+    - A map's entry can't be named `$value`: the engine would read the whole map as computed.
+    - **A `literal` envelope stays a literal.** It's edited as its payload, its hint saying it's kept as data, and
+      saved wrapped again. Its kind changes only through Fixed/Formula, Replace or Clear.
+    - Why: D19; one reading of `$value` everywhere. The cost: none.
+111. **Accepted. A problem focuses its field** (ruling 83, the part that waited for 4c).
+    - "Go to" on a problem whose field is inside the step opens the step's drawer on that field's tab and focuses the
+      field: the closest one shown, for a pointer inside a list, a map or a JSON value.
+    - A pointer no field shows lands on "Problems with this step", which lists it.
+    - A problem about the step as a whole (no field, or its whole config) focuses the step, as in 4b.
+    - Why: ruling 83. The cost: none.
+112. **Accepted. One new dependency, `@radix-ui/react-tabs` 1.1.21**, for the drawer's tabs, on the outline's approved list.
+    - Its first browser check is at the end of Task 7, before lists, maps and pickers are built.
+    - A CSP violation stops the work for the owner.
+    - Why: D23. The cost: none.
+113. **Accepted. Unapplied edits are the editor's, never lost in silence.**
+    - What counts: text a control holds that isn't in the draft. That is JSON being typed or refused; a map entry's
+      name, a port's name or a key being typed or refused; a number or a limit that doesn't parse; a formula the
+      graph's format refuses.
+    - The editor keeps each, by its step, its field and its kind, never the control. A tab change, a JSON toggle, a
+      closed and reopened drawer, or an undo keeps it. It shows at its control, with its reason and a "Discard".
+    - **What's held is what shows.** The control displays the held text over its own. The field's view follows what's
+      held: JSON as JSON, a formula as a formula.
+    - A control writes first and releases its held text only when the write lands. A refused write (an editor turned
+      read only, the graph's admission) keeps the text and says why.
+    - **What it was typed over.** Each held edit records its base, the value it was typed over, and its lineage, the
+      lists and items on its path. Where either has changed since, the edit is applied, or typed through, only when
+      the person chooses "Apply here"; otherwise it's discarded, or asked about at an exit. The changes that count: an
+      undo moving or removing a list's items, even equal ones; a literal turned to data. The edit keeps the reading it
+      began with, a literal's or not.
+    - **Their list.** The toolbar's "N edits not applied" opens a list of them all: step, field, text, reason, "Go
+      to it", "Discard". It's where an edit whose field is gone is recovered, never by recreating the field.
+    - **Discard means discard.** Leaving a field applies what's typed in it; moving to its own Discard or Clear, by
+      keyboard or pointer, doesn't.
+    - What's held shows first, before what the value under it has become: a reference, a hidden secret, another mode.
+    - Every write and settlement reads the editor's latest document, written at once with its history.
+    - The toolbar counts them ("1 edit not applied") beside the draft's own state, and the count opens their list.
+    - Leaving the editor (the router, sign-out, an ended session), publishing, exporting and viewing a version first
+      apply every one that can be applied, as one undo step. Those that can't (refused, or taking ports away) are
+      listed in a question: "Discard them and …" or "Go back to them". Leaving folds them into 4b's leave question.
+    - **Leaving is one transaction.** It settles, saves, and settles again whatever was typed while the save was
+      awaited, until nothing is unapplied or unsaved, or the person is asked.
+    - Many edits apply in a fixed order, whatever order they were typed in: values before names, the deepest first.
+      An entry's rename waits while an edit inside the entry can't be applied.
+    - **Recovery.** "Download my version" is the draft. Wherever it's offered, the drawer says the edits not applied
+      aren't in it, and "Download the edits not applied" writes them as a file of their own, never into the graph,
+      which is what runs.
+    - A change to what holds an unapplied edit first applies the edits beneath it, as one step with the change: a
+      list item's move or removal, a map entry's removal, Fixed/Formula, a JSON toggle. When one can't be applied,
+      the change waits, and the edit's control says why.
+    - Clear and deleting a step discard the unapplied edits beneath them, on purpose. The delete question says so.
+    - Why: the review of revision 1; nothing a person typed disappears without their decision. The cost: one more
+      state in the editor, and one more question at its exits.

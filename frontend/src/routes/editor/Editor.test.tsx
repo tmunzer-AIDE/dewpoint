@@ -9,6 +9,9 @@ import { onAnnounce } from "../../lib/announce";
 import { cancelLeaving, mayLeave } from "../../lib/leaving";
 import type { CanvasProps } from "./Canvas";
 import { EditorPage } from "./Editor";
+import { DELAY, IF, LOOP, REMOTE, SWITCH, TRANSFORM, typeWith } from "../../test/nodeTypes";
+import { formula } from "../../lib/config";
+import { STALE } from "../../lib/unapplied";
 
 // Every document the stand-in canvas was handed: what was drawn, and what never was.
 const { drawn } = vi.hoisted(() => ({ drawn: [] as { doc: GraphDoc; editable: boolean }[] }));
@@ -297,6 +300,120 @@ it("leaves focus in a step's panel when undo keeps its step", async () => {
   await userEvent.keyboard("{Control>}z{/Control}"); // the second step's addition undone; transform stays
   expect(screen.getByRole("complementary", { name: "transform" })).toBeTruthy();
   expect(document.activeElement).toBe(heading);
+});
+
+/** A draft of one step of `type`, with this config, and a transform after it. */
+const oneStep = (type: string, config: Record<string, unknown>, key = "wait") => ({
+  graph_format: 1,
+  nodes: [
+    { id: `id-${key}`, key, type, config, position: { x: 0, y: 140 } },
+    { id: "id-transform", key: "transform", type: "flow.transform@1", position: { x: 0, y: 280 } },
+  ],
+  edges: [],
+});  // prettier-ignore
+const stepConfig = (key: string) => drawn.at(-1)!.doc.nodes!.find((n) => n.key === key)!.config;
+
+it("makes a field's typing one undo step", async () => {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, DELAY]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.delay@1", {}) }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "wait" }));
+  const drawer = screen.getByRole("complementary", { name: "wait" });
+  expect(within(drawer).getByRole("tab", { name: "Setup" }).getAttribute("aria-selected")).toBe("true");
+  await userEvent.type(within(drawer).getByLabelText("Duration S"), "120");
+  expect(stepConfig("wait")).toEqual({ duration_s: 120 });
+  await userEvent.click(within(drawer).getByRole("heading", { name: "wait" })); // focus leaves the field
+  await userEvent.keyboard("{Control>}z{/Control}");
+  expect(stepConfig("wait")).toEqual({}); // the whole field's typing, in one step
+});
+
+it("keeps an unknown type's settings as they are", async () => {
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("acme.thing@1", { secret: "s3cr3t" }, "x") }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "x" }));
+  const drawer = screen.getByRole("complementary", { name: "x" });
+  expect(drawer.textContent).toContain("This server doesn't know this step's type, so its settings can't be shown. They're kept as they are.");
+  expect(drawer.textContent).not.toContain("s3cr3t");
+  expect(stepConfig("x")).toEqual({ secret: "s3cr3t" });
+});
+
+it("shows a step's settings read only to a viewer", async () => {
+  role = "viewer";
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, DELAY]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.delay@1", { duration_s: 5 }) }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "wait" }));
+  expect(screen.getByLabelText<HTMLInputElement>("Duration S").disabled).toBe(true);
+});
+
+it("opens on Options when the type requires nothing", async () => {
+  const note = typeWith({ type: "object", properties: { note: { type: "string", title: "Note" } } }, { ref: "acme.note@1", type: "acme.note", title: "Note" });
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, note]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("acme.note@1", {}, "n") }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "n" }));
+  expect(screen.getByRole("tab", { name: "Options" }).getAttribute("aria-selected")).toBe("true");
+  expect(screen.getByLabelText("Note")).toBeTruthy();
+});
+
+/** A step whose `routes` declare its ports, as a switch's cases do, held as JSON: route b leads to the transform. */
+const ROUTER = typeWith(
+  { type: "object", properties: { routes: { title: "Routes" } } },
+  { ref: "acme.router@1", type: "acme.router", title: "Router", ports: ["other"], dynamic_ports: "routes" },
+);
+const routed = () => {
+  const draft = oneStep("acme.router@1", { routes: [{ port: "a" }, { port: "b" }] }, "route");
+  return { ...draft, edges: [{ from: { node: "id-route", port: "b" }, to: { node: "id-transform" } }] };
+};
+
+async function dropRouteB() {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, ROUTER]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: routed() }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "route" }));
+  const routes = screen.getByLabelText("Routes");
+  await userEvent.clear(routes);
+  await userEvent.paste('[{"port": "a"}]');
+  await userEvent.tab(); // JSON applies when focus leaves
+  return screen.getByRole("dialog", { name: "Remove a port" });
+}
+
+it("asks before an edit takes a port with edges away", async () => {
+  const dialog = await dropRouteB();
+  expect(dialog.textContent).toContain("The port b goes with this change, and its edge to transform is deleted.");
+  await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  expect(drawn.at(-1)!.doc.edges).toHaveLength(1);
+  expect(stepConfig("route")).toEqual({ routes: [{ port: "a" }, { port: "b" }] });
+  // Canceled, the edit stays the person's: unapplied, its reason at its control (ruling 18).
+  expect(JSON.parse(screen.getByLabelText<HTMLTextAreaElement>("Routes").value)).toEqual([{ port: "a" }]);
+  expect(screen.getByText("Not applied: it removes the port b and its edge to transform.")).toBeTruthy();
+});
+
+it("keeps an unapplied edit when the tab changes or the drawer closes", async () => {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, DELAY]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.delay@1", {}) }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "wait" }));
+  await userEvent.type(screen.getByLabelText("Duration S"), "1x");
+  await userEvent.click(screen.getByRole("tab", { name: "Options" }));
+  await userEvent.click(screen.getByRole("tab", { name: "Setup" }));
+  expect(screen.getByLabelText<HTMLInputElement>("Duration S").value).toBe("1x");
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
+  await userEvent.click(screen.getByRole("button", { name: "wait" }));
+  expect(screen.getByLabelText<HTMLInputElement>("Duration S").value).toBe("1x");
+  expect(screen.getByText("A whole number, like 42.")).toBeTruthy();
+  expect(stepConfig("wait")).toEqual({ duration_s: 1 }); // "1" was a number; "1x" never reached the draft
+});
+
+it("undoes the edit and its edges together", async () => {
+  const dialog = await dropRouteB();
+  await userEvent.click(within(dialog).getByRole("button", { name: "Remove" }));
+  expect(drawn.at(-1)!.doc.edges).toEqual([]);
+  expect(stepConfig("route")).toEqual({ routes: [{ port: "a" }] });
+  await vi.waitFor(() => expect(document.activeElement?.id).toBe("step-drawer-title"));
+  await userEvent.keyboard("{Control>}z{/Control}");
+  expect(drawn.at(-1)!.doc.edges).toHaveLength(1);
+  expect(stepConfig("route")).toEqual({ routes: [{ port: "a" }, { port: "b" }] });
 });
 
 const steps = () => screen.getByRole("group", { name: "Workflow steps" });
@@ -1093,3 +1210,566 @@ it.each(["a viewer", "an editor after a conflict", "a viewed version"])(
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "c" }));
   },
 );
+
+/** The `wait` step's drawer, its duration holding text that isn't a number: an edit that can't be applied. */
+async function unappliedDuration() {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, DELAY]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.delay@1", { duration_s: 5 }) }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "wait" }));
+  await userEvent.type(screen.getByLabelText("Duration S"), "x");
+}
+
+it("counts the edits not applied in the toolbar, and lists them with their text", async () => {
+  await unappliedDuration();
+  await userEvent.click(screen.getByRole("button", { name: "1 edit not applied" }));
+  const list = screen.getByRole("complementary", { name: "Edits not applied" });
+  expect(list.textContent).toContain("wait · Duration S");
+  expect(list.textContent).toContain("5x");
+  expect(list.textContent).toContain("A whole number, like 42.");
+  await userEvent.click(within(list).getByRole("button", { name: "Discard: wait · Duration S" }));
+  expect(screen.queryByRole("button", { name: /edits? not applied/ })).toBeNull();
+  expect(stepConfig("wait")).toEqual({ duration_s: 5 });
+});
+
+it("applies what it can before publishing, and asks about the rest", async () => {
+  await unappliedDuration();
+  await userEvent.click(await screen.findByRole("button", { name: "Publish v1" }));
+  const ask = screen.getByRole("dialog", { name: "Edits not applied" });
+  expect(ask.textContent).toContain("wait · Duration S: A whole number, like 42.");
+  await userEvent.click(within(ask).getByRole("button", { name: "Discard and publish" }));
+  expect(screen.getByRole("dialog", { name: "Publish version 1" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /edits? not applied/ })).toBeNull();
+  expect(stepConfig("wait")).toEqual({ duration_s: 5 });
+});
+
+it("applies a JSON edit still being typed when the person leaves", async () => {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, ROUTER]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("acme.router@1", { routes: [{ port: "a" }] }, "route") }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "route" }));
+  await userEvent.clear(screen.getByLabelText("Routes"));
+  await userEvent.paste('[{"port": "a"}, {"port": "c"}]'); // focus stays: nothing has applied it yet
+  await act(async () => {
+    expect(await mayLeave()).toBe(true); // what the shell's Sign out asks
+  });
+  expect(stepConfig("route")).toEqual({ routes: [{ port: "a" }, { port: "c" }] });
+  act(() => cancelLeaving());
+});
+
+it("asks before leaving with an edit it can't apply", async () => {
+  await unappliedDuration();
+  const decision = mayLeave();
+  const ask = await screen.findByRole("dialog", { name: "Your latest changes aren't saved" });
+  expect(ask.textContent).toContain("wait · Duration S: A whole number, like 42.");
+  await userEvent.click(within(ask).getByRole("button", { name: "Stay" }));
+  expect(await decision).toBe(false);
+  expect(screen.getByLabelText<HTMLInputElement>("Duration S").value).toBe("5x"); // still there to fix
+});
+
+it("settles what's typed while leaving waits for a save", async () => {
+  let answer: () => void = () => undefined;
+  answers.set(`PUT ${BASE}/draft`, () =>
+    new Promise<Response>((resolve) => {
+      answer = () => resolve(json({ draft_revision: 2, unpublished_changes: true, graph_hash: "h2", active_version_id: null, active_version_number: null }));
+    }),
+  );
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, DELAY]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.delay@1", { duration_s: 5 }) }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "wait" }));
+  await userEvent.type(screen.getByLabelText("Duration S"), "0"); // 50: a save, held unanswered
+  const decision = mayLeave(); // waits on that save
+  await userEvent.type(screen.getByLabelText("Duration S"), "x"); // typed meanwhile: can't be applied
+  await act(() => Promise.resolve(answer())); // the held save answers, inside an async act
+  const ask = await screen.findByRole("dialog", { name: "Your latest changes aren't saved" });
+  expect(ask.textContent).toContain("wait · Duration S: A whole number, like 42.");
+  await userEvent.click(within(ask).getByRole("button", { name: "Stay" }));
+  expect(await decision).toBe(false);
+});
+
+it("settles what's typed during a save against the draft that save made, never an older one", async () => {
+  const PAIR = typeWith(
+    { type: "object", properties: { first: { title: "First" }, second: { title: "Second" } } },
+    { ref: "acme.pair@1", type: "acme.pair", title: "Pair" },
+  );
+  let answer: () => void = () => undefined;
+  let puts = 0;
+  answers.set(`PUT ${BASE}/draft`, () => {
+    puts++;
+    const saved = json({ draft_revision: puts + 1, unpublished_changes: true, graph_hash: `h${puts + 1}`, active_version_id: null, active_version_number: null });
+    return puts === 1 ? new Promise<Response>((resolve) => (answer = () => resolve(saved))) : saved;
+  });
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, PAIR]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("acme.pair@1", { first: [1], second: [2] }, "pair") }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "pair" }));
+  await userEvent.clear(screen.getByLabelText("First"));
+  await userEvent.paste("[11]"); // focus stays: not applied yet
+  const decision = mayLeave(); // applies it, then awaits its save
+  await userEvent.clear(screen.getByLabelText("Second"));
+  await userEvent.paste("[22]"); // typed while that save is awaited
+  await act(() => Promise.resolve(answer())); // the held save answers, inside an async act
+  expect(await decision).toBe(true);
+  expect(stepConfig("pair")).toEqual({ first: [11], second: [22] }); // never `first: [1]` again
+  const last = sent.filter((r) => r.method === "PUT").at(-1)!.body as GraphDoc;
+  expect(last.nodes![0]!.config).toEqual({ first: [11], second: [22] });
+  act(() => cancelLeaving());
+});
+
+it("keeps an edit not applied shown, and counted, when the editor turns read only", async () => {
+  answers.set(`PUT ${BASE}/draft`, () => json({ error: "draft_conflict" }, 409));
+  await unappliedDuration(); // "5x" held
+  await userEvent.click(screen.getByRole("button", { name: "Move wait right" })); // an edit whose save conflicts
+  await screen.findByText(/This draft was changed elsewhere, so your changes since then aren't saved/, {}, { timeout: 3000 }); // after the 1 s save delay
+  const field = screen.getByLabelText<HTMLInputElement>("Duration S");
+  expect([field.value, field.disabled]).toEqual(["5x", true]);
+  expect(screen.getByRole("button", { name: "1 edit not applied" })).toBeTruthy();
+});
+
+it("downloads the edits not applied as a file of their own, and says the draft's file doesn't hold them", async () => {
+  answers.set(`PUT ${BASE}/draft`, () => json({ error: "draft_conflict" }, 409));
+  await unappliedDuration();
+  await userEvent.click(screen.getByRole("button", { name: "Move wait right" }));
+  const banner = (await screen.findByText(/This draft was changed elsewhere, so your changes since then aren't saved/, {}, { timeout: 3000 })).closest<HTMLElement>("[role='alert']")!;
+  expect(banner.textContent).toContain("Your version's file doesn't hold the 1 edit not applied: download it separately.");
+  await userEvent.click(within(banner).getByRole("button", { name: "Download the edit not applied" }));
+  await userEvent.click(within(banner).getByRole("button", { name: "Download my version" }));
+  expect(downloads).toEqual(["nightly.unapplied.json", "nightly.draft.json"]);
+});
+
+it("goes back to the edits not applied, and from there to the field", async () => {
+  await unappliedDuration();
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
+  await userEvent.click(screen.getByRole("button", { name: "Export" }));
+  await userEvent.click(within(screen.getByRole("dialog", { name: "Edits not applied" })).getByRole("button", { name: "Go back to them" }));
+  const list = screen.getByRole("complementary", { name: "Edits not applied" });
+  await userEvent.click(within(list).getByRole("button", { name: "Go to it: wait · Duration S" }));
+  expect(within(screen.getByRole("complementary", { name: "wait" })).getByLabelText<HTMLInputElement>("Duration S").value).toBe("5x");
+  expect(downloads).toEqual([]);
+});
+
+it("discards a deleted step's edits not applied, and says so", async () => {
+  await unappliedDuration();
+  await userEvent.click(screen.getByRole("button", { name: "Delete step" }));
+  const ask = screen.getByRole("dialog", { name: "Delete a step" });
+  expect(ask.textContent).toContain("Its edits not applied yet are discarded too.");
+  await userEvent.click(within(ask).getByRole("button", { name: "Delete" }));
+  expect(screen.queryByRole("button", { name: /edits? not applied/ })).toBeNull();
+});
+
+/** A switch whose case b leads to a transform. */
+const switched = () => ({
+  graph_format: 1,
+  nodes: [
+    { id: "id-pick", key: "pick", type: "flow.switch@1", config: { cases: [{ port: "a", when: formula("true") }, { port: "b", when: formula("false") }] }, position: { x: 0, y: 140 } },
+    { id: "id-transform", key: "transform", type: "flow.transform@1", position: { x: 0, y: 280 } },
+  ],
+  edges: [{ from: { node: "id-pick", port: "b" }, to: { node: "id-transform" } }],
+});  // prettier-ignore
+
+async function openSwitch() {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, SWITCH]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: switched() }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "pick" }));
+}
+
+it("renames a case's port in place, its edges following", async () => {
+  await openSwitch();
+  const port = within(screen.getByRole("group", { name: "Cases, item 2" })).getByLabelText("Port");
+  await userEvent.clear(port);
+  await userEvent.type(port, "big{Enter}"); // applies on Enter, or when focus leaves
+  expect(drawn.at(-1)!.doc.edges).toEqual([{ from: { node: "id-pick", port: "big" }, to: { node: "id-transform" } }]);
+});
+
+it("lists an edit whose field an undo removed, and discards it without bringing the field back", async () => {
+  const SIZES = typeWith(
+    { type: "object", properties: { sizes: { type: "array", title: "Sizes", items: { type: "integer" } } } },
+    { ref: "acme.sizes@1", type: "acme.sizes", title: "Sizes" },
+  );
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, SIZES]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("acme.sizes@1", { sizes: [] }, "sz") }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "sz" }));
+  await userEvent.click(screen.getByRole("button", { name: "Add to Sizes" }));
+  await userEvent.click(screen.getByLabelText("Sizes, item 1"));
+  await userEvent.paste("1x"); // held: no number
+  await userEvent.click(screen.getByRole("heading", { name: "sz" }));
+  await userEvent.keyboard("{Control>}z{/Control}"); // the item's addition undone: its field is gone
+  expect(screen.queryByLabelText("Sizes, item 1")).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "1 edit not applied" }));
+  const list = screen.getByRole("complementary", { name: "Edits not applied" });
+  expect(list.textContent).toContain("sz · Sizes, item 1");
+  expect(list.textContent).toContain("1x");
+  await userEvent.click(within(list).getByRole("button", { name: "Discard: sz · Sizes, item 1" }));
+  expect(stepConfig("sz")).toEqual({ sizes: [] }); // never recreated
+  expect(screen.queryByRole("button", { name: /edits? not applied/ })).toBeNull();
+});
+
+it("never moves a held edit to an equal item when a removal is undone", async () => {
+  const SIZES = typeWith(
+    { type: "object", properties: { sizes: { type: "array", title: "Sizes", items: { type: "integer" } } } },
+    { ref: "acme.sizes@1", type: "acme.sizes", title: "Sizes" },
+  );
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, SIZES]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("acme.sizes@1", { sizes: [5, 5, 7] }, "sz") }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "sz" }));
+  await userEvent.click(screen.getByRole("button", { name: "Remove: Sizes, item 1" })); // [5, 7]
+  // The removal sends focus to Add a frame later: typing before it lands would type into the button (the review of f2bd150).
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Add to Sizes" })));
+  await userEvent.type(screen.getByLabelText("Sizes, item 1"), "x"); // "5x", over the second 5
+  expect(screen.getByLabelText<HTMLInputElement>("Sizes, item 1").value).toBe("5x");
+  expect(screen.getByRole("button", { name: "1 edit not applied" })).toBeTruthy(); // held, before the undo
+  await userEvent.click(screen.getByRole("heading", { name: "sz" }));
+  await userEvent.keyboard("{Control>}z{/Control}"); // the removal undone: [5, 5, 7]
+  await userEvent.type(screen.getByLabelText("Sizes, item 1"), "{Backspace}0"); // "50"
+  expect(stepConfig("sz")).toEqual({ sizes: [5, 5, 7] }); // never [50, 5, 7] unasked
+  expect(screen.getByText(STALE)).toBeTruthy();
+});
+
+it("asks before removing a case with edges", async () => {
+  await openSwitch();
+  await userEvent.click(screen.getByRole("button", { name: "Remove: Cases, item 2" }));
+  const dialog = screen.getByRole("dialog", { name: "Remove a port" });
+  expect(dialog.textContent).toContain("The port b goes with this change, and its edge to transform is deleted.");
+  await userEvent.click(within(dialog).getByRole("button", { name: "Remove" }));
+  expect(drawn.at(-1)!.doc.edges).toEqual([]);
+  expect(stepConfig("pick")).toEqual({ cases: [{ port: "a", when: formula("true") }] });
+});
+
+/** The `wait` step's draft at 5 and its version 1 at 3, whose read the test answers: `answer()`. */
+async function slowVersionOfWait() {
+  let answer: () => void = () => undefined;
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, DELAY]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.delay@1", { duration_s: 5 }) }));
+  answers.set(`GET ${BASE}/versions`, () => json([version(1, true)]));
+  answers.set(`GET ${BASE}/versions/v1`, () =>
+    new Promise<Response>((resolve) => {
+      answer = () => resolve(json({ ...version(1, true), graph: oneStep("flow.delay@1", { duration_s: 3 }), expressions: [] }));
+    }),
+  );
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "Versions" }));
+  await userEvent.click(await screen.findByRole("button", { name: "View version 1" })); // its read is held
+  await userEvent.click(screen.getByRole("button", { name: "wait" })); // the draft's drawer, meanwhile
+  await userEvent.type(screen.getByLabelText("Duration S"), "x"); // "5x": typed while the version is read
+  await act(() => Promise.resolve(answer())); // the version arrives
+  return screen.getByRole("dialog", { name: "Edits not applied" });
+}
+
+it("asks about an edit typed while a version is read, and never shows it in the version", async () => {
+  const ask = await slowVersionOfWait();
+  expect(ask.textContent).toContain("wait · Duration S: A whole number, like 42.");
+  await userEvent.click(within(ask).getByRole("button", { name: "Discard and view the version" }));
+  await screen.findByText("Viewing version 1, read only. The draft is unchanged.");
+  await userEvent.click(screen.getByRole("button", { name: "wait" }));
+  const field = within(screen.getByRole("complementary", { name: "wait" })).getByLabelText<HTMLInputElement>("Duration S");
+  expect([field.value, field.disabled]).toEqual(["3", true]); // the version's own value, never the draft's "5x"
+  expect(screen.queryByRole("button", { name: /edits? not applied/ })).toBeNull();
+});
+
+it("keeps an edit typed while a version is read, when the person goes back to it", async () => {
+  const ask = await slowVersionOfWait();
+  await userEvent.click(within(ask).getByRole("button", { name: "Go back to them" }));
+  expect(screen.queryByText(/Viewing version 1/)).toBeNull(); // the draft stays on the screen
+  expect(screen.getByRole("complementary", { name: "Edits not applied" }).textContent).toContain("5x");
+  expect(stepConfig("wait")).toEqual({ duration_s: 5 });
+});
+
+it("asks about an edit typed while an export waits for its save", async () => {
+  let answer: () => void = () => undefined;
+  answers.set(`PUT ${BASE}/draft`, () =>
+    new Promise<Response>((resolve) => {
+      answer = () => resolve(json({ draft_revision: 2, unpublished_changes: true, graph_hash: "h2", active_version_id: null, active_version_number: null }));
+    }),
+  );
+  answers.set(`GET ${BASE}/export`, () => json({ format: "dewpoint.workflow", format_version: 1, name: "Nightly", graph: {}, bindings: [] }));
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, DELAY]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.delay@1", { duration_s: 5 }) }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "wait" }));
+  await userEvent.type(screen.getByLabelText("Duration S"), "0"); // 50: a save, held unanswered
+  await userEvent.click(screen.getByRole("button", { name: "Export" })); // waits on that save
+  await userEvent.type(screen.getByLabelText("Duration S"), "x"); // typed meanwhile: can't be applied
+  await act(() => Promise.resolve(answer())); // the save answers
+  const ask = await screen.findByRole("dialog", { name: "Edits not applied" });
+  expect(ask.textContent).toContain("wait · Duration S: A whole number, like 42.");
+  expect(sent.some((r) => r.path.endsWith("/export"))).toBe(false); // nothing asked for before the person decides
+  await userEvent.click(within(ask).getByRole("button", { name: "Discard and export" }));
+  await vi.waitFor(() => expect(downloads).toEqual(["nightly.dewpoint.json"]));
+});
+
+it("gives focus back to the count when the list of edits not applied closes", async () => {
+  await unappliedDuration();
+  const count = screen.getByRole("button", { name: "1 edit not applied" });
+  await userEvent.click(count);
+  await userEvent.click(within(screen.getByRole("complementary", { name: "Edits not applied" })).getByRole("button", { name: "Close" }));
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "1 edit not applied" })));
+});
+
+it("keeps focus in the list when its last entry is discarded", async () => {
+  await unappliedDuration();
+  await userEvent.click(screen.getByRole("button", { name: "1 edit not applied" }));
+  const list = screen.getByRole("complementary", { name: "Edits not applied" });
+  await userEvent.click(within(list).getByRole("button", { name: "Discard: wait · Duration S" })); // the count goes too
+  await vi.waitFor(() => expect(document.activeElement).toBe(within(list).getByRole("heading", { name: "Edits not applied" })));
+});
+
+it("asks before errors stop going to a port", async () => {
+  const draft = {
+    graph_format: 1,
+    nodes: [
+      { id: "id-check", key: "check", type: "flow.if@1", options: { on_error: "port" }, position: { x: 0, y: 140 } },
+      { id: "id-transform", key: "transform", type: "flow.transform@1", position: { x: 0, y: 280 } },
+    ],
+    edges: [{ from: { node: "id-check", port: "error" }, to: { node: "id-transform" } }],
+  };  // prettier-ignore
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, IF]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "check" }));
+  const chip = screen.getByRole("button", { name: "On error: route to the error port" });
+  await userEvent.click(chip);
+  expect(chip.getAttribute("aria-expanded")).toBe("true");
+  await userEvent.selectOptions(screen.getByLabelText("When it fails"), "Fail the run");
+  const dialog = screen.getByRole("dialog", { name: "Remove a port" });
+  expect(dialog.textContent).toContain("The port error goes with this change, and its edge to transform is deleted.");
+  await userEvent.click(within(dialog).getByRole("button", { name: "Remove" }));
+  expect(drawn.at(-1)!.doc.edges).toEqual([]);
+  expect(drawn.at(-1)!.doc.nodes![0]).not.toHaveProperty("options");
+});
+
+/** `fetch`, read by a formula in `use` and a reference in `copy`. */
+const readers = () => ({
+  graph_format: 1,
+  nodes: [
+    { id: "id-fetch", key: "fetch", type: "flow.transform@1", position: { x: 0, y: 140 } },
+    { id: "id-use", key: "use", type: "flow.if@1", config: { condition: formula("steps.fetch.output.n > 1") }, position: { x: 0, y: 280 } },
+    { id: "id-copy", key: "copy", type: "flow.transform@1", config: { fields: { x: { $value: { kind: "ref", path: "steps.fetch.output" } } } }, position: { x: 0, y: 420 } },
+  ],
+  edges: [],
+});  // prettier-ignore
+
+async function openFetch() {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, IF]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: readers() }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "fetch" }));
+  await userEvent.click(screen.getByRole("button", { name: "Rename" }));
+}
+
+async function renameTo(key: string) {
+  const field = screen.getByLabelText("Key");
+  await userEvent.clear(field);
+  await userEvent.type(field, `${key}{Enter}`);
+}
+
+it("says which formulas mention the old key, until the next edit", async () => {
+  await openFetch();
+  await renameTo("load");
+  const heading = screen.getByRole("heading", { name: "load" });
+  await vi.waitFor(() => expect(document.activeElement).toBe(heading));
+  expect(screen.getByText("1 formula mentions fetch and keeps its text: check it.")).toBeTruthy();
+  expect(stepConfig("copy")).toEqual({ fields: { x: { $value: { kind: "ref", path: "steps.load.output" } } } });
+  await userEvent.keyboard("{Control>}z{/Control}"); // one step: the key and its references
+  expect(stepConfig("copy")).toEqual({ fields: { x: { $value: { kind: "ref", path: "steps.fetch.output" } } } });
+  expect(screen.getByRole("heading", { name: "fetch" })).toBeTruthy();
+  expect(screen.queryByText(/mentions fetch/)).toBeNull(); // said only while it's true of the draft
+});
+
+it("refuses a key another step has, and keeps its own", async () => {
+  await openFetch();
+  await renameTo("use");
+  expect(screen.getByText("Another step is already called use.")).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "fetch" })).toBeTruthy();
+});
+
+it("disables an open rename when the draft can't change, and never says it renamed", async () => {
+  answers.set(`PUT ${BASE}/draft`, () => json({ error: "draft_conflict" }, 409));
+  await openFetch();
+  await userEvent.type(screen.getByLabelText("Key"), "_v2"); // typed, not applied
+  await userEvent.click(screen.getByRole("button", { name: "Move fetch right" })); // an edit, whose save conflicts
+  await vi.waitFor(() => expect(screen.getByLabelText<HTMLInputElement>("Key").disabled).toBe(true), { timeout: 3000 });
+  expect(screen.getByRole<HTMLButtonElement>("button", { name: "Rename" }).disabled).toBe(true);
+  expect(screen.getByLabelText<HTMLInputElement>("Key").value).toBe("fetch_v2"); // kept, never lost
+  expect(screen.getByRole("heading", { name: "fetch" })).toBeTruthy();
+  expect(screen.queryByText(/^Renamed/)).toBeNull();
+});
+
+/** A check that found these problems. */
+const found = (...diagnostics: { message: string; field: string }[]) => ({
+  draft_revision: 1, valid: false, expressions: [], taint: { sites: [], declassified: [] },
+  diagnostics: diagnostics.map((d) => ({ code: "config.invalid", node: "id-each", fix: null, severity: "error", ...d })),
+});  // prettier-ignore
+
+async function goTo(field: string) {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, LOOP]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.loop@1", { items: formula("trigger.list") }, "each") }));
+  answers.set(`POST ${BASE}/validate`, () => json(found({ message: "Must be at most 10.", field })));
+  await show();
+  await userEvent.click(await screen.findByRole("button", { name: "Problems · 1" }));
+  await userEvent.click(within(screen.getByRole("complementary", { name: "Problems" })).getByRole("button", { name: "Go to each" }));
+}
+
+it("goes to a problem's field: the drawer opens on its tab, the field focused (ruling 83)", async () => {
+  await goTo("/concurrency");
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Concurrency")));
+  expect(screen.getByRole("tab", { name: "Options · 1 problem" }).getAttribute("aria-selected")).toBe("true");
+});
+
+it("goes to the step's own problems when no field shows the one named", async () => {
+  await goTo("/nope");
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Problems with this step" })));
+});
+
+it("goes to the step itself for a problem about it as a whole, as in 4b", async () => {
+  await goTo("");
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "each" })));
+});
+
+it("goes to an edit not applied from its list, at its field", async () => {
+  await unappliedDuration();
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
+  await userEvent.click(screen.getByRole("button", { name: "1 edit not applied" }));
+  const list = screen.getByRole("complementary", { name: "Edits not applied" });
+  await userEvent.click(within(list).getByRole("button", { name: "Go to it: wait · Duration S" }));
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Duration S")));
+});
+
+it("gives a viewer's drawer controls a disabled look, their values legible (the owner's ruling O2)", async () => {
+  role = "viewer";
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, DELAY]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.delay@1", { duration_s: 5 }) }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "wait" }));
+  const drawer = screen.getByRole("complementary", { name: "wait" });
+  // The drawer's own: 4a's forms keep their look. The value's ink stays muted, never the fainter disabled ink.
+  for (const look of ["bg-disabled-bg", "border-disabled-line", "text-muted"]) {
+    expect(drawer.className).toContain(`[&_:is(input,select,textarea):disabled]:${look}`);
+  }
+  const fixed = within(drawer).getByRole<HTMLButtonElement>("button", { name: "Fixed" });
+  expect(fixed.disabled).toBe(true);
+  expect(fixed.className).toContain("disabled:bg-disabled-bg");
+  expect(fixed.className).toContain("font-semibold"); // the chosen mode still reads, by its weight
+});
+
+it("says how a formula runs once, under its field, and lists only what no field says (the owner's ruling O4)", async () => {
+  const runs = (field: string) => ({ node: "id-check", field, mode: "activity", reason: "it reads a large value" });
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, IF]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.if@1", { condition: formula("trigger.n > 1") }, "check") }));
+  answers.set(`POST ${BASE}/validate`, () => json({ ...valid(1), expressions: [runs("/condition"), runs("/elsewhere")] }));
+  await show();
+  await screen.findByRole("button", { name: "No problems" }, { timeout: 3000 });
+  await userEvent.click(screen.getByRole("button", { name: "check" }));
+  const drawer = screen.getByRole("complementary", { name: "check" });
+  await vi.waitFor(() => expect(within(drawer).getAllByText(/it reads a large value/)).toHaveLength(2));
+  const list = within(drawer).getByRole("heading", { name: "How its formulas run" }).parentElement!;
+  expect(list.textContent).toContain("/elsewhere"); // no field shows it: listed
+  expect(list.textContent).not.toContain("/condition"); // its field says it
+});
+
+// The review of 66fc658: a rename settled with the rest keeps its word on formulas; "Go to it" reaches a held key, a
+// held limit, and a field whose control is still loading.
+
+it("keeps a rename's word on formulas when it's applied with the rest, as before an export", async () => {
+  answers.set(`GET ${BASE}/export`, () => json({ format: "dewpoint.workflow", format_version: 1, name: "Nightly", graph: {}, bindings: [] }));
+  await openFetch();
+  await userEvent.clear(screen.getByLabelText("Key"));
+  await userEvent.type(screen.getByLabelText("Key"), "load"); // typed, never applied: no Enter
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
+  await userEvent.click(screen.getByRole("button", { name: "Export" })); // applies it, with every other edit
+  await vi.waitFor(() => expect(downloads).toEqual(["nightly.dewpoint.json"]), { timeout: 3000 });
+  expect(stepConfig("copy")).toEqual({ fields: { x: { $value: { kind: "ref", path: "steps.load.output" } } } });
+  await userEvent.click(screen.getByRole("button", { name: "load" }));
+  expect(screen.getByText("1 formula mentions fetch and keeps its text: check it.")).toBeTruthy();
+});
+
+it("says a rename's word only in the renamed step's drawer", async () => {
+  await openFetch();
+  await renameTo("load");
+  await screen.findByText("1 formula mentions fetch and keeps its text: check it.");
+  await userEvent.click(screen.getByRole("button", { name: "use" }));
+  expect(within(screen.getByRole("complementary", { name: "use" })).queryByText(/mentions fetch/)).toBeNull();
+});
+
+/** The list of edits not applied, opened from the toolbar with the drawer closed, then its entry's "Go to it". */
+async function goBackTo(entry: string) {
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
+  await userEvent.click(screen.getByRole("button", { name: "1 edit not applied" }));
+  await userEvent.click(within(screen.getByRole("complementary", { name: "Edits not applied" })).getByRole("button", { name: `Go to it: ${entry}` }));
+}
+
+it("goes to a held key from the list of edits not applied, at its field", async () => {
+  await openFetch();
+  await userEvent.type(screen.getByLabelText("Key"), "_v2"); // held
+  await goBackTo("fetch · Key");
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Key")));
+});
+
+it("goes to a held limit from the list of edits not applied, its section open", async () => {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, DELAY]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.delay@1", { duration_s: 5 }) }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "wait" }));
+  await userEvent.click(screen.getByRole("button", { name: "On error: fail the run" }));
+  await userEvent.type(screen.getByLabelText("Attempts"), "25"); // "2" written, "25" held: past 20
+  await goBackTo("wait · Attempts");
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Attempts")));
+});
+
+/** A step whose connection field's list is answered when the test says: `answer()`. A check names its connection. */
+async function goToLoadingConnection() {
+  let answer: () => void = () => undefined;
+  const prod = { id: "c1", name: "Prod", type: "acme", status: "ok", revision: 1, config: {}, secret_set: true, status_detail: "", privilege: null, last_verified_at: null };
+  answers.set("GET /api/v1/t/t1/connections", () => new Promise<Response>((resolve) => (answer = () => resolve(json([prod])))));
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, REMOTE]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("acme.sites@1", { site_id: "s1" }, "sites") }));
+  answers.set(`POST ${BASE}/validate`, () =>
+    json({ ...valid(1), valid: false, diagnostics: [{ code: "config.invalid", node: "id-sites", field: "/connection", fix: null, severity: "error", message: "Choose one." }] }),
+  );
+  await show();
+  await userEvent.click(await screen.findByRole("button", { name: "Problems · 1" }, { timeout: 3000 }));
+  await userEvent.click(within(screen.getByRole("complementary", { name: "Problems" })).getByRole("button", { name: "Go to sites" }));
+  await screen.findByText("Loading connections…");
+  await new Promise((r) => setTimeout(r, 50)); // several frames pass while the list is still on its way
+  return () => act(() => Promise.resolve(answer()));
+}
+
+it("goes to a field whose control is still loading, once it's there", async () => {
+  const arrive = await goToLoadingConnection();
+  await arrive();
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Connection")));
+});
+
+it("drops a pending Go to when the person moves on before the field's control loads", async () => {
+  const arrive = await goToLoadingConnection();
+  await userEvent.click(screen.getByRole("button", { name: "Rename" })); // the person's own move: the key field
+  await arrive();
+  await new Promise((r) => setTimeout(r, 50)); // the list has landed, and a frame has passed
+  expect(document.activeElement).toBe(screen.getByLabelText("Key"));
+});
+
+it("goes to a held entry name from the list of edits not applied, at its name", async () => {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES.filter((t) => t.ref !== "flow.transform@1"), TRANSFORM]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.transform@1", { fields: { old: 1, other: 2 } }, "map") }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "map" }));
+  await userEvent.clear(screen.getByLabelText("Name: old"));
+  await userEvent.type(screen.getByLabelText("Name: old"), "other"); // another entry's: refused when focus leaves, held
+  await goBackTo("map · Fields, the name old");
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Name: old")));
+});
+
+it("keeps a formula past the limit out of the draft, held and counted, never cut (the review of 97235e3)", async () => {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, IF]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.if@1", { condition: formula("false") }, "check") }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "check" }));
+  await userEvent.click(screen.getByLabelText("Condition"));
+  await userEvent.keyboard("{Control>}a{/Control}");
+  await userEvent.paste(`true${" ".repeat(16_380)}&& false`); // over the whole formula: cut, it would read `true`
+  expect(stepConfig("check")).toEqual({ condition: formula("false") });
+  expect(screen.getByRole("button", { name: "1 edit not applied" })).toBeTruthy();
+});

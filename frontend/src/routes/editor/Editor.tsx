@@ -9,38 +9,46 @@ import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { LoadError } from "../../components/LoadError";
 import { announce } from "../../lib/announce";
 import { ApiError, client, ok } from "../../lib/client";
+import { admission, setConfig, setOptions, valueAt, type Changed } from "../../lib/config";
 import { downloadJson, fileName } from "../../lib/download";
 import { ConflictError, DraftSync, type SyncState } from "../../lib/draftSync";
 import {
   START, addAfter, asGraph, connect, deleteEdge, deleteNode, edgesOf, findNode, idKey, insertBeforeEntry, insertOnEdge,
-  moveNodes, nodesOf, portsOf, sameId, type PortRef,
+  moveNodes, nodesOf, portOf, portsOf, sameId, type PortRef,
 } from "../../lib/graph";  // prettier-ignore
 import { begin, record, redo, undo, type History } from "../../lib/history";
 import { CARD, layout } from "../../lib/layout";
 import { guardLeaving } from "../../lib/leaving";
+import type { Path } from "../../lib/schemaForm";
 import { useDocumentTitle } from "../../lib/title";
 import {
+  STALE, applyAll, applyUnapplied, baseOf, droppedWhy, isStale, lineageOf, unappliedFile, unappliedId, within,
+  type Unapplied, type UnappliedKind,
+} from "../../lib/unapplied";  // prettier-ignore
+import {
   canEdit, canPublish, nodeTypesQuery, notPortable, tenantQuery, versionsQuery, workflowQuery, type Diagnostic,
-  type GraphDoc, type GraphEdge, type NodeType, type PortableProblem, type VersionDetail, type VersionRow,
+  type GraphDoc, type GraphEdge, type GraphNode, type NodeType, type PortableProblem, type VersionDetail, type VersionRow,
   type WorkflowDetail,
 } from "../../lib/workflows";  // prettier-ignore
 import { Canvas } from "./Canvas";
 import { NAV_KEYS, isPath, navModel, pathTo, step, type NavKey } from "./canvasNav";
 import { checkLabel, checkState, lastOf, type Check } from "./check";
 import { ConnectDialog } from "./ConnectDialog";
+import type { DrawerActions } from "./drawer/context";
+import { StepDrawer } from "./drawer/StepDrawer";
 import { addsOf, item, type ItemAction } from "./items";
 import { ProblemsPanel, type PublishProblems } from "./ProblemsPanel";
 import { SaveState } from "./SaveState";
 import { type Problems } from "./StepCard";
-import { StepPanel } from "./StepPanel";
 import { StepPicker, type PickMode } from "./StepPicker";
+import { UnappliedPanel } from "./UnappliedPanel";
 import { VersionsPanel } from "./VersionsPanel";
 import { Toolbar } from "./Toolbar";
 
 type Opened = { workflow: WorkflowDetail; types: NodeType[]; role: string | null };
 
 /** The editor's right column: a step's panel, the problems, or the versions (Task 15). */
-type Side = { kind: "step"; node: string } | { kind: "problems" } | { kind: "versions" } | null;
+type Side = { kind: "step"; node: string; field?: { pointer: string; kind?: UnappliedKind; n: number } } | { kind: "problems" } | { kind: "versions" } | { kind: "unapplied" } | null;
 const NO_DIAGNOSTICS: Diagnostic[] = []; // one empty list, so a memo over it holds
 
 /** Whether a request's outcome is unknown: no answer reached the editor (the network), or a 5xx came in the API's
@@ -49,6 +57,41 @@ const uncertain = (e: unknown) => !(e instanceof ApiError) || e.status >= 500;
 
 type Notice = { tone: "danger" | "info"; text: string; action?: { label: string; run: () => void } };
 type Confirm = { kind: "publish"; expected: number; elsewhere?: boolean } | { kind: "activate"; version: VersionRow };
+
+/** What the editor asks before doing: deleting a step or an edge, or a settings change that takes ports away, with the
+ * document it makes and the unapplied edits it applies (rulings 9 and 18). */
+type Asking =
+  | { kind: "node"; id: string }
+  | { kind: "edge"; edge: GraphEdge }
+  | { kind: "ports"; next: GraphDoc; dropped: GraphEdge[]; release: string[] }
+  // edits that can't be applied, before what needs the draft settled: an export, a publication, a version view
+  | { kind: "unapplied"; action: string; left: Unapplied[]; then: () => void };
+
+/** Which ports a change takes away, and where their edges led (ruling 9). */
+function portsQuestion(dropped: GraphEdge[], keyOf: (id: string) => string): string {
+  const ports = [...new Set(dropped.map(portOf))];
+  const targets = [...new Set(dropped.map((e) => keyOf(e.to.node)))];
+  const one = ports.length === 1;
+  return `${one ? "The port" : "The ports"} ${ports.join(", ")} ${one ? "goes" : "go"} with this change, and ${
+    dropped.length === 1 ? "its edge" : "their edges"} to ${targets.join(", ")} ${dropped.length === 1 ? "is" : "are"} deleted.`;
+}
+
+const CANT = "Not written: the draft can't be changed now."; // a conflict, an exit agreed to, a version view
+
+/** A version's drawer: read only, and blind to the draft's edits not applied, which are never a version's (the review
+ * of milestone 2). */
+const VERSION_ACTIONS: DrawerActions = {
+  set: () => CANT,
+  options: () => CANT,
+  held: () => undefined,
+  hold: () => undefined,
+  release: () => undefined,
+  discard: () => undefined,
+  apply: () => CANT,
+  stale: () => false,
+  rebase: () => undefined,
+  restructure: () => CANT,
+};
 
 export function EditorPage({ tenantId, workflowId }: { tenantId: string; workflowId: string }) {
   const qc = useQueryClient();
@@ -107,6 +150,15 @@ function Editor({
   const typeMap = useMemo(() => new Map(types.map((t) => [t.ref, t])), [types]);
   const [history, setHistory] = useState<History<GraphDoc>>(() => begin(asGraph(workflow.draft)));
   const doc = history.present;
+  // The history as of now, written at once (the review of revision 3): a decision made between renders (an exit
+  // awaiting a save) settles against the document that save made, never one captured before it waited. `change` and
+  // undo/redo go through `commitHistory`; the drawer's writes read `draftNow()`.
+  const historyNow = useRef(history);
+  const commitHistory = (next: History<GraphDoc>) => {
+    historyNow.current = next;
+    setHistory(next);
+  };
+  const draftNow = () => historyNow.current.present;
   const [sync, setSyncState] = useState<SyncState>({
     status: "saved", revision: workflow.draft_revision, unpublished: workflow.unpublished_changes, generation: 0,
     savedGeneration: 0, savedHash: workflow.draft_graph_hash, activeNumber: workflow.active_version_number,
@@ -175,14 +227,17 @@ function Editor({
   decide.current = (by) => {
     joined.current.add(by); // recorded before it shares the decision, whichever exit came first
     if (deciding.current) return deciding.current;
+    const ask = () => new Promise<boolean>((resolve) => setLeaveQuestion(() => resolve));
     const run = (async () => {
-      const s = saver.current;
-      if (agreed.current || !s?.unsaved) return true;
-      try {
-        await s.flush();
-        return true;
-      } catch {
-        return new Promise<boolean>((resolve) => setLeaveQuestion(() => resolve));
+      // Settling and saving are one transaction (ruling 18; the review of revision 2): what's typed but not applied
+      // goes in where it can, then the save is awaited; anything typed meanwhile goes round again. The person is asked
+      // when an edit can't be applied or the save fails. Nothing is left unasked when this answers "leave".
+      for (;;) {
+        if (agreed.current) return true;
+        if (settleAll().length > 0) return ask();
+        const s = saver.current;
+        if (!s?.unsaved) return true; // settled just now, synchronously: nothing typed since
+        if (!(await s.flush().then(() => true, () => false))) return ask();
       }
     })().then((leave) => {
       deciding.current = null;
@@ -208,7 +263,7 @@ function Editor({
   useEffect(
     () =>
       guardLeaving({
-        unsaved: () => saver.current?.unsaved ?? false,
+        unsaved: () => (saver.current?.unsaved ?? false) || unappliedRef.current.size > 0,
         decide: () => decide.current("guard"),
         stayed: () => withdraw("guard"), // the sign-out it agreed to failed
       }),
@@ -227,7 +282,7 @@ function Editor({
   const router = useRouter();
   useBlocker({
     shouldBlockFn: async ({ next }) => !isHome(next.routeId, next.params as Record<string, unknown>) && !(await decide.current("router")),
-    enableBeforeUnload: () => saver.current?.unsaved ?? false,
+    enableBeforeUnload: () => (saver.current?.unsaved ?? false) || unappliedRef.current.size > 0,
   });
   useEffect(
     () =>
@@ -260,7 +315,27 @@ function Editor({
   );
   const shown = nav.order.includes(focusId) ? focusId : START; // a deleted item's tab stop falls back to the start card
   const [connecting, setConnecting] = useState<PortRef | null>(null);
-  const [asking, setAsking] = useState<{ kind: "node"; id: string } | { kind: "edge"; edge: GraphEdge } | null>(null);
+  const [asking, setAsking] = useState<Asking | null>(null);
+  // What's typed in the drawer but not in the draft (ruling 18): the editor's, never a control's, so a tab, a toggle
+  // or a closed drawer keeps it. The ref is the record, written at once, so a decision made between renders (an exit
+  // awaiting a save, Task 8) reads every keystroke; the state draws it.
+  const unappliedRef = useRef<ReadonlyMap<string, Unapplied>>(new Map());
+  const [unapplied, setUnapplied] = useState(unappliedRef.current);
+  const setRecord = (next: ReadonlyMap<string, Unapplied>) => {
+    unappliedRef.current = next;
+    setUnapplied(next);
+  };
+  const keep = (u: Unapplied) => setRecord(new Map(unappliedRef.current).set(u.id, u));
+  const drop = (ids: string[]) => {
+    if (!ids.some((id) => unappliedRef.current.has(id))) return;
+    const next = new Map(unappliedRef.current);
+    for (const id of ids) next.delete(id);
+    setRecord(next);
+  };
+  // A rename's word on formulas, in its step's drawer while the draft is the one it made (ruling 11; the review of
+  // 66fc658: kept when the rename is applied with the rest, and said in no other step's drawer).
+  const [renamed, setRenamed] = useState<{ doc: GraphDoc; node: string; text: string } | null>(null);
+  const typeOf = (n: GraphNode) => typeMap.get(n.type);
   const [side, setSide] = useState<Side>(null); // the right column's one panel
   // Where focus lands when what held it goes: a panel's Close, or a confirmation whose button an action removed or
   // disabled (the final checkpoint's review, WCAG 2.4.3). A native dialog returns focus to its opener only while that
@@ -268,7 +343,12 @@ function Editor({
   const problemsButton = useRef<HTMLButtonElement>(null);
   const versionsButton = useRef<HTMLButtonElement>(null);
   const publishButton = useRef<HTMLButtonElement>(null);
-  const [landing, setLanding] = useState<{ on: "problems" | "versions" | "publish" | "problems-panel" | "versions-panel"; n: number } | null>(null);
+  const unappliedButton = useRef<HTMLButtonElement>(null);
+  const jumps = useRef(0); // each "Go to" a field, so the same one twice still focuses it
+  const [landing, setLanding] = useState<{
+    on: "problems" | "versions" | "publish" | "problems-panel" | "versions-panel" | "unapplied" | "unapplied-panel";
+    n: number;
+  } | null>(null);
   const land = (on: NonNullable<typeof landing>["on"]) => setLanding((l) => ({ on, n: (l?.n ?? 0) + 1 }));
   useEffect(() => {
     if (!landing) return;
@@ -280,6 +360,8 @@ function Editor({
         publish: () => usable(publishButton.current) ?? usable(versionsButton.current),
         "problems-panel": () => document.getElementById("problems-title") ?? usable(problemsButton.current),
         "versions-panel": () => document.getElementById("versions-title") ?? usable(versionsButton.current),
+        unapplied: () => usable(unappliedButton.current),
+        "unapplied-panel": () => document.getElementById("unapplied-title") ?? usable(unappliedButton.current),
       }[landing.on]();
       target?.focus();
     });
@@ -538,11 +620,16 @@ function Editor({
         }),
       );
       if (asked !== viewAsked.current) return; // a newer view, or Back to the draft, came since
-      setViewing(opened);
-      setSide(null);
-      setPlacing(null);
-      focus(START);
-      announce(`Viewing version ${opened.number}, read only`);
+      // What was typed while the version was read is applied now, or asked about: a version view never carries the
+      // draft's edits not applied, and never drops them unasked (the review of milestone 2).
+      whenSettled("view the version", () => {
+        if (asked !== viewAsked.current) return; // Back to the draft, or a newer view, while the person decided
+        setViewing(opened);
+        setSide(null);
+        setPlacing(null);
+        focus(START);
+        announce(`Viewing version ${opened.number}, read only`);
+      });
     } catch {
       if (asked === viewAsked.current) setNotice({ tone: "danger", text: `Version ${version.number} couldn't be opened. Try again.` });
     }
@@ -554,12 +641,21 @@ function Editor({
     focus(START);
   }
 
-  /** The saved draft as a file (B12; 4b ruling 18). Unsaved edits stop it: the file would miss them. */
+  /** The saved draft as a file (B12; 4b ruling 18). Unsaved edits stop it: the file would miss them. Settling and
+   * saving are one transaction, as leaving's are: what's typed while the save is awaited is applied too, or asked about,
+   * before the file is asked for (the review of milestone 2). */
   async function exportFile(savedOnly = false) {
     setNotice(null);
-    if (!savedOnly) {
+    while (!savedOnly) {
+      const left = settleAll();
+      if (left.length > 0) {
+        setAsking({ kind: "unapplied", action: "export", left, then: () => void exportFile() });
+        return;
+      }
+      const s = saver.current!;
+      if (!s.unsaved) break; // settled just now, synchronously: nothing typed since
       try {
-        await saver.current!.flush();
+        await s.flush();
       } catch {
         setNotice({
           tone: "danger",
@@ -601,13 +697,138 @@ function Editor({
     setFocusRequest((r) => ({ id, n: (r?.n ?? 0) + 1 }));
   }
 
-  function change(next: GraphDoc, message: string, then?: string) {
-    if (!mayEdit()) return; // read only now: a conflict, an exit agreed to, a version view, a publication
-    setHistory((h) => record(h, next));
+  /** One edit: recorded (edits sharing a field's mark are one undo step, ruling 8), saved, and said, unless `message`
+   * is null: a field's edits aren't announced, its control says what it holds. Whether it landed. */
+  function change(next: GraphDoc, message: string | null, then?: string, mark?: string): boolean {
+    if (!mayEdit()) return false; // read only now: a conflict, an exit agreed to, a version view, a publication
+    commitHistory(record(historyNow.current, next, mark));
     saver.current?.change(next);
-    announce(message);
+    if (message !== null) announce(message);
     if (then) focus(then);
+    return true;
   }
+
+  /** A drawer's change to the draft. Refused when the graph's format would refuse it (ruling 7); asked first when it
+   * takes ports away (ruling 9); else recorded, and the unapplied edits it carries released. Why it wasn't made, or
+   * null (made, or asked). */
+  function writeDraft(changed: Changed, how: { mark?: string; release?: string[]; said?: string | null } = {}): string | null {
+    const refused = admission(changed.doc);
+    if (refused !== null) return refused;
+    if (changed.dropped.length > 0) {
+      setAsking({ kind: "ports", next: changed.doc, dropped: changed.dropped, release: how.release ?? [] });
+      return null;
+    }
+    if (!change(changed.doc, how.said ?? null, undefined, how.mark)) return CANT;
+    drop(how.release ?? []);
+    return null;
+  }
+
+  /** One unapplied edit applied now (focus left its control, Enter): why it stays unapplied, or null. A name moves its
+   * entry, so what's typed inside the entry is applied with it, first, or the name waits (the review of revision 2). */
+  function applyEdit(id: string): string | null {
+    const u = unappliedRef.current.get(id);
+    if (!u) return null;
+    if (u.kind === "name") return restructureStep(u.node, u.pointer);
+    const now = draftNow();
+    const node = findNode(now, u.node);
+    const result = applyUnapplied(now, u, node ? typeOf(node) : undefined);
+    // Asked before it takes ports away: until the answer, and after a Cancel, its control says why (ruling 9).
+    const why =
+      "problem" in result ? result.problem
+      : result.dropped.length > 0 ? (writeDraft(result, { release: [id] }) ?? droppedWhy(result.dropped, result.doc))
+      : writeDraft(result, { release: [id], said: result.said });  // prettier-ignore
+    if (why !== null) keep({ ...u, why });
+    else if (!("problem" in result) && result.note !== null) setRenamed({ doc: result.doc, node: u.node, text: result.note });
+    return why;
+  }
+
+  /** The unapplied edits at `pointer` and below in a step applied; then, with `then`, what `make` makes of the value
+   * at `path` written: one undo step (ruling 18). An edit that can't be applied stops it, said at its control. */
+  function restructureStep(nodeId: string, pointer: string, then?: { path: Path; make: (current: unknown) => unknown }): string | null {
+    const now = draftNow();
+    const { doc: settled, applied, left } = applyAll(now, unappliedRef.current.values(), typeOf, within(nodeId, pointer));
+    for (const u of left) keep(u);
+    if (left.length > 0) return left[0]!.why;
+    let changed: Changed = { doc: settled, dropped: [] };
+    const node = findNode(settled, nodeId);
+    if (then && node) {
+      const current = valueAt(node.config ?? {}, then.path);
+      const made = then.make(current);
+      if (made !== current) changed = setConfig(settled, nodeId, then.path, made, typeOf(node));
+    }
+    if (changed.doc === now) return null;
+    return writeDraft(changed, { release: applied.map((u) => u.id) });
+  }
+
+  /** What the open step's drawer may do. Every write goes through `change`, so through 4b's guards (`mayEdit`). */
+  function actionsFor(nodeId: string): DrawerActions {
+    const id = (kind: UnappliedKind, pointer: string) => unappliedId(nodeId, kind, pointer);
+    const stepType = () => {
+      const node = findNode(draftNow(), nodeId);
+      return node ? typeOf(node) : undefined;
+    };
+    return {
+      set: (path, value, mark) => writeDraft(setConfig(draftNow(), nodeId, path, value, stepType()), { mark }),
+      options: (options, mark) => writeDraft(setOptions(draftNow(), nodeId, options, stepType()), { mark }),
+      held: (kind, pointer) => unapplied.get(id(kind, pointer)),
+      hold: (kind, pointer, holding) => {
+        // What it's typed over is recorded when the edit begins, and kept while it's typed (ruling 18).
+        const was = unappliedRef.current.get(id(kind, pointer));
+        const u: Unapplied = { ...holding, id: id(kind, pointer), node: nodeId, kind, pointer, base: "", lineage: [] };
+        keep({ ...u, base: was?.base ?? baseOf(draftNow(), u), lineage: was?.lineage ?? lineageOf(draftNow(), u) });
+      },
+      release: (kind, pointer) => drop([id(kind, pointer)]),
+      discard: (pointer) => drop([...unappliedRef.current.values()].filter(within(nodeId, pointer)).map((u) => u.id)),
+      apply: (kind, pointer) => applyEdit(id(kind, pointer)),
+      stale: (kind, pointer) => {
+        const u = unappliedRef.current.get(id(kind, pointer));
+        return u !== undefined && isStale(draftNow(), u);
+      },
+      rebase: (kind, pointer) => {
+        const u = unappliedRef.current.get(id(kind, pointer));
+        if (u) keep({ ...u, base: baseOf(draftNow(), u), lineage: lineageOf(draftNow(), u), why: null });
+      },
+      restructure: (pointer, then) => restructureStep(nodeId, pointer, then),
+    };
+  }
+
+  /** Every unapplied edit that can be applied, applied as one undo step; those that can't, returned with their reasons
+   * (ruling 18). */
+  function settleAll(): Unapplied[] {
+    const all = [...unappliedRef.current.values()];
+    // The latest document, not the render's: after a save was awaited, this render's `doc` is older (the review of
+    // revision 3).
+    const { doc: next, applied, left, note } = applyAll(draftNow(), all, typeOf, () => true);
+    for (const u of left) keep(u);
+    if (applied.length === 0) return left;
+    if (!change(next, applied.length === 1 ? "Applied an edit" : `Applied ${applied.length} edits`)) return all;
+    drop(applied.map((u) => u.id));
+    if (note !== null) setRenamed({ doc: next, ...note });
+    return left;
+  }
+
+  /** `then`, once every unapplied edit is in the draft; when one can't be, the person decides first (ruling 18). */
+  function whenSettled(action: string, then: () => void) {
+    const left = settleAll();
+    if (left.length === 0) then();
+    else setAsking({ kind: "unapplied", action, left, then });
+  }
+
+  /** Back to the edits not applied: their list, where each can be read, gone to or discarded, its field gone or not. */
+  function goBack() {
+    setSide({ kind: "unapplied" });
+  }
+
+  const describe = (u: Unapplied) => `${keyOf(u.node)} · ${u.label}: ${u.why ?? "still being typed"}`;
+
+  /** The edits not applied, as a file of their own: never written into the graph to keep them, as the graph is what
+   * runs (ruling 18; the review of revision 2). */
+  const downloadUnapplied = () =>
+    downloadJson(fileName(workflow.name, ".unapplied.json"), unappliedFile([...unappliedRef.current.values()], keyOf));
+  /** Said beside every "Download my version": that file is the draft, and the edits not applied aren't in it. */
+  const notInMine = (n: number) =>
+    n === 0 ? "" : `Your version's file doesn't hold the ${n === 1 ? "1 edit" : `${n} edits`} not applied: download ${n === 1 ? "it" : "them"} separately.`;
+  const downloadLabel = (n: number) => (n === 1 ? "Download the edit not applied" : "Download the edits not applied");
 
   const firstPort = (nodeId: string): PortRef | null => {
     const port = portMap.get(idKey(nodeId))?.[0];
@@ -650,12 +871,29 @@ function Editor({
 
   function confirmDelete() {
     if (!asking) return;
+    if (asking.kind === "unapplied") {
+      drop(asking.left.map((u) => u.id)); // discarded, on purpose
+      setAsking(null);
+      asking.then();
+      return;
+    }
+    if (asking.kind === "ports") {
+      const ports = [...new Set(asking.dropped.map(portOf))].join(", ");
+      const edges = asking.dropped.length === 1 ? "its edge" : `${asking.dropped.length} edges`;
+      if (change(asking.next, `Removed ${ports} and ${edges}`)) drop(asking.release);
+      setAsking(null);
+      // What asked is gone with its port (a Remove, a JSON edit): focus lands on the drawer, after the dialog has
+      // given it back (WCAG 2.4.3).
+      requestAnimationFrame(() => document.getElementById("step-drawer-title")?.focus());
+      return;
+    }
     if (asking.kind === "node") {
       const { doc: next, healed } = deleteNode(doc, asking.id);
       // Focus goes to the step it came after (its own items are gone with it), or to the start card.
       const inbound = edgesOf(doc).find((e) => sameId(e.to.node, asking.id));
       const back = inbound ? item.node(inbound.from.node) : START;
       if (panel !== null && sameId(panel, asking.id)) setSide(null);
+      drop([...unappliedRef.current.values()].filter(within(asking.id, "")).map((u) => u.id));
       change(next, `Deleted ${keyOf(asking.id)}${healed ? `; ${keyOf(healed.from.node)} now leads to ${keyOf(healed.to.node)}` : ""}`, back);
     } else {
       change(deleteEdge(doc, asking.edge), `Deleted the edge from ${keyOf(asking.edge.from.node)} to ${keyOf(asking.edge.to.node)}`, item.node(asking.edge.from.node));
@@ -725,9 +963,9 @@ function Editor({
     if (t.closest("input, textarea, select, dialog")) return;
     e.preventDefault();
     if (!mayEdit()) return;
-    const next = e.shiftKey ? redo(history) : undo(history);
-    if (next === history) return;
-    setHistory(next);
+    const next = e.shiftKey ? redo(historyNow.current) : undo(historyNow.current);
+    if (next === historyNow.current) return;
+    commitHistory(next);
     saver.current?.change(next.present);
     announce(e.shiftKey ? "Redone" : "Undone");
     const after = next.present;
@@ -795,6 +1033,11 @@ function Editor({
         state={
           <>
             <SaveState state={sync} />
+            {unapplied.size > 0 && (
+              <Button ref={unappliedButton} size="md" aria-expanded={side?.kind === "unapplied"} onClick={() => setSide(side?.kind === "unapplied" ? null : { kind: "unapplied" })}>
+                {unapplied.size === 1 ? "1 edit not applied" : `${unapplied.size} edits not applied`}
+              </Button>
+            )}
             {sync.status === "error" && (
               <Button size="md" onClick={() => saver.current?.retry()}>Retry</Button>
             )}
@@ -828,7 +1071,9 @@ function Editor({
             variant="primary"
             size="md"
             disabled={busy !== null || latest === null}
-            onClick={() => latest !== null && setConfirm({ kind: "publish", expected: latest })}
+            onClick={() => {
+              if (latest !== null) whenSettled("publish", () => setConfirm({ kind: "publish", expected: latest }));
+            }}
           >
             {latest === null ? "Publish" : `Publish v${latest + 1}`}
           </Button>
@@ -872,6 +1117,12 @@ function Editor({
             This draft was changed elsewhere, so your changes since then aren&apos;t saved. Reload to see the saved draft, or
             download your version to keep it.
           </span>
+          {unapplied.size > 0 && (
+            <>
+              <span className="basis-full">{notInMine(unapplied.size)}</span>
+              <Button size="sm" onClick={downloadUnapplied}>{downloadLabel(unapplied.size)}</Button>
+            </>
+          )}
           <Button size="sm" onClick={downloadMine}>Download my version</Button>
           <Button size="sm" variant="primary" onClick={() => setReloading(true)}>Reload</Button>
         </div>
@@ -910,9 +1161,12 @@ function Editor({
           />
         </div>
         {open && (
-          <StepPanel
+          <StepDrawer
+            key={idKey(open.id)}
             node={open}
             type={typeMap.get(open.type)}
+            tenantId={tenantId}
+            workflowId={workflow.id}
             ports={portMap.get(idKey(open.id)) ?? []}
             problems={
               viewing || !trusted ? null : [...trusted.diagnostics, ...published].filter((d) => d.node !== null && sameId(d.node, open.id))
@@ -920,6 +1174,9 @@ function Editor({
             expressions={(viewing ? viewing.expressions : (trusted?.expressions ?? [])).filter((x) => x.node !== null && sameId(x.node, open.id))}
             editable={editable}
             adds={editable ? addsOf(doc, open, portMap.get(idKey(open.id)) ?? []) : []}
+            actions={viewing ? VERSION_ACTIONS : actionsFor(open.id)}
+            note={renamed !== null && renamed.doc === doc && sameId(renamed.node, open.id) ? renamed.text : null}
+            focusField={side?.kind === "step" ? (side.field ?? null) : null}
             onAdd={onItem}
             onDelete={() => setAsking({ kind: "node", id: open.id })}
             onConnectPort={(port) => setConnecting({ node: open.id, port })}
@@ -934,11 +1191,30 @@ function Editor({
             }}
           />
         )}
+        {side?.kind === "unapplied" && (
+          <UnappliedPanel
+            edits={[...unapplied.values()]}
+            keyOf={(id) => findNode(doc, id)?.key ?? null}
+            reason={(u) => (isStale(draftNow(), u) ? STALE : (u.why ?? "Still being typed."))}
+            onGo={(u) => setSide({ kind: "step", node: u.node, field: { pointer: u.pointer, kind: u.kind, n: ++jumps.current } })}
+            onDiscard={(u) => {
+              drop([u.id]);
+              land("unapplied-panel"); // its entry is gone, and with the last one the count: the list's heading takes focus
+            }}
+            onDownload={downloadUnapplied}
+            onClose={() => {
+              setSide(null);
+              // Back to the count that opened it while there is one; with none left, to the canvas (WCAG 2.4.3).
+              if (unappliedRef.current.size > 0) land("unapplied");
+              else focus(shown);
+            }}
+          />
+        )}
         {side?.kind === "versions" && (
           <VersionsPanel
             versions={versions.data ?? []}
             publisher={publisher && busy === null}
-            onView={(v) => void view(v)}
+            onView={(v) => whenSettled("view the version", () => void view(v))}
             onActivate={(version) => setConfirm({ kind: "activate", version })}
             onClose={() => {
               setSide(null);
@@ -953,7 +1229,11 @@ function Editor({
             publishProblems={publishProblems}
             publishCurrent={publishCurrent}
             keyOf={keyOf}
-            onJump={(nodeId) => focus(item.node(nodeId))}
+            onJump={(nodeId, field) => {
+              // A field inside the step opens its drawer there (ruling 16); the step as a whole is focused, as in 4b.
+              if (field === null || field === "") focus(item.node(nodeId));
+              else setSide({ kind: "step", node: nodeId, field: { pointer: field, n: ++jumps.current } });
+            }}
             onCheck={() => void validate.current()}
             onClose={() => {
               setSide(null);
@@ -982,19 +1262,30 @@ function Editor({
       )}
       <ConfirmDialog
         open={asking !== null}
-        title={asking?.kind === "edge" ? "Delete an edge" : "Delete a step"}
-        confirmLabel="Delete"
+        title={
+          asking?.kind === "unapplied" ? "Edits not applied"
+          : asking?.kind === "edge" ? "Delete an edge" : asking?.kind === "ports" ? "Remove a port" : "Delete a step"
+        }
+        confirmLabel={asking?.kind === "unapplied" ? `Discard and ${asking.action}` : asking?.kind === "ports" ? "Remove" : "Delete"}
+        cancelLabel={asking?.kind === "unapplied" ? "Go back to them" : "Cancel"}
         onConfirm={confirmDelete}
-        onCancel={() => setAsking(null)}
+        onCancel={() => {
+          if (asking?.kind === "unapplied") goBack();
+          setAsking(null);
+        }}
       >
         {asking?.kind === "node" && (
           <>
             {keyOf(asking.id)} and its edges are deleted.
             {healed && ` ${keyOf(healed.from.node)} will lead to ${keyOf(healed.to.node)}.`} Other steps that read its
             output will show a problem.
+            {[...unapplied.values()].some(within(asking.id, "")) && " Its edits not applied yet are discarded too."}
           </>
         )}
         {asking?.kind === "edge" && `${keyOf(asking.edge.to.node)} will no longer follow ${keyOf(asking.edge.from.node)}.`}
+        {asking?.kind === "ports" && portsQuestion(asking.dropped, keyOf)}
+        {asking?.kind === "unapplied" &&
+          `${asking.left.length === 1 ? "This edit isn't applied, so it would be left out" : "These edits aren't applied, so they would be left out"}: ${asking.left.map(describe).join("; ")}.`}
       </ConfirmDialog>
       <ConfirmDialog
         open={confirm !== null}
@@ -1027,7 +1318,15 @@ function Editor({
       >
         {sync.status === "conflict"
           ? "This draft was changed elsewhere, so your changes since then can't be saved here. "
-          : "They couldn't be saved. Stay to try again, or keep a copy before you leave. "}
+          : sync.status !== "saved" ? "They couldn't be saved. Stay to try again, or keep a copy before you leave. " : ""}
+        {unapplied.size > 0 &&
+          `${unapplied.size === 1 ? "An edit isn't applied" : "Some edits aren't applied"}: ${[...unapplied.values()].map(describe).join("; ")}. Stay to fix ${unapplied.size === 1 ? "it" : "them"}. `}
+        {unapplied.size > 0 && (
+          <>
+            <span className="basis-full">{notInMine(unapplied.size)}</span>
+            <Button size="sm" onClick={downloadUnapplied}>{downloadLabel(unapplied.size)}</Button>
+          </>
+        )}
         <Button size="sm" onClick={downloadMine}>Download my version</Button>
       </ConfirmDialog>
       <ConfirmDialog
@@ -1041,6 +1340,8 @@ function Editor({
         onCancel={() => setReloading(false)}
       >
         Your version since the conflict is discarded. Download it first to keep it.
+        {unapplied.size > 0 && ` The ${unapplied.size === 1 ? "edit" : "edits"} not applied ${unapplied.size === 1 ? "is" : "are"} discarded too: ${notInMine(unapplied.size)}`}
+        {unapplied.size > 0 && <Button size="sm" onClick={downloadUnapplied}>{downloadLabel(unapplied.size)}</Button>}
       </ConfirmDialog>
     </div>
   );

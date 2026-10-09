@@ -32,7 +32,7 @@ it("lists errors before warnings, each with its fix and code, a step's going to 
   expect(items[0]!.textContent).toContain("fix config.invalid");
   expect(items[1]!.textContent).toContain("vars.unassigned");
   await userEvent.click(within(items[0]!).getByRole("button", { name: "Go to transform" }));
-  expect(onJump).toHaveBeenCalledWith("n1");
+  expect(onJump).toHaveBeenCalledWith("n1", "/fields");
 });
 
 it("says how each expression runs (engine-core §5.10)", () => {
