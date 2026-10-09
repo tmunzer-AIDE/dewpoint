@@ -44,19 +44,64 @@ def test_a_development_setup_says_so_with_its_own_namespace(monkeypatch: pytest.
     )
 
 
-@pytest.mark.usefixtures("owner_env")
-def test_the_ingress_capacity_is_set_changed_one_value_at_a_time_then_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The fresh M3 review 3's I3: a value left out keeps what it was, never unset by omission."""
-    monkeypatch.setenv("DEWPOINT_ENVIRONMENT", "development")
-    get_settings.cache_clear()
-    assert CliRunner().invoke(cli.app, ["platform", "init-environment"]).exit_code == 0
-    given = ["platform", "set-ingress-capacity", "--starts-per-s", "8", "--headroom", "0.5", "--queue-wait-s", "300"]
-    set_ = CliRunner().invoke(cli.app, given)
-    said = "ingress capacity: 8.0 starts a second measured, 0.5 of them for ingress, a 300 s queue: a tenant's queue "
-    assert (set_.exit_code, set_.output) == (0, said + "holds 1200 requests\n")
-    wait = CliRunner().invoke(cli.app, ["platform", "set-ingress-capacity", "--queue-wait-s", "600"])
-    assert (wait.exit_code, wait.output) == (0, said.replace("a 300 s", "a 600 s") + "holds 2400 requests\n")
-    bad = CliRunner().invoke(cli.app, ["platform", "set-ingress-capacity", "--starts-per-s", "8", "--headroom", "2"])
-    assert bad.exit_code == 2 and "ingress capacity" in bad.output
-    unset = CliRunner().invoke(cli.app, ["platform", "set-ingress-capacity", "--unset"])
-    assert (unset.exit_code, unset.output) == (0, "ingress capacity unset: the development-only rates and cap\n")
+PW = "violet-otter-canyon-42"
+SAID = "Measured on this deployment's Temporal."
+
+
+async def test_the_capacity_command_signs_in_through_the_api_and_its_change_names_the_admin(
+    client, owner_sessionmaker, development_deployment
+) -> None:  # fmt: skip
+    """The owner's ruling on the 2b-4b M3 checkpoint 3 (D11): the command signs in as the platform admin, password
+    then second factor, and asks the API, which audits the change with that admin's id."""
+    import time
+    from urllib.parse import parse_qs, urlparse
+
+    import pyotp
+    from sqlalchemy import text
+
+    from dewpoint.core.auth.users import create_user
+
+    async with owner_sessionmaker() as s, s.begin():
+        user = await create_user(s, email="ops@corp.test", password=PW)
+        await s.execute(text("update users set is_platform_admin = true where id = :u"), {"u": user.id})
+    csrf = (await client.post("/api/v1/auth/login", json={"email": "ops@corp.test", "password": PW})).json()[
+        "csrf_token"
+    ]
+    uri = (await client.post("/api/v1/auth/mfa/totp/enroll", headers={"X-CSRF-Token": csrf})).json()["otpauth_uri"]
+    totp = pyotp.TOTP(parse_qs(urlparse(uri).query)["secret"][0])
+    await client.post("/api/v1/auth/mfa/totp/confirm", json={"code": totp.now()}, headers={"X-CSRF-Token": csrf})
+    client.cookies.clear()  # the command signs in on its own
+    answer = await cli.capacity_via_api(client, email="ops@corp.test", password=PW, code=totp.at(time.time() + 30),
+                                        change={"starts_per_s": 8.0, "headroom": 0.5, "queue_wait_s": 300},
+                                        attestation=SAID)  # fmt: skip
+    assert answer == {"starts_per_s": 8.0, "headroom": 0.5, "queue_wait_s": 300, "queue_cap": 1200, "problems": []}
+    async with owner_sessionmaker() as s:
+        found = await s.execute(text("select actor_id from audit_log where action = 'platform.ingress_capacity.set'"))
+        assert list(found.scalars()) == [user.id]
+    with pytest.raises(cli.CapacityApiError, match="invalid_credentials"):
+        await cli.capacity_via_api(client, email="ops@corp.test", password="wrong-wrong-wrong", code="000000",
+                                   change={"unset": True}, attestation=SAID)  # fmt: skip
+
+
+def test_the_command_sends_only_what_it_was_given(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A value left out keeps what it was: the command sends only the options given, or `unset`."""
+    sent: list[dict[str, object]] = []
+
+    async def asked(_client: object, **kwargs: object) -> dict[str, object]:
+        sent.append(kwargs)
+        return {"starts_per_s": 8.0, "headroom": 0.5, "queue_wait_s": 600, "queue_cap": 2400, "problems": []}
+
+    monkeypatch.setattr(cli, "capacity_via_api", asked)
+    base = ["platform", "set-ingress-capacity", "--api", "https://dewpoint.test", "--email", "ops@corp.test",
+            "--attestation", SAID]  # fmt: skip
+    wait = CliRunner().invoke(cli.app, [*base, "--queue-wait-s", "600"], input=f"{PW}\n123456\n")
+    assert wait.exit_code == 0, wait.output
+    assert wait.output.endswith("ingress capacity: 8.0 starts a second measured, 0.5 of them for ingress, a 600 s "
+                                "queue: a tenant's queue holds 2400 requests\n")  # fmt: skip
+    unset = CliRunner().invoke(cli.app, [*base, "--unset"], input=f"{PW}\n123456\n")
+    assert unset.exit_code == 0, unset.output
+    assert [(k["change"], k["password"], k["code"], k["attestation"]) for k in sent] == [
+        ({"queue_wait_s": 600}, PW, "123456", SAID), ({"unset": True}, PW, "123456", SAID),
+    ]  # fmt: skip
+    nothing = CliRunner().invoke(cli.app, base)
+    assert nothing.exit_code == 2 and "--unset" in nothing.output

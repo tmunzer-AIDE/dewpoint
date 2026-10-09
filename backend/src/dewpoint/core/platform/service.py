@@ -13,11 +13,13 @@ from datetime import timedelta
 
 from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.audit import service as audit
 from dewpoint.core.models.platform import DispatcherReport, PlatformSettings, WorkerInstance
 from dewpoint.core.models.requests import CurrentBuild
+from dewpoint.core.platform import readiness
 
 PRODUCTION = "production"
 DEVELOPMENT = "development"
@@ -37,27 +39,50 @@ class EnvironmentMismatchError(Exception):
     pass
 
 
+class IngressCapacityRequiredError(Exception):
+    """Production ingress is enabled: its capacity stays whole."""
+
+
 async def set_ingress_capacity(
-    s: AsyncSession, *, starts_per_s: float | None, headroom: float | None, queue_wait_s: int | None,
-    actor_id: uuid.UUID | None,
-) -> None:  # fmt: skip
-    """The deployment's ingress capacity (the owner's ruling 2 on the 2b-4b M3 checkpoint 2), as `dewpoint_admin`, in
-    the caller's transaction, audited with what it was: the sustained starts measured on its own Temporal, the share
-    of them ingress may use (above 0, at most 1), and the agreed wait a tenant's queued webhook requests may stand for
-    (seconds). None unsets one: ingress keeps its configured rates (development-only) until the first two are set, and
-    a development-only cap until all three are. Raises ValueError for a value out of range."""
+    s: AsyncSession, *, change: dict[str, float | int | None], attestation: str, actor_id: uuid.UUID
+) -> dict[str, object]:
+    """The deployment's ingress capacity changed (the owner's rulings 2 on the 2b-4b M3 checkpoints 2 and 3), as the
+    API's role for a platform admin (D11), in the caller's transaction, audited with that admin's id, the attestation
+    and the readiness it leaves: `change` names the values to set, a None unsetting one; the others keep what they
+    were. What it is then, the values unset among them. Raises ValueError for a value out of range, and
+    IngressCapacityRequiredError for one left unset while production ingress is enabled."""
+    starts, headroom, wait = (change.get(k) for k in readiness.CAPACITY)
     if (
-        (starts_per_s is not None and not (math.isfinite(starts_per_s) and starts_per_s > 0))
-        or (headroom is not None and not 0 < headroom <= 1)
-        or (queue_wait_s is not None and not queue_wait_s > 0)
+        (starts is not None and not (math.isfinite(starts) and starts > 0))
+        or (headroom is not None and not (math.isfinite(headroom) and 0 < headroom <= 1))
+        or (wait is not None and not wait > 0)
+        or set(change) - set(readiness.CAPACITY)
     ):
         raise ValueError("The ingress capacity needs starts above 0, a headroom above 0 and at most 1, a wait above 0.")
-    found = await s.execute(text("select set_ingress_capacity(:s, :h, :w)::text"),
-                            {"s": starts_per_s, "h": headroom, "w": queue_wait_s})  # fmt: skip
-    after = {"starts_per_s": starts_per_s, "headroom": headroom, "queue_wait_s": queue_wait_s}
+    try:
+        async with s.begin_nested():
+            found = await s.execute(text("select set_ingress_capacity(cast(:p as jsonb))::text"),
+                                    {"p": json.dumps(change)})  # fmt: skip
+    except DBAPIError as e:
+        if getattr(e.orig, "sqlstate", None) == CAPACITY_REQUIRED:
+            raise IngressCapacityRequiredError(str(e.orig).split("\n")[0]) from None
+        raise
+    moved = json.loads(found.scalar_one())
+    after = moved["after"]
+    problems = readiness.ingress_capacity(_Capacity(after["starts_per_s"], after["headroom"], after["queue_wait_s"]))
     await audit.record(s, tenant_id=None, actor_id=actor_id, action="platform.ingress_capacity.set",
                        target_type="platform", target_id="ingress_capacity",
-                       details={"before": json.loads(found.scalar_one()), "after": after})  # fmt: skip
+                       details={"before": moved["before"], "after": after, "attestation": attestation,
+                                "problems": problems})  # fmt: skip
+    return {**after, "problems": problems}
+
+
+CAPACITY_REQUIRED = "DPC01"  # set_ingress_capacity()'s refusal: production ingress keeps a whole capacity
+
+
+class _Capacity:
+    def __init__(self, starts: float | None, headroom: float | None, wait: int | None) -> None:
+        self.ingress_starts_per_s, self.ingress_headroom, self.ingress_queue_wait_s = starts, headroom, wait
 
 
 async def recorded(s: AsyncSession) -> PlatformSettings | None:

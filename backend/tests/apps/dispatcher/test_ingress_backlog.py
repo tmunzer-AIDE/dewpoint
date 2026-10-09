@@ -15,6 +15,7 @@ import pytest
 from sqlalchemy import text
 
 from dewpoint.apps.dispatcher import matching
+from dewpoint.core.ingress import capacity
 from tests.apps.dispatcher.inbound import bind, endpoint, event_state, send
 from tests.apps.dispatcher.test_matching import ALARM, dev, ready  # noqa: F401
 from tests.apps.test_admission import KEYS, OPEN_GRAPH
@@ -51,7 +52,7 @@ async def queued(owner: Any, tenant_id: uuid.UUID) -> int:
 async def test_an_event_past_its_tenants_cap_stays_pending_and_its_later_events_wait_behind_it(
     dev, owner_sessionmaker, ingress_sessionmaker, dispatch_sessionmaker, api_sessionmaker, api_settings, monkeypatch  # noqa: F811
 ) -> None:  # fmt: skip
-    monkeypatch.setattr(matching, "DEV_QUEUED", 7)
+    monkeypatch.setattr(capacity, "DEV_QUEUED", 7)
     await fanned_out((owner_sessionmaker, api_sessionmaker, api_settings), dev, 3)
     ids = await arrived(ingress_sessionmaker, dev, 4)
     done = await matching.match_once(dispatch_sessionmaker, KEYS, matching.Verified())
@@ -70,7 +71,7 @@ async def test_matchers_at_once_never_admit_past_the_cap(
 ) -> None:  # fmt: skip
     """Four dispatchers' passes at once, each match held a moment once it has its event, the events on two endpoints
     (whose rows don't serialize the matches): the cap counted under the tenant's counter row holds whoever matches."""
-    monkeypatch.setattr(matching, "DEV_QUEUED", 10)
+    monkeypatch.setattr(capacity, "DEV_QUEUED", 10)
 
     async def held() -> None:
         await asyncio.sleep(0.05)
@@ -102,7 +103,7 @@ def platform(starts: float | None, headroom: float | None, wait_s: int | None) -
     ],
 )
 def test_the_cap_follows_the_measured_starts_the_headroom_and_the_agreed_wait(given: Any, cap: Any) -> None:
-    assert matching.queue_cap(platform(*given)) == (matching.DEV_QUEUED if cap == "dev" else cap)
+    assert capacity.queue_cap(platform(*given)) == (capacity.DEV_QUEUED if cap == "dev" else cap)
 
 
 async def test_the_cap_from_the_ingress_capacity_counts_the_tenants_webhook_requests_alone(

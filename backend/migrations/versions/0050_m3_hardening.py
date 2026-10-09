@@ -10,7 +10,8 @@
 - **The ingress capacity** (the owner's ruling 2 on the M3 checkpoint 2): `platform_settings` gets the sustained starts
   measured on the deployment's Temporal, the headroom's share of them ingress may use, and the agreed wait a tenant's
   queued webhook requests may stand for, each checked, none set by default, set only through
-  `set_ingress_capacity()` (the platform's admin, audited by its caller). Once the starts and the headroom are set,
+  `set_ingress_capacity()`, the API's for a platform admin (D11, the ruling on checkpoint 3; audited by its caller),
+  which keeps it whole while production ingress is enabled. Once the starts and the headroom are set,
   `record_inbound_events()` (derived from 0039's text, as 0039 derives it from 0032's) holds a tenant's events to their
   product and an endpoint's to that divided by its enabled bindings, a lower configured rate staying; the matcher holds
   a tenant's queued webhook requests to the cap they make with the wait (an index of those requests, built
@@ -198,26 +199,36 @@ CAPACITY = (  # the deployment's ingress capacity: none set until its admin sets
     "CONSTRAINT platform_ingress_headroom CHECK (ingress_headroom > 0 AND ingress_headroom <= 1)",
     "ingress_queue_wait_s integer CONSTRAINT platform_ingress_queue_wait CHECK (ingress_queue_wait_s > 0)",
 )
-SET_CAPACITY = [
-    """CREATE FUNCTION set_ingress_capacity(starts double precision, headroom double precision, wait_s integer)
-RETURNS jsonb
+SET_CAPACITY = [  # the API's, for a platform admin (D11): the CLI asks the API
+    """CREATE FUNCTION set_ingress_capacity(patch jsonb) RETURNS jsonb
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
+    p platform_settings%ROWTYPE;
     v_before jsonb;
 BEGIN
-    SELECT jsonb_build_object('starts_per_s', p.ingress_starts_per_s, 'headroom', p.ingress_headroom,
-                              'queue_wait_s', p.ingress_queue_wait_s)
-      INTO v_before FROM platform_settings p WHERE p.id = 1 FOR UPDATE;
+    SELECT * INTO p FROM platform_settings WHERE id = 1 FOR UPDATE;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'the deployment''s environment is not recorded';
     END IF;
-    UPDATE platform_settings SET ingress_starts_per_s = starts, ingress_headroom = headroom,
-        ingress_queue_wait_s = wait_s WHERE id = 1;
-    RETURN v_before;
+    v_before := jsonb_build_object('starts_per_s', p.ingress_starts_per_s, 'headroom', p.ingress_headroom,
+                                   'queue_wait_s', p.ingress_queue_wait_s);
+    IF patch ? 'starts_per_s' THEN p.ingress_starts_per_s := (patch->>'starts_per_s')::double precision; END IF;
+    IF patch ? 'headroom' THEN p.ingress_headroom := (patch->>'headroom')::double precision; END IF;
+    IF patch ? 'queue_wait_s' THEN p.ingress_queue_wait_s := (patch->>'queue_wait_s')::integer; END IF;
+    -- Production ingress enabled (a production deployment with its runs on, until D14's own switch) keeps a whole
+    -- capacity: never development's rates by an unset (the owner's ruling on the M3 checkpoint 3)
+    IF p.environment = 'production' AND p.production_runs AND (p.ingress_starts_per_s IS NULL
+        OR p.ingress_headroom IS NULL OR p.ingress_queue_wait_s IS NULL) THEN
+        RAISE EXCEPTION 'production ingress needs its whole capacity' USING ERRCODE = 'DPC01';
+    END IF;
+    UPDATE platform_settings SET ingress_starts_per_s = p.ingress_starts_per_s, ingress_headroom = p.ingress_headroom,
+        ingress_queue_wait_s = p.ingress_queue_wait_s WHERE id = 1;
+    RETURN jsonb_build_object('before', v_before, 'after', jsonb_build_object(
+        'starts_per_s', p.ingress_starts_per_s, 'headroom', p.ingress_headroom, 'queue_wait_s', p.ingress_queue_wait_s));
 END
 $$""",
-    "REVOKE ALL ON FUNCTION set_ingress_capacity(double precision, double precision, integer) FROM PUBLIC",
-    "GRANT EXECUTE ON FUNCTION set_ingress_capacity(double precision, double precision, integer) TO dewpoint_admin",
+    "REVOKE ALL ON FUNCTION set_ingress_capacity(jsonb) FROM PUBLIC",
+    "GRANT EXECUTE ON FUNCTION set_ingress_capacity(jsonb) TO dewpoint_api",
 ]
 QUEUED_INDEX = ("CREATE INDEX CONCURRENTLY IF NOT EXISTS run_requests_queued_webhook ON run_requests (tenant_id) "
                 "WHERE status = 'queued' AND source = 'webhook'")  # fmt: skip
@@ -535,7 +546,7 @@ def downgrade() -> None:
     op.execute("DROP FUNCTION dispatch_next(uuid[])")
     op.execute(_recorder_0039())
     op.execute("DROP INDEX run_requests_queued_webhook")
-    op.execute("DROP FUNCTION set_ingress_capacity(double precision, double precision, integer)")
+    op.execute("DROP FUNCTION set_ingress_capacity(jsonb)")
     op.execute("ALTER TABLE platform_settings DROP COLUMN ingress_starts_per_s, DROP COLUMN ingress_headroom, "
                "DROP COLUMN ingress_queue_wait_s")  # fmt: skip
     for function in ("work_failures_held_count(text, timestamptz)", "work_failures_release_many(text, timestamptz, integer)",

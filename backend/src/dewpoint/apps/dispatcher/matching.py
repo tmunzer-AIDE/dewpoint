@@ -29,7 +29,6 @@ attempts (`failures`, D10): it waits 1, 2, 4, 8, 16 then 30 minutes, so it never
 owner's review of the 2b-4b M1 checkpoint 4), and the 7th in a row holds it for an operator."""
 
 import json
-import math
 import uuid
 from collections import Counter
 from dataclasses import dataclass
@@ -49,6 +48,7 @@ from dewpoint.core.crypto import events
 from dewpoint.core.crypto.keys import KeySource, key_unreadable
 from dewpoint.core.db import tenant_scope, unavailable
 from dewpoint.core.ingress import keys as event_keys
+from dewpoint.core.ingress.capacity import queue_cap
 from dewpoint.core.ingress.counters import release
 from dewpoint.core.ingress.filters import MAX_BINDINGS, matches
 from dewpoint.core.models.ingress import InboundEvent, TenantEventCounters, TriggerBinding, WebhookEndpoint
@@ -69,9 +69,6 @@ SKIPPED = "skipped"
 BUSY = "busy"  # its endpoint's row held elsewhere (ingress, another dispatcher): passed by (D9)
 BUSY_TENANT = "busy_tenant"  # its tenant's counter row held elsewhere: passed by alike
 BACKLOG_FULL = "backlog_full"  # its tenant's queued webhook requests at their cap: pending, its tenant passed by alike
-# A tenant's queued webhook requests at most, until the deployment's ingress capacity is set: development-only, never a
-# production value (the owner's ruling 2 on the 2b-4b M3 checkpoint 2)
-DEV_QUEUED = 10_000
 FAN_OUT_EXCEEDED = "fan_out_exceeded"
 KEY_UNAVAILABLE = "key_unavailable"
 RETRYING = "retrying"
@@ -190,16 +187,6 @@ async def match_once(
     await failures.cleared(sessionmaker, [failures.MATCH], done)
     admitted.reported(counts, full=len(picked) >= batch * PAGES)
     return dict(counts)
-
-
-def queue_cap(platform: PlatformSettings) -> int:
-    """A tenant's queued webhook requests at most: the headroom's share of the deployment's measured starts for the
-    agreed wait, never below an event's most bindings (one must fit, or it never matches); `DEV_QUEUED` until all
-    three are set."""
-    starts, headroom, wait = platform.ingress_starts_per_s, platform.ingress_headroom, platform.ingress_queue_wait_s
-    if starts is None or headroom is None or wait is None:
-        return DEV_QUEUED
-    return max(MAX_BINDINGS, math.floor(starts * headroom * wait))
 
 
 # A tenant's webhook requests still queued, on `run_requests_queued_webhook`: its status and source the statement's

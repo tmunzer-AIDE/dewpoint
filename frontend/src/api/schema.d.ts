@@ -21,6 +21,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/platform/ingress-capacity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Ingress Capacity
+         * @description The capacity, the queue it makes for a tenant, and its values still unset (production readiness refuses then).
+         */
+        get: operations["ingress_capacity_api_v1_admin_platform_ingress_capacity_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Change Ingress Capacity
+         * @description The capacity changed, audited (`platform.ingress_capacity.set`) with the admin's id, the attestation, what it
+         *     was and what it is, and its values still unset.
+         */
+        patch: operations["change_ingress_capacity_api_v1_admin_platform_ingress_capacity_patch"];
+        trace?: never;
+    };
     "/api/v1/admin/recovery": {
         parameters: {
             query?: never;
@@ -1396,6 +1421,25 @@ export interface components {
             /** Filter */
             filter?: unknown[] | null;
         };
+        /**
+         * CapacityIn
+         * @description The values to change, each `null` to unset it, or `unset` for all three; and how the starts were measured.
+         */
+        CapacityIn: {
+            /** Attestation */
+            attestation: string;
+            /** Headroom */
+            headroom?: number | null;
+            /** Queue Wait S */
+            queue_wait_s?: number | null;
+            /** Starts Per S */
+            starts_per_s?: number | null;
+            /**
+             * Unset
+             * @default false
+             */
+            unset?: boolean;
+        };
         /** CodeIn */
         CodeIn: {
             /** Code */
@@ -2061,6 +2105,63 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    ingress_capacity_api_v1_admin_platform_ingress_capacity_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    change_ingress_capacity_api_v1_admin_platform_ingress_capacity_patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CapacityIn"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

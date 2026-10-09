@@ -266,15 +266,21 @@ them. No role turns the gate on outside 2b-4's command.
 ### The ingress capacity
 
 ```bash
-dewpoint platform set-ingress-capacity --starts-per-s 8 --headroom 0.5 --queue-wait-s 300
+dewpoint platform set-ingress-capacity --api https://dewpoint.example.com --email ops@example.com \
+  --starts-per-s 8 --headroom 0.5 --queue-wait-s 300 --attestation "Measured on this deployment's Temporal, 2026-10-09"
 ```
 
-As `dewpoint_admin`, audited (`platform.ingress_capacity.set`, with what it was): the sustained starts a second
-measured on this deployment's own Temporal, the share of them ingress may use, and the wait its operators agree a
-tenant's queued webhook requests may stand for. From them come ingress's event rates and each tenant's queue cap
-([ingress](ingress.md#the-ingress-capacity)); none is set by default, and until they are, the rates and the cap are
-development-only. The values above are an example, not a recommendation. A value left out keeps what it was;
-`--unset` unsets all three.
+A platform admin's change, through the API (D11): the command signs in as that admin, asking for the password and the
+authenticator's code, and calls `PATCH /api/v1/admin/platform/ingress-capacity`, which needs the second factor proven
+within the reauthentication window and audits the change in its transaction (`platform.ingress_capacity.set`) with the
+admin's id, the attestation, what it was and what it is, and which values are still unset. No database login changes
+it directly. The values: the sustained starts a second measured on this deployment's own Temporal, the share of them
+ingress may use, and the wait its operators agree a tenant's queued webhook requests may stand for. From them come
+ingress's event rates and each tenant's queue cap ([ingress](ingress.md#the-ingress-capacity)); none is set by
+default, and until they are, the rates and the cap are development-only. The values above are an example, not a
+recommendation. A value left out keeps what it was; `--unset` unsets all three, which a production deployment whose
+runs are on refuses (409 `ingress_capacity_required`): its capacity stays whole. `GET` on the same path shows it and
+what's unset; production readiness (M6's enable command, D14's ingress switch) refuses while any value is.
 
 ## Encrypted payloads
 

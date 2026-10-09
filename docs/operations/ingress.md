@@ -203,8 +203,9 @@ for development: they aren't a promise with a real Temporal or with more binding
 Events cost what their requests cost to start: an event becomes a request for each of its endpoint's enabled bindings
 that matches it, and a dispatcher starts them one at a time (about 35 ms each on the dev server, [measured
 below](#measured)). So a deployment's rates come from the starts measured on its own Temporal, with headroom, and a
-tenant's queue from a wait its operators agree to. `dewpoint platform set-ingress-capacity`, run as `dewpoint_admin`
-and audited (`platform.ingress_capacity.set`, with what it was), sets the three values, none of them set by default:
+tenant's queue from a wait its operators agree to. A platform admin sets the three values, none set by
+default, through the API (D11; [deployment](deployment.md#the-ingress-capacity)): `dewpoint platform
+set-ingress-capacity` signs in and asks it, and the change is audited with the admin's id and an attestation:
 
 - `--starts-per-s`: the sustained starts a second a tenant's runs reached on this deployment's own Temporal and
   workers (`tests/probes/test_ingress_starts.py`, with slots enough that only the dispatcher bounds them);
@@ -216,7 +217,9 @@ the event rates follow from it: an endpoint's divided by its enabled bindings, a
 bindings any of its endpoints has, so its requests stay within it however its events spread. With 8 starts a second
 measured and a headroom of 0.5, an endpoint with 4 enabled bindings takes 1 event a second, and so does its tenant if
 none of its endpoints has more; an endpoint with 1 binding takes up to 4. A rate configured lower stays; the bursts
-stay as configured. With the wait set too, a tenant's queued webhook requests stop at starts × headroom × wait (never
+stay as configured. **Each tenant gets the whole budget, so tenants together can admit more than the
+deployment starts**: a budget shared by the whole deployment, fair between tenants, is designed and not yet built
+(2b-4b M3). With the wait set too, a tenant's queued webhook requests stop at starts × headroom × wait (never
 below 20, an endpoint's most bindings), counted as the dispatcher matches, under the tenant's counter row: dispatchers
 matching at once never queue past it. An event that doesn't fit stays pending, and the endpoint's and the tenant's
 pending quotas then answer its senders with 429 `quota_exceeded`. A value left out keeps what it was; `--unset`

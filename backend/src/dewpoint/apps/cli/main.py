@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
 
+import httpx
 import typer
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import select, text
@@ -21,7 +22,6 @@ from dewpoint.apps.codec import KeyringKeys, data_converter
 from dewpoint.apps.dispatcher import evidence
 from dewpoint.apps.dispatcher.dispatch import START_DEADLINE
 from dewpoint.apps.dispatcher.gate import disable_and_wait
-from dewpoint.apps.dispatcher.matching import queue_cap
 from dewpoint.apps.dispatcher.tick import admission_pollers
 from dewpoint.apps.environment import verify_environment
 from dewpoint.apps.plugin_loader import PluginLoadError, installed_plugins, prepare
@@ -31,6 +31,7 @@ from dewpoint.apps.worker.main import run as run_worker
 from dewpoint.core import logs
 from dewpoint.core.audit import service as audit_log
 from dewpoint.core.audit.anchor import FileAnchorSink, anchor_all, anchor_freshness, verify_anchors
+from dewpoint.core.auth.sessions import SESSION_COOKIE
 from dewpoint.core.auth.users import PasswordPolicyError, create_user
 from dewpoint.core.config import Settings, get_settings
 from dewpoint.core.crypto import reencrypt, retire
@@ -42,7 +43,6 @@ from dewpoint.core.egress import allowlist
 from dewpoint.core.ingress import secrets_reseal
 from dewpoint.core.ingress.keys import retire_event_keys, rotate_event_key
 from dewpoint.core.models.identity import User
-from dewpoint.core.models.platform import PlatformSettings
 from dewpoint.core.models.tenancy import Tenant
 from dewpoint.core.platform import inventory
 from dewpoint.core.platform.service import (
@@ -50,7 +50,6 @@ from dewpoint.core.platform.service import (
     EnvironmentNotRecordedError,
     check_namespace,
     record_environment,
-    set_ingress_capacity,
 )
 from dewpoint.core.plugins import lifecycle
 from dewpoint.core.plugins.lifecycle import Entry
@@ -947,8 +946,58 @@ def platform_disable_production_runs(
     typer.echo("production runs are off; no start is left unresolved")
 
 
+class CapacityApiError(Exception):
+    """The API refused the capacity command: its error code, never more."""
+
+
+def _api_client(base: str) -> httpx.AsyncClient:
+    return httpx.AsyncClient(base_url=base, timeout=30.0)
+
+
+async def capacity_via_api(
+    client: httpx.AsyncClient, *, email: str, password: str, code: str, change: dict[str, object], attestation: str
+) -> dict[str, object]:
+    """The ingress capacity changed through the platform admin's API (D11, the owner's ruling on the 2b-4b M3
+    checkpoint 3): signed in with the password, then the authenticator's code (a second factor proven now, so fresh),
+    the change asked on that session, which is then ended. What the capacity is then."""
+    token: str | None = None
+    csrf = ""
+
+    async def call(method: str, path: str, body: dict[str, object] | None = None) -> httpx.Response:
+        nonlocal token
+        headers = {"X-Dewpoint-Client": "web", **({"X-CSRF-Token": csrf} if csrf else {}),
+                   **({"Cookie": f"{SESSION_COOKIE}={token}"} if token else {})}  # fmt: skip
+        answer = await client.request(method, path, json=body, headers=headers)
+        token = answer.cookies.get(SESSION_COOKIE) or token  # sent by hand: the client's own jar keeps none
+        client.cookies.clear()
+        if answer.status_code >= 400:
+            error = (
+                answer.json().get("error")
+                if answer.headers.get("content-type", "").startswith("application/json")
+                else None
+            )
+            raise CapacityApiError(str(error or answer.status_code))
+        return answer
+
+    csrf = (await call("POST", "/api/v1/auth/login", {"email": email, "password": password})).json()["csrf_token"]
+    csrf = (await call("POST", "/api/v1/auth/mfa/totp", {"code": code})).json()["csrf_token"]
+    try:
+        changed = await call("PATCH", "/api/v1/admin/platform/ingress-capacity", {**change, "attestation": attestation})
+        result: dict[str, object] = changed.json()
+        return result
+    finally:
+        try:
+            await call("POST", "/api/v1/auth/logout")
+        except (CapacityApiError, httpx.HTTPError):
+            pass
+
+
 @platform_cli.command("set-ingress-capacity")
 def platform_set_ingress_capacity(
+    api: str = typer.Option(..., "--api", envvar="DEWPOINT_API_URL", help="the API's origin, as the web reaches it"),
+    email: str = typer.Option(..., "--email", help="the platform admin's email: you sign in as them"),
+    attestation: str = typer.Option(..., "--attestation", help="how and where the starts were measured, kept in the "
+                                    "audit with the change"),
     starts: float | None = typer.Option(None, "--starts-per-s", help="sustained starts a second, measured on this "
                                         "deployment's own Temporal (tests/probes/test_ingress_starts.py)"),
     headroom: float | None = typer.Option(None, "--headroom", help="the share of them ingress may use: above 0, at "
@@ -957,47 +1006,39 @@ def platform_set_ingress_capacity(
                                     "webhook requests may stand for"),
     unset: bool = typer.Option(False, "--unset", help="unset all three: the development-only rates and cap"),
 ) -> None:  # fmt: skip
-    """Set this deployment's ingress capacity (the owner's ruling 2 on the 2b-4b M3 checkpoint 2), audited: once the
-    starts and the headroom are set, a tenant's requests come at most at their product, its events and an endpoint's
-    divided by their enabled bindings; with the wait too, a tenant's queued webhook requests stop at the product of
-    all three. A value left out keeps what it was; `--unset` unsets all three. Run as dewpoint_admin. Until set,
-    ingress keeps its development-only rates and cap."""
-    if unset:
-        starts = headroom = wait = None
-    elif starts is None and headroom is None and wait is None:
-        typer.echo("ERROR: give the ingress capacity's values, or --unset")
+    """Change this deployment's ingress capacity through the platform admin's API (D11): you sign in with your password
+    and your authenticator's code, and the API audits the change with your id and the attestation. A value left out
+    keeps what it was; `--unset` unsets all three, which a production deployment whose runs are on refuses. Until the
+    starts and the headroom are set, ingress keeps its development-only rates; until the wait is too, its
+    development-only cap."""
+    given: dict[str, object] = {
+        k: v for k, v in (("starts_per_s", starts), ("headroom", headroom), ("queue_wait_s", wait)) if v is not None
+    }
+    if unset == bool(given):
+        typer.echo("ERROR: give the ingress capacity's values to change, or --unset alone")
         raise typer.Exit(2)
-    settings = get_settings()
+    password = typer.prompt("Password", hide_input=True)
+    code = typer.prompt("Authenticator code")
 
-    async def _go() -> tuple[float | None, float | None, int | None, int]:
-        engine = make_engine(settings.database_url)
-        try:
-            async with make_sessionmaker(engine)() as s, s.begin():
-                now = await s.get(PlatformSettings, 1, populate_existing=True)
-                if now is None:
-                    raise ValueError("The deployment's environment isn't recorded: run `platform init-environment`.")
-                given = (None, None, None) if unset else (  # a value left out keeps what it was
-                    starts if starts is not None else now.ingress_starts_per_s,
-                    headroom if headroom is not None else now.ingress_headroom,
-                    wait if wait is not None else now.ingress_queue_wait_s,
-                )  # fmt: skip
-                await set_ingress_capacity(s, starts_per_s=given[0], headroom=given[1], queue_wait_s=given[2],
-                                           actor_id=None)  # fmt: skip
-                platform = await s.get(PlatformSettings, 1, populate_existing=True)
-                return *given, queue_cap(platform) if platform is not None else 0
-        finally:
-            await engine.dispose()
+    async def _go() -> dict[str, object]:
+        async with _api_client(api) as client:
+            change: dict[str, object] = {"unset": True} if unset else given
+            return await capacity_via_api(client, email=email, password=password, code=code, change=change,
+                                          attestation=attestation)  # fmt: skip
 
     try:
-        starts, headroom, wait, cap = asyncio.run(_go())
-    except ValueError as e:
-        typer.echo(f"ERROR: {e}")
+        now = asyncio.run(_go())
+    except (CapacityApiError, httpx.HTTPError) as e:
+        typer.echo(f"ERROR: the API refused it: {e}" if isinstance(e, CapacityApiError) else "ERROR: the API is "
+                   f"unreachable ({type(e).__name__})")  # fmt: skip
         raise typer.Exit(2) from None
-    if unset:
+    if now["starts_per_s"] is None and now["headroom"] is None and now["queue_wait_s"] is None:
         typer.echo("ingress capacity unset: the development-only rates and cap")
         return
-    queue = f"a {wait} s queue: a tenant's queue holds {cap} requests" if wait is not None else "no wait agreed"
-    typer.echo(f"ingress capacity: {starts} starts a second measured, {headroom} of them for ingress, {queue}")
+    queue = (f"a {now['queue_wait_s']} s queue: a tenant's queue holds {now['queue_cap']} requests"
+             if now["queue_wait_s"] is not None else "no wait agreed")  # fmt: skip
+    typer.echo(f"ingress capacity: {now['starts_per_s']} starts a second measured, {now['headroom']} of them for "
+               f"ingress, {queue}")  # fmt: skip
 
 
 @deployment_cli.command("set-current")
