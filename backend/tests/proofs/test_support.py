@@ -69,7 +69,7 @@ def test_a_token_is_signed_by_its_key_set_and_expires() -> None:
                       lifetime=60, now=now)  # fmt: skip
     header, claims = _claims(token, keys)
     assert header == {"alg": "RS256", "typ": "JWT", "kid": "k1"}
-    assert claims["exp"] == now + 60 and claims["iat"] == now and claims["sub"] == "proof-admin"
+    assert claims["exp"] == now + 60 and claims["iat"] == now - tokens.SKEW_S and claims["sub"] == "proof-admin"
     _, expired = _claims(keys.sign({"sub": "x"}, lifetime=-60, now=now), keys)
     assert expired["exp"] == now - 60
 

@@ -11,6 +11,8 @@ from typing import Any
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
+SKEW_S = 60
+
 
 def _b64(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
@@ -35,10 +37,11 @@ class KeySet:
                           "n": _int(numbers.n), "e": _int(numbers.e)}]}  # fmt: skip
 
     def sign(self, claims: dict[str, Any], *, lifetime: int, now: int | None = None) -> str:
-        """`claims` with `iat` and `exp` (`lifetime` seconds on; negative: already expired)."""
+        """`claims` with `iat` and `exp` (`lifetime` seconds on; negative: already expired). `iat` is set back by
+        `SKEW_S`: Temporal's JWT library refuses a token issued in the future, and Docker's clock can lag the host's."""
         now = int(time.time()) if now is None else now
         header = {"alg": "RS256", "typ": "JWT", "kid": self.kid}
-        body = {**claims, "iat": now, "exp": now + lifetime}
+        body = {**claims, "iat": now - SKEW_S, "exp": now + lifetime}
         signing = f"{_b64(json.dumps(header).encode())}.{_b64(json.dumps(body).encode())}"
         signature = self.private.sign(signing.encode(), padding.PKCS1v15(), hashes.SHA256())
         return f"{signing}.{_b64(signature)}"
