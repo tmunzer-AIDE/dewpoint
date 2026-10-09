@@ -147,6 +147,17 @@ class DbRunStore:
             )
         return StoredClaim(found.value, found.sensitive_pointers)
 
+    async def fetch_many(self, tenant_id: str, run_id: str, claim_ids: Sequence[str]) -> dict[str, StoredClaim]:
+        """These claims, read in groups bounded by bytes, each checked first (2b-4b M3: a sub-flow's input)."""
+        cipher = self._claims()
+        found: dict[str, StoredClaim] = {}
+        async with self.sessionmaker() as s, s.begin():
+            await tenant_scope(s, uuid.UUID(tenant_id))
+            async for group in claims.fetch_groups(s, cipher, uuid.UUID(tenant_id), run_id=uuid.UUID(run_id),
+                                                   claim_ids=[uuid.UUID(c) for c in claim_ids]):  # fmt: skip
+                found.update({str(c): StoredClaim(v.value, v.sensitive_pointers) for c, v in group.items()})
+        return found
+
     async def nested(self, tenant_id: str, run_id: str, claim_ids: Sequence[str]) -> set[str]:
         """The handles these claims nest, read in groups bounded by bytes, each group let go once scanned (2b-4b M3;
         the fresh M3 review's I4)."""

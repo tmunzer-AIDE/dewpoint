@@ -90,6 +90,11 @@ class ClaimStore(Protocol):
         reads one and let go once its handles are taken; one this run may not read refuses them all."""
         ...
 
+    async def fetch_many(self, tenant_id: str, run_id: str, claim_ids: Sequence[str]) -> dict[str, StoredClaim]:
+        """These whole claims, for `run_id`, in one session: each checked as `fetch` checks one, before any is read
+        (one this run may not read refuses them all), their ciphertexts read in groups bounded by bytes."""
+        ...
+
     async def write(
         self,
         tenant_id: str,
@@ -628,6 +633,29 @@ async def _closure(claim_ids: Sequence[str], nested: Callable[[Sequence[str]], A
     return sorted(seen)
 
 
+async def _prefetched(store: ClaimStore, tenant: str, run: str, value: Any) -> dict[str, StoredClaim]:
+    """Every claim `value`'s handles reach, as `run` reads them (`fetch_many`), a level at a time and `CLOSURE_READS`
+    a read: what resolving `value` reads one claim at a time, and its closure (the owner's ruling on the 2b-4b M3
+    checkpoint 2: a sub-flow's input of 10,000 claims took 38.5 s of its crossing's minute, read a claim a session)."""
+    held: dict[str, StoredClaim] = {}
+    level = sorted({h.id for _, h in handles_in(value)})
+    while level:
+        for at in range(0, len(level), CLOSURE_READS):
+            held.update(await store.fetch_many(tenant, run, level[at : at + CLOSURE_READS]))
+        level = sorted({h.id for c in level for _, h in handles_in(held[c].value)} - held.keys())
+    return held
+
+
+def _from(held: dict[str, StoredClaim], fetch: Fetch) -> Fetch:
+    """`fetch`, answered from `held` where it can be."""
+
+    async def read(claim_id: str) -> StoredClaim:
+        found = held.get(claim_id)
+        return found if found is not None else await fetch(claim_id)
+
+    return read
+
+
 async def _granted(store: ClaimStore, tenant: str, run: str, to: str, value: Any, root: str) -> None:
     async def nested(claim_ids: Sequence[str]) -> set[str]:
         return await store.nested(tenant, run, claim_ids)
@@ -692,17 +720,19 @@ async def child_input(data: ChildInput, store: ClaimStore) -> ChildInputResult:
     schema = await store.input_schema(tenant, data.version_id)
     if schema is None:
         raise ApplicationError(NO_CHILD_VERSION, type=VERSION_UNUSABLE, non_retryable=True)
-    fetch = _fetcher(store, tenant, run)
     seed = uuid.uuid5(_INPUTS, data.child_run_id)
     made = _Reclassified(seed, uuid.UUID(data.child_run_id), uuid.UUID(data.root_run_id))
     try:
-        resolved = await resolve_value(data.value, fetch)
-        refused = reasons(schema, resolved.value)
+        held = await _prefetched(store, tenant, run, data.value)  # the closure, read once: checked, granted below
+        fetch = _from(held, _fetcher(store, tenant, run))
+        refused = reasons(schema, (await resolve_value(data.value, fetch)).value)
         if refused:
             return ChildInputResult(reasons=refused)
         value = await _reclassify(data.value, from_schema(schema), fetch, made)
     except UNREADABLE:
         raise ApplicationError(UNAVAILABLE, type=CLAIM_UNAVAILABLE, non_retryable=True) from None
+    closure = sorted(held)
+    del held, fetch  # the values read: the split and the writes need only the handles
     try:
         done = split(
             value,
@@ -724,7 +754,9 @@ async def child_input(data: ChildInput, store: ClaimStore) -> ChildInputResult:
     if rows:
         await store.write_inputs(tenant, rows)
     try:
-        await _granted(store, tenant, run, data.child_run_id, data.value, data.root_run_id)
+        if closure:
+            await store.grant(tenant, granted_by=run, to=data.child_run_id, claim_ids=closure,
+                              root_run_id=data.root_run_id)  # fmt: skip
     except UNREADABLE:
         raise ApplicationError(UNAVAILABLE, type=CLAIM_UNAVAILABLE, non_retryable=True) from None
     return ChildInputResult(trigger=done.envelope)
