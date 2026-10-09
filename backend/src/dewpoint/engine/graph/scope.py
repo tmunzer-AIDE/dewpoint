@@ -121,6 +121,22 @@ def _head(p: RefPath) -> str:
     return p.root
 
 
+def _format(schema: Any) -> str | None:
+    """The format the value surely has: within a way, the one its schemas declare (all of them apply); across ways,
+    only one every way shares. Two formats in a way, or a way without one, leave nothing sure (the review of
+    milestone 1: a nullable or conjoined date-time keeps its format)."""
+    unfolded = alternatives(schema, schema) if schema is not None else None
+    if unfolded is None or not unfolded[0]:
+        return None
+    shared: set[str] = set()
+    for way in unfolded[0]:
+        formats = {part["format"] for part in way if isinstance(part.get("format"), str)}
+        if len(formats) != 1:
+            return None
+        shared |= formats
+    return shared.pop() if len(shared) == 1 else None
+
+
 def _split(p: RefPath) -> tuple[str | None, str]:
     """A path's parent and the name it shows: `trigger.events[0]` is `[0]` under `trigger.events`."""
     if not p.rest:
@@ -185,7 +201,6 @@ class _Reader:
             return None
         parent, name = _split(p)
         types = json_types(r.schema)
-        fmt = r.schema.get("format") if r.schema is not None else None
         return Entry(
             path=text,
             parent=parent,
@@ -193,7 +208,7 @@ class _Reader:
             root=p.root,  # type: ignore[arg-type]  # parse_ref gives one of Root's values
             step=self._step(p),
             types=tuple(sorted(types)) if types is not None and types <= JSON_TYPES else (),
-            format=fmt if isinstance(fmt, str) else None,
+            format=_format(r.schema),
             missing=r.missing,
             nullable=r.nullable,
             sensitive=r.taint.tainted,
@@ -288,16 +303,31 @@ class _Reader:
         return Scope((entry,) if entry is not None else (), problem=problems[0] if problems else None)
 
     def find(self, text: str) -> Scope:
+        """Fields whose name holds `text`, breadth first. `more` says the search stopped short at one of its bounds
+        (children past MAX_CHILDREN, fields below FIND_DEPTH, FIND_VISITS, FIND_FOUND) while something was left
+        unsearched: never "nothing more" unless all of it was searched (the review of milestone 1)."""
         needle = text.casefold()
         found: list[Entry] = []
         visits = 0
+        omitted = False
         queue: deque[tuple[str, int]] = deque((root, 0) for root in self.roots())
-        while queue and len(found) < FIND_FOUND and visits < FIND_VISITS:
+        while queue:
+            if len(found) >= FIND_FOUND or visits >= FIND_VISITS:
+                omitted = True  # the queue still holds fields to search
+                break
             parent, depth = queue.popleft()
             resolved = self.resolve(parent)
-            if resolved is None or depth >= FIND_DEPTH:
+            names = self.child_names(resolved[1].schema) if resolved is not None else []
+            if not names:
                 continue
-            for name in self.child_names(resolved[1].schema)[:MAX_CHILDREN]:
+            if depth >= FIND_DEPTH:
+                omitted = True  # fields below the search's depth
+                continue
+            omitted |= len(names) > MAX_CHILDREN
+            for name in names[:MAX_CHILDREN]:
+                if len(found) >= FIND_FOUND or visits >= FIND_VISITS:
+                    omitted = True  # this parent's other children
+                    break
                 visits += 1
                 e = self.child(parent, name)
                 if e is None:
@@ -306,9 +336,7 @@ class _Reader:
                     found.append(e)
                 if e.nameable and e.children:
                     queue.append((e.path, depth + 1))
-                if visits >= FIND_VISITS or len(found) >= FIND_FOUND:
-                    break
-        return Scope(tuple(found[:FIND_FOUND]), more=bool(queue) or visits >= FIND_VISITS)
+        return Scope(tuple(found), more=omitted)
 
     # ---- formulas -------------------------------------------------------------------------------------------
 

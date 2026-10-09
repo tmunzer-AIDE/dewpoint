@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from dewpoint.engine.graph.scope import FIND_FOUND, Entry, Scope, scope
+from dewpoint.engine.graph.scope import FIND_DEPTH, FIND_FOUND, MAX_CHILDREN, Entry, Scope, scope
 from dewpoint.engine.graph.validate import ValidationContext
 from dewpoint.plugins.flow import PLUGIN as FLOW
 from dewpoint.plugins.mist import PLUGIN as MIST
@@ -195,3 +195,55 @@ def test_guards_a_value_that_may_not_be_an_object_whatever_its_spelling(spelling
         "type(trigger.variant) == map",
         "has(trigger.variant.n)",
     ]
+
+
+# The review of milestone 1: a format survives null and conjunctions, and a search says when it stopped short.
+def _with_input(schema: dict[str, Any]) -> G:
+    g = G().node("c", "flow.if@1", {"condition": True})
+    g.settings = {"input_schema": schema}
+    return g
+
+
+def test_keeps_a_format_through_null_alternatives_and_conjunctions() -> None:
+    when = {"type": "string", "format": "date-time"}
+    fields = {
+        "plain": when,
+        "listed": {"type": ["string", "null"], "format": "date-time"},
+        "either": {"anyOf": [when, {"type": "null"}]},
+        "both": {"allOf": [{"type": "string"}, {"format": "date-time"}]},
+        "mixed": {"anyOf": [when, {"type": "string", "format": "uuid"}]},  # two formats: neither is sure
+    }
+    schema = {"type": "object", "properties": fields, "required": sorted(fields)}
+    entries = by_path(scope(_with_input(schema).build(), CTX, nid("c"), "/condition"))
+    formats = {name: entries[f"trigger.{name}"].format for name in fields}
+    assert formats == {"plain": "date-time", "listed": "date-time", "either": "date-time", "both": "date-time",
+                       "mixed": None}  # fmt: skip
+
+
+def _find(schema: dict[str, Any], text: str) -> Scope:
+    return scope(_with_input(schema).build(), CTX, nid("c"), "/condition", find=text)
+
+
+def test_a_search_says_when_children_past_the_limit_went_unsearched() -> None:
+    wide = {"type": "object", "properties": {f"f{i}": {"type": "string"} for i in range(MAX_CHILDREN + 1)}}
+    found = _find({"type": "object", "properties": {"big": wide}, "required": ["big"]}, "zzz")
+    assert found.entries == () and found.more
+
+
+def test_a_search_says_when_it_stopped_at_its_count() -> None:
+    many = {"type": "object", "properties": {f"match_{i}": {"type": "string"} for i in range(FIND_FOUND + 1)}}
+    found = _find({"type": "object", "properties": {"many": many}, "required": ["many"]}, "match")
+    assert len(found.entries) == FIND_FOUND and found.more
+
+
+def test_a_search_says_when_it_stopped_at_its_depth() -> None:
+    deep: dict[str, Any] = {"type": "object", "properties": {"deep_target": {"type": "string"}}}
+    for _ in range(FIND_DEPTH):
+        deep = {"type": "object", "properties": {"x": deep}, "required": ["x"]}
+    found = _find({"type": "object", "properties": {"top": deep}, "required": ["top"]}, "deep_target")
+    assert found.entries == () and found.more
+
+
+def test_a_complete_search_says_so() -> None:
+    found = _find({"type": "object", "properties": {"site": {"type": "string"}}, "required": ["site"]}, "site")
+    assert [e.path for e in found.entries] == ["trigger.site"] and not found.more
