@@ -532,12 +532,13 @@ claims are.
   10,000 claims of 1 KiB held by grant, nested three levels, granted in 1.75 s (it was about 7 to 8 ms a claim, one at a
   time, so about 7,500 could time out). Past the timeout the step or loop that started it fails with `internal_error`,
   and a sub-flow whose outputs hold that many fails itself. A list held as one claim crosses as one, with the claims
-  nested in it. A sub-flow's input is also read whole, every claim it holds one at a time, to check it against the
-  child's schema, so a whole run's crossing costs more: measured on the dev server (`tests/probes/test_crossing_run.py`,
-  2026-10-09), a CSV start of 10,000 sites, each with a sensitive key (10,000 claims nested in the rows' claim), ran a
-  sub-flow that ran its own: each crossing granted 10,001 claims, the first (claims its run owns) in 38.5 s, the second
-  (claims held by grant) in 23.3 s, each on its first attempt, and the whole run took 62 s. At about 3.8 ms a claim,
-  **about 15,000 claims would pass the timeout** in a sub-flow's input.
+  nested in it. A sub-flow's input is also read whole, to check it against the child's schema: since 2b-4b M3 its
+  closure is read once, a thousand claims a statement (each checked as one read alone is), and granted as read. Measured
+  on the dev server (`tests/probes/test_crossing_run.py`, 2026-10-09): a CSV start of 10,000 sites, each with a
+  sensitive key (10,000 claims nested in the rows' claim), ran a sub-flow that ran its own; each crossing granted 10,001
+  claims on its first attempt, in 1.6 and 1.7 s of its minute (98 and 119 statements, against 26 and 29 for 1,000), and
+  the whole run took 4.1 s. Read a claim a session before, the same crossings took 38.5 and 23.3 s, and about 15,000
+  claims would have passed the timeout.
 - **The secret index.** Every string of 4 characters or more in a sensitive claim joins its run tree's index (the run,
   its sub-runs and its batches share one), stored encrypted, and so does a map key claimed with its map. Every
   message leaving an activity (a step's error, a CEL error, a `fail` node's message) and every row the projection

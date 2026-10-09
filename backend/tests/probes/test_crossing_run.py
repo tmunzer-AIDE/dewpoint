@@ -7,8 +7,9 @@ first of claims its run owns, the second of claims its run holds by grant. Each 
 resolved and checked against the child's schema, split, and its handles' closure granted, within the activity's
 one-minute timeout. One dispatcher pass starts the root; a real engine worker (`DbRunStore`) runs all three.
 
-Per run: its status and its time; per crossing: its activity's time and attempts (from its parent's history) and the
-claims it granted.
+Per run: its status and its time; per crossing: its activity's time and attempts (from its parent's history) against
+its own one-minute timeout, the statements it executed (counted on the worker's engine while that activity of that
+run ran), and the claims it granted.
 
 A probe, run by hand on a quiet machine, never in CI; bounded by `DEADLINE_S`. `DEWPOINT_PROBE_ROWS` makes it smaller,
 to check the probe itself. From `backend/`:
@@ -22,12 +23,15 @@ import asyncio
 import json
 import os
 import time
-from collections.abc import AsyncIterator
+from collections import Counter
+from collections.abc import AsyncIterator, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
+from temporalio import activity
 from temporalio.testing import WorkflowEnvironment
 
 from dewpoint.apps.dispatcher import dispatch
@@ -78,24 +82,41 @@ def calling(workflow_id: Any, sites: str) -> G:
     return G().node("s", "flow.run_workflow@1", {"workflow_id": str(workflow_id), "input": {"sites": ref(sites)}})
 
 
+@contextmanager
+def by_activity(sm: Any) -> Iterator[Counter[tuple[str, str]]]:
+    """The statements `sm`'s engine executes meanwhile, by the activity type and the workflow id they ran for."""
+    engine, seen = sm.kw["bind"].sync_engine, Counter[tuple[str, str]]()
+
+    def counted(*_: Any) -> None:
+        if activity.in_activity():
+            info = activity.info()
+            seen[(info.activity_type, info.workflow_id)] += 1
+
+    event.listen(engine, "before_cursor_execute", counted)
+    try:
+        yield seen
+    finally:
+        event.remove(engine, "before_cursor_execute", counted)
+
+
 async def crossings(client: Any, tenant_id: str, run_id: str) -> list[dict[str, Any]]:
     """A run's `claims.child_input` activities: each one's time from its scheduling to its end, its last attempt, and
     whether it completed."""
     history = await client.get_workflow_handle(run_workflow_id(tenant_id, run_id)).fetch_history()
     found: dict[int, dict[str, Any]] = {}
-    for event in history.events:
-        at = event.event_time.ToDatetime()
-        if event.HasField("activity_task_scheduled_event_attributes"):
-            if event.activity_task_scheduled_event_attributes.activity_type.name == CLAIMS_CHILD_INPUT:
-                found[event.event_id] = {"scheduled": at}
-        elif event.HasField("activity_task_started_event_attributes"):
-            started = event.activity_task_started_event_attributes
+    for happened in history.events:
+        at = happened.event_time.ToDatetime()
+        if happened.HasField("activity_task_scheduled_event_attributes"):
+            if happened.activity_task_scheduled_event_attributes.activity_type.name == CLAIMS_CHILD_INPUT:
+                found[happened.event_id] = {"scheduled": at}
+        elif happened.HasField("activity_task_started_event_attributes"):
+            started = happened.activity_task_started_event_attributes
             if started.scheduled_event_id in found:
                 found[started.scheduled_event_id]["attempt"] = started.attempt
         else:
             for kind in ("completed", "failed", "timed_out"):
-                if event.HasField(f"activity_task_{kind}_event_attributes"):
-                    ended = getattr(event, f"activity_task_{kind}_event_attributes")
+                if happened.HasField(f"activity_task_{kind}_event_attributes"):
+                    ended = getattr(happened, f"activity_task_{kind}_event_attributes")
                     if ended.scheduled_event_id in found:
                         one = found[ended.scheduled_event_id]
                         one.update(ended=kind, s=round((at - one.pop("scheduled")).total_seconds(), 2))
@@ -136,17 +157,8 @@ async def test_a_whole_run_whose_crossings_grant_ten_thousand_claims(
         owned = (await s.execute(text("select count(*) from run_inputs where owner_run_id = :r"),
                                  {"r": root_id})).scalar_one()  # fmt: skip
 
-    async with serving(server.client, DbRunStore(worker_sessionmaker, KEYS)):  # type: ignore[arg-type]
-        began = time.perf_counter()
-        assert await dispatch.dispatch_once(dispatch_sessionmaker, server.client, KEYS, api_settings, BUILD) == {
-            "started": 1
-        }
-        while time.perf_counter() - began < DEADLINE_S:
-            found = (await client.get(f"{base}/runs/{root_id}")).json()
-            if found["status"] not in ("queued", "starting", "running"):
-                break
-            await asyncio.sleep(0.5)
-        whole_s = time.perf_counter() - began
+    with by_activity(worker_sessionmaker) as statements:
+        whole_s = await _ran(server, client, base, root_id, dispatch_sessionmaker, worker_sessionmaker, api_settings)
     async with owner_sessionmaker() as s:
         runs = (await s.execute(text(
             "select id, parent_run_id, status, extract(epoch from ended_at - started_at) from runs "
@@ -161,7 +173,8 @@ async def test_a_whole_run_whose_crossings_grant_ten_thousand_claims(
         "runs": [{"depth": d, "status": st, "s": round(float(took), 1) if took is not None else None}
                  for d, (_, _, st, took) in enumerate(runs)],
         "crossings": [
-            {"from_depth": d, "activity": await crossings(server.client, str(ctx.tenant_id), str(i)),
+            {"from_depth": d, "timeout_s": 60, "activity": await crossings(server.client, str(ctx.tenant_id), str(i)),
+             "statements": statements[(CLAIMS_CHILD_INPUT, run_workflow_id(str(ctx.tenant_id), str(i)))],
              "granted": granted.get(by_parent.get(str(i), ""), 0)}
             for d, (i, *_) in enumerate(runs[:-1])
         ],
@@ -171,3 +184,21 @@ async def test_a_whole_run_whose_crossings_grant_ten_thousand_claims(
     if out:
         Path(out).write_text(json.dumps(result, indent=1))  # noqa: ASYNC240  # once, at the end
     assert [r["status"] for r in result["runs"]] == ["succeeded"] * 3, result
+
+
+async def _ran(
+    server: Any, client: Any, base: str, root_id: str, dispatch_sessionmaker: Any, worker_sessionmaker: Any,
+    api_settings: Any,
+) -> float:  # fmt: skip
+    """The root started, then watched until it ends (within DEADLINE_S): how long it took."""
+    async with serving(server.client, DbRunStore(worker_sessionmaker, KEYS)):  # type: ignore[arg-type]
+        began = time.perf_counter()
+        assert await dispatch.dispatch_once(dispatch_sessionmaker, server.client, KEYS, api_settings, BUILD) == {
+            "started": 1
+        }
+        while time.perf_counter() - began < DEADLINE_S:
+            found = (await client.get(f"{base}/runs/{root_id}")).json()
+            if found["status"] not in ("queued", "starting", "running"):
+                break
+            await asyncio.sleep(0.5)
+        return time.perf_counter() - began
