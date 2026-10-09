@@ -9,6 +9,7 @@ import { onAnnounce } from "../../lib/announce";
 import { cancelLeaving, mayLeave } from "../../lib/leaving";
 import type { CanvasProps } from "./Canvas";
 import { EditorPage } from "./Editor";
+import { DELAY, typeWith } from "../../test/nodeTypes";
 
 // Every document the stand-in canvas was handed: what was drawn, and what never was.
 const { drawn } = vi.hoisted(() => ({ drawn: [] as { doc: GraphDoc; editable: boolean }[] }));
@@ -297,6 +298,120 @@ it("leaves focus in a step's panel when undo keeps its step", async () => {
   await userEvent.keyboard("{Control>}z{/Control}"); // the second step's addition undone; transform stays
   expect(screen.getByRole("complementary", { name: "transform" })).toBeTruthy();
   expect(document.activeElement).toBe(heading);
+});
+
+/** A draft of one step of `type`, with this config, and a transform after it. */
+const oneStep = (type: string, config: Record<string, unknown>, key = "wait") => ({
+  graph_format: 1,
+  nodes: [
+    { id: `id-${key}`, key, type, config, position: { x: 0, y: 140 } },
+    { id: "id-transform", key: "transform", type: "flow.transform@1", position: { x: 0, y: 280 } },
+  ],
+  edges: [],
+});  // prettier-ignore
+const stepConfig = (key: string) => drawn.at(-1)!.doc.nodes!.find((n) => n.key === key)!.config;
+
+it("makes a field's typing one undo step", async () => {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, DELAY]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.delay@1", {}) }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "wait" }));
+  const drawer = screen.getByRole("complementary", { name: "wait" });
+  expect(within(drawer).getByRole("tab", { name: "Setup" }).getAttribute("aria-selected")).toBe("true");
+  await userEvent.type(within(drawer).getByLabelText("Duration S"), "120");
+  expect(stepConfig("wait")).toEqual({ duration_s: 120 });
+  await userEvent.click(within(drawer).getByRole("heading", { name: "wait" })); // focus leaves the field
+  await userEvent.keyboard("{Control>}z{/Control}");
+  expect(stepConfig("wait")).toEqual({}); // the whole field's typing, in one step
+});
+
+it("keeps an unknown type's settings as they are", async () => {
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("acme.thing@1", { secret: "s3cr3t" }, "x") }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "x" }));
+  const drawer = screen.getByRole("complementary", { name: "x" });
+  expect(drawer.textContent).toContain("This server doesn't know this step's type, so its settings can't be shown. They're kept as they are.");
+  expect(drawer.textContent).not.toContain("s3cr3t");
+  expect(stepConfig("x")).toEqual({ secret: "s3cr3t" });
+});
+
+it("shows a step's settings read only to a viewer", async () => {
+  role = "viewer";
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, DELAY]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.delay@1", { duration_s: 5 }) }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "wait" }));
+  expect(screen.getByLabelText<HTMLInputElement>("Duration S").disabled).toBe(true);
+});
+
+it("opens on Options when the type requires nothing", async () => {
+  const note = typeWith({ type: "object", properties: { note: { type: "string", title: "Note" } } }, { ref: "acme.note@1", type: "acme.note", title: "Note" });
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, note]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("acme.note@1", {}, "n") }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "n" }));
+  expect(screen.getByRole("tab", { name: "Options" }).getAttribute("aria-selected")).toBe("true");
+  expect(screen.getByLabelText("Note")).toBeTruthy();
+});
+
+/** A step whose `routes` declare its ports, as a switch's cases do, held as JSON: route b leads to the transform. */
+const ROUTER = typeWith(
+  { type: "object", properties: { routes: { title: "Routes" } } },
+  { ref: "acme.router@1", type: "acme.router", title: "Router", ports: ["other"], dynamic_ports: "routes" },
+);
+const routed = () => {
+  const draft = oneStep("acme.router@1", { routes: [{ port: "a" }, { port: "b" }] }, "route");
+  return { ...draft, edges: [{ from: { node: "id-route", port: "b" }, to: { node: "id-transform" } }] };
+};
+
+async function dropRouteB() {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, ROUTER]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: routed() }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "route" }));
+  const routes = screen.getByLabelText("Routes");
+  await userEvent.clear(routes);
+  await userEvent.paste('[{"port": "a"}]');
+  await userEvent.tab(); // JSON applies when focus leaves
+  return screen.getByRole("dialog", { name: "Remove a port" });
+}
+
+it("asks before an edit takes a port with edges away", async () => {
+  const dialog = await dropRouteB();
+  expect(dialog.textContent).toContain("The port b goes with this change, and its edge to transform is deleted.");
+  await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  expect(drawn.at(-1)!.doc.edges).toHaveLength(1);
+  expect(stepConfig("route")).toEqual({ routes: [{ port: "a" }, { port: "b" }] });
+  // Canceled, the edit stays the person's: unapplied, its reason at its control (ruling 18).
+  expect(JSON.parse(screen.getByLabelText<HTMLTextAreaElement>("Routes").value)).toEqual([{ port: "a" }]);
+  expect(screen.getByText("Not applied: it removes the port b and its edge to transform.")).toBeTruthy();
+});
+
+it("keeps an unapplied edit when the tab changes or the drawer closes", async () => {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, DELAY]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.delay@1", {}) }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "wait" }));
+  await userEvent.type(screen.getByLabelText("Duration S"), "1x");
+  await userEvent.click(screen.getByRole("tab", { name: "Options" }));
+  await userEvent.click(screen.getByRole("tab", { name: "Setup" }));
+  expect(screen.getByLabelText<HTMLInputElement>("Duration S").value).toBe("1x");
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
+  await userEvent.click(screen.getByRole("button", { name: "wait" }));
+  expect(screen.getByLabelText<HTMLInputElement>("Duration S").value).toBe("1x");
+  expect(screen.getByText("A whole number, like 42.")).toBeTruthy();
+  expect(stepConfig("wait")).toEqual({ duration_s: 1 }); // "1" was a number; "1x" never reached the draft
+});
+
+it("undoes the edit and its edges together", async () => {
+  const dialog = await dropRouteB();
+  await userEvent.click(within(dialog).getByRole("button", { name: "Remove" }));
+  expect(drawn.at(-1)!.doc.edges).toEqual([]);
+  expect(stepConfig("route")).toEqual({ routes: [{ port: "a" }] });
+  await vi.waitFor(() => expect(document.activeElement?.id).toBe("step-drawer-title"));
+  await userEvent.keyboard("{Control>}z{/Control}");
+  expect(drawn.at(-1)!.doc.edges).toHaveLength(1);
+  expect(stepConfig("route")).toEqual({ routes: [{ port: "a" }, { port: "b" }] });
 });
 
 const steps = () => screen.getByRole("group", { name: "Workflow steps" });
