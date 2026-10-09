@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 from jsonschema import Draft202012Validator
 
-from dewpoint.engine.graph.schema_messages import explain
+from dewpoint.engine.graph.schema_messages import explain, problems
 
 SECRET, NUMBER = "tok-9f2c", 41713
 
@@ -65,9 +65,44 @@ def test_a_property_named_like_a_keyword_is_still_a_property() -> None:
     assert explain(e) == "Must be at most 2 characters long."
 
 
+def test_every_property_whose_dependencies_are_missing_is_named() -> None:
+    """jsonschema reports `dependentRequired` once per missing dependency, each worded at its place: the sentence names
+    each present property missing some of its dependencies, and only the missing ones (the owner's ruling)."""
+    schema = {"dependentRequired": {"a": ["x"], "b": ["y", "v", "z"], "c": ["w"], "d": ["v"]}}
+    errors = list(Draft202012Validator(schema).iter_errors({"a": SECRET, "b": 2, "d": 3, "v": 4}))
+    assert [explain(e) for e in errors] == ["Needs `x` beside `a`; `y`, `z` beside `b`."] * 3
+
+
 def test_a_keyword_without_words_of_its_own_still_says_nothing_of_the_value() -> None:
     e = next(Draft202012Validator({"maxContains": 1, "contains": {}}).iter_errors([SECRET, SECRET]))
     assert SECRET not in explain(e) and explain(e) == "Doesn't satisfy its schema's `maxContains`."
+
+
+@pytest.mark.parametrize(
+    ("schema", "instance", "said"),
+    [
+        ({"required": ["a", "b"]}, {}, [((), "Needs `a`, `b`.")]),
+        (
+            {"dependentRequired": {"user": ["password", "otp"]}}, {"user": SECRET},
+            [((), "Needs `password`, `otp` beside `user`.")],
+        ),
+        (
+            {"propertyNames": {"maxLength": 2}}, {SECRET: 1, SECRET + "x": 2},
+            [((), "Has a property whose name its schema doesn't allow.")],
+        ),
+        (
+            {"properties": {"x": {"required": ["a", "b"]}, "y": {"required": ["a", "b"]}}}, {"x": {}, "y": {}},
+            [(("x",), "Needs `a`, `b`."), (("y",), "Needs `a`, `b`.")],
+        ),
+    ],
+)  # fmt: skip
+def test_a_problem_jsonschema_reports_per_property_is_said_once_per_place(
+    schema: Any, instance: Any, said: list[tuple[tuple[Any, ...], str]]
+) -> None:
+    # jsonschema reports these keywords once per property they find wanting; the sentence covers the keyword, so
+    # each would read the same as the last.
+    assert len(list(Draft202012Validator(schema).iter_errors(instance))) > len(said)
+    assert problems(schema, instance) == said
 
 
 def test_jsonschemas_own_words_quote_the_value() -> None:

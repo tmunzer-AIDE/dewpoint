@@ -22,6 +22,7 @@ from pydantic import BaseModel
 from dewpoint.plugins.mist import fixtures, oas, policy, routing
 from dewpoint.plugins.mist.client import SEGMENT, InvalidAnswer, InvalidPathValue, MistClient, NotFound, may_have_more
 from dewpoint.plugins.mist.schemas import converted, resolved, top_properties, with_defs
+from dewpoint.plugins.mist.titles import title
 from dewpoint.sdk import (
     CallContext,
     FatalError,
@@ -218,12 +219,6 @@ class MistOperation(Node):
         return {**{k: merged(current.body.get(k), v) for k, v in body.items()}, **cleared}
 
 
-def _title(op_id: str) -> str:
-    words = re.findall(r"[A-Z]{2,}(?![a-z])|[A-Z]?[a-z0-9]+", op_id)
-    text = " ".join(w if w.isupper() and len(w) > 1 else w.lower() for w in words)
-    return text[:1].upper() + text[1:]
-
-
 def _description(op: oas.Operation) -> str:
     text = str(op.spec.get("description") or "").strip().split("\n\n", 1)[0].strip()
     return text if len(text) <= 300 else text[:297].rstrip() + "..."
@@ -319,7 +314,7 @@ def config_schema(
     for p in op.parameters:
         if p["in"] == "path" and p["name"] != "org_id":
             props[p["name"]] = {
-                "title": _title(p["name"]),
+                "title": title(p["name"]),
                 **converted(p.get("schema", {}), output=False),
                 "pattern": f"^{routing.value_pattern(op.id, p['name'])}$",  # publish refuses another route's literal
             }
@@ -420,7 +415,7 @@ def build() -> tuple[type[Node], ...]:
             "__qualname__": name,
             "type": type_,
             "version": 1,
-            "title": _title(op_id),
+            "title": title(op_id),
             "description": _description(op) + (RACE if merge_with is not None else ""),
             "Config": declared_model(
                 f"{name}Config",

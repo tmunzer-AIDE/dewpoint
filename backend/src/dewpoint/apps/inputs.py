@@ -43,10 +43,13 @@ class InputRefusedError(Exception):
 def reasons(schema: Mapping[str, Any], value: Any) -> list[str]:
     """Why `value` doesn't match `schema`: each place, as far as the schema declares it (`projection.location`: a key
     the data supplied shows as `*`), and the rule it breaks; never what's there. Ordered by that text, not by the
-    data."""
+    data, and each told once: jsonschema reports `required` once per missing property (`dependentRequired` per
+    missing dependency, `propertyNames` per refused name), and keys breaking one rule show as one `*`."""
     found = sorted(
-        (location(list(e.absolute_path), schema), str(e.validator))
-        for e in Draft202012Validator(schema).iter_errors(value)
+        {
+            (location(list(e.absolute_path), schema), str(e.validator))
+            for e in Draft202012Validator(schema).iter_errors(value)
+        }
     )
     return [
         f"The run's input doesn't match the workflow's input schema at "

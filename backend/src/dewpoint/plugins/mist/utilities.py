@@ -20,8 +20,9 @@ from pydantic import BaseModel
 
 from dewpoint.plugins.mist import oas, policy, routing, stream
 from dewpoint.plugins.mist.client import InvalidAnswer, MistClient
-from dewpoint.plugins.mist.nodes import MistOperation, OperationUnavailable, _class_name, _description, _title
+from dewpoint.plugins.mist.nodes import MistOperation, OperationUnavailable, _class_name, _description
 from dewpoint.plugins.mist.schemas import converted, with_defs
+from dewpoint.plugins.mist.titles import title
 from dewpoint.sdk import (
     FatalError,
     MaybeSent,
@@ -173,7 +174,7 @@ def config_schema(
     for p in op.parameters:
         if p["in"] == "path" and p["name"] != "org_id":
             props[p["name"]] = {
-                "title": _title(p["name"]),
+                "title": title(p["name"]),
                 **converted(p.get("schema", {}), output=False),
                 "pattern": f"^{routing.value_pattern(op.id, p['name'])}$",
             }
@@ -278,7 +279,7 @@ def build() -> tuple[type[Node], ...]:
             "__qualname__": name,
             "type": type_,
             "version": 1,
-            "title": _title(op_id),
+            "title": title(op_id),
             "description": _description(op) + CONTRACT_TEXT[review.contract],
             "Config": declared_model(
                 f"{name}Config", config_schema(doc, op, review, pickers, default), formats=(), checked=False

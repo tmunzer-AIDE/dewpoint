@@ -199,9 +199,10 @@ def _fields(error: ValidationError, schema: Mapping[str, Any]) -> str:
     """Each failing field and its rule's stable code (`int_parsing`, `value_error`), nothing else: pydantic's
     messages quote the input, and so does a validator's own prose, whatever `include_input` says. A location shows
     only what the schema declares at each place (`projection.location`): a map key is data, even a numeric one. A
-    code shows only if pydantic defines it: a custom error's type is whatever its validator made it."""
+    code shows only if pydantic defines it: a custom error's type is whatever its validator made it. Each is said once:
+    keys breaking one rule show as one `*`."""
     problems = error.errors(include_url=False, include_context=True, include_input=False)
-    return "; ".join(f"{location(e['loc'], schema)} ({_code(e)})" for e in problems) + "."
+    return "; ".join(dict.fromkeys(f"{location(e['loc'], schema)} ({_code(e)})" for e in problems)) + "."
 
 
 def _code(error: Any) -> str:
@@ -369,9 +370,10 @@ def step_activity_for(
         data = result.model_dump(mode="json", by_alias=True, warnings=False)
         problems = sorted(emitted.iter_errors(data), key=lambda e: [str(p) for p in e.absolute_path])
         if problems:
-            raise violation(
-                "; ".join(f"{location(list(e.absolute_path), output_schema)} ({e.validator})" for e in problems) + "."
-            )
+            # each place and rule said once: jsonschema reports `required` once per missing property, and keys
+            # breaking one rule show as one `*`
+            said = dict.fromkeys(f"{location(list(e.absolute_path), output_schema)} ({e.validator})" for e in problems)
+            raise violation("; ".join(said) + ".")
         return data
 
     @activity.defn(name=step_activity(ref))
