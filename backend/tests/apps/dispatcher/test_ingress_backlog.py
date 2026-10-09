@@ -103,3 +103,32 @@ def platform(starts: float | None, headroom: float | None, wait_s: int | None) -
 )
 def test_the_cap_follows_the_measured_starts_the_headroom_and_the_agreed_wait(given: Any, cap: Any) -> None:
     assert matching.queue_cap(platform(*given)) == (matching.DEV_QUEUED if cap == "dev" else cap)
+
+
+async def test_the_cap_from_the_ingress_capacity_counts_the_tenants_webhook_requests_alone(
+    dev, owner_sessionmaker, ingress_sessionmaker, dispatch_sessionmaker, api_sessionmaker, api_settings  # noqa: F811
+) -> None:  # fmt: skip
+    """The fresh M3 review 3: the cap as `platform_settings` makes it, and only the tenant's webhook requests in it."""
+    from tests.apps.test_admission import admit
+
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text("update platform_settings set ingress_starts_per_s = 1, ingress_headroom = 1, "
+                             "ingress_queue_wait_s = 24"))  # fmt: skip  # a 24-request queue
+    await fanned_out((owner_sessionmaker, api_sessionmaker, api_settings), dev, 3)
+    for k in range(5):  # queued too, but not from ingress
+        await admit(api_sessionmaker, dev.ctx, dev.workflow_id, key=f"manual-{k}", input={})
+    await arrived(ingress_sessionmaker, dev, 9)
+    done = await matching.match_once(dispatch_sessionmaker, KEYS, matching.Verified())
+    assert done == {"matched": 8, "backlog_full": 1}  # 24 requests: a ninth event's 3 would pass the cap
+
+
+async def test_a_tenants_queue_is_counted_on_its_own_index_whatever_the_plan(dispatch_sessionmaker) -> None:
+    """The fresh M3 review 3: with the status and the source bound as parameters, a generic plan couldn't prove the
+    partial index's predicate; they're the statement's own."""
+    import json
+
+    async with dispatch_sessionmaker() as s, s.begin():
+        await s.execute(text("set local plan_cache_mode = force_generic_plan"))
+        await s.execute(text("set local enable_seqscan = off"))
+        plan = (await s.execute(text("explain (format json) " + matching.QUEUED.text), {"t": uuid.uuid4()})).scalar()
+    assert "run_requests_queued_webhook" in json.dumps(plan), plan

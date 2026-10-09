@@ -53,7 +53,6 @@ from dewpoint.core.ingress.counters import release
 from dewpoint.core.ingress.filters import MAX_BINDINGS, matches
 from dewpoint.core.models.ingress import InboundEvent, TenantEventCounters, TriggerBinding, WebhookEndpoint
 from dewpoint.core.models.platform import PlatformSettings
-from dewpoint.core.models.requests import RunRequest
 from dewpoint.core.models.tenancy import Tenant
 from dewpoint.core.platform.service import PRODUCTION
 from dewpoint.core.plugins import lifecycle
@@ -203,14 +202,13 @@ def queue_cap(platform: PlatformSettings) -> int:
     return max(MAX_BINDINGS, math.floor(starts * headroom * wait))
 
 
+# A tenant's webhook requests still queued, on `run_requests_queued_webhook`: its status and source the statement's
+# own, never parameters, so even a generic plan proves the partial index's predicate (the fresh M3 review 3)
+QUEUED = text("SELECT count(*) FROM run_requests WHERE tenant_id = :t AND status = 'queued' AND source = 'webhook'")
+
+
 async def _queued(s: AsyncSession, tenant_id: uuid.UUID) -> int:
-    """The tenant's webhook requests still queued (`run_requests_queued_webhook`)."""
-    found = await s.execute(
-        select(func.count()).select_from(RunRequest).where(
-            RunRequest.tenant_id == tenant_id, RunRequest.status == "queued", RunRequest.source == SOURCE
-        )
-    )  # fmt: skip
-    return int(found.scalar_one())
+    return int((await s.execute(QUEUED, {"t": tenant_id})).scalar_one())
 
 
 async def match_event(
