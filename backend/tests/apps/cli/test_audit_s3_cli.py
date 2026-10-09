@@ -104,3 +104,18 @@ def test_the_monitor_needs_the_bucket(pg_url, _test_users, monkeypatch, tmp_path
 
 def test_an_anchor_key_names_its_scope_and_sequence() -> None:
     assert anchor_key("p/", "platform", 12) == "p/anchors/platform/00000000000000000012.json"
+
+
+def test_each_s3_client_takes_the_credentials_in_force_when_its_made(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """R2's third attempt: boto3's default session keeps the first credentials it resolves, so an anchor job's
+    put-only credentials leaked into a verify run later in the same process. Each client resolves its own."""
+    from dewpoint.core.config import Settings
+
+    settings = Settings.model_construct(audit_s3_endpoint_url="http://s3.test:9000", audit_s3_region="us-east-1")
+    seen = []
+    for access in ("WRITERKEY", "VERIFIERKEY"):
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", access)
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
+        monkeypatch.delenv("AWS_SESSION_TOKEN", raising=False)
+        seen.append(cli._s3_client(settings)._request_signer._credentials.access_key)
+    assert seen == ["WRITERKEY", "VERIFIERKEY"]

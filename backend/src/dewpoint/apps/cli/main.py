@@ -149,10 +149,13 @@ def _signing_key() -> Ed25519PrivateKey:
 
 def _s3_client(settings: Settings) -> Any:
     """An S3 client with this process's own credentials (AWS's variables or profile): the anchor writer's put-only
-    ones, the verifier's or the monitor's read-only ones (D6)."""
+    ones, the verifier's or the monitor's read-only ones (D6). A session of its own: boto3's default one keeps the
+    first credentials it resolves, which a later command in the same process would otherwise reuse (R2's third
+    attempt: the writer's, on a verify)."""
     import boto3
 
-    return boto3.client("s3", endpoint_url=settings.audit_s3_endpoint_url, region_name=settings.audit_s3_region)
+    session = boto3.session.Session()
+    return session.client("s3", endpoint_url=settings.audit_s3_endpoint_url, region_name=settings.audit_s3_region)
 
 
 def _kept(settings: Settings) -> timedelta:
