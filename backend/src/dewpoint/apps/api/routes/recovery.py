@@ -12,12 +12,13 @@ admin's user id with the change, in its transaction.
   first, then released oldest first, `RELEASE_MAX` at most a request, audited once: never all of them across tenants.
 - **The listings**, across tenants: held items and recovery reasons, as ids, kinds, reasons and times."""
 
+import re
 import uuid
-from datetime import datetime
-from typing import Any
+from datetime import UTC, datetime
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, AwareDatetime, BaseModel, BeforeValidator, Field
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,7 +28,7 @@ from dewpoint.core.config import Settings
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.http import active_session, ensure_fresh_reauth, get_db, get_settings_dep, require_platform_admin
 from dewpoint.core.models.identity import AuthSession, User
-from dewpoint.core.recovery import COMMANDS, EVIDENCE_LIMIT, LOST, RELEASE_MAX, CommandKind, WorkKind
+from dewpoint.core.recovery import AUDITED_IDS, COMMANDS, EVIDENCE_LIMIT, LOST, RELEASE_MAX, CommandKind, WorkKind
 from dewpoint.core.runs.service import sanitize
 from dewpoint.core.tenancy import lifecycle
 from dewpoint.core.tenancy.lifecycle import FENCED
@@ -49,11 +50,25 @@ class ReleaseIn(BaseModel):
     item_id: uuid.UUID
 
 
+_ISO = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}")  # a date and a time: never a bare number, nor a date alone
+
+
+def _text(value: object) -> object:
+    if not isinstance(value, str) or not _ISO.match(value):
+        raise ValueError("an ISO 8601 timestamp with its offset")
+    return value
+
+
+# An ISO 8601 timestamp with an explicit offset, in UTC from then on (the owner's ruling on the M3 checkpoint 2): a
+# naive one, a date or a number is refused
+HeldBefore = Annotated[AwareDatetime, BeforeValidator(_text), AfterValidator(lambda at: at.astimezone(UTC))]
+
+
 class ReleaseManyIn(BaseModel):
     """A tenant's held items of one kind, held before `held_before`: `max` of them at most, oldest first."""
 
     kind: WorkKind
-    held_before: datetime
+    held_before: HeldBefore
     max: int = Field(ge=1, le=RELEASE_MAX)
 
 
@@ -177,7 +192,7 @@ async def release(
 async def held_count(
     tenant_id: uuid.UUID,
     kind: WorkKind,
-    held_before: datetime,
+    held_before: HeldBefore,
     _: User = Depends(require_platform_admin),
     db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict[str, object]:
@@ -200,18 +215,21 @@ async def release_many(
     settings: Settings = Depends(get_settings_dep),
     db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict[str, object]:
-    """A bulk release (the owner's ruling on the M3 checkpoint): bounded by tenant, kind, `held_before` and `max`, never
-    all of them across tenants; audited once, with what it released; what's still held answered."""
+    """A bulk release (the owner's rulings on the M3 checkpoints): bounded by tenant, kind, `held_before` and `max`,
+    never all of them across tenants; audited in its own transaction with the exact items it released, oldest first,
+    `AUDITED_IDS` an entry (the count previewed may have changed meanwhile); what's still held answered."""
     ensure_fresh_reauth(sess, settings)
     await _tenant(db, tenant_id)
-    released = await db.execute(text("SELECT work_failures_release_many(:k, :b, :n)"),
-                                {"k": body.kind, "b": body.held_before, "n": body.max})  # fmt: skip
-    count = int(released.scalar_one())
-    await audit.record(db, tenant_id=tenant_id, actor_id=admin.id, action="work_failure.release_many",
-                       target_type="tenant", target_id=str(tenant_id),
-                       details={"kind": body.kind, "held_before": body.held_before.isoformat(), "max": body.max,
-                                "released": count})  # fmt: skip
-    return {"kind": body.kind, "held_before": body.held_before.isoformat(), "released": count,
+    found = await db.execute(text("SELECT item_id FROM work_failures_release_many(:k, :b, :n)"),
+                             {"k": body.kind, "b": body.held_before, "n": body.max})  # fmt: skip
+    ids = list(map(str, found.scalars().all()))
+    parts = [ids[n : n + AUDITED_IDS] for n in range(0, len(ids), AUDITED_IDS)] or [[]]
+    asked = {"kind": body.kind, "held_before": body.held_before.isoformat(), "max": body.max, "released": len(ids)}
+    for n, part in enumerate(parts, start=1):
+        await audit.record(db, tenant_id=tenant_id, actor_id=admin.id, action="work_failure.release_many",
+                           target_type="tenant", target_id=str(tenant_id),
+                           details=asked | {"part": n, "parts": len(parts), "item_ids": part})  # fmt: skip
+    return {"kind": body.kind, "held_before": body.held_before.isoformat(), "released": len(ids),
             "held": await _held(db, body.kind, body.held_before)}  # fmt: skip
 
 

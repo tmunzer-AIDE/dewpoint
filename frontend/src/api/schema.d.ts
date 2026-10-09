@@ -172,8 +172,9 @@ export interface paths {
         put?: never;
         /**
          * Release Many
-         * @description A bulk release (the owner's ruling on the M3 checkpoint): bounded by tenant, kind, `held_before` and `max`, never
-         *     all of them across tenants; audited once, with what it released; what's still held answered.
+         * @description A bulk release (the owner's rulings on the M3 checkpoints): bounded by tenant, kind, `held_before` and `max`,
+         *     never all of them across tenants; audited in its own transaction with the exact items it released, oldest first,
+         *     `AUDITED_IDS` an entry (the count previewed may have changed meanwhile); what's still held answered.
          */
         post: operations["release_many_api_v1_admin_tenants__tenant_id__held_release_many_post"];
         delete?: never;

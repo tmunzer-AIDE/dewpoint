@@ -327,8 +327,8 @@ Each change is audited with the admin's user id.
 | `GET /api/v1/admin/recovery` | the recovery reasons recorded, across tenants: tenant, reason, item, `since`, `last_seen_at` |
 | `GET /api/v1/admin/held` | the held items, across tenants: tenant, kind of work, item, errors, the last error's type, `held_at` |
 | `POST /api/v1/admin/tenants/{tenant}/held/release` | `{kind, item_id}`: the item's hold for that kind of work ends, and its pass tries it again; another kind's hold stays (`work_failure.release`) |
-| `GET /api/v1/admin/tenants/{tenant}/held/count` | `?kind=…&held_before=…`: how many of the tenant's items of that kind were held before that time |
-| `POST /api/v1/admin/tenants/{tenant}/held/release-many` | `{kind, held_before, max}`: those items' holds end, oldest first, `max` at most (1,000), in one audited change (`work_failure.release_many`, with how many); the answer says how many are still held. Never every kind, or every tenant, at once |
+| `GET /api/v1/admin/tenants/{tenant}/held/count` | `?kind=…&held_before=…`: how many of the tenant's items of that kind were held before that time (an ISO 8601 timestamp with its offset, such as `2026-10-09T08:00:00Z`; a naive one, a date or a number is a 422; answered in UTC) |
+| `POST /api/v1/admin/tenants/{tenant}/held/release-many` | `{kind, held_before, max}`: those items' holds end, oldest first, `max` at most (1,000), in one change audited in its own transaction (`work_failure.release_many`: the exact items released, oldest first, 100 an entry, each entry with the request and how many; the count previewed may have changed meanwhile); the answer says how many it released and how many are still held. `held_before` as for the count. Never every kind, or every tenant, at once |
 | `POST /api/v1/admin/tenants/{tenant}/commands` | `{kind, item_id, evidence, idempotency_key}`: a command, recorded `pending` (202), for the dispatcher's leader to carry out (`operator.command.request`) |
 | `GET /api/v1/admin/tenants/{tenant}/commands/{id}` | the command: `pending`, `applied` or `refused`, with its outcome |
 

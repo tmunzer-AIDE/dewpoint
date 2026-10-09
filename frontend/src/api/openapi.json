@@ -2385,7 +2385,7 @@
     },
     "/api/v1/admin/tenants/{tenant_id}/held/release-many": {
       "post": {
-        "description": "A bulk release (the owner's ruling on the M3 checkpoint): bounded by tenant, kind, `held_before` and `max`, never\nall of them across tenants; audited once, with what it released; what's still held answered.",
+        "description": "A bulk release (the owner's rulings on the M3 checkpoints): bounded by tenant, kind, `held_before` and `max`,\nnever all of them across tenants; audited in its own transaction with the exact items it released, oldest first,\n`AUDITED_IDS` an entry (the count previewed may have changed meanwhile); what's still held answered.",
         "operationId": "release_many_api_v1_admin_tenants__tenant_id__held_release_many_post",
         "parameters": [
           {

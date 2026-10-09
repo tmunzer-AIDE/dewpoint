@@ -304,7 +304,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp SET row_s
   WHERE f.tenant_id = app_tenant_id() AND f.kind = held_kind AND f.held_at IS NOT NULL AND f.held_at < held_before
 $$""",
     """CREATE FUNCTION work_failures_release_many(held_kind text, held_before timestamptz, max_rows integer)
-RETURNS integer
+RETURNS TABLE (item_id uuid)
 LANGUAGE sql SECURITY DEFINER SET search_path = public, pg_temp SET row_security = off AS $$
   WITH gone AS (
     DELETE FROM work_failures f WHERE (f.tenant_id, f.item_id, f.kind) IN (
@@ -312,9 +312,9 @@ LANGUAGE sql SECURITY DEFINER SET search_path = public, pg_temp SET row_security
       WHERE w.tenant_id = app_tenant_id() AND w.kind = held_kind AND w.held_at IS NOT NULL AND w.held_at < held_before
       ORDER BY w.held_at, w.item_id
       LIMIT least(max_rows, 1000))
-    RETURNING 1
+    RETURNING f.item_id, f.held_at
   )
-  SELECT count(*)::integer FROM gone
+  SELECT gone.item_id FROM gone ORDER BY gone.held_at, gone.item_id
 $$""",
     """CREATE FUNCTION work_failures_held(max_rows integer)
 RETURNS TABLE (tenant_id uuid, kind text, item_id uuid, errors integer, last_error text, held_at timestamptz)

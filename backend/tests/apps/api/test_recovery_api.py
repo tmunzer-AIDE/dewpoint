@@ -288,3 +288,57 @@ async def test_a_bulk_release_needs_a_fresh_factor_and_an_active_tenant(app, own
     async with admin:
         erasing = await admin.post(url(tenant, "held/release-many"), json=query)
         assert (erasing.status_code, erasing.json()) == (409, {"error": "tenant_erasing"})
+
+
+async def test_a_bulk_release_audits_the_items_it_released_oldest_first_in_bounded_entries(
+    app, owner_sessionmaker, api_settings, monkeypatch
+) -> None:  # fmt: skip
+    """The owner's ruling on the M3 checkpoint 2: the audit says what happened (the count previewed may change before
+    the release): the exact items released, oldest first, at most `AUDITED_IDS` an entry, in the release's own
+    transaction."""
+    from datetime import UTC, datetime, timedelta
+
+    from dewpoint.apps.api.routes import recovery as routes
+
+    monkeypatch.setattr(routes, "AUDITED_IDS", 2)
+    admin, admin_id = await admin_of(app, owner_sessionmaker, api_settings)
+    tenant, _ = await tenant_of(app, owner_sessionmaker, api_settings)
+    items = [(await aged(owner_sessionmaker, tenant, "cancel", 120 - n))[0] for n in range(5)]  # the first oldest
+    before = (datetime.now(UTC) - timedelta(minutes=60)).isoformat()
+    async with admin:
+        released = await admin.post(url(tenant, "held/release-many"),
+                                    json={"kind": "cancel", "held_before": before, "max": 4})  # fmt: skip
+        assert (released.status_code, released.json()["released"]) == (200, 4)
+    entries = await audited(owner_sessionmaker, "work_failure.release_many")
+    assert [(a, d["released"], d["part"], d["parts"], d["item_ids"]) for a, _, d in entries] == [
+        (admin_id, 4, 1, 2, [str(items[0]), str(items[1])]),
+        (admin_id, 4, 2, 2, [str(items[2]), str(items[3])]),
+    ]
+    async with owner_sessionmaker() as s:
+        assert list((await s.execute(text("select item_id from work_failures"))).scalars()) == [items[4]]
+
+
+async def test_held_before_needs_its_offset_and_is_answered_and_audited_in_utc(
+    app, owner_sessionmaker, api_settings
+) -> None:  # fmt: skip
+    """The owner's ruling on the M3 checkpoint 2: an ISO 8601 timestamp with an explicit offset, normalized to UTC for
+    the selection, the answer and the audit; a naive one, a date or a number is refused."""
+    from datetime import UTC, datetime, timedelta, timezone
+
+    admin, _ = await admin_of(app, owner_sessionmaker, api_settings)
+    tenant, _ = await tenant_of(app, owner_sessionmaker, api_settings)
+    await aged(owner_sessionmaker, tenant, "cancel", 120)
+    before = datetime.now(UTC) - timedelta(minutes=60)
+    utc, local = before.isoformat(), before.astimezone(timezone(timedelta(hours=2))).isoformat()
+    async with admin:
+        for bad in ("2026-10-09T10:00:00", "2026-10-09", 1760000000):
+            counted = await admin.get(url(tenant, "held/count"), params={"kind": "cancel", "held_before": bad})
+            released = await admin.post(url(tenant, "held/release-many"),
+                                        json={"kind": "cancel", "held_before": bad, "max": 1})  # fmt: skip
+            assert (counted.status_code, released.status_code) == (422, 422), bad
+        counted = await admin.get(url(tenant, "held/count"), params={"kind": "cancel", "held_before": local})
+        assert counted.json() == {"kind": "cancel", "held_before": utc, "held": 1}
+        released = await admin.post(url(tenant, "held/release-many"),
+                                    json={"kind": "cancel", "held_before": local, "max": 1})  # fmt: skip
+        assert (released.json()["held_before"], released.json()["released"]) == (utc, 1)
+    assert [d["held_before"] for *_, d in await audited(owner_sessionmaker, "work_failure.release_many")] == [utc]
