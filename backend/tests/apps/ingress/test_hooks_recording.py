@@ -170,6 +170,15 @@ async def test_past_the_deployments_limit_is_429_with_a_wait_from_its_starts(app
     assert await events_of(owner_sessionmaker, endpoint_id) == []
 
 
+def test_a_delivery_that_can_never_fit_the_deployments_limit_is_413_without_a_retry_after() -> None:
+    from dewpoint.apps.ingress.recording import respond
+
+    too_large = respond({"outcome": "over_limit"})
+    assert (too_large.status_code, too_large.body, too_large.headers.get("retry-after")) == (
+        413, b'{"error":"over_limit"}', None,
+    )  # fmt: skip
+
+
 async def test_over_a_retained_cap_is_429_without_a_retry_after(app, owner_sessionmaker) -> None:
     _, endpoint_id = await bearer_endpoint(owner_sessionmaker, retained_events_max=1)
     assert (await _post(app, endpoint_id, '{"n": 1}')).status_code == 200

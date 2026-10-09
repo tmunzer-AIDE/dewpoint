@@ -22,7 +22,9 @@ with synthetic data only. From `backend/`:
   1, 5 and 20: the aggregate drain, each tenant's, what's left, the counters and the admissions;
 - `contention`: recordings across 16 tenants at once, 1, 8 and 32 connections, each a 1 KiB event a call (sealed
   beforehand): calls a second and each call's time, what a row every recording takes would cost (the owner's ruling
-  on 2b-4b's M3 checkpoint 4: measured before a shared admission row is ruled out).
+  on 2b-4b's M3 checkpoint 4: measured before a shared admission row is ruled out, and after). Each concurrency starts
+  with nothing outstanding: the events before it are cancelled, and its counters emptied, so no tenant's share or
+  quota refuses it.
 
 Numbers depend on the machine; record them with it."""
 
@@ -329,6 +331,8 @@ CONTENTION_S = 10.0  # each concurrency's window
 
 
 async def contention(db: Database) -> None:
+    from sqlalchemy import text
+
     from dewpoint.core.db import make_engine, make_sessionmaker
     from tests.apps.dispatcher.inbound import sealed
     from tests.core.ingress.support import RECORD
@@ -337,7 +341,14 @@ async def contention(db: Database) -> None:
     engine = make_engine(db.role_url("dewpoint_ingress"), pool_size=32, max_overflow=0)
     ingress_ = make_sessionmaker(engine)
     results: dict[str, Any] = {}
+    owner = db.sessions()
     for workers in (1, 8, 32):
+        async with owner() as s, s.begin():  # the budget's own triggers release what was outstanding
+            await s.execute(text("update inbound_events set status = 'cancelled', reason = 'user_cancelled', "
+                                 "ended_at = now() where status = 'pending'"))  # fmt: skip
+            for table in ("webhook_endpoints", "tenant_event_counters"):
+                await s.execute(text(f"update {table} set pending_events = 0, pending_bytes = 0, "  # noqa: S608
+                                     "retained_events = 0, retained_bytes = 0"))  # fmt: skip
         stop = time.monotonic() + CONTENTION_S
         times: list[float] = []
 

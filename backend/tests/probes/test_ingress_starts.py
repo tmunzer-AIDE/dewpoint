@@ -49,8 +49,8 @@ CASES = (
     (1, 200, None, None),
     (20, 10, None, None),
     (20, 10, 1_000, None),
-    (20, 6, 1_000, (8.0, 0.5, 30)),
-)  # the last limited: (starts, headroom, wait) give the deployment a 120-request limit, which 6 events of 20 fill
+    (20, 5, 1_000, (8.0, 0.5, 30)),
+)  # the last limited: (starts, headroom, wait) give the deployment a limit of 120, 101 for ingress: 5 events of 20
 DEADLINE_S = float(os.environ.get("DEWPOINT_PROBE_DEADLINE_S", "300"))
 FAST = {  # the endpoint's and the tenant's buckets never refuse: the backlog is recorded at once
     "request_per_s": 1e6, "request_burst": 10**7, "event_per_s": 1e6, "event_burst": 10**7, "byte_per_s": 1e9,

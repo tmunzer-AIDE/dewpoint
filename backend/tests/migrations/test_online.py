@@ -419,6 +419,12 @@ HELD = {  # the table held and how, from which revision; the writes probed meanw
     # 0050's tables (the owner's ruling on the 2b-4b M3 design, rev 2): new, but their keys reference `tenants`
     "tenants, by 0050": ("tenants", "ROW EXCLUSIVE", "0049", ["UPDATE tenants SET status = status WHERE false"],
                          "0050"),
+    # 0050's ingress budget (the owner's ruling on the M3 checkpoint 4): each busy table's column and triggers in steps
+    # of their own (the fresh review 5's M6), behind ingress's and the dispatcher's writers
+    "inbound_events, by 0050": ("inbound_events", "ROW EXCLUSIVE", "0049",
+                                ["UPDATE inbound_events SET attempts = attempts WHERE false"], "0050"),
+    "run_requests, by 0050": ("run_requests", "ROW EXCLUSIVE", "0049",
+                              ["UPDATE run_requests SET attempts = attempts WHERE false"], "0050"),
 }  # fmt: skip
 
 

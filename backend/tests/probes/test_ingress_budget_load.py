@@ -43,15 +43,18 @@ pytestmark = [
     pytest.mark.skipif(not os.environ.get("DEWPOINT_PROBE"), reason="a probe, run by hand (DEWPOINT_PROBE)"),
     pytest.mark.usefixtures("development_deployment"),
 ]
-# 30 starts a second, all of them for ingress, a 4 s wait: a limit of 120 requests outstanding. Endpoints' derived
-# rates (30 over their bindings) stay above what each sends, so the budget alone refuses
+# 30 starts a second, all of them for ingress, a 4 s wait: a limit of 120 requests outstanding, 101 of them for
+# ingress (19 kept for top-ups). Endpoints' derived rates (30 over their bindings) stay above what each sends, so the
+# budget alone refuses
 CAPACITY = (30.0, 1.0, 4)
-# Each tenant: (name, bindings, events a second sent steadily, bursts as (seconds in, events in one delivery))
+# Each tenant: (name, bindings, events a second sent steadily, bursts as (seconds in, events in one delivery)). With
+# the three steady ones at their shares (101 over 4: 25 each), the bursty one finds 26 of room: its bursts of 20 and 24
+# fit, its last, 60, doesn't while they hold theirs
 TENANTS = (
     ("narrow", 1, 8.0, ()),
     ("middle", 5, 2.0, ()),
     ("wide", 10, 1.0, ()),
-    ("bursty", 2, 0.0, ((10.0, 30), (25.0, 30))),
+    ("bursty", 2, 0.0, ((10.0, 10), (20.0, 12), (30.0, 30))),
 )
 TRAFFIC_S = float(os.environ.get("DEWPOINT_PROBE_TRAFFIC_S", "40"))
 DRAIN_S = float(os.environ.get("DEWPOINT_PROBE_DRAIN_S", "120"))

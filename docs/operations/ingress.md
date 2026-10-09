@@ -117,6 +117,7 @@ stored: only keyed digests of them.
 | 408 | the body took longer than 10 s |
 | 409 `event_id_reused` | an id reused for other content |
 | 413 `too_large` | past the endpoint's body limit (1 MiB by default, at most 5 MiB) or the global 5 MiB |
+| 413 `over_limit`, no `Retry-After` | the delivery's credit is more than ingress may ever hold ([below](#the-ingress-capacity)): no retry helps it; send fewer events at once |
 | 429 `rate_limited`, `Retry-After` | short of a rate budget, or too many failures from this address |
 | 429 `quota_exceeded`, `Retry-After: 30` | the endpoint's or the tenant's pending backlog is full |
 | 429 `backlog_full`, `Retry-After` | the deployment's outstanding work is at its limit, or the tenant at its share of it ([below](#the-ingress-capacity)); 1 to 60 s, or 30 s while the capacity is unset |
@@ -220,21 +221,25 @@ lower stays, the bursts stay as configured, and a tenant's rate stays as configu
 was; `--unset` unsets all three.
 
 **The deployment's outstanding-work limit.** With all three set, the whole deployment holds at most starts × headroom
-× wait requests' worth of webhook work outstanding (never less than 20, an endpoint's most bindings), shared by every
-tenant (2b-4b M3):
+× wait requests' worth of webhook work outstanding (never less than 40), shared by every tenant (2b-4b M3):
 
 - **What counts.** A pending event counts its credit: its endpoint's enabled bindings when it was accepted, at least 1.
   A webhook request counts 1 while it's `queued` or `starting`. Nothing else does: manual, scheduled and re-run starts
   use what the headroom leaves.
-- **Admission, at ingress.** A delivery is accepted only if its new events' credit fits the limit's room and, for a
-  tenant with work outstanding already, its share: the limit divided by the tenants with work outstanding, at most
-  half of it. A tenant with nothing outstanding may use the room whatever its share, so a delivery bigger than a share
-  still gets in while the deployment has room. Otherwise the whole delivery is refused, 429 `backlog_full`, and nothing
-  is stored; `Retry-After` is how long the budget's starts take to free what's missing (1 to 60 s), or 30 s while the
-  capacity is unset. One database row holds the deployment's count, locked as each delivery is admitted, so deliveries
-  at once, from any tenants and any ingress process, never pass the limit.
+- **Ingress's room.** Ingress fills the limit but 19, an event's most bindings but the one its credit holds: those
+  are kept for events whose bindings grew since they were accepted, so they're never starved behind new deliveries.
+- **Admission, at ingress.** A delivery is accepted only if its new events' credit fits ingress's room and, for a
+  tenant with work outstanding already, its share: the room divided by the tenants with work outstanding and one more
+  (half of it when the tenant is alone). Keeping one share aside means a tenant with nothing outstanding always finds
+  room once the others are at their shares, and it may use the room whatever its share, so a delivery bigger than a
+  share still gets in while the deployment has room. Otherwise the whole delivery is refused, 429 `backlog_full`, and
+  nothing is stored; `Retry-After` is how long the budget's starts take to free what's missing (1 to 60 s), or 30 s
+  while the capacity is unset. A delivery worth more than the room itself could never fit: 413 `over_limit`. One
+  database row holds the deployment's count, locked as each delivery is admitted, so deliveries at once, from any
+  tenants and any ingress process, never pass the limit.
 - **Matching.** An event's requests take its credit. Bindings enabled since it was accepted need the limit's room for
-  the difference: without it the event waits, as above. Bindings disabled since give back what they held.
+  the difference (what's kept from ingress holds one event's): without it the event waits, as above. Bindings disabled
+  since give back what they held.
 - **Release.** An event leaving `pending` (matched, unmatched, dead, cancelled) or deleted gives back its credit; a
   request leaving `queued` or `starting` (started, cancelled, dead) or deleted gives back 1; a tenant's erasure gives
   back all it held. The database counts each as the change commits, whatever code makes it.

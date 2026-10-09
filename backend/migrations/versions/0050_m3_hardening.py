@@ -12,10 +12,15 @@
   queued webhook requests may stand for, each checked, none set by default, set only through
   `set_ingress_capacity()`, the API's for a platform admin (D11, the ruling on checkpoint 3; audited by its caller),
   which keeps it whole while production ingress is enabled. Once the starts and the headroom are set,
-  `record_inbound_events()` (derived from 0039's text, as 0039 derives it from 0032's) holds a tenant's events to their
-  product and an endpoint's to that divided by its enabled bindings, a lower configured rate staying; the matcher holds
-  a tenant's queued webhook requests to the cap they make with the wait (an index of those requests, built
-  concurrently). Unset, the configured rates and a development-only cap.
+  `record_inbound_events()` (derived from 0039's text, as 0039 derives it from 0032's) holds an endpoint's events to
+  their product divided by its enabled bindings, a lower configured rate staying.
+- **The deployment's ingress budget** (the owner's ruling on the M3 checkpoint 4): one limit on the webhook work
+  outstanding, the three values' product (at least 40; 50,000, development-only, until they're all set). A pending
+  event counts its credit (its endpoint's enabled bindings when accepted), a webhook request queued or starting 1.
+  `record_inbound_events()` admits a delivery under the budget's row within ingress's room (the limit but what's kept
+  for top-ups) and, for a tenant with work outstanding, its share of it; else `backlog_full`, nothing stored, or
+  `over_limit` for one that could never fit. A match's requests take its event's credit, past it only within the
+  limit. Deferred triggers count every request inserted and release every way out, whoever writes the row.
 - **A tenant's next due request** (the owner's ruling 1 on the M3 checkpoint): `dispatch_next(tenants)`, each listed
   tenant's oldest due request as `dispatch_candidates` picks it, for a cycle's further rounds. Ids and ordering only.
 - **Bounded retry and recovery** (D10(1), the owner's rulings on the M3 design, rev 2), three tables of a tenant's:
@@ -248,7 +253,7 @@ def _recorder_0039() -> str:
 RATES = {  # 0039's text: what it reads, how it refills and waits, and what it admits (the owner's rulings on the M3
     # checkpoints 2 and 4): an endpoint's event rate derived once the capacity's set; every delivery within the budget
     "    v_wait double precision;\n": "    v_wait double precision;\n    v_budget double precision;\n"
-    "    v_fanout integer;\n    v_event_rate double precision;\n    v_short bigint;\n",
+    "    v_fanout integer;\n    v_event_rate double precision;\n    v_weight bigint;\n    v_short bigint;\n",
     "    SELECT environment INTO v_environment FROM public.platform_settings WHERE id = 1;\n":
     "    SELECT environment, ingress_starts_per_s * ingress_headroom INTO v_environment, v_budget\n"
     "      FROM public.platform_settings WHERE id = 1;\n",
@@ -270,7 +275,11 @@ RATES = {  # 0039's text: what it reads, how it refills and waits, and what it a
     "    -- The deployment's budget: the new events' credit admitted, or nothing stored (the owner's ruling on the M3\n"
     "    -- checkpoint 4)\n"
     "    IF cardinality(v_new) > 0 THEN\n"
-    "        v_short := public.ingress_admit(v_tenant, cardinality(v_new)::bigint * v_fanout, true);\n"
+    "        v_weight := cardinality(v_new)::bigint * v_fanout;\n"
+    "        IF v_weight > public.ingress_room() THEN  -- it could never fit: no retry helps it\n"
+    "            RETURN jsonb_build_object('outcome', 'over_limit');\n"
+    "        END IF;\n"
+    "        v_short := public.ingress_admit(v_tenant, v_weight);\n"
     "        IF v_short > 0 THEN\n"
     "            RETURN jsonb_build_object('outcome', 'backlog_full', 'retry_after', CASE WHEN v_budget IS NULL THEN 30\n"
     "                ELSE greatest(1, least(60, ceil(v_short / v_budget)))::integer END);\n"
@@ -321,13 +330,21 @@ BUDGET = [
 ]
 CREDIT = "ALTER TABLE inbound_events ADD COLUMN credit smallint"  # none before: what they owe is nothing
 DEV_LIMIT = 50_000  # the deployment's outstanding work at most, until its capacity's whole: development-only
+MAX_BINDINGS = 20  # an endpoint's most (core/ingress/filters.py), as of this migration
 DEFINER = "SECURITY DEFINER SET search_path = public, pg_temp"
 CREDITED = [
     f"""CREATE FUNCTION ingress_limit() RETURNS bigint LANGUAGE sql STABLE {DEFINER} AS $$
   SELECT CASE WHEN p.ingress_starts_per_s IS NULL OR p.ingress_headroom IS NULL OR p.ingress_queue_wait_s IS NULL
               THEN {DEV_LIMIT}::bigint
-              ELSE greatest(20, floor(p.ingress_starts_per_s * p.ingress_headroom * p.ingress_queue_wait_s))::bigint END
+              ELSE greatest({2 * MAX_BINDINGS}, floor(p.ingress_starts_per_s * p.ingress_headroom
+                                                      * p.ingress_queue_wait_s))::bigint END
     FROM platform_settings p WHERE p.id = 1
+$$""",
+    # What ingress may fill: the limit but what's kept for top-ups (an event's most bindings but the one its credit
+    # holds), so an event whose bindings grew since it was accepted is never starved behind deliveries (the fresh
+    # review 5's I2); at least an event's most bindings, with the limit's floor
+    f"""CREATE FUNCTION ingress_room() RETURNS bigint LANGUAGE sql STABLE {DEFINER} AS $$
+  SELECT ingress_limit() - {MAX_BINDINGS - 1}
 $$""",
     # A tenant's outstanding work moved by `delta`, and the deployment's with it, never below nothing; a tenant whose
     # row is gone (its counters erased took what it held with them) moves nothing
@@ -360,16 +377,17 @@ BEGIN
      WHERE id = 1;
 END
 $$""",
-    # `weight` more for a tenant, under the budget's row: within the limit, and with `share`, within the tenant's share
-    # (the limit over the tenants with work outstanding, at most half) unless it has none. 0 when admitted, else how
-    # much past
-    f"""CREATE FUNCTION ingress_admit(p_tenant uuid, p_weight bigint, p_share boolean) RETURNS bigint
+    # `weight` more for a tenant, under the budget's row: within ingress's room, and for a tenant with work outstanding,
+    # within its share, the room over the tenants with work outstanding and one more, so that one more always finds
+    # room once they're at their shares (the load probe's finding; at most half when it's alone). 0 when admitted, else
+    # how much past
+    f"""CREATE FUNCTION ingress_admit(p_tenant uuid, p_weight bigint) RETURNS bigint
 LANGUAGE plpgsql {DEFINER} AS $$
 DECLARE
     v_mine bigint;
     v_all bigint;
     v_active integer;
-    v_limit bigint;
+    v_room bigint;
     v_share bigint;
 BEGIN
     SELECT outstanding, active INTO v_all, v_active FROM ingress_budget WHERE id = 1 FOR UPDATE;
@@ -377,12 +395,12 @@ BEGIN
         RAISE EXCEPTION 'ingress_budget_missing' USING ERRCODE = 'DPB01';
     END IF;
     SELECT coalesce((SELECT outstanding FROM ingress_outstanding WHERE tenant_id = p_tenant), 0) INTO v_mine;
-    v_limit := ingress_limit();
-    IF v_all + p_weight > v_limit THEN
-        RETURN v_all + p_weight - v_limit;
+    v_room := ingress_room();
+    IF v_all + p_weight > v_room THEN
+        RETURN v_all + p_weight - v_room;
     END IF;
-    IF p_share AND v_mine > 0 THEN
-        v_share := floor(v_limit * least(1.0 / greatest(v_active, 1), 0.5));
+    IF v_mine > 0 THEN
+        v_share := floor(v_room::numeric / (v_active + 1));
         IF v_mine + p_weight > v_share THEN
             RETURN v_mine + p_weight - v_share;
         END IF;
@@ -415,7 +433,7 @@ LANGUAGE sql STABLE {DEFINER} AS $$
          (SELECT coalesce(sum(e.credit), 0) FROM inbound_events e WHERE e.status = 'pending')::bigint
          + (SELECT count(*) FROM run_requests r WHERE r.source = 'webhook' AND r.status IN ('queued', 'starting'))
 $$""",
-    "REVOKE ALL ON FUNCTION ingress_limit(), ingress_credit(uuid, bigint), ingress_admit(uuid, bigint, boolean), "
+    "REVOKE ALL ON FUNCTION ingress_limit(), ingress_room(), ingress_credit(uuid, bigint), ingress_admit(uuid, bigint), "
     "ingress_matched(bigint, bigint), ingress_budget_drift() FROM PUBLIC",
     "GRANT EXECUTE ON FUNCTION ingress_matched(bigint, bigint), ingress_budget_drift() TO dewpoint_dispatch",
     "GRANT EXECUTE ON FUNCTION ingress_limit() TO dewpoint_api",  # the platform admin's API shows it
@@ -455,11 +473,25 @@ END
 $$""",
     "REVOKE ALL ON FUNCTION ingress_event_settled(), ingress_request_queued(), ingress_request_settled(), "
     "ingress_tenant_gone() FROM PUBLIC",
+    "CREATE TRIGGER ingress_outstanding_fence BEFORE INSERT ON ingress_outstanding FOR EACH ROW "
+    "EXECUTE FUNCTION tenant_insert_fence()",
+]
+# Each table's triggers a step of its own (one table in use a step). A tenant's counters deleted first: the rows the
+# last step counts don't exist yet, and an erasure deletes counters only once its tenant's requests are cancelled
+GONE = [
+    "CREATE CONSTRAINT TRIGGER tenant_event_counters_credit_gone AFTER DELETE ON tenant_event_counters "
+    "DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION ingress_tenant_gone()",
+]
+# No event before had a credit: nothing to count, their releases nothing until the recorder gives them one
+SETTLED_EVENTS = [
     "CREATE CONSTRAINT TRIGGER inbound_events_credit_settled AFTER UPDATE OF status ON inbound_events "
     "DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (OLD.status = 'pending' AND NEW.status <> 'pending') "
     "EXECUTE FUNCTION ingress_event_settled()",
     "CREATE CONSTRAINT TRIGGER inbound_events_credit_deleted AFTER DELETE ON inbound_events "
     "DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (OLD.status = 'pending') EXECUTE FUNCTION ingress_event_settled()",
+]
+# The requests' triggers and what's outstanding already, counted in their transaction (their lock holds every write)
+COUNTED = [
     "CREATE CONSTRAINT TRIGGER run_requests_credit_queued AFTER INSERT ON run_requests "
     f"DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.source = 'webhook' AND NEW.status IN {HOLDING}) "
     "EXECUTE FUNCTION ingress_request_queued()",
@@ -469,12 +501,6 @@ $$""",
     "CREATE CONSTRAINT TRIGGER run_requests_credit_deleted AFTER DELETE ON run_requests "
     f"DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (OLD.source = 'webhook' AND OLD.status IN {HOLDING}) "
     "EXECUTE FUNCTION ingress_request_settled()",
-    "CREATE CONSTRAINT TRIGGER tenant_event_counters_credit_gone AFTER DELETE ON tenant_event_counters "
-    "DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION ingress_tenant_gone()",
-    "CREATE TRIGGER ingress_outstanding_fence BEFORE INSERT ON ingress_outstanding FOR EACH ROW "
-    "EXECUTE FUNCTION tenant_insert_fence()",
-    # What's outstanding already, counted in the triggers' own transaction (their locks hold every write still): each
-    # tenant's webhook requests queued or starting (no event before had a credit)
     f"""INSERT INTO ingress_outstanding (tenant_id, outstanding)
   SELECT r.tenant_id, count(*) FROM run_requests r WHERE r.source = 'webhook' AND r.status IN {HOLDING}
    GROUP BY r.tenant_id""",
@@ -735,9 +761,14 @@ def upgrade() -> None:
         step(conn, "0050 inbound_events.credit", CREDIT, done=exists("column", "credit", "inbound_events"))
         step(conn, "0050 the budget's functions", *ungranted(*CREDITED),
              done=exists("function", "ingress_budget_drift()"))  # fmt: skip
-        # its triggers and its first counts in one transaction: the triggers' locks hold the three tables' writes
         step(conn, "0050 the budget's releases", *RELEASES,
+             done=exists("trigger", "ingress_outstanding_fence", "ingress_outstanding"))  # fmt: skip
+        step(conn, "0050 tenant_event_counters releases", *GONE,
              done=exists("trigger", "tenant_event_counters_credit_gone", "tenant_event_counters"))  # fmt: skip
+        step(conn, "0050 inbound_events releases", *SETTLED_EVENTS,
+             done=exists("trigger", "inbound_events_credit_deleted", "inbound_events"))  # fmt: skip
+        step(conn, "0050 run_requests counted", *COUNTED,
+             done=exists("trigger", "run_requests_credit_deleted", "run_requests"))  # fmt: skip
         step(conn, "0050 event rates and admission from the ingress budget", _rated())
         step(conn, "0050 grants", *grants(*CURSOR), *grants(*CLEAR), *grants(*OPERATOR), *grants(*SETTLED),
              *grants(*NEXT), *grants(*SET_CAPACITY), *grants(*CREDITED), *BUDGET_READ, *ACCESS)  # fmt: skip
@@ -759,8 +790,8 @@ def downgrade() -> None:
         op.execute(f"DROP TRIGGER {trigger} ON {table}")
     op.execute("DROP FUNCTION ingress_event_settled(), ingress_request_queued(), ingress_request_settled(), "
                "ingress_tenant_gone(), "
-               "ingress_budget_drift(), ingress_matched(bigint, bigint), ingress_admit(uuid, bigint, boolean), "
-               "ingress_credit(uuid, bigint), ingress_limit()")  # fmt: skip
+               "ingress_budget_drift(), ingress_matched(bigint, bigint), ingress_admit(uuid, bigint), "
+               "ingress_credit(uuid, bigint), ingress_room(), ingress_limit()")  # fmt: skip
     op.execute("ALTER TABLE inbound_events DROP COLUMN credit")
     op.drop_table("ingress_outstanding")
     op.drop_table("ingress_budget")
