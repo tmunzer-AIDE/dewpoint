@@ -1327,3 +1327,14 @@ M56. **A formula past the engine's limit is held whole, never cut** (the paste i
     draft, held and counted, never cut".
 M57. **Clearing an optional list or map lands on its Add**, the one control left: "lands on Add after a map is
     cleared", "lands on Add after a list is cleared".
+
+### Review sign-off at c30d74e (2026-10-09, pasted)
+
+A pasted review signed off 4c-1 at c30d74e on the review side: both blockers corrected (its five failing cases pass,
+with two more: the exact 16,384/16,385-character boundary, and export refusing an oversized held formula while keeping
+its whole text); 710 tests, typecheck, lint, the API check and the build pass independently; the corrected zip names the
+new checkpoint and its 109 screenshots match the reviewed ones byte for byte. The browser gate and CodeQL stay as the
+implementer reported them. The eight deferred minors may stay tracked for the catalog as shipped, with one condition:
+the `options` collision is latent text loss, to fix before any type with `config.options` is enabled. The earlier
+unidentified suite failure stays unexplained. The owner's adoption of rulings 96 to 113 and the push and PR stay the
+owner's decisions; the review recommends keeping the isolated stack through CI and the merge.
