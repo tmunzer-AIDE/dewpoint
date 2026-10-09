@@ -332,6 +332,7 @@ function Editor({
     for (const id of ids) next.delete(id);
     setRecord(next);
   };
+  const [renamed, setRenamed] = useState<{ doc: GraphDoc; text: string } | null>(null); // a rename's word on formulas, true of the draft it made (ruling 11)
   const typeOf = (n: GraphNode) => typeMap.get(n.type);
   const [side, setSide] = useState<Side>(null); // the right column's one panel
   // Where focus lands when what held it goes: a panel's Close, or a confirmation whose button an action removed or
@@ -734,6 +735,7 @@ function Editor({
       : result.dropped.length > 0 ? (writeDraft(result, { release: [id] }) ?? droppedWhy(result.dropped, result.doc))
       : writeDraft(result, { release: [id], said: result.said });  // prettier-ignore
     if (why !== null) keep({ ...u, why });
+    else if (!("problem" in result) && result.note !== null) setRenamed({ doc: result.doc, text: result.note });
     return why;
   }
 
@@ -1169,6 +1171,7 @@ function Editor({
             editable={editable}
             adds={editable ? addsOf(doc, open, portMap.get(idKey(open.id)) ?? []) : []}
             actions={viewing ? VERSION_ACTIONS : actionsFor(open.id)}
+            note={renamed !== null && renamed.doc === doc ? renamed.text : null}
             onAdd={onItem}
             onDelete={() => setAsking({ kind: "node", id: open.id })}
             onConnectPort={(port) => setConnecting({ node: open.id, port })}

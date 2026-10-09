@@ -1540,3 +1540,60 @@ it("asks before errors stop going to a port", async () => {
   expect(drawn.at(-1)!.doc.edges).toEqual([]);
   expect(drawn.at(-1)!.doc.nodes![0]).not.toHaveProperty("options");
 });
+
+/** `fetch`, read by a formula in `use` and a reference in `copy`. */
+const readers = () => ({
+  graph_format: 1,
+  nodes: [
+    { id: "id-fetch", key: "fetch", type: "flow.transform@1", position: { x: 0, y: 140 } },
+    { id: "id-use", key: "use", type: "flow.if@1", config: { condition: formula("steps.fetch.output.n > 1") }, position: { x: 0, y: 280 } },
+    { id: "id-copy", key: "copy", type: "flow.transform@1", config: { fields: { x: { $value: { kind: "ref", path: "steps.fetch.output" } } } }, position: { x: 0, y: 420 } },
+  ],
+  edges: [],
+});  // prettier-ignore
+
+async function openFetch() {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, IF]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: readers() }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "fetch" }));
+  await userEvent.click(screen.getByRole("button", { name: "Rename" }));
+}
+
+async function renameTo(key: string) {
+  const field = screen.getByLabelText("Key");
+  await userEvent.clear(field);
+  await userEvent.type(field, `${key}{Enter}`);
+}
+
+it("says which formulas mention the old key, until the next edit", async () => {
+  await openFetch();
+  await renameTo("load");
+  const heading = screen.getByRole("heading", { name: "load" });
+  await vi.waitFor(() => expect(document.activeElement).toBe(heading));
+  expect(screen.getByText("1 formula mentions fetch and keeps its text: check it.")).toBeTruthy();
+  expect(stepConfig("copy")).toEqual({ fields: { x: { $value: { kind: "ref", path: "steps.load.output" } } } });
+  await userEvent.keyboard("{Control>}z{/Control}"); // one step: the key and its references
+  expect(stepConfig("copy")).toEqual({ fields: { x: { $value: { kind: "ref", path: "steps.fetch.output" } } } });
+  expect(screen.getByRole("heading", { name: "fetch" })).toBeTruthy();
+  expect(screen.queryByText(/mentions fetch/)).toBeNull(); // said only while it's true of the draft
+});
+
+it("refuses a key another step has, and keeps its own", async () => {
+  await openFetch();
+  await renameTo("use");
+  expect(screen.getByText("Another step is already called use.")).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "fetch" })).toBeTruthy();
+});
+
+it("disables an open rename when the draft can't change, and never says it renamed", async () => {
+  answers.set(`PUT ${BASE}/draft`, () => json({ error: "draft_conflict" }, 409));
+  await openFetch();
+  await userEvent.type(screen.getByLabelText("Key"), "_v2"); // typed, not applied
+  await userEvent.click(screen.getByRole("button", { name: "Move fetch right" })); // an edit, whose save conflicts
+  await vi.waitFor(() => expect(screen.getByLabelText<HTMLInputElement>("Key").disabled).toBe(true), { timeout: 3000 });
+  expect(screen.getByRole<HTMLButtonElement>("button", { name: "Rename" }).disabled).toBe(true);
+  expect(screen.getByLabelText<HTMLInputElement>("Key").value).toBe("fetch_v2"); // kept, never lost
+  expect(screen.getByRole("heading", { name: "fetch" })).toBeTruthy();
+  expect(screen.queryByText(/^Renamed/)).toBeNull();
+});

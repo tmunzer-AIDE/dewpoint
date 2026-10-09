@@ -14,6 +14,7 @@ import { SIDE } from "../side";
 import { DrawerContext, problemsAt, segment, type DrawerActions } from "./context";
 import { ErrorHandling, chipText } from "./ErrorHandling";
 import { FieldView } from "./FieldView";
+import { KeyField } from "./KeyField";
 
 const EFFECTS: Record<NodeType["side_effect"], string> = {
   none: "Changes nothing",
@@ -42,12 +43,12 @@ const counted = (problems: Diagnostic[], fields: FieldSpec[]) =>
 const tabLabel = (label: string, n: number) => (n === 0 ? label : `${label} · ${n} ${n === 1 ? "problem" : "problems"}`);
 
 export function StepDrawer({
-  node, type, tenantId, workflowId, ports, problems, expressions, editable, adds, actions,
+  node, type, tenantId, workflowId, ports, problems, expressions, editable, adds, actions, note,
   onAdd, onDelete, onConnectPort, onPlace, onNudge, onClose,
 }: {
   node: GraphNode; type: NodeType | undefined; tenantId: string; workflowId: string; ports: string[];
   problems: Diagnostic[] | null; expressions: Expression[]; editable: boolean; adds: { label: string; action: ItemAction }[];
-  actions: DrawerActions; onAdd: (action: ItemAction) => void; onDelete: () => void; onConnectPort: (port: string) => void;
+  actions: DrawerActions; note: string | null; onAdd: (action: ItemAction) => void; onDelete: () => void; onConnectPort: (port: string) => void;
   onPlace: () => void; onNudge: (key: Nudge) => void; onClose: () => void;
 }) {  // prettier-ignore
   const heading = useRef<HTMLHeadingElement>(null);
@@ -78,6 +79,8 @@ export function StepDrawer({
             <h2 id="step-drawer-title" ref={heading} tabIndex={-1} className="truncate font-mono text-body-lg font-semibold">
               {node.key}
             </h2>
+            <KeyField onRenamed={() => requestAnimationFrame(() => heading.current?.focus())} />
+            {note !== null && <p role="status" className="text-small">{note}</p>}
             <p className="text-small text-muted">{type ? `${type.title} · ${type.ref}` : `Unknown step type ${node.type}`}</p>
             {type && (
               <p className="text-small text-muted">
