@@ -100,11 +100,12 @@ def explain(e: ValidationError) -> str:  # noqa: PLR0911, PLR0912 - one sentence
         )
     if k == "dependentRequired":
         present = e.instance.keys() if isinstance(e.instance, Mapping) else ()
+        pairs = []  # every present property missing some of its dependencies, not only the first (the owner's ruling)
         for name, needs in v.items():
             missing = [n for n in needs if n not in present]
             if name in present and missing:
-                return f"Needs {_names(missing)} beside `{name}`."
-        return "Needs a property its schema asks for."
+                pairs.append(f"{_names(missing)} beside `{name}`")
+        return f"Needs {'; '.join(pairs)}." if pairs else "Needs a property its schema asks for."
     if k in ("anyOf", "oneOf"):
         # oneOf also fails when the value matches more than one form: then no form's own errors are kept.
         if k == "oneOf" and not e.context:
