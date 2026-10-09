@@ -1925,3 +1925,8 @@ shaped it: technical recommendations only.
   hashes don't; over the whole OAS, 602 of 1,160 operation ids and path value names. Siblings read as their ids do:
   "Count org site mxedge events" beside "Search org Mist Edge events".
 - Not run: the full suite. Awaiting the owner: review of the full title diff, sign-off of this ruling, push and PR.
+- A technical review of a679340d and 5477ad7f (pasted by the owner, 2026-10-09): no blocking findings; the manifest
+  comparison regenerated (131 node titles, 270 field titles, no other difference, the 294 contract hashes unchanged);
+  across the OAS only the two documented corrections change a title's letters; the mxedge / "Mist Edge" siblings and
+  the compound field titles ("Nacrule ID") are naming choices. Technical closure only: no ruling sign-off or push
+  authorization.
