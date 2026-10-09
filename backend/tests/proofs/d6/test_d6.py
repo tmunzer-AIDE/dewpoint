@@ -226,8 +226,8 @@ def test_d6_2_deleting_the_version_is_refused_to_the_writer_and_to_root(pg_url, 
 
 def test_d6_3_shortening_or_changing_the_lock_is_refused(pg_url, _test_users, monkeypatch, lab: Lab) -> None:
     """Root's request to shorten the lock, or to turn it into governance mode, is refused, and the version's lock is
-    unchanged after. The control: each request, the same shape, takes on an unlocked version, so the lock, not the
-    request, refuses it. The codes are recorded."""
+    unchanged after. The control: each request, the same shape and the same headers (the owner's ruling), takes on
+    an unlocked version, so the lock, not the request, refuses it. The codes are recorded."""
     asyncio.run(_seed(_url_for(pg_url, "dewpoint_api")))
     prefix = _prefix()
     _anchor(monkeypatch, pg_url, lab, prefix)
@@ -242,8 +242,9 @@ def test_d6_3_shortening_or_changing_the_lock_is_refused(pg_url, _test_users, mo
     for name, retention in changes.items():
         unlocked_key = f"{prefix}control/{name}-{uuid.uuid4().hex}"
         unlocked = lab.root.put_object(Bucket=UNLOCKED_BUCKET, Key=unlocked_key, Body=b"{}")["VersionId"]
+        # the control: the same request, headers included (the governance bypass), takes on an unlocked version
         lab.root.put_object_retention(Bucket=UNLOCKED_BUCKET, Key=unlocked_key, VersionId=unlocked,
-                                      Retention=retention)  # fmt: skip  # the control: it takes
+                                      Retention=retention, BypassGovernanceRetention=True)  # fmt: skip
         took = lab.root.get_object_retention(Bucket=UNLOCKED_BUCKET, Key=unlocked_key, VersionId=unlocked)
         assert took["Retention"]["Mode"] == retention["Mode"]
         refusals[name] = _refusal(lambda r=retention: lab.root.put_object_retention(  # type: ignore[misc]

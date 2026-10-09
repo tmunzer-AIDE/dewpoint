@@ -446,7 +446,8 @@ def test_d12_3_nexus_routes_are_closed(server: Server) -> None:
         status, _ = _http(server, "POST", path, {})
         record({"environment": f"d12-{server.config}", "nexus_route": name, "status": status,
                 "expected_from_the_source": unreachable, "reaches_the_authorizer": False})  # fmt: skip
-        assert status >= 400, (name, status)  # refused before the authorizer: its exact code is recorded
+        # refused before the authorizer: a 4xx (its exact code recorded); a 5xx is a server fault, never "closed"
+        assert 400 <= status < 500, (name, status)
 
 
 # ---- D12.4 ----------------------------------------------------------------------------------------------------------
