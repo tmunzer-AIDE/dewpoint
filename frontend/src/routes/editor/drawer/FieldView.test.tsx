@@ -472,3 +472,57 @@ it("shows Edit as JSON pressed while it's on, by its weight and fill (the owner'
   await userEvent.click(toggle());
   expect(toggle().getAttribute("aria-pressed")).toBe("true");
 });
+
+// The final review: focus after a field's own actions; a reference in a sensitive field; a blank list item.
+
+it("keeps focus at the field after its Discard or its Clear", async () => {
+  showFields(PLAIN, { config: { count: 5 } });
+  const count = () => screen.getByLabelText<HTMLInputElement>("Count");
+  await userEvent.type(count(), "x"); // "5x", held
+  await userEvent.click(screen.getByRole("button", { name: "Discard the edit to Count" }));
+  await vi.waitFor(() => expect(document.activeElement).toBe(count()));
+  await userEvent.click(screen.getByRole("button", { name: "Clear Count" }));
+  await vi.waitFor(() => expect(document.activeElement).toBe(count()));
+});
+
+it("keeps focus at the field after Apply here", async () => {
+  const { config, replace } = showFields(PLAIN, { config: { count: 5 } });
+  const count = () => screen.getByLabelText<HTMLInputElement>("Count");
+  await userEvent.type(count(), "x"); // "5x", held
+  replace({ count: 7 }); // an undo under it: stale
+  await userEvent.clear(count());
+  await userEvent.type(count(), "9"); // still the stale edit's text
+  await userEvent.click(screen.getByRole("button", { name: "Apply here: Count" }));
+  expect(config()).toEqual({ count: 9 });
+  await vi.waitFor(() => expect(document.activeElement).toBe(count()));
+});
+
+it("gives focus to the new control after a reference is replaced", async () => {
+  showFields(PLAIN, { config: { name: { $value: { kind: "ref", path: "steps.fetch.output.name" } } } });
+  await userEvent.click(screen.getByRole("button", { name: "Replace with a formula" }));
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Name")));
+  expect(document.activeElement?.tagName).toBe("TEXTAREA");
+});
+
+it("gives focus to the formula after a sensitive field's fixed value is replaced", async () => {
+  showFields(REMOTE, { config: { token: "s3cr3t-value" } });
+  await userEvent.click(screen.getByRole("button", { name: "Replace with a formula" }));
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Token")));
+});
+
+it("shows a reference in a sensitive field as a reference, never as a fixed value to clear", () => {
+  showFields(REMOTE, { config: { token: { $value: { kind: "ref", path: "trigger.input.token" } } } });
+  expect(screen.getByLabelText("Token").textContent).toBe("trigger.input.token");
+  expect(screen.queryByText(/A fixed value is written here/)).toBeNull();
+  expect(screen.queryByRole("button", { name: "Clear it" })).toBeNull();
+});
+
+it("keeps an emptied list item blank without calling it missing", async () => {
+  const { config } = showFields(REMOTE, { config: { tags: ["a", "b"] } });
+  const first = screen.getByLabelText<HTMLInputElement>("Tags, item 1");
+  expect(first.getAttribute("aria-required")).not.toBe("true"); // an item is never required on its own
+  await userEvent.clear(first);
+  expect(config().tags).toEqual(["", "b"]); // blank, in its place
+  expect(screen.queryByText("Required")).toBeNull();
+  expect(first.getAttribute("aria-invalid")).toBe("false");
+});

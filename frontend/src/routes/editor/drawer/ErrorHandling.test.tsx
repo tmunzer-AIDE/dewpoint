@@ -51,3 +51,11 @@ it("keeps a limit a refused write turned away, with its reason", async () => {
   expect(step()).not.toHaveProperty("options");
   expect(held().map((u) => [u.kind, u.text])).toEqual([["limit", "4"]]);
 });
+
+it("keeps focus at a limit after its Discard (the final review)", async () => {
+  showFields(DELAY, {}, <ErrorHandling />);
+  const attempts = () => screen.getByLabelText<HTMLInputElement>("Attempts");
+  await userEvent.type(attempts(), "25"); // "25" held: past 20
+  await userEvent.click(screen.getByRole("button", { name: "Discard the edit to Attempts" }));
+  await vi.waitFor(() => expect(document.activeElement).toBe(attempts()));
+});

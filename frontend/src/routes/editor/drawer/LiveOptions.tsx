@@ -96,7 +96,7 @@ export function OptionsControl({ spec, value, literal, id, describedBy, invalid,
       <div className="flex min-w-0 gap-2">
         <input
           id={id} type="text" value={text} disabled={disabled} spellCheck={false}
-          aria-describedby={describedBy} aria-invalid={invalid} aria-required={spec.required}
+          aria-describedby={describedBy} aria-invalid={invalid} aria-required={spec.required && !spec.entry}
           onChange={(e) => {
             const next = e.target.value;
             const why = onChange(next === "" ? undefined : next, true);

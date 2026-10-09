@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // What a step's failure does, in words (4c-1, ruling 10; §10.3's chip), with the attempts and timeout the step sets
 // when they differ from its type's.
+import { useRef } from "react";
 import { Button } from "../../../components/Button";
 import { Field, Select } from "../../../components/Field";
 import type { StepOptions } from "../../../lib/config";
@@ -36,8 +37,11 @@ function LimitField({ name, label, fallback }: { name: Limit; label: string; fal
     held?.text,
   );
   const stale = held !== undefined && drawer.stale("limit", pointer);
+  const box = useRef<HTMLDivElement>(null);
+  // Its Apply here and Discard go with the edit: focus goes back to the limit (WCAG 2.4.3; the final review).
+  const refocus = () => requestAnimationFrame(() => box.current?.querySelector("input")?.focus());
   return (
-    <div onFocus={onFocus} data-limit={name} className="flex flex-col gap-1.5">
+    <div ref={box} onFocus={onFocus} data-limit={name} className="flex flex-col gap-1.5">
       <Field
         label={label} hint={`If empty: ${fallback}.`} error={stale ? STALE : (held?.why ?? undefined)} value={held?.text ?? text}
         disabled={!drawer.editable}
@@ -60,6 +64,7 @@ function LimitField({ name, label, fallback }: { name: Limit; label: string; fal
               onClick={() => {
                 drawer.rebase("limit", pointer);
                 drawer.apply("limit", pointer);
+                refocus();
               }}
             >
               Apply here
@@ -70,6 +75,7 @@ function LimitField({ name, label, fallback }: { name: Limit; label: string; fal
             onClick={() => {
               drawer.release("limit", pointer);
               setText(typeof own[name] === "number" ? String(own[name]) : "");
+              refocus();
             }}
           >
             Discard

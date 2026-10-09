@@ -84,6 +84,11 @@ function holds(marker: string, schema: unknown, root: Schema, seen: ReadonlySet<
     schema.items,
     schema.additionalProperties,
     ...["anyOf", "oneOf", "allOf", "prefixItems"].flatMap((k) => (Array.isArray(schema[k]) ? (schema[k] as unknown[]) : [])),
+    // A sensitive part is also every patternProperties schema, matched or not, and a map whose keys are sensitive:
+    // engine/sensitive.py's positions, never fewer (the final review). contains_literal doesn't walk them.
+    ...(marker === "x-sensitive"
+      ? [...(isObject(schema.patternProperties) ? Object.values(schema.patternProperties) : []), schema.propertyNames]
+      : []),
   ];
   return children.some((child) => holds(marker, child, root, seen));
 }

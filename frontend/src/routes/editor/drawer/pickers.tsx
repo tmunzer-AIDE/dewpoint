@@ -60,7 +60,7 @@ export function ConnectionControl({ spec, value, id, describedBy, invalid, disab
   return (
     <select
       id={id} value={current} disabled={disabled}
-      aria-describedby={describedBy} aria-invalid={invalid} aria-required={spec.required}
+      aria-describedby={describedBy} aria-invalid={invalid} aria-required={spec.required && !spec.entry}
       onChange={(e) => onChange(e.target.value === "" ? undefined : e.target.value, false)}
       className={controlClass(invalid)}
     >
@@ -88,7 +88,7 @@ export function WorkflowControl({ spec, value, id, describedBy, invalid, disable
   return (
     <select
       id={id} value={current} disabled={disabled}
-      aria-describedby={describedBy} aria-invalid={invalid} aria-required={spec.required}
+      aria-describedby={describedBy} aria-invalid={invalid} aria-required={spec.required && !spec.entry}
       onChange={(e) => onChange(e.target.value === "" ? undefined : e.target.value, false)}
       className={controlClass(invalid)}
     >

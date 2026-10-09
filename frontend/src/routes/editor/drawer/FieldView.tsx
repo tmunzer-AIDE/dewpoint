@@ -3,7 +3,7 @@
 // it, or neither (ruling 6); its control, chosen by its widget (ruling 5); the server's problems at it, with how a
 // formula runs (D19); and what's typed in it but not applied, with its reason and a Discard (ruling 18). Its typing
 // while it keeps focus is one undo step (ruling 8).
-import { useEffect, useState, type MouseEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { Button } from "../../../components/Button";
 import { fixedOf, formula, isPlainRef, kindOf, literal, referenceText, valueAt } from "../../../lib/config";
 import { canFixed, canFormula, emptyOf, startsAsFormula, type FieldSpec, type Widget } from "../../../lib/schemaForm";
@@ -98,6 +98,17 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
     else if (!empty) setChosen("fixed");
   }
   const { mark, onFocus } = useSession(`${drawer.node.id}${spec.pointer}`);
+  const region = useRef<HTMLDivElement>(null);
+  /** After one of the field's own actions, which removes the button pressed or remounts the control: focus goes back to
+   * the field's control, else its first one (WCAG 2.4.3; the final review). */
+  const refocus = () =>
+    requestAnimationFrame(() => {
+      const box = region.current;
+      const label = box?.querySelector<HTMLLabelElement>("label[for]");
+      const control = label ? document.getElementById(label.htmlFor) : null;
+      const usable = control && control.tagName !== "OUTPUT" && !(control as HTMLInputElement).disabled ? control : null;
+      (usable ?? box?.querySelector<HTMLElement>("input:not([disabled]), textarea:not([disabled]), select:not([disabled])"))?.focus();
+    });
   const held = OWN.map((k) => drawer.held(k, spec.pointer)).find((u) => u !== undefined);
   const disabled = !drawer.editable;
   const fixedOk = canFixed(spec);
@@ -128,14 +139,17 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
     if (why === null) then();
   };
   const computed = kind === "ref" || kind === "template";
-  const hidden = spec.sensitive && !empty && kind !== "cel"; // a fixed value in a sensitive field: never shown (M25)
+  // A fixed value in a sensitive field: never shown (M25). A reference or a template there is how a secret is passed,
+  // and shows as one (the final review).
+  const hidden = spec.sensitive && !empty && kind !== "cel" && !computed;
   const fixed = fixedOf(value);
   // A literal's or an unreadable envelope's parts aren't where a form writes them: shown as JSON.
   const json = asJson || held?.kind === "json" || kind === "unknown" || (kind === "literal" && isContainer(spec.base));
   const container = mode === "fixed" && fixedOk && !computed && !hidden && !json && isContainer(spec.base);
   const problems = problemsAt(drawer.problems, spec.pointer, container ? new Set(partNames(spec, fixed)) : null);
   const required = spec.required && !spec.entry && spec.path.length > 1;
-  const missing = spec.required && touched && (empty || value === "") ? "Required" : null;
+  // A list's item or a map's entry, emptied, keeps its place, blank: never missing on its own (the final review).
+  const missing = spec.required && !spec.entry && touched && (empty || value === "") ? "Required" : null;
   const switchTo = (next: Mode) =>
     reshape(
       (current) => {
@@ -159,6 +173,7 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
     // Written over what's there now: the stale edit `write` guards against is discarded above, so this render's
     // `stale` no longer applies. The editor's own guards (read only, admission) still answer (the review of milestone 2).
     setLocal(drawer.set(spec.path, emptyOf(spec)));
+    refocus();
   };
   const actions = (
     <>
@@ -181,6 +196,7 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
           onClick={() => {
             drawer.rebase(held.kind, spec.pointer);
             setLocal(drawer.apply(held.kind, spec.pointer));
+            refocus();
           }}
         >
           Apply here
@@ -195,6 +211,7 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
             drawer.release(held.kind, spec.pointer);
             setGeneration((g) => g + 1);
             setLocal(null);
+            refocus();
           }}
         >
           Discard
@@ -235,7 +252,10 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
       <SensitiveView
         {...c} toFormula={formulaOk} disabled={disabled}
         onClear={clear}
-        onFormula={() => reshape(() => emptyOf(spec), () => setChosen("formula"))}
+        onFormula={() => reshape(() => emptyOf(spec), () => {
+          setChosen("formula");
+          refocus();
+        })}
       />
     ));  // prettier-ignore
   } else if (!fixedOk && !formulaOk) {
@@ -252,8 +272,14 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
     body = frame((c) => (
       <ReferenceView
         {...c} value={value} fixed={fixedOk} toFormula={formulaOk} disabled={disabled}
-        onFixed={() => reshape(() => emptyOf(spec), () => setChosen("fixed"))}
-        onFormula={() => reshape(() => (isPlainRef(value) ? formula(referenceText(value)) : emptyOf(spec)), () => setChosen("formula"))}
+        onFixed={() => reshape(() => emptyOf(spec), () => {
+          setChosen("fixed");
+          refocus();
+        })}
+        onFormula={() => reshape(() => (isPlainRef(value) ? formula(referenceText(value)) : emptyOf(spec)), () => {
+          setChosen("formula");
+          refocus();
+        })}
       />
     ));  // prettier-ignore
   } else if (mode === "formula") {
@@ -292,6 +318,7 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
     // The field is one focus region: what's typed in JSON or a port's name applies when focus leaves the region, so
     // moving to its own Discard or Clear, by keyboard or pointer, never applies it first (the review of revision 4).
     <div
+      ref={region}
       data-pointer={spec.pointer}
       onFocus={onFocus}
       onBlur={(e) => {

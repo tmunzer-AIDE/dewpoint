@@ -135,3 +135,12 @@ it("empties a property by removing it, and a list's item or a map's entry by bla
   expect(emptyOf(itemOf(field(REMOTE, "tags"), 0))).toBe("");
   expect(emptyOf(entryOf(field(TRANSFORM, "fields"), "x"))).toBeNull();
 });
+
+it("finds a sensitive part under patternProperties or propertyNames, as the engine does (the final review)", () => {
+  const marked = (inner: Record<string, unknown>) =>
+    fieldsOf(typeWith({ type: "object", properties: { headers: { type: "object", title: "Headers", ...inner } } }))[0]!;
+  // engine/sensitive.py: every pattern's schema, matched or not; a map whose keys are sensitive is sensitive whole.
+  expect(marked({ patternProperties: { "^x-": { type: "string", "x-sensitive": true } } }).holdsSensitive).toBe(true);
+  expect(marked({ propertyNames: { type: "string", "x-sensitive": true } }).holdsSensitive).toBe(true);
+  expect(marked({ patternProperties: { "^x-": { type: "string" } } }).holdsSensitive).toBe(false);
+});

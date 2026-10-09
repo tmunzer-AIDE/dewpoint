@@ -44,7 +44,7 @@ export function TextControl({ spec, value, literal, id, describedBy, invalid, di
   return (
     <input
       id={id} type="text" value={held?.text ?? asText(value)} disabled={disabled} spellCheck={false}
-      aria-describedby={describedBy} aria-invalid={invalid} aria-required={spec.required}
+      aria-describedby={describedBy} aria-invalid={invalid} aria-required={spec.required && !spec.entry}
       onChange={(e) => {
         const text = e.target.value;
         const why = onChange(text === "" ? undefined : text, true);
@@ -76,7 +76,7 @@ export function NumberControl({ spec, value, literal, id, describedBy, invalid, 
   return (
     <input
       id={id} type="text" value={held?.text ?? text} disabled={disabled} spellCheck={false}
-      aria-describedby={describedBy} aria-invalid={invalid} aria-required={spec.required}
+      aria-describedby={describedBy} aria-invalid={invalid} aria-required={spec.required && !spec.entry}
       onChange={(e) => {
         const typed = e.target.value;
         setText(typed);
@@ -109,7 +109,7 @@ export function EnumControl({ spec, value, id, describedBy, invalid, disabled, o
   return (
     <select
       id={id} value={current} disabled={disabled}
-      aria-describedby={describedBy} aria-invalid={invalid} aria-required={spec.required}
+      aria-describedby={describedBy} aria-invalid={invalid} aria-required={spec.required && !spec.entry}
       onChange={(e) => onChange(e.target.value === "" ? undefined : e.target.value, false)}
       className={controlClass(invalid)}
     >
