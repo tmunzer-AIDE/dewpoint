@@ -5,8 +5,10 @@
 // reopened) or refuse writes (an editor gone read only). An edit that takes ports away is refused here: the editor
 // asks (Task 7). Imported by tests only: the build never reaches it.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { RouterProvider, createMemoryHistory, createRootRoute, createRouter } from "@tanstack/react-router";
 import { act, render } from "@testing-library/react";
 import { useState, type ReactNode } from "react";
+import { vi } from "vitest";
 import { admission, setConfig, setOptions, valueAt, type Changed, type StepOptions } from "../../../lib/config";
 import { fieldsOf, type Path } from "../../../lib/schemaForm";
 import {
@@ -25,6 +27,7 @@ interface Options {
   problems?: Diagnostic[];
   expressions?: Expression[];
   editable?: boolean;
+  routed?: boolean; // inside a router: a link to another page needs one
 }
 
 interface State {
@@ -137,13 +140,18 @@ export function showFields(type: NodeType, options: Options = {}, children?: Rea
     mounts: 0,
   };
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(
+  const fields = (
     <QueryClientProvider client={client}>
       <Harness type={type} options={options} edits={edits} state={state}>
         {children ?? fieldsOf(type).map((f) => <FieldView key={f.pointer} spec={f} />)}
       </Harness>
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
+  if (!options.routed) render(fields);
+  else {
+    const root = createRootRoute({ component: () => fields });
+    render(<RouterProvider router={createRouter({ routeTree: root, history: createMemoryHistory({ initialEntries: ["/"] }) })} />);
+  }
   const redraw = () => act(() => state.redraw());
   return {
     edits,
@@ -169,3 +177,20 @@ export function showFields(type: NodeType, options: Options = {}, children?: Rea
 export const problem = (field: string, message: string): Diagnostic => ({
   code: "config.invalid", severity: "error", message, fix: null, node: NODE_ID, field,
 });  // prettier-ignore
+
+export const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
+
+/** The API's answers, by "METHOD /path" (the path decoded); anything else is a 404, never the network. An answer may
+ * be a promise the test settles. Each request is kept. */
+export function fakeApi(answers: Record<string, () => Response | Promise<Response>>) {
+  const sent: { method: string; path: string; body: unknown }[] = [];
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const request = input as Request;
+    const path = decodeURIComponent(new URL(request.url).pathname);
+    const text = await request.text();
+    sent.push({ method: request.method, path, body: text ? (JSON.parse(text) as unknown) : null });
+    const answer = answers[`${request.method} ${path}`];
+    return answer ? answer() : json({ error: "not_found" }, 404);
+  });
+  return sent;
+}

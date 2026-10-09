@@ -1,11 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { formula, literal } from "../../../lib/config";
 import { FILTER, IF, REMOTE, SWITCH, TRANSFORM, typeWith } from "../../../test/nodeTypes";
 import { STALE } from "../../../lib/unapplied";
-import { NODE_ID, problem, showFields } from "./harness";
+import { NODE_ID, fakeApi, problem, showFields } from "./harness";
+
+beforeEach(() => {
+  fakeApi({}); // a picker's list answers 404 here, never the network
+});
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 /** A step of every plain shape: a required text, numbers, a choice, a yes or no, JSON and a group. */
 const PLAIN = typeWith({
