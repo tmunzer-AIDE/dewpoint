@@ -273,7 +273,8 @@ As `dewpoint_admin`, audited (`platform.ingress_capacity.set`, with what it was)
 measured on this deployment's own Temporal, the share of them ingress may use, and the wait its operators agree a
 tenant's queued webhook requests may stand for. From them come ingress's event rates and each tenant's queue cap
 ([ingress](ingress.md#the-ingress-capacity)); none is set by default, and until they are, the rates and the cap are
-development-only. The values above are an example, not a recommendation. `--unset` unsets all three.
+development-only. The values above are an example, not a recommendation. A value left out keeps what it was;
+`--unset` unsets all three.
 
 ## Encrypted payloads
 

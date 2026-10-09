@@ -191,7 +191,9 @@ $$""",
 
 
 CAPACITY = (  # the deployment's ingress capacity: none set until its admin sets it
-    "ingress_starts_per_s double precision CONSTRAINT platform_ingress_starts CHECK (ingress_starts_per_s > 0)",
+    # NaN sorts above every number in PostgreSQL: `> 0` alone would take it, and Infinity
+    "ingress_starts_per_s double precision CONSTRAINT platform_ingress_starts "
+    "CHECK (ingress_starts_per_s > 0 AND ingress_starts_per_s < 'Infinity')",
     "ingress_headroom double precision "
     "CONSTRAINT platform_ingress_headroom CHECK (ingress_headroom > 0 AND ingress_headroom <= 1)",
     "ingress_queue_wait_s integer CONSTRAINT platform_ingress_queue_wait CHECK (ingress_queue_wait_s > 0)",

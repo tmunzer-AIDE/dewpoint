@@ -45,7 +45,8 @@ def test_a_development_setup_says_so_with_its_own_namespace(monkeypatch: pytest.
 
 
 @pytest.mark.usefixtures("owner_env")
-def test_the_ingress_capacity_is_set_then_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_ingress_capacity_is_set_changed_one_value_at_a_time_then_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fresh M3 review 3's I3: a value left out keeps what it was, never unset by omission."""
     monkeypatch.setenv("DEWPOINT_ENVIRONMENT", "development")
     get_settings.cache_clear()
     assert CliRunner().invoke(cli.app, ["platform", "init-environment"]).exit_code == 0
@@ -53,6 +54,8 @@ def test_the_ingress_capacity_is_set_then_unset(monkeypatch: pytest.MonkeyPatch)
     set_ = CliRunner().invoke(cli.app, given)
     said = "ingress capacity: 8.0 starts a second measured, 0.5 of them for ingress, a 300 s queue: a tenant's queue "
     assert (set_.exit_code, set_.output) == (0, said + "holds 1200 requests\n")
+    wait = CliRunner().invoke(cli.app, ["platform", "set-ingress-capacity", "--queue-wait-s", "600"])
+    assert (wait.exit_code, wait.output) == (0, said.replace("a 300 s", "a 600 s") + "holds 2400 requests\n")
     bad = CliRunner().invoke(cli.app, ["platform", "set-ingress-capacity", "--starts-per-s", "8", "--headroom", "2"])
     assert bad.exit_code == 2 and "ingress capacity" in bad.output
     unset = CliRunner().invoke(cli.app, ["platform", "set-ingress-capacity", "--unset"])

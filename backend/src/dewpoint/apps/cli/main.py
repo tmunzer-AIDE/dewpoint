@@ -958,9 +958,10 @@ def platform_set_ingress_capacity(
     unset: bool = typer.Option(False, "--unset", help="unset all three: the development-only rates and cap"),
 ) -> None:  # fmt: skip
     """Set this deployment's ingress capacity (the owner's ruling 2 on the 2b-4b M3 checkpoint 2), audited: once the
-    starts and the headroom are set, a tenant's events come at most at their product, an endpoint's at that divided by
-    its enabled bindings; with the wait too, a tenant's queued webhook requests stop at the product of all three. Run
-    as dewpoint_admin. Until set, ingress keeps its development-only rates and cap."""
+    starts and the headroom are set, a tenant's requests come at most at their product, its events and an endpoint's
+    divided by their enabled bindings; with the wait too, a tenant's queued webhook requests stop at the product of
+    all three. A value left out keeps what it was; `--unset` unsets all three. Run as dewpoint_admin. Until set,
+    ingress keeps its development-only rates and cap."""
     if unset:
         starts = headroom = wait = None
     elif starts is None and headroom is None and wait is None:
@@ -968,18 +969,27 @@ def platform_set_ingress_capacity(
         raise typer.Exit(2)
     settings = get_settings()
 
-    async def _go() -> int:
+    async def _go() -> tuple[float | None, float | None, int | None, int]:
         engine = make_engine(settings.database_url)
         try:
             async with make_sessionmaker(engine)() as s, s.begin():
-                await set_ingress_capacity(s, starts_per_s=starts, headroom=headroom, queue_wait_s=wait, actor_id=None)
+                now = await s.get(PlatformSettings, 1, populate_existing=True)
+                if now is None:
+                    raise ValueError("The deployment's environment isn't recorded: run `platform init-environment`.")
+                given = (None, None, None) if unset else (  # a value left out keeps what it was
+                    starts if starts is not None else now.ingress_starts_per_s,
+                    headroom if headroom is not None else now.ingress_headroom,
+                    wait if wait is not None else now.ingress_queue_wait_s,
+                )  # fmt: skip
+                await set_ingress_capacity(s, starts_per_s=given[0], headroom=given[1], queue_wait_s=given[2],
+                                           actor_id=None)  # fmt: skip
                 platform = await s.get(PlatformSettings, 1, populate_existing=True)
-                return queue_cap(platform) if platform is not None else 0
+                return *given, queue_cap(platform) if platform is not None else 0
         finally:
             await engine.dispose()
 
     try:
-        cap = asyncio.run(_go())
+        starts, headroom, wait, cap = asyncio.run(_go())
     except ValueError as e:
         typer.echo(f"ERROR: {e}")
         raise typer.Exit(2) from None

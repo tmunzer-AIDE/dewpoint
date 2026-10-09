@@ -219,7 +219,8 @@ none of its endpoints has more; an endpoint with 1 binding takes up to 4. A rate
 stay as configured. With the wait set too, a tenant's queued webhook requests stop at starts × headroom × wait (never
 below 20, an endpoint's most bindings), counted as the dispatcher matches, under the tenant's counter row: dispatchers
 matching at once never queue past it. An event that doesn't fit stays pending, and the endpoint's and the tenant's
-pending quotas then answer its senders with 429 `quota_exceeded`. `--unset` unsets all three.
+pending quotas then answer its senders with 429 `quota_exceeded`. A value left out keeps what it was; `--unset`
+unsets all three.
 
 Until they're set, the rates are the development-only ones in the table, and a tenant's queue stops at 10,000
 webhook requests, a development-only cap. Neither is a production value: production's are derived as above from its

@@ -38,8 +38,11 @@ async def test_the_admin_sets_it_audited_with_what_it_was_and_may_unset_it(admin
         ]  # fmt: skip
 
 
-@pytest.mark.parametrize(("starts", "headroom", "wait"), [(0.0, 0.5, 300), (8.0, 0.0, 300), (8.0, 1.5, 300),
-                                                         (8.0, 0.5, 0)])  # fmt: skip
+OUT_OF_RANGE = [(0.0, 0.5, 300), (8.0, 0.0, 300), (8.0, 1.5, 300), (8.0, 0.5, 0), (float("inf"), 0.5, 300),
+                (float("nan"), 0.5, 300), (8.0, float("nan"), 300)]  # fmt: skip
+
+
+@pytest.mark.parametrize(("starts", "headroom", "wait"), OUT_OF_RANGE)
 async def test_a_value_out_of_range_is_refused(admin_sessionmaker, starts: float, headroom: float, wait: int) -> None:
     async with admin_sessionmaker() as s, s.begin():
         with pytest.raises(ValueError, match="ingress capacity"):
@@ -54,3 +57,12 @@ async def test_only_the_admin_sets_it(api_sessionmaker, owner_sessionmaker) -> N
     async with owner_sessionmaker() as s, s.begin():  # and its row checks each value whoever writes it
         with pytest.raises(DBAPIError):
             await s.execute(text("update platform_settings set ingress_headroom = 2"))
+
+
+@pytest.mark.parametrize("starts", ["NaN", "Infinity"])
+async def test_its_row_refuses_a_starts_rate_that_isnt_a_finite_number(owner_sessionmaker, starts: str) -> None:
+    """The fresh M3 review 3: PostgreSQL holds NaN above every number, so `> 0` alone took it, and every match would
+    then fail computing the cap."""
+    async with owner_sessionmaker() as s, s.begin():
+        with pytest.raises(DBAPIError):
+            await s.execute(text(f"update platform_settings set ingress_starts_per_s = '{starts}'"))  # noqa: S608

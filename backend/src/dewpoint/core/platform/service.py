@@ -6,6 +6,7 @@ label proves nothing about the data: keeping development's database and namespac
 operator's job. Its engine worker instances record what they can do (§2.7)."""
 
 import json
+import math
 import uuid
 from collections.abc import Sequence
 from datetime import timedelta
@@ -46,7 +47,7 @@ async def set_ingress_capacity(
     (seconds). None unsets one: ingress keeps its configured rates (development-only) until the first two are set, and
     a development-only cap until all three are. Raises ValueError for a value out of range."""
     if (
-        (starts_per_s is not None and not starts_per_s > 0)
+        (starts_per_s is not None and not (math.isfinite(starts_per_s) and starts_per_s > 0))
         or (headroom is not None and not 0 < headroom <= 1)
         or (queue_wait_s is not None and not queue_wait_s > 0)
     ):
