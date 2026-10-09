@@ -47,15 +47,17 @@ pytestmark = [
 # ingress (19 kept for top-ups). Endpoints' derived rates (30 over their bindings) stay above what each sends, so the
 # budget alone refuses
 CAPACITY = (30.0, 1.0, 4)
-# Each tenant: (name, bindings, events a second sent steadily, bursts as (seconds in, events in one delivery)). With
-# the three steady ones at their shares (101 over 4: 25 each), the bursty one finds 26 of room: its bursts of 20 and 24
-# fit; its last, 60, is more than any tenant may hold even alone (half of 101: 50), so it's refused for good (413)
+# Each tenant: (name, bindings, events a second sent steadily, bursts as (seconds in, events in one delivery)). The
+# bursty one's bursts of 20 and 24 come in once the room they need is free beside the steady tenants' shares (it sends
+# them again after each Retry-After); its last, 60, is more than any tenant may hold even alone (half of 101: 50), so
+# it's refused for good (413)
 TENANTS = (
     ("narrow", 1, 8.0, ()),
     ("middle", 5, 2.0, ()),
     ("wide", 10, 1.0, ()),
     ("bursty", 2, 0.0, ((10.0, 10), (20.0, 12), (30.0, 30))),
 )
+BURST_TRIES = 5  # a refused burst is sent again after its Retry-After, at most this many times in all
 TRAFFIC_S = float(os.environ.get("DEWPOINT_PROBE_TRAFFIC_S", "40"))
 DRAIN_S = float(os.environ.get("DEWPOINT_PROBE_DRAIN_S", "120"))
 SAMPLE_S = 0.25
@@ -119,7 +121,7 @@ async def test_tenants_of_mixed_fan_out_steady_and_in_bursts_share_the_budget(
     accepted: dict[str, int] = Counter()
     began = time.monotonic()
 
-    async def deliver(name: str, n: int) -> None:
+    async def deliver(name: str, n: int) -> dict[str, Any]:
         ready = tenants[name]
         ids = [uuid.uuid4() for _ in range(n)]
         params = {"e": ready.endpoint_id, "refusal": None, "read": 0, "ids": ids,
@@ -130,6 +132,7 @@ async def test_tenants_of_mixed_fan_out_steady_and_in_bursts_share_the_budget(
         outcomes[name][outcome["outcome"]] += 1
         if outcome["outcome"] == "recorded":
             accepted[name] += outcome["accepted"]
+        return outcome
 
     async def steady(name: str, per_s: float) -> None:
         sent = 0
@@ -140,10 +143,21 @@ async def test_tenants_of_mixed_fan_out_steady_and_in_bursts_share_the_budget(
                 sent += 1
             await asyncio.sleep(1 / per_s / 2)
 
+    burst_tries: list[dict[str, Any]] = []
+
     async def bursts(name: str, at: tuple[tuple[float, int], ...]) -> None:
+        """Each burst sent again after its `Retry-After` while it's refused for room, at most `BURST_TRIES` times: a
+        sender that retries, as many do."""
         for when, n in at:
             await asyncio.sleep(max(0.0, when - (time.monotonic() - began)))
-            await deliver(name, n)
+            first = time.monotonic()
+            for tries in range(1, BURST_TRIES + 1):
+                outcome = await deliver(name, n)
+                if outcome["outcome"] != "backlog_full" or tries == BURST_TRIES:
+                    break
+                await asyncio.sleep(float(outcome["retry_after"]))
+            burst_tries.append({"events": n, "outcome": outcome["outcome"], "tries": tries,
+                                "after_s": round(time.monotonic() - first, 1)})  # fmt: skip
 
     samples: list[tuple[float, int, int]] = []
     sampling = True
@@ -206,7 +220,8 @@ async def test_tenants_of_mixed_fan_out_steady_and_in_bursts_share_the_budget(
         "outstanding": {"max": peak, "mean": round(sum(o for _, o, _ in samples) / max(1, len(samples)), 1),
                         "samples": len(samples), "at_limit": sum(1 for _, o, _ in samples if o >= limit),
                         "most_active_tenants": max((a for *_, a in samples), default=0)},
-        "dispatched": dict(dispatched), "tenants": per_tenant, "counted_actual_at_end": [int(counted), int(actual)],
+        "dispatched": dict(dispatched), "tenants": per_tenant, "bursts": burst_tries,
+        "counted_actual_at_end": [int(counted), int(actual)],
     }  # fmt: skip
     out = os.environ.get("DEWPOINT_PROBE_OUT")
     if out:

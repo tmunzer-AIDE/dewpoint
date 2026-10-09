@@ -124,3 +124,23 @@ def test_a_capacity_left_incomplete_is_shown_as_such_never_as_an_agreed_limit(mo
     assert shown.exit_code == 0, shown.output
     assert shown.output.endswith("ingress capacity incomplete (starts_per_s, headroom unset): the development-only "
                                  "rates and limit, 50000 requests' outstanding work at most\n")  # fmt: skip
+
+
+def test_a_capacity_missing_only_its_wait_shows_its_rates_derived_and_the_development_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fresh review 6's M3: with the starts and the headroom set, the event rates are derived already; only the
+    limit is development-only until the wait is set."""
+
+    async def asked(_client: object, **kwargs: object) -> dict[str, object]:
+        return {"starts_per_s": 8.0, "headroom": 0.5, "queue_wait_s": None, "limit": 50000, "outstanding": 0,
+                "active_tenants": 0, "problems": ["queue_wait_s"]}  # fmt: skip
+
+    monkeypatch.setattr(cli, "capacity_via_api", asked)
+    base = ["platform", "set-ingress-capacity", "--api", "https://dewpoint.test", "--email", "ops@corp.test",
+            "--attestation", SAID, "--headroom", "0.5"]  # fmt: skip
+    shown = CliRunner().invoke(cli.app, base, input=f"{PW}\n123456\n")
+    assert shown.exit_code == 0, shown.output
+    assert shown.output.endswith("ingress capacity incomplete (queue_wait_s unset): event rates from 8.0 starts a "
+                                 "second measured, 0.5 of them for ingress; the development-only limit, 50000 "
+                                 "requests' outstanding work at most\n")  # fmt: skip

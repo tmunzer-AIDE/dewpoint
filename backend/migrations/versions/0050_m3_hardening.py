@@ -18,9 +18,11 @@
   outstanding, the three values' product (at least 40; 50,000, development-only, until they're all set). A pending
   event counts its credit (its endpoint's enabled bindings when accepted), a webhook request queued or starting 1.
   `record_inbound_events()` admits a delivery under the budget's row within ingress's room (the limit but what's kept
-  for top-ups) and, for a tenant with work outstanding, its share of it; else `backlog_full`, nothing stored, or
-  `over_limit` for one that could never fit. A match's requests take its event's credit, past it only within the
-  limit. Deferred triggers count every request inserted and release every way out, whoever writes the row.
+  for top-ups), each tenant within its share and all of them keeping one share free for a tenant yet to come (a single
+  event excepted, as an event can't be split); else `backlog_full`, nothing stored, or `over_limit` for one that could
+  never fit. A match's requests take its event's credit, past it only within the limit. Deferred triggers count every
+  request inserted and release every way out, whoever writes the row, and refuse a commit that adds past the limit
+  (the ruling on the M3 checkpoint 5). A capacity change never takes the limit below the work outstanding.
 - **A tenant's next due request** (the owner's ruling 1 on the M3 checkpoint): `dispatch_next(tenants)`, each listed
   tenant's oldest due request as `dispatch_candidates` picks it, for a cycle's further rounds. Ids and ordering only.
 - **Bounded retry and recovery** (D10(1), the owner's rulings on the M3 design, rev 2), three tables of a tenant's:
@@ -283,7 +285,7 @@ RATES = {  # 0039's text: what it reads, how it refills and waits, and what it a
     "    -- checkpoint 4)\n"
     "    IF cardinality(v_new) > 0 THEN\n"
     "        v_weight := cardinality(v_new)::bigint * v_fanout;\n"
-    "        v_short := public.ingress_admit(v_tenant, v_weight);\n"
+    "        v_short := public.ingress_admit(v_tenant, v_weight, cardinality(v_new));\n"
     "        IF v_short < 0 THEN  -- it could never fit: no retry helps it\n"
     "            RETURN jsonb_build_object('outcome', 'over_limit');\n"
     "        END IF;\n"
@@ -353,6 +355,16 @@ $$""",
     f"""CREATE FUNCTION ingress_room() RETURNS bigint LANGUAGE sql STABLE {DEFINER} AS $$
   SELECT ingress_limit() - {MAX_BINDINGS - 1}
 $$""",
+    # The count as the transaction first touched it (a transaction-local setting): the bound refuses a commit only past
+    # both the limit and where it started (the fresh review 6's M1). The caller holds the budget's row
+    f"""CREATE FUNCTION ingress_started() RETURNS void LANGUAGE plpgsql {DEFINER} AS $$
+BEGIN
+    IF coalesce(current_setting('dewpoint.ingress_before', true), '') = '' THEN
+        PERFORM set_config('dewpoint.ingress_before', (SELECT outstanding FROM ingress_budget WHERE id = 1)::text,
+                           true);
+    END IF;
+END
+$$""",
     # A tenant's outstanding work moved by `delta`, and the deployment's with it, never below nothing; a tenant whose
     # row is gone (its counters erased took what it held with them) moves nothing
     f"""CREATE FUNCTION ingress_credit(p_tenant uuid, p_delta bigint) RETURNS void LANGUAGE plpgsql {DEFINER} AS $$
@@ -367,6 +379,7 @@ BEGIN
     IF NOT FOUND THEN  -- the migration's row, never deleted: counting nothing is never right
         RAISE EXCEPTION 'ingress_budget_missing' USING ERRCODE = 'DPB01';
     END IF;
+    PERFORM ingress_started();
     SELECT outstanding INTO v_was FROM ingress_outstanding WHERE tenant_id = p_tenant;
     IF NOT FOUND THEN
         IF p_delta < 0 THEN
@@ -384,14 +397,16 @@ BEGIN
      WHERE id = 1;
 END
 $$""",
-    # `weight` more for a tenant, under the budget's row, within ingress's room and:
-    # - for a tenant with work outstanding, its share: the room over the tenants with work outstanding and one more, so
-    #   that one more finds room once they're at their shares (the load probe's finding; half when it's alone);
-    # - for one with none, its first admission: the share it will have once counted (the room over them, itself and one
-    #   more), or an event's most bindings if that's more, so no tenant takes the room for itself and an event of the
-    #   most bindings stays admissible at the least limit (the owner's ruling on the M3 checkpoint 5).
-    # 0 when admitted; how much past; or -1 when it could never fit, even alone in an otherwise empty deployment
-    f"""CREATE FUNCTION ingress_admit(p_tenant uuid, p_weight bigint) RETURNS bigint
+    # `weight` (`events` events' credit) more for a tenant, under the budget's row, within ingress's room, and always
+    # keeping one share free for a tenant yet to come (the owner's ruling on the M3 checkpoint 5; the fresh review 6's
+    # I2), the share being the room over the tenants with work outstanding once it's admitted and one more:
+    # - the tenant holds at most its share, but a single event may take more when it holds nothing (an event can't be
+    #   split: one of the most bindings stays admissible at the least limit, the review's I1);
+    # - all of them hold at most the room but that share, but a single event may come into a deployment holding
+    #   nothing else.
+    # 0 when admitted; how much past; or -1 when it could never fit, even alone in an otherwise empty deployment: more
+    # than one event worth more than half the room
+    f"""CREATE FUNCTION ingress_admit(p_tenant uuid, p_weight bigint, p_events integer) RETURNS bigint
 LANGUAGE plpgsql {DEFINER} AS $$
 DECLARE
     v_mine bigint;
@@ -399,6 +414,7 @@ DECLARE
     v_active integer;
     v_room bigint;
     v_share bigint;
+    v_single boolean := p_events = 1;
 BEGIN
     SELECT outstanding, active INTO v_all, v_active FROM ingress_budget WHERE id = 1 FOR UPDATE;
     IF NOT FOUND THEN
@@ -406,22 +422,18 @@ BEGIN
     END IF;
     SELECT coalesce((SELECT outstanding FROM ingress_outstanding WHERE tenant_id = p_tenant), 0) INTO v_mine;
     v_room := ingress_room();
-    IF p_weight > greatest(floor(v_room / 2.0), {MAX_BINDINGS}) THEN
+    IF NOT v_single AND p_weight > floor(v_room / 2.0) THEN
         RETURN -1;
     END IF;
     IF v_all + p_weight > v_room THEN
         RETURN v_all + p_weight - v_room;
     END IF;
-    IF v_mine > 0 THEN
-        v_share := floor(v_room::numeric / (v_active + 1));
-        IF v_mine + p_weight > v_share THEN
-            RETURN v_mine + p_weight - v_share;
-        END IF;
-    ELSE
-        v_share := greatest(floor(v_room::numeric / (v_active + 2)), {MAX_BINDINGS});
-        IF p_weight > v_share THEN
-            RETURN p_weight - v_share;
-        END IF;
+    v_share := floor(v_room::numeric / (v_active + CASE WHEN v_mine = 0 THEN 1 ELSE 0 END + 1));
+    IF v_mine + p_weight > v_share AND NOT (v_mine = 0 AND v_single) THEN
+        RETURN v_mine + p_weight - v_share;
+    END IF;
+    IF v_all + p_weight > v_room - v_share AND NOT (v_all = 0 AND v_single) THEN
+        RETURN v_all + p_weight - (v_room - v_share);
     END IF;
     PERFORM ingress_credit(p_tenant, p_weight);
     RETURN 0;
@@ -451,7 +463,8 @@ LANGUAGE sql STABLE {DEFINER} AS $$
          (SELECT coalesce(sum(e.credit), 0) FROM inbound_events e WHERE e.status = 'pending')::bigint
          + (SELECT count(*) FROM run_requests r WHERE r.source = 'webhook' AND r.status IN ('queued', 'starting'))
 $$""",
-    "REVOKE ALL ON FUNCTION ingress_limit(), ingress_room(), ingress_credit(uuid, bigint), ingress_admit(uuid, bigint), "
+    "REVOKE ALL ON FUNCTION ingress_limit(), ingress_room(), ingress_started(), ingress_credit(uuid, bigint), "
+    "ingress_admit(uuid, bigint, integer), "
     "ingress_matched(bigint, bigint), ingress_budget_drift() FROM PUBLIC",
     "GRANT EXECUTE ON FUNCTION ingress_matched(bigint, bigint), ingress_budget_drift() TO dewpoint_dispatch",
     "GRANT EXECUTE ON FUNCTION ingress_limit() TO dewpoint_api",  # the platform admin's API shows it
@@ -481,6 +494,7 @@ DECLARE
     v_was bigint;
 BEGIN
     PERFORM 1 FROM ingress_budget WHERE id = 1 FOR UPDATE;
+    PERFORM ingress_started();
     DELETE FROM ingress_outstanding WHERE tenant_id = OLD.tenant_id RETURNING outstanding INTO v_was;
     IF FOUND THEN
         UPDATE ingress_budget SET outstanding = greatest(outstanding - v_was, 0),
@@ -525,15 +539,19 @@ COUNTED = [
     """UPDATE ingress_budget SET outstanding = (SELECT coalesce(sum(outstanding), 0) FROM ingress_outstanding),
     active = (SELECT count(*) FROM ingress_outstanding WHERE outstanding > 0) WHERE id = 1""",
 ]
-# The limit, whoever writes (the owner's ruling on the M3 checkpoint 5): a commit that raised the budget never leaves it
-# past the limit. A dispatcher still on the code before 0050 (an upgrade rolling out) queues an event's requests without
-# asking; its match is refused at its commit, its event left pending. Checked as the transaction commits, after its
-# other deferred work (each increment's check fires a round later, reading the row as it ends); a commit that only
-# released is never refused, so a backlog above the limit drains
+# The limit, whoever writes (the owner's ruling on the M3 checkpoint 5): a commit never leaves the budget past the limit
+# and past where it started. A dispatcher still on the code before 0050 (an upgrade rolling out) queues an event's
+# requests without asking; its match is refused at its commit, its event left pending. Checked as the transaction
+# commits, after its other deferred work (each increment's check fires a round later, reading the row as it ends). A
+# commit adding nothing net is never refused (the fresh review 6's M1), so above the limit (drifted, say) matching
+# within credit and starts go on, and it drains
 BOUNDED = [
     f"""CREATE FUNCTION ingress_budget_bounded() RETURNS trigger LANGUAGE plpgsql {DEFINER} AS $$
+DECLARE
+    v_now bigint := (SELECT outstanding FROM ingress_budget WHERE id = 1);
 BEGIN
-    IF (SELECT outstanding FROM ingress_budget WHERE id = 1) > ingress_limit() THEN
+    IF v_now > ingress_limit()
+       AND v_now > coalesce(nullif(current_setting('dewpoint.ingress_before', true), '')::bigint, 0) THEN
         RAISE EXCEPTION 'the ingress budget would pass its limit' USING ERRCODE = 'DPB02';
     END IF;
     RETURN NULL;
@@ -835,8 +853,8 @@ def downgrade() -> None:
     op.execute("DROP FUNCTION ingress_budget_bounded(), ingress_event_settled(), ingress_request_queued(), "
                "ingress_request_settled(), "
                "ingress_tenant_gone(), "
-               "ingress_budget_drift(), ingress_matched(bigint, bigint), ingress_admit(uuid, bigint), "
-               "ingress_credit(uuid, bigint), ingress_room(), ingress_limit()")  # fmt: skip
+               "ingress_budget_drift(), ingress_matched(bigint, bigint), ingress_admit(uuid, bigint, integer), "
+               "ingress_credit(uuid, bigint), ingress_started(), ingress_room(), ingress_limit()")  # fmt: skip
     op.execute("ALTER TABLE inbound_events DROP COLUMN credit")
     op.drop_table("ingress_outstanding")
     op.drop_table("ingress_budget")
