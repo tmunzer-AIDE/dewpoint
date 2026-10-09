@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { formula, literal } from "../../../lib/config";
-import { FILTER, IF, REMOTE, typeWith } from "../../../test/nodeTypes";
+import { FILTER, IF, REMOTE, SWITCH, TRANSFORM, typeWith } from "../../../test/nodeTypes";
 import { STALE } from "../../../lib/unapplied";
 import { NODE_ID, problem, showFields } from "./harness";
 
@@ -319,4 +319,119 @@ it("disables every control for a person who can't edit", () => {
   expect(screen.getByLabelText<HTMLInputElement>("Name").disabled).toBe(true);
   expect(screen.getByLabelText<HTMLSelectElement>("Mode").disabled).toBe(true);
   expect(screen.queryByRole("button", { name: /^Clear/ })).toBeNull();
+});
+
+it("adds, moves and removes a list's items", async () => {
+  const { config } = showFields(REMOTE);
+  await userEvent.click(screen.getByRole("button", { name: "Add to Tags" }));
+  await userEvent.type(screen.getByLabelText("Tags, item 1"), "x");
+  await userEvent.click(screen.getByRole("button", { name: "Add to Tags" }));
+  await userEvent.type(screen.getByLabelText("Tags, item 2"), "y");
+  expect(config().tags).toEqual(["x", "y"]);
+  await userEvent.click(screen.getByRole("button", { name: "Move up: Tags, item 2" }));
+  expect(config().tags).toEqual(["y", "x"]);
+  await userEvent.click(screen.getByRole("button", { name: "Remove: Tags, item 1" }));
+  expect(config().tags).toEqual(["x"]);
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Add to Tags" })));
+});
+
+it("moves an item only once the edits inside it are applied", async () => {
+  const sizes = typeWith({ type: "object", properties: { sizes: { type: "array", title: "Sizes", items: { type: "integer" } } } });
+  const { config } = showFields(sizes, { config: { sizes: [1, 2] } });
+  await userEvent.type(screen.getByLabelText("Sizes, item 2"), "x");
+  await userEvent.click(screen.getByRole("button", { name: "Move up: Sizes, item 2" }));
+  expect(config()).toEqual({ sizes: [1, 2] }); // it waits: "2x" can't be applied
+  expect(screen.getByText("A whole number, like 42.")).toBeTruthy();
+  await userEvent.clear(screen.getByLabelText("Sizes, item 2"));
+  await userEvent.type(screen.getByLabelText("Sizes, item 2"), "5");
+  await userEvent.click(screen.getByRole("button", { name: "Move up: Sizes, item 2" }));
+  expect(config()).toEqual({ sizes: [5, 1] });
+});
+
+it("never writes a held edit over another item after an undo moves it", async () => {
+  const sizes = typeWith({ type: "object", properties: { sizes: { type: "array", title: "Sizes", items: { type: "integer" } } } });
+  const { config, replace } = showFields(sizes, { config: { sizes: [5, 7] } });
+  await userEvent.click(screen.getByRole("button", { name: "Move up: Sizes, item 2" })); // [7, 5]
+  await userEvent.type(screen.getByLabelText("Sizes, item 2"), "x"); // "5x", over the 5
+  replace({ sizes: [5, 7] }); // the move undone: the second item is the 7 now
+  await userEvent.type(screen.getByLabelText("Sizes, item 2"), "{Backspace}0"); // "50": a number, typed over the 5
+  expect(config()).toEqual({ sizes: [5, 7] }); // never [5, 50] unasked
+  expect(screen.getByText(STALE)).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Apply here: Sizes, item 2" })); // the person's choice
+  expect(config()).toEqual({ sizes: [5, 50] });
+});
+
+it("adds a case with the first free port name", async () => {
+  const { config } = showFields(SWITCH);
+  await userEvent.click(screen.getByRole("button", { name: "Add to Cases" }));
+  expect(config()).toEqual({ cases: [{ port: "case_1" }] });
+  const item = screen.getByRole("group", { name: "Cases, item 1" });
+  expect(within(item).getByLabelText<HTMLInputElement>("Port").value).toBe("case_1");
+  expect(within(item).getByLabelText("When").tagName).toBe("TEXTAREA");
+});
+
+it("sets a map's entries, renamed in place, never as $value", async () => {
+  const { config, held } = showFields(TRANSFORM);
+  await userEvent.click(screen.getByRole("button", { name: "Add to Fields" }));
+  await userEvent.type(screen.getByLabelText("field_1"), "1 + 1"); // an entry starts as a formula
+  const name = screen.getByLabelText("Name: field_1");
+  await userEvent.clear(name);
+  await userEvent.type(name, "total");
+  expect(held().map((u) => [u.kind, u.text])).toEqual([["name", "total"]]); // held while it's typed
+  await userEvent.tab();
+  expect(config()).toEqual({ fields: { total: formula("1 + 1") } });
+  const renamed = screen.getByLabelText("Name: total");
+  await userEvent.clear(renamed);
+  await userEvent.type(renamed, "$value");
+  await userEvent.tab();
+  expect(screen.getByText("A name can't be $value: the engine would read the whole value as computed.")).toBeTruthy();
+  expect(config()).toEqual({ fields: { total: formula("1 + 1") } });
+});
+
+it("discards a new name without renaming the entry", async () => {
+  const { config } = showFields(TRANSFORM, { config: { fields: { old: 1 } } });
+  const name = screen.getByLabelText("Name: old");
+  await userEvent.clear(name);
+  await userEvent.type(name, "new");
+  await userEvent.click(screen.getByRole("button", { name: "Discard the new name for old" }));
+  expect(config()).toEqual({ fields: { old: 1 } });
+  expect(screen.getByLabelText<HTMLInputElement>("Name: old").value).toBe("old");
+});
+
+it("never writes a held edit into the other of two equal items after an undo moves them", async () => {
+  const items = typeWith({
+    type: "object",
+    properties: {
+      lines: {
+        type: "array", title: "Lines",
+        items: { type: "object", properties: { label: { type: "string", title: "Label" }, amount: { type: "integer", title: "Amount" } } },
+      },
+    },
+  });  // prettier-ignore
+  const before = { lines: [{ label: "A", amount: 5 }, { label: "B", amount: 5 }] };
+  const { config, replace } = showFields(items, { config: before });
+  await userEvent.click(screen.getByRole("button", { name: "Move up: Lines, item 2" })); // [B, A]
+  const second = () => within(screen.getByRole("group", { name: "Lines, item 2" })).getByLabelText("Amount");
+  await userEvent.type(second(), "x"); // "5x": A's amount
+  replace(before); // the move undone: B, its amount an equal 5, is the second item now
+  await userEvent.type(second(), "{Backspace}0"); // "50"
+  expect(config()).toEqual(before); // B's amount is never written
+  expect(screen.getByText(STALE)).toBeTruthy();
+});
+
+it("renames an entry only once the edit inside it is applied", async () => {
+  const sizes = typeWith({ type: "object", properties: { sizes: { type: "object", title: "Sizes", additionalProperties: { type: "integer" } } } });
+  const { config } = showFields(sizes, { config: { sizes: { old: 2 } } });
+  await userEvent.type(screen.getByLabelText("old"), "x"); // "2x": held under the entry's name
+  const name = screen.getByLabelText("Name: old");
+  await userEvent.clear(name);
+  await userEvent.type(name, "new");
+  await userEvent.tab();
+  expect(screen.getByText("Not applied: an edit inside it isn't applied yet.")).toBeTruthy();
+  expect(config()).toEqual({ sizes: { old: 2 } }); // the held "2x" never points at a name that's gone
+  await userEvent.clear(screen.getByLabelText("old"));
+  await userEvent.type(screen.getByLabelText("old"), "1");
+  await userEvent.click(screen.getByLabelText("Name: old"));
+  await userEvent.tab();
+  expect(config()).toEqual({ sizes: { new: 1 } });
 });

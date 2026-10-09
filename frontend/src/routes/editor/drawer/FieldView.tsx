@@ -15,7 +15,7 @@ import {
   BooleanControl, CUT_NOTE, EnumControl, JSON_NOTE, JsonControl, LITERAL_NOTE, NumberControl, TextControl,
   type ControlProps,
 } from "./scalars";  // prettier-ignore
-import { ContainerParts, isContainer, partNames } from "./structured";
+import { ContainerParts, PortControl, isContainer, partNames } from "./structured";
 
 type Control = (props: ControlProps) => ReactNode;
 const OWN: UnappliedKind[] = ["text", "json", "number", "formula", "port"]; // what a field's own control may hold
@@ -33,6 +33,8 @@ function heldControl(kind: UnappliedKind, spec: FieldSpec): Control | null {
       return JsonControl;
     case "formula":
       return FormulaControl;
+    case "port":
+      return PortControl;
     default:
       return null;
   }
@@ -123,7 +125,7 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
   // A literal's or an unreadable envelope's parts aren't where a form writes them: shown as JSON.
   const json = asJson || held?.kind === "json" || kind === "unknown" || (kind === "literal" && isContainer(spec.base));
   const container = mode === "fixed" && fixedOk && !computed && !hidden && !json && isContainer(spec.base);
-  const problems = problemsAt(drawer.problems, spec.pointer, container ? new Set(partNames(spec)) : null);
+  const problems = problemsAt(drawer.problems, spec.pointer, container ? new Set(partNames(spec, fixed)) : null);
   const required = spec.required && !spec.entry && spec.path.length > 1;
   const missing = spec.required && touched && (empty || value === "") ? "Required" : null;
   const switchTo = (next: Mode) =>
@@ -191,7 +193,11 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
       {control}
     </FieldFrame>
   );
-  const Control: Control = json ? JsonControl : (controlFor(spec.widget === "formula" ? spec.base : spec.widget) ?? controlFor(spec.base) ?? JsonControl);
+  const Control: Control = json
+    ? JsonControl
+    : spec.port
+      ? PortControl
+      : (controlFor(spec.widget === "formula" ? spec.base : spec.widget) ?? controlFor(spec.base) ?? JsonControl);
   const Held = held ? heldControl(held.kind, spec) : null;
   let body: ReactNode;
   if (held && Held) {
@@ -242,7 +248,7 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
   } else if (container) {
     body = (
       <GroupFrame label={spec.label} required={required} hint={spec.hint} local={local ?? missing} problems={problems} actions={actions}>
-        <ContainerParts spec={spec} />
+        <ContainerParts spec={spec} value={fixed} />
       </GroupFrame>
     );
   } else if (spec.holdsSensitive && Control === JsonControl) {

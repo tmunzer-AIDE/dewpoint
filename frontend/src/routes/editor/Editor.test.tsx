@@ -9,7 +9,9 @@ import { onAnnounce } from "../../lib/announce";
 import { cancelLeaving, mayLeave } from "../../lib/leaving";
 import type { CanvasProps } from "./Canvas";
 import { EditorPage } from "./Editor";
-import { DELAY, typeWith } from "../../test/nodeTypes";
+import { DELAY, SWITCH, typeWith } from "../../test/nodeTypes";
+import { formula } from "../../lib/config";
+import { STALE } from "../../lib/unapplied";
 
 // Every document the stand-in canvas was handed: what was drawn, and what never was.
 const { drawn } = vi.hoisted(() => ({ drawn: [] as { doc: GraphDoc; editable: boolean }[] }));
@@ -1354,4 +1356,81 @@ it("discards a deleted step's edits not applied, and says so", async () => {
   expect(ask.textContent).toContain("Its edits not applied yet are discarded too.");
   await userEvent.click(within(ask).getByRole("button", { name: "Delete" }));
   expect(screen.queryByRole("button", { name: /edits? not applied/ })).toBeNull();
+});
+
+/** A switch whose case b leads to a transform. */
+const switched = () => ({
+  graph_format: 1,
+  nodes: [
+    { id: "id-pick", key: "pick", type: "flow.switch@1", config: { cases: [{ port: "a", when: formula("true") }, { port: "b", when: formula("false") }] }, position: { x: 0, y: 140 } },
+    { id: "id-transform", key: "transform", type: "flow.transform@1", position: { x: 0, y: 280 } },
+  ],
+  edges: [{ from: { node: "id-pick", port: "b" }, to: { node: "id-transform" } }],
+});  // prettier-ignore
+
+async function openSwitch() {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, SWITCH]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: switched() }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "pick" }));
+}
+
+it("renames a case's port in place, its edges following", async () => {
+  await openSwitch();
+  const port = within(screen.getByRole("group", { name: "Cases, item 2" })).getByLabelText("Port");
+  await userEvent.clear(port);
+  await userEvent.type(port, "big{Enter}"); // applies on Enter, or when focus leaves
+  expect(drawn.at(-1)!.doc.edges).toEqual([{ from: { node: "id-pick", port: "big" }, to: { node: "id-transform" } }]);
+});
+
+it("lists an edit whose field an undo removed, and discards it without bringing the field back", async () => {
+  const SIZES = typeWith(
+    { type: "object", properties: { sizes: { type: "array", title: "Sizes", items: { type: "integer" } } } },
+    { ref: "acme.sizes@1", type: "acme.sizes", title: "Sizes" },
+  );
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, SIZES]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("acme.sizes@1", { sizes: [] }, "sz") }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "sz" }));
+  await userEvent.click(screen.getByRole("button", { name: "Add to Sizes" }));
+  await userEvent.click(screen.getByLabelText("Sizes, item 1"));
+  await userEvent.paste("1x"); // held: no number
+  await userEvent.click(screen.getByRole("heading", { name: "sz" }));
+  await userEvent.keyboard("{Control>}z{/Control}"); // the item's addition undone: its field is gone
+  expect(screen.queryByLabelText("Sizes, item 1")).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "1 edit not applied" }));
+  const list = screen.getByRole("complementary", { name: "Edits not applied" });
+  expect(list.textContent).toContain("sz · Sizes, item 1");
+  expect(list.textContent).toContain("1x");
+  await userEvent.click(within(list).getByRole("button", { name: "Discard: sz · Sizes, item 1" }));
+  expect(stepConfig("sz")).toEqual({ sizes: [] }); // never recreated
+  expect(screen.queryByRole("button", { name: /edits? not applied/ })).toBeNull();
+});
+
+it("never moves a held edit to an equal item when a removal is undone", async () => {
+  const SIZES = typeWith(
+    { type: "object", properties: { sizes: { type: "array", title: "Sizes", items: { type: "integer" } } } },
+    { ref: "acme.sizes@1", type: "acme.sizes", title: "Sizes" },
+  );
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, SIZES]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("acme.sizes@1", { sizes: [5, 5, 7] }, "sz") }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "sz" }));
+  await userEvent.click(screen.getByRole("button", { name: "Remove: Sizes, item 1" })); // [5, 7]
+  await userEvent.type(screen.getByLabelText("Sizes, item 1"), "x"); // "5x", over the second 5
+  await userEvent.click(screen.getByRole("heading", { name: "sz" }));
+  await userEvent.keyboard("{Control>}z{/Control}"); // the removal undone: [5, 5, 7]
+  await userEvent.type(screen.getByLabelText("Sizes, item 1"), "{Backspace}0"); // "50"
+  expect(stepConfig("sz")).toEqual({ sizes: [5, 5, 7] }); // never [50, 5, 7] unasked
+  expect(screen.getByText(STALE)).toBeTruthy();
+});
+
+it("asks before removing a case with edges", async () => {
+  await openSwitch();
+  await userEvent.click(screen.getByRole("button", { name: "Remove: Cases, item 2" }));
+  const dialog = screen.getByRole("dialog", { name: "Remove a port" });
+  expect(dialog.textContent).toContain("The port b goes with this change, and its edge to transform is deleted.");
+  await userEvent.click(within(dialog).getByRole("button", { name: "Remove" }));
+  expect(drawn.at(-1)!.doc.edges).toEqual([]);
+  expect(stepConfig("pick")).toEqual({ cases: [{ port: "a", when: formula("true") }] });
 });
