@@ -89,15 +89,20 @@ def test_a_version_not_locked_in_compliance_mode_for_long_enough_is_refused(mode
     ]
 
 
-def test_a_lock_dated_a_moment_before_its_version_is_long_enough() -> None:
-    """A real server dates a version's lock and its last-modified time apart, by milliseconds (R2's lesson on MinIO):
-    a lock a moment short of the period by that is no problem, one short by more than a minute is."""
-    moment, short = FakeS3(lock_lag=timedelta(milliseconds=3)), FakeS3(lock_lag=timedelta(minutes=2))
-    written(moment, ("platform", 1))
-    written(short, ("platform", 1))
-    assert read_anchors(moment, BUCKET, PREFIX, kept=KEPT).problems == []  # type: ignore[arg-type]
-    [problem] = read_anchors(short, BUCKET, PREFIX, kept=KEPT).problems  # type: ignore[arg-type]
+def test_the_check_is_exact_and_the_bucket_keeps_a_day_more_for_timestamp_precision() -> None:
+    """The invariant is a lock of at least the period from the version's write, checked exactly (the owner's ruling:
+    no slack). A real server dates a version's lock and its last-modified time apart, by milliseconds, so a bucket
+    whose default is exactly the period can fall short by that; its default must be a day more (default retention
+    is set in whole days)."""
+    exact, margin = (
+        FakeS3(days=435, lock_lag=timedelta(milliseconds=3)),
+        FakeS3(days=436, lock_lag=timedelta(milliseconds=3)),
+    )
+    written(exact, ("platform", 1))
+    written(margin, ("platform", 1))
+    [problem] = read_anchors(exact, BUCKET, PREFIX, kept=KEPT).problems  # type: ignore[arg-type]
     assert "less than 435 days" in problem
+    assert read_anchors(margin, BUCKET, PREFIX, kept=KEPT).problems == []  # type: ignore[arg-type]
 
 
 def test_a_listing_longer_than_a_page_is_verified_whole() -> None:
@@ -113,8 +118,11 @@ def test_a_listing_longer_than_a_page_is_verified_whole() -> None:
 @pytest.mark.parametrize(("bucket", "problems"), [
     (FakeS3(), []),
     (FakeS3(days=500), []),
+    (FakeS3(days=435), ["the bucket's default retention, 435 days, is less than 436 (audit retention, backups and a "
+                        "day for timestamp precision)"]),
     (FakeS3(mode="GOVERNANCE"), ["the bucket's default retention isn't in compliance mode"]),
-    (FakeS3(days=400), ["the bucket's default retention, 400 days, is less than 435 (audit retention and backups)"]),
+    (FakeS3(days=400), ["the bucket's default retention, 400 days, is less than 436 (audit retention, backups and a "
+                        "day for timestamp precision)"]),
     (FakeS3(mode=None), ["the bucket has no default retention"]),
     (FakeS3(enabled=False), ["the bucket has no Object Lock"]),
 ])  # fmt: skip

@@ -61,7 +61,10 @@ def test_verify_refuses_a_bucket_whose_default_retention_is_too_short(pg_url, _t
     assert CliRunner().invoke(app, ["audit", "anchor"]).exit_code == 0
     verified = CliRunner().invoke(app, ["audit", "verify"])
     assert verified.exit_code == 1
-    assert "the bucket's default retention, 30 days, is less than 435 (audit retention and backups)" in verified.output
+    assert (
+        "the bucket's default retention, 30 days, is less than 436 (audit retention, backups and a day for "
+        "timestamp precision)"
+    ) in verified.output
 
 
 def test_the_monitor_is_set_up_stays_quiet_when_healthy_and_alerts(pg_url, _test_users, monkeypatch,

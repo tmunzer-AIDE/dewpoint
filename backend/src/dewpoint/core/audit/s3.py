@@ -10,7 +10,8 @@
   kept less than the audit retention and backup periods require are each a problem. Each anchor's first version is
   the anchor of record.
 - **The bucket** (`bucket_problems`): Object Lock on, its default retention in compliance mode and at least those
-  periods (D6.9, against the settings in force).
+  periods plus a day (D6.9, against the settings in force): a server dates a version's lock and its write apart by
+  milliseconds, and each version's lock is checked exactly against the periods.
 
 Whether a real server behaves so is D6's proof (tests/proofs/d6), on the pinned MinIO, and on the owner's bucket
 before readiness."""
@@ -27,9 +28,9 @@ from dewpoint.core.audit.anchor import signed_message
 
 ANCHORS = "anchors/"
 PAGE = 1000  # S3's own maximum keys a listing page
-# A server dates a version's lock and its last-modified time apart (by milliseconds, at the write): a lock that short
-# of the period by no more than this is long enough
-LOCK_SLACK = timedelta(minutes=1)
+# A server dates a version's lock and its last-modified time apart (by milliseconds, at the write), and a bucket's
+# default retention is in whole days: the bucket keeps this much more than the periods, so the exact check below holds
+MARGIN_DAYS = 1
 
 
 def anchor_key(prefix: str, scope: str, seq: int) -> str:
@@ -88,7 +89,7 @@ def _lock_problem(client: Any, bucket: str, key: str, version: dict[str, Any], k
     if retention.get("Mode") != "COMPLIANCE":
         return f"not in compliance mode ({retention.get('Mode')})"
     until: datetime = retention["RetainUntilDate"]
-    if until < version["LastModified"] + kept - LOCK_SLACK:
+    if until < version["LastModified"] + kept:  # exact: the invariant (the owner's ruling), the margin is the bucket's
         return f"kept until {until.date().isoformat()}, less than {kept.days} days"
     return None
 
@@ -141,6 +142,9 @@ def bucket_problems(client: Any, bucket: str, *, kept: timedelta) -> list[str]:
     if retention.get("Mode") != "COMPLIANCE":
         return ["the bucket's default retention isn't in compliance mode"]
     days = int(retention.get("Days") or 365 * int(retention.get("Years") or 0))
-    if days < kept.days:
-        return [f"the bucket's default retention, {days} days, is less than {kept.days} (audit retention and backups)"]
+    if days < kept.days + MARGIN_DAYS:
+        return [
+            f"the bucket's default retention, {days} days, is less than {kept.days + MARGIN_DAYS} (audit "
+            "retention, backups and a day for timestamp precision)"
+        ]
     return []

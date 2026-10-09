@@ -139,7 +139,8 @@ def write_credentials(path: Path, credentials: dict[str, str]) -> None:
 S3_ENDPOINT = f"http://127.0.0.1:{os.environ.get('DEWPOINT_M4_S3_PORT', '19000')}"
 REGION = "us-east-1"
 BUCKET = "dewpoint-audit"  # compose.yaml's DEWPOINT_AUTHZ_AUDIT_BUCKET: anchors and the authorizer's records
-RETENTION_DAYS = 435  # audit retention 400 + backups 35: D6.9's default
+RETENTION_DAYS = 435  # audit retention 400 + backups 35: D6.9's default, and each version's lock at least that
+BUCKET_DAYS = RETENTION_DAYS + 1  # the bucket's default: a day more, as the verifier requires (timestamp precision)
 STS_ROLE = "arn:minio:iam:::role/dewpoint-proof"  # MinIO ignores the role for its own users; boto3 requires one
 
 
@@ -192,7 +193,7 @@ def assume(run: Run, kind: str, bucket: str, prefix: str, seconds: int = 3600) -
     return dict(answer["Credentials"])
 
 
-def make_bucket(client: Any, bucket: str, *, days: int | None = RETENTION_DAYS) -> None:
+def make_bucket(client: Any, bucket: str, *, days: int | None = BUCKET_DAYS) -> None:
     """A bucket with Object Lock; a compliance-mode default retention of `days`, or none (D6.8's fixture)."""
     client.create_bucket(Bucket=bucket, ObjectLockEnabledForBucket=True)
     if days is not None:

@@ -19,7 +19,7 @@ import base64
 import json
 import os
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -169,6 +169,9 @@ def test_d6_0_the_writer_and_the_verifier_are_demonstrably_apart(lab: Lab) -> No
 
 
 def test_d6_1_a_written_anchor_is_a_locked_version(pg_url, _test_users, monkeypatch, lab: Lab) -> None:
+    """Locked in compliance mode for at least the periods from its write, exactly (the invariant), and for the
+    bucket's configured default to the second. The gap between the two times the server dates is measured and
+    recorded (the owner's ruling: a day's tolerance couldn't establish the duration)."""
     asyncio.run(_seed(_url_for(pg_url, "dewpoint_api")))
     prefix = _prefix()
     _anchor(monkeypatch, pg_url, lab, prefix)
@@ -176,38 +179,80 @@ def test_d6_1_a_written_anchor_is_a_locked_version(pg_url, _test_users, monkeypa
     retention = environment.s3(lab.verifier).get_object_retention(
         Bucket=BUCKET, Key=version["Key"], VersionId=version["VersionId"]
     )["Retention"]
+    held = retention["RetainUntilDate"] - version["LastModified"]
+    configured = timedelta(days=environment.BUCKET_DAYS)
+    record({"environment": "d6", "case": "d6.1 lock", "held_s": held.total_seconds(),
+            "configured_s": configured.total_seconds(),
+            "gap_ms": (configured - held) / timedelta(milliseconds=1)})  # fmt: skip
     assert retention["Mode"] == "COMPLIANCE"
-    assert abs(retention["RetainUntilDate"] - (version["LastModified"] + KEPT)) < timedelta(days=1)
+    assert held >= KEPT  # the invariant
+    assert abs(held - configured) < timedelta(seconds=1)  # as configured
+
+
+def _refusal(call: Any) -> dict[str, Any]:
+    with pytest.raises(ClientError) as refused:
+        call()
+    answer = refused.value.response
+    return {"status": answer["ResponseMetadata"]["HTTPStatusCode"], "code": answer["Error"]["Code"],
+            "message": answer["Error"].get("Message", "")}  # fmt: skip
 
 
 def test_d6_2_deleting_the_version_is_refused_to_the_writer_and_to_root(pg_url, _test_users, monkeypatch,
                                                                         lab: Lab) -> None:  # fmt: skip
+    """The writer is refused for want of permission (403 AccessDenied); root, for the lock (MinIO's ErrObjectLocked:
+    400 InvalidRequest, "Object is WORM protected and cannot be overwritten"). The control: root deletes an unlocked
+    version with the same request, so the lock, not the request, is what refuses it. The version is still there."""
     asyncio.run(_seed(_url_for(pg_url, "dewpoint_api")))
     prefix = _prefix()
     _anchor(monkeypatch, pg_url, lab, prefix)
     version = _only_anchor(lab, prefix)
-    # the refusal is the property, and the version still there after it; the code MinIO gives is recorded, not
-    # assumed (R2's rerun: a locked version's delete answered InvalidRequest, where the test had assumed AccessDenied)
-    for who, client in (("writer", environment.s3(lab.writer)), ("root", lab.root)):
-        with pytest.raises(ClientError) as refused:
-            client.delete_object(Bucket=BUCKET, Key=version["Key"], VersionId=version["VersionId"])
-        record({"environment": "d6", "case": "d6.2 refusal", "who": who,
-                "code": refused.value.response["Error"]["Code"]})  # fmt: skip
+
+    def delete(client: Any, bucket: str, key: str, version_id: str) -> Callable[[], Any]:
+        return lambda: client.delete_object(Bucket=bucket, Key=key, VersionId=version_id)
+
+    writer = _refusal(delete(environment.s3(lab.writer), BUCKET, version["Key"], version["VersionId"]))
+    by_root = _refusal(delete(lab.root, BUCKET, version["Key"], version["VersionId"]))
+    unlocked_key = f"{prefix}control/{uuid.uuid4().hex}"
+    unlocked = lab.root.put_object(Bucket=UNLOCKED_BUCKET, Key=unlocked_key, Body=b"{}")["VersionId"]
+    delete(lab.root, UNLOCKED_BUCKET, unlocked_key, unlocked)()  # the control: the same request, no lock: deleted
+    record({"environment": "d6", "case": "d6.2", "writer": writer, "root": by_root})
+    assert (writer["status"], writer["code"]) == (403, "AccessDenied"), writer
+    assert (by_root["status"], by_root["code"]) == (400, "InvalidRequest"), by_root
+    assert "WORM protected" in by_root["message"], by_root
+    remaining = lab.root.list_object_versions(Bucket=UNLOCKED_BUCKET, Prefix=unlocked_key).get("Versions", [])
+    assert [v for v in remaining if v["VersionId"] == unlocked] == []
     assert [v["VersionId"] for v in _versions(lab, version["Key"])] == [version["VersionId"]]
 
 
 def test_d6_3_shortening_or_changing_the_lock_is_refused(pg_url, _test_users, monkeypatch, lab: Lab) -> None:
+    """Root's request to shorten the lock, or to turn it into governance mode, is refused, and the version's lock is
+    unchanged after. The control: each request, the same shape, takes on an unlocked version, so the lock, not the
+    request, refuses it. The codes are recorded."""
     asyncio.run(_seed(_url_for(pg_url, "dewpoint_api")))
     prefix = _prefix()
     _anchor(monkeypatch, pg_url, lab, prefix)
     version = _only_anchor(lab, prefix)
-    for retention in ({"Mode": "COMPLIANCE", "RetainUntilDate": datetime.now(UTC) + timedelta(days=1)},
-                      {"Mode": "GOVERNANCE", "RetainUntilDate": version["LastModified"] + KEPT}):  # fmt: skip
-        with pytest.raises(ClientError):
-            lab.root.put_object_retention(Bucket=BUCKET, Key=version["Key"], VersionId=version["VersionId"],
-                                          Retention=retention, BypassGovernanceRetention=True)  # fmt: skip
-    kept = lab.root.get_object_retention(Bucket=BUCKET, Key=version["Key"], VersionId=version["VersionId"])
-    assert kept["Retention"]["Mode"] == "COMPLIANCE"
+    before = lab.root.get_object_retention(Bucket=BUCKET, Key=version["Key"], VersionId=version["VersionId"])
+    soon = datetime.now(UTC)
+    changes = {
+        "shorter": {"Mode": "COMPLIANCE", "RetainUntilDate": soon + timedelta(days=1)},
+        "governance": {"Mode": "GOVERNANCE", "RetainUntilDate": soon + timedelta(days=2)},
+    }
+    refusals = {}
+    for name, retention in changes.items():
+        unlocked_key = f"{prefix}control/{name}-{uuid.uuid4().hex}"
+        unlocked = lab.root.put_object(Bucket=UNLOCKED_BUCKET, Key=unlocked_key, Body=b"{}")["VersionId"]
+        lab.root.put_object_retention(Bucket=UNLOCKED_BUCKET, Key=unlocked_key, VersionId=unlocked,
+                                      Retention=retention)  # fmt: skip  # the control: it takes
+        took = lab.root.get_object_retention(Bucket=UNLOCKED_BUCKET, Key=unlocked_key, VersionId=unlocked)
+        assert took["Retention"]["Mode"] == retention["Mode"]
+        refusals[name] = _refusal(lambda r=retention: lab.root.put_object_retention(  # type: ignore[misc]
+            Bucket=BUCKET, Key=version["Key"], VersionId=version["VersionId"], Retention=r,
+            BypassGovernanceRetention=True))  # fmt: skip
+    record({"environment": "d6", "case": "d6.3", "refusals": refusals})
+    after = lab.root.get_object_retention(Bucket=BUCKET, Key=version["Key"], VersionId=version["VersionId"])
+    assert after["Retention"] == before["Retention"]
+    assert all(r["status"] in (400, 403) for r in refusals.values()), refusals
 
 
 def test_d6_4_a_plain_delete_adds_a_marker_and_verify_fails(pg_url, _test_users, monkeypatch, lab: Lab) -> None:
@@ -358,10 +403,10 @@ def test_d6_9_the_default_retention_is_checked_against_the_configured_periods(pg
     asyncio.run(_seed(_url_for(pg_url, "dewpoint_api")))
     prefix = _prefix()
     _anchor(monkeypatch, pg_url, lab, prefix)
-    assert _verify(monkeypatch, pg_url, lab, prefix).exit_code == 0  # 400 + 35 = 435: the bucket's default
+    assert _verify(monkeypatch, pg_url, lab, prefix).exit_code == 0  # 400 + 35 = 435, and a day: the bucket's 436
     longer = _verify(monkeypatch, pg_url, lab, prefix, DEWPOINT_BACKUP_RETENTION_DAYS="40")
     assert longer.exit_code == 1
-    assert "the bucket's default retention, 435 days, is less than 440" in longer.output
+    assert "the bucket's default retention, 436 days, is less than 441" in longer.output
 
 
 def _monitor(monkeypatch: pytest.MonkeyPatch, pg_url: str, lab: Lab, prefix: str, roster: dict[str, Any],

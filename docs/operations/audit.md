@@ -12,8 +12,11 @@ Production writes them to an S3 bucket with Object Lock in compliance mode; deve
 ## The bucket
 
 - Object Lock enabled at creation, with a **default retention in compliance mode** of at least the audit retention plus
-  the backup period: `DEWPOINT_AUDIT_RETENTION_DAYS` (400 unless set) + `DEWPOINT_BACKUP_RETENTION_DAYS` (35 unless
-  set) = 435 days. `dewpoint audit verify` checks it against the settings in force and fails below them. Nobody,
+  the backup period, **plus one day**: `DEWPOINT_AUDIT_RETENTION_DAYS` (400 unless set) +
+  `DEWPOINT_BACKUP_RETENTION_DAYS` (35 unless set) + 1 = 436 days. Verify checks each version's lock exactly against
+  the periods (435 days from its write), and a server dates a version's lock and its write apart by milliseconds;
+  the default is set in whole days, so the extra day covers that. `dewpoint audit verify` checks the default against
+  the settings in force and fails below them. Nobody,
   the bucket's owner included, can shorten a compliance-mode lock: choose the period before the first write.
 - Anchors go under `<prefix>anchors/<scope>/<sequence>.json` (`DEWPOINT_AUDIT_S3_PREFIX`, `dewpoint/` unless set).
   Temporal's authorizer writes its records under `<prefix>temporal-authorizer/<day>/<id>.json` in the same bucket.

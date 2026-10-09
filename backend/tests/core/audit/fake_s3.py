@@ -30,7 +30,7 @@ class Version:
 
 
 class FakeS3:
-    def __init__(self, *, mode: str | None = "COMPLIANCE", days: int | None = 435, enabled: bool = True,
+    def __init__(self, *, mode: str | None = "COMPLIANCE", days: int | None = 436, enabled: bool = True,
                  now: datetime | None = None, lock_lag: timedelta = timedelta(0)) -> None:  # fmt: skip
         """`lock_lag`: how much earlier than the version's own time the server dates its lock (a real server takes
         the two times apart, by milliseconds)."""
