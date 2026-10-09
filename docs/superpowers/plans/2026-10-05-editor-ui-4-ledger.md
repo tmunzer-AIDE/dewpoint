@@ -1752,3 +1752,22 @@ M58. **The branch starts from origin/main 532ab6c6, not the plan's 93a0dd61**: m
     was applied to the current code. Cost if wrong: none seen; the suite is green.
 M59. **Task 1 recorded the owner's acceptance and copied rulings 114–124**, where the plan's text said "proposed": the
     owner accepted before Task 1 ran, as with 96–113.
+
+### Owner, milestone 1 reviewed (2026-10-10, pasted)
+
+A pasted review held milestone 1 at dc92b173 for two P2 defects in `scope.py`, both in the accepted plan's own code:
+known formats disappeared through nullable type lists, nullable `anyOf` and `allOf`; and a search could say `more:
+false` with work omitted at a bound (children past 500, matches past 50, fields below its depth). It found no new
+blocker in the validator or guard changes, and authorized no milestone-2 work or push.
+
+### 4c-2a, after the milestone 1 review (2026-10-10)
+
+M60. **A format is kept conservatively**: within a way the one its schemas declare, across ways only one they all
+    share (`_format`); two formats, or a way without one, leave none. Test: "keeps a format through null alternatives
+    and conjunctions" (failed first on the nullable list, the nullable `anyOf` and the `allOf`).
+M61. **A search tracks what it left unsearched at every bound**, without raising any limit: `more` is true when it
+    stopped at FIND_FOUND or FIND_VISITS with work left, skipped children past MAX_CHILDREN, or left fields below
+    FIND_DEPTH. Tests: "a search says when children past the limit went unsearched", "… when it stopped at its count",
+    "… when it stopped at its depth" (each failed first), and "a complete search says so".
+    Engine tests 1,262 passed, 1 skipped; ruff, mypy, import contracts clean. The whole backend suite wasn't rerun:
+    nothing outside the engine's tests uses `scope.py` yet.
