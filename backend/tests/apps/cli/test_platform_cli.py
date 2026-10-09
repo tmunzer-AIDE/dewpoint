@@ -74,7 +74,8 @@ async def test_the_capacity_command_signs_in_through_the_api_and_its_change_name
     answer = await cli.capacity_via_api(client, email="ops@corp.test", password=PW, code=totp.at(time.time() + 30),
                                         change={"starts_per_s": 8.0, "headroom": 0.5, "queue_wait_s": 300},
                                         attestation=SAID)  # fmt: skip
-    assert answer == {"starts_per_s": 8.0, "headroom": 0.5, "queue_wait_s": 300, "queue_cap": 1200, "problems": []}
+    assert answer == {"starts_per_s": 8.0, "headroom": 0.5, "queue_wait_s": 300, "limit": 1200, "outstanding": 0,
+                      "active_tenants": 0, "problems": []}  # fmt: skip
     async with owner_sessionmaker() as s:
         found = await s.execute(text("select actor_id from audit_log where action = 'platform.ingress_capacity.set'"))
         assert list(found.scalars()) == [user.id]
@@ -89,7 +90,8 @@ def test_the_command_sends_only_what_it_was_given(monkeypatch: pytest.MonkeyPatc
 
     async def asked(_client: object, **kwargs: object) -> dict[str, object]:
         sent.append(kwargs)
-        return {"starts_per_s": 8.0, "headroom": 0.5, "queue_wait_s": 600, "queue_cap": 2400, "problems": []}
+        return {"starts_per_s": 8.0, "headroom": 0.5, "queue_wait_s": 600, "limit": 2400, "outstanding": 0,
+                "active_tenants": 0, "problems": []}  # fmt: skip
 
     monkeypatch.setattr(cli, "capacity_via_api", asked)
     base = ["platform", "set-ingress-capacity", "--api", "https://dewpoint.test", "--email", "ops@corp.test",
@@ -97,7 +99,7 @@ def test_the_command_sends_only_what_it_was_given(monkeypatch: pytest.MonkeyPatc
     wait = CliRunner().invoke(cli.app, [*base, "--queue-wait-s", "600"], input=f"{PW}\n123456\n")
     assert wait.exit_code == 0, wait.output
     assert wait.output.endswith("ingress capacity: 8.0 starts a second measured, 0.5 of them for ingress, a 600 s "
-                                "queue: a tenant's queue holds 2400 requests\n")  # fmt: skip
+                                "wait: the deployment's outstanding work at most 2400 requests\n")  # fmt: skip
     unset = CliRunner().invoke(cli.app, [*base, "--unset"], input=f"{PW}\n123456\n")
     assert unset.exit_code == 0, unset.output
     assert [(k["change"], k["password"], k["code"], k["attestation"]) for k in sent] == [

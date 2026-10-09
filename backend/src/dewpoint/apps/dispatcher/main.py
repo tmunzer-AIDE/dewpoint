@@ -25,7 +25,7 @@ from dewpoint.apps.dispatcher.dispatch import Rotation, dispatch_once
 from dewpoint.apps.dispatcher.matching import Verified, match_once
 from dewpoint.apps.dispatcher.observe import observe, report
 from dewpoint.apps.dispatcher.reconcile import Leader, reconcile_once, reconcile_subruns
-from dewpoint.apps.dispatcher.recount import recount_once
+from dewpoint.apps.dispatcher.recount import Drift, check_budget, recount_once
 from dewpoint.apps.dispatcher.schedule_sync import check_misses, check_strays, sync_schedules
 from dewpoint.apps.dispatcher.tick import ADMISSION_QUEUE, Ticker
 from dewpoint.apps.dispatcher.tick_workflow import ScheduleTick
@@ -61,13 +61,14 @@ async def current_build(client: Client) -> str | None:
 async def cycle(
     sessionmaker: async_sessionmaker[AsyncSession], client: Client, keys: KeySource, settings: Settings, *,
     instance: uuid.UUID, reconciler: uuid.UUID, leader: Leader, rotation: Rotation, verified: Verified | None = None,
-    retention: evidence.Retention | None = None, pages: matching.Busy | None = None,
+    retention: evidence.Retention | None = None, pages: matching.Busy | None = None, drift: Drift | None = None,
 ) -> None:  # fmt: skip
     """One cycle: observe the current build, dispatch what's due, match inbound events, report; the leader also
     reconciles, sends cancels, carries out the operator's commands and clears settled items' failure counts and
     recovery reasons (2b-4b M3), keeps the Temporal Schedules in step
     with their rows, reads their missed firings, reads the run executions' histories their evidence is due
-    (`evidence`) and recounts the inbound-event counters due a recount. An observation that fails (Temporal, or the
+    (`evidence`), recounts the inbound-event counters due a recount and checks the ingress budget (2b-4b M3). An
+    observation that fails (Temporal, or the
     database, briefly unavailable) dispatches and matches nothing this cycle, and the next one asks again: admission
     would refuse a matched event's requests for good without a fresh record of the build (§7.2), which ages out
     meanwhile."""
@@ -97,6 +98,7 @@ async def cycle(
         checked = await evidence.check_evidence(sessionmaker, client, retention=kept)
         settled.update({f"evidence_{k}": v for k, v in checked.items()})
         settled.update({f"recount_{k}": v for k, v in (await recount_once(sessionmaker)).items()})
+        settled.update({f"budget_{k}": v for k, v in (await check_budget(sessionmaker, drift or Drift())).items()})
         await report(sessionmaker, reconciler, build_id, {**settled}, kind="reconciler")
 
 
@@ -148,10 +150,12 @@ async def run(settings: Settings) -> None:
         reconciler, leader = uuid.uuid5(instance, "reconciler"), Leader(engine)
         log.info("dispatcher_started", instance=str(instance), build=this_build())
         rotation, verified, retention, pages = Rotation(), Verified(), evidence.Retention(), matching.Busy()
+        drift = Drift()
 
         async def one() -> None:
             await cycle(sessionmaker, client, keys, settings, instance=instance, reconciler=reconciler, leader=leader,
-                        rotation=rotation, verified=verified, retention=retention, pages=pages)  # fmt: skip
+                        rotation=rotation, verified=verified, retention=retention, pages=pages,
+                        drift=drift)  # fmt: skip
 
         try:
             async with admission_worker(

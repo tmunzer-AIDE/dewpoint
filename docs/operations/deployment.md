@@ -275,12 +275,12 @@ authenticator's code, and calls `PATCH /api/v1/admin/platform/ingress-capacity`,
 within the reauthentication window and audits the change in its transaction (`platform.ingress_capacity.set`) with the
 admin's id, the attestation, what it was and what it is, and which values are still unset. No database login changes
 it directly. The values: the sustained starts a second measured on this deployment's own Temporal, the share of them
-ingress may use, and the wait its operators agree a tenant's queued webhook requests may stand for. From them come
-ingress's event rates and each tenant's queue cap ([ingress](ingress.md#the-ingress-capacity)); none is set by
-default, and until they are, the rates and the cap are development-only. The values above are an example, not a
+ingress may use, and the wait its operators agree the outstanding webhook work may stand for. From them come an
+endpoint's event rates and the deployment's outstanding-work limit ([ingress](ingress.md#the-ingress-capacity)); none
+is set by default, and until they are, the rates and the limit are development-only. The values above are an example, not a
 recommendation. A value left out keeps what it was; `--unset` unsets all three, which a production deployment whose
-runs are on refuses (409 `ingress_capacity_required`): its capacity stays whole. `GET` on the same path shows it and
-what's unset; production readiness (M6's enable command, D14's ingress switch) refuses while any value is.
+runs are on refuses (409 `ingress_capacity_required`): its capacity stays whole. `GET` on the same path shows it, the
+limit it makes, what's outstanding and what's unset; production readiness (M6's enable command, D14's ingress switch) refuses while any value is.
 
 ## Encrypted payloads
 

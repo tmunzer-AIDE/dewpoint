@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""An endpoint's and a tenant's event rates, derived (the owner's ruling 2 on 2b-4b's M3 checkpoint 2). Once the
-deployment's ingress capacity is set, a tenant's events come at most at the headroom's share of its measured starts,
-and an endpoint's at that divided by its enabled bindings (an event becomes a request for each); before, the rates as
-configured, development-only. A rate configured lower stays; bursts are as configured."""
+"""An endpoint's event rate, derived (the owner's rulings on 2b-4b's M3 checkpoints 2 and 4). Once the deployment's
+ingress capacity is set, an endpoint's events come at most at the headroom's share of its measured starts divided by its
+enabled bindings (an event becomes a request for each), to smooth a sender; before, as configured, development-only. A
+rate configured lower stays; bursts are as configured. A tenant's rate stays as configured: the deployment's budget, not
+a rate, bounds its work outstanding (tests/apps/dispatcher/test_ingress_budget.py)."""
 
 import uuid
 from typing import Any
@@ -73,43 +74,15 @@ async def test_an_endpoints_rate_is_its_share_of_the_measured_starts_by_its_enab
     assert 8 <= await limited(ingress_sessionmaker, endpoint_id, 10, 10) <= 10
 
 
-async def test_a_tenants_rate_is_the_share_of_the_measured_starts_and_a_lower_configured_rate_stays(
+async def test_a_tenants_rate_stays_as_configured_once_the_capacity_is_set(
     owner_sessionmaker, ingress_sessionmaker
 ) -> None:  # fmt: skip
+    """The checkpoint-3 derivation (the budget over the tenant's widest fan-out) went with the per-tenant queue cap:
+    the deployment's budget bounds what a tenant's events become."""
     tenant, endpoint_id = await endpoint(owner_sessionmaker, event_tokens=1_000, event_per_s=1_000)
-    await bound(owner_sessionmaker, tenant, endpoint_id, 1)
+    await bound(owner_sessionmaker, tenant, endpoint_id, 4)
     async with owner_sessionmaker() as s, s.begin():
         await s.execute(text("insert into tenant_event_counters (tenant_id) values (:t)"), {"t": tenant})
+    await capacity(owner_sessionmaker, 8.0, 0.5)  # 4 starts a second, 4 bindings: once, an event a second
     await drained(owner_sessionmaker, tenant=tenant)
     assert await limited(ingress_sessionmaker, endpoint_id, 10, 0) == 1  # at its configured 10 a second
-    await capacity(owner_sessionmaker, 8.0, 0.5)  # 4 a second for the tenant: 10 events wait 2.5 s
-    await drained(owner_sessionmaker, tenant=tenant)
-    assert 2 <= await limited(ingress_sessionmaker, endpoint_id, 10, 10) <= 3
-    await capacity(owner_sessionmaker, 800.0, 0.5)  # 400 a second: its configured 10 stays
-    await drained(owner_sessionmaker, tenant=tenant)
-    assert await limited(ingress_sessionmaker, endpoint_id, 10, 20) == 1
-
-
-async def test_a_tenants_rate_is_divided_by_its_largest_fan_out_whichever_endpoint_its_events_reach(
-    owner_sessionmaker, ingress_sessionmaker
-) -> None:  # fmt: skip
-    """The fresh M3 review 3's I2: an event becomes at most as many requests as the tenant's largest fan-out, so its
-    events come at most at the budget divided by it, and its requests at most at the budget, however they spread
-    over its endpoints."""
-    import hashlib
-
-    tenant, wide = await endpoint(owner_sessionmaker)
-    await bound(owner_sessionmaker, tenant, wide, 4)
-    narrow = uuid.uuid4()
-    async with owner_sessionmaker() as s, s.begin():
-        user = (await s.execute(text("select created_by from webhook_endpoints where id = :e"),
-                                {"e": wide})).scalar_one()  # fmt: skip
-        await s.execute(text("insert into webhook_endpoints (id, tenant_id, name, created_by, auth_kind, "
-                             "bearer_digest, dedupe_key, event_tokens, event_per_s) values (:e, :t, 'narrow', :u, "
-                             "'bearer', :d, 'sealed-dedupe-key', 1000, 1000)"),
-                        {"e": narrow, "t": tenant, "u": user, "d": hashlib.sha256(b"token").digest()})  # fmt: skip
-        await s.execute(text("insert into tenant_event_counters (tenant_id) values (:t)"), {"t": tenant})
-    await bound(owner_sessionmaker, tenant, narrow, 1)
-    await capacity(owner_sessionmaker, 8.0, 0.5)  # 4 starts a second; 4 bindings at most: an event a second
-    await drained(owner_sessionmaker, tenant=tenant)
-    assert 8 <= await limited(ingress_sessionmaker, narrow, 10, 0) <= 10  # at 4 a second, 3

@@ -49,8 +49,8 @@ CASES = (
     (1, 200, None, None),
     (20, 10, None, None),
     (20, 10, 1_000, None),
-    (20, 20, 1_000, (8.0, 0.5, 30)),
-)  # the last capped: (starts, headroom, wait) give a 120-request queue
+    (20, 6, 1_000, (8.0, 0.5, 30)),
+)  # the last limited: (starts, headroom, wait) give the deployment a 120-request limit, which 6 events of 20 fill
 DEADLINE_S = float(os.environ.get("DEWPOINT_PROBE_DEADLINE_S", "300"))
 FAST = {  # the endpoint's and the tenant's buckets never refuse: the backlog is recorded at once
     "request_per_s": 1e6, "request_burst": 10**7, "event_per_s": 1e6, "event_burst": 10**7, "byte_per_s": 1e9,
@@ -86,7 +86,7 @@ async def test_a_backlog_of_events_becomes_runs_on_a_real_temporal(
         await bind(owner_sessionmaker, ready, workflow)
     await workers(owner_sessionmaker)
     async with owner_sessionmaker() as s, s.begin():
-        if capacity is not None:  # the owner's ruling 2 on the M3 checkpoint 2: a tenant's queue capped
+        if capacity is not None:  # the owner's ruling on the M3 checkpoint 4: the deployment's limit
             await s.execute(text("update platform_settings set ingress_starts_per_s = :s, ingress_headroom = :h, "
                                  "ingress_queue_wait_s = :w"), dict(zip("shw", capacity, strict=True)))  # fmt: skip
         if limit is not None:
@@ -104,7 +104,7 @@ async def test_a_backlog_of_events_becomes_runs_on_a_real_temporal(
               "sealed": [sealed(ready, i, {"type": "ap_down", "site": "lyon"}) for i in ids],
               "versions": [1] * events, "dedupe": [None] * events, "digests": [None] * events}  # fmt: skip
     async with owner_sessionmaker() as s, s.begin():  # ingress's own recording function, as its role would call it
-        await s.execute(RECORD, params)
+        assert (await s.execute(RECORD, params)).scalar_one()["outcome"] == "recorded"
 
     rotation, busy, verified = dispatch.Rotation(), matching.Busy(), matching.Verified()
     runs = events * fan_out

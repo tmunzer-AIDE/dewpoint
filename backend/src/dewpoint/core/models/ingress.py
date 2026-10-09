@@ -154,5 +154,6 @@ class InboundEvent(Base):
     attempts: Mapped[int] = mapped_column(Integer, server_default="0")
     next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     request_count: Mapped[int | None] = mapped_column(Integer)
+    credit: Mapped[int | None] = mapped_column(Integer)  # its endpoint's enabled bindings when accepted (0050)
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

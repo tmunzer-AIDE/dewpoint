@@ -30,14 +30,17 @@ async def test_a_platform_admin_sets_it_audited_with_their_id_the_attestation_an
     app, owner_sessionmaker, api_settings
 ) -> None:  # fmt: skip
     admin, admin_id = await admin_of(app, owner_sessionmaker, api_settings)
+    async with owner_sessionmaker() as s, s.begin():  # what the deployment's budget counts now, shown with it
+        await s.execute(text("update ingress_budget set outstanding = 7, active = 2"))
+    held = {"outstanding": 7, "active_tenants": 2}
     async with admin:
         before = await admin.get(URL)
-        assert before.json() == {"starts_per_s": None, "headroom": None, "queue_wait_s": None, "queue_cap": 10_000,
+        assert before.json() == {"starts_per_s": None, "headroom": None, "queue_wait_s": None, "limit": 50_000, **held,
                                  "problems": ["starts_per_s", "headroom", "queue_wait_s"]}  # fmt: skip
         answer = await admin.patch(URL, json=WHOLE | {"attestation": SAID})
-        assert (answer.status_code, answer.json()) == (200, WHOLE | {"queue_cap": 1_200, "problems": []})
+        assert (answer.status_code, answer.json()) == (200, WHOLE | {"limit": 1_200, **held, "problems": []})
         wait = await admin.patch(URL, json={"queue_wait_s": 600, "attestation": SAID})  # the others kept
-        assert wait.json() == WHOLE | {"queue_wait_s": 600, "queue_cap": 2_400, "problems": []}
+        assert wait.json() == WHOLE | {"queue_wait_s": 600, "limit": 2_400, **held, "problems": []}
         unset_one = await admin.patch(URL, json={"headroom": None, "attestation": SAID})
         assert unset_one.json()["problems"] == ["headroom"]
         unset = await admin.patch(URL, json={"unset": True, "attestation": SAID})

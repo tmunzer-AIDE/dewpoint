@@ -30,7 +30,8 @@ export interface paths {
         };
         /**
          * Ingress Capacity
-         * @description The capacity, the queue it makes for a tenant, and its values still unset (production readiness refuses then).
+         * @description The capacity, the deployment's limit it makes and what's outstanding, and its values still unset (production
+         *     readiness refuses then).
          */
         get: operations["ingress_capacity_api_v1_admin_platform_ingress_capacity_get"];
         put?: never;

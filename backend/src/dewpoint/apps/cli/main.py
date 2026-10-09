@@ -1033,9 +1033,9 @@ def platform_set_ingress_capacity(
                    f"unreachable ({type(e).__name__})")  # fmt: skip
         raise typer.Exit(2) from None
     if now["starts_per_s"] is None and now["headroom"] is None and now["queue_wait_s"] is None:
-        typer.echo("ingress capacity unset: the development-only rates and cap")
+        typer.echo("ingress capacity unset: the development-only rates and limit")
         return
-    queue = (f"a {now['queue_wait_s']} s queue: a tenant's queue holds {now['queue_cap']} requests"
+    queue = (f"a {now['queue_wait_s']} s wait: the deployment's outstanding work at most {now['limit']} requests"
              if now["queue_wait_s"] is not None else "no wait agreed")  # fmt: skip
     typer.echo(f"ingress capacity: {now['starts_per_s']} starts a second measured, {now['headroom']} of them for "
                f"ingress, {queue}")  # fmt: skip

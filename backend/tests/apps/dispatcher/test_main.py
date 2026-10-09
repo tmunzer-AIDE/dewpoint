@@ -119,7 +119,7 @@ async def test_the_leader_recounts_inbound_event_counters_and_reports_it(
     async def nothing(*args: Any, **kwargs: Any) -> dict[str, int]:
         return {}
 
-    for step in ("reconcile_once", "send_cancels", "sync_schedules", "check_misses"):
+    for step in ("reconcile_once", "send_cancels", "sync_schedules", "check_misses", "check_budget"):
         monkeypatch.setattr(main, step, nothing)
 
     class Leading:
@@ -166,6 +166,30 @@ async def test_the_leader_carries_out_the_operators_commands_and_reports_them(
                      leader=Leading(), rotation=dispatch.Rotation())  # type: ignore[arg-type]  # fmt: skip
     assert seen == ["commands"]
     assert (await reported(owner_sessionmaker, reconciler)).get("command_slot_released") == 1
+
+
+async def test_the_leader_checks_the_ingress_budget_and_reports_it(
+    owner_sessionmaker, dispatch_sessionmaker, api_settings, monkeypatch
+) -> None:  # fmt: skip
+    """The owner's ruling on the 2b-4b M3 checkpoint 4: the budget against its truth, in the reconciler's report."""
+
+    async def nothing(*args: Any, **kwargs: Any) -> dict[str, int]:
+        return {}
+
+    for step in ("reconcile_once", "reconcile_subruns", "send_cancels", "commands_once", "sync_schedules",
+                 "check_misses", "check_strays", "recount_once"):  # fmt: skip
+        monkeypatch.setattr(main, step, nothing)
+
+    class Leading:
+        async def leading(self) -> bool:
+            return True
+
+    client = FakeClient()
+    client.workflow_service = Flaky(failures=0)
+    reconciler = uuid.uuid4()
+    await main.cycle(dispatch_sessionmaker, client, KEYS, api_settings, instance=uuid.uuid4(), reconciler=reconciler,
+                     leader=Leading(), rotation=dispatch.Rotation())  # type: ignore[arg-type]  # fmt: skip
+    assert (await reported(owner_sessionmaker, reconciler)).get("budget_checked") == 1
 
 
 async def test_the_leader_clears_the_entries_of_settled_items_each_cycle(

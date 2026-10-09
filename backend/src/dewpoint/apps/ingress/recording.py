@@ -56,6 +56,8 @@ def respond(outcome: dict[str, Any]) -> Response:
             return _error(409, "event_id_reused")
         case "quota_exceeded":
             return _error(429, "quota_exceeded", retry_after=int(outcome["retry_after"]))
+        case "backlog_full":  # the deployment's outstanding work at its limit: nothing stored
+            return _error(429, "backlog_full", retry_after=int(outcome["retry_after"]))
         case "retained_full":
             return _error(429, "retained_full")  # nothing frees it before 2b-4: no Retry-After
         case "environment":

@@ -119,6 +119,7 @@ stored: only keyed digests of them.
 | 413 `too_large` | past the endpoint's body limit (1 MiB by default, at most 5 MiB) or the global 5 MiB |
 | 429 `rate_limited`, `Retry-After` | short of a rate budget, or too many failures from this address |
 | 429 `quota_exceeded`, `Retry-After: 30` | the endpoint's or the tenant's pending backlog is full |
+| 429 `backlog_full`, `Retry-After` | the deployment's outstanding work is at its limit, or the tenant at its share of it ([below](#the-ingress-capacity)); 1 to 60 s, or 30 s while the capacity is unset |
 | 429 `retained_full`, no `Retry-After` | the stored events are at their cap, until retention deletes ended events past the tenant's cutoff ([retention](retention.md)) |
 | 503 | too many requests in flight (`busy`, `Retry-After`), outside a development deployment, the database unavailable, or the tenant without an inbound key |
 | 503 `key_retired`, `Retry-After: 1` | the tenant's inbound keypair the delivery was sealed to was retired before it was recorded ([key rotation](key-rotation.md)); nothing is stored, and a retry is sealed to the newest |
@@ -149,11 +150,10 @@ refuses is a `refused` request.
 The dispatcher matches events only while the production gate is on (always, in development), every tenant's oldest
 first. An event is then:
 
-- **`matched`**, with the number of requests it admitted, or **`unmatched`** when no binding's filter held. It's
-  matched only while its tenant's queue has room: its queued webhook requests and the event's matching bindings
-  within the tenant's cap ([below](#the-ingress-capacity)). Past it, the event stays pending (`backlog_full` in the
-  dispatcher's report), nothing written, and the tenant's later events wait behind it, its order kept, until its
-  queue drains;
+- **`matched`**, with the number of requests it admitted, or **`unmatched`** when no binding's filter held. Its
+  requests take the credit it was accepted with ([below](#the-ingress-capacity)); bindings enabled since need the
+  deployment's room for the difference. Without it, the event stays pending (`backlog_full` in the dispatcher's
+  report), nothing written, and the tenant's later events wait behind it, its order kept;
 - **`dead`**, only when it can never be matched: its ciphertext fails under a keypair version proven on another event,
   or its payload isn't a JSON object; or after 5 failed attempts, backing off from 30 s. Each death is audited and
   alerted on (`inbound_event_dead`);
@@ -202,32 +202,55 @@ for development: they aren't a promise with a real Temporal or with more binding
 
 Events cost what their requests cost to start: an event becomes a request for each of its endpoint's enabled bindings
 that matches it, and a dispatcher starts them one at a time (about 35 ms each on the dev server, [measured
-below](#measured)). So a deployment's rates come from the starts measured on its own Temporal, with headroom, and a
-tenant's queue from a wait its operators agree to. A platform admin sets the three values, none set by
+below](#measured)). So a deployment's rates come from the starts measured on its own Temporal, with headroom, and how
+much webhook work it holds outstanding from a wait its operators agree to. A platform admin sets the three values, none set by
 default, through the API (D11; [deployment](deployment.md#the-ingress-capacity)): `dewpoint platform
 set-ingress-capacity` signs in and asks it, and the change is audited with the admin's id and an attestation:
 
 - `--starts-per-s`: the sustained starts a second a tenant's runs reached on this deployment's own Temporal and
   workers (`tests/probes/test_ingress_starts.py`, with slots enough that only the dispatcher bounds them);
 - `--headroom`: the share of them ingress may use, above 0 and at most 1;
-- `--queue-wait-s`: the agreed wait, in seconds, a tenant's queued webhook requests may stand for.
+- `--queue-wait-s`: the wait, in seconds, its operators agree the outstanding webhook work may stand for at the
+  budget's starts. It sizes the limit below; it isn't promised to anyone.
 
-Once the first two are set, their product (starts × headroom a second) is what a tenant's requests may come at, and
-the event rates follow from it: an endpoint's divided by its enabled bindings, and the tenant's by the most enabled
-bindings any of its endpoints has, so its requests stay within it however its events spread. With 8 starts a second
-measured and a headroom of 0.5, an endpoint with 4 enabled bindings takes 1 event a second, and so does its tenant if
-none of its endpoints has more; an endpoint with 1 binding takes up to 4. A rate configured lower stays; the bursts
-stay as configured. **Each tenant gets the whole budget, so tenants together can admit more than the
-deployment starts**: a budget shared by the whole deployment, fair between tenants, is designed and not yet built
-(2b-4b M3). With the wait set too, a tenant's queued webhook requests stop at starts × headroom × wait (never
-below 20, an endpoint's most bindings), counted as the dispatcher matches, under the tenant's counter row: dispatchers
-matching at once never queue past it. An event that doesn't fit stays pending, and the endpoint's and the tenant's
-pending quotas then answer its senders with 429 `quota_exceeded`. A value left out keeps what it was; `--unset`
-unsets all three.
+Once the first two are set, their product (starts × headroom a second) is the budget webhook work starts at, and an
+endpoint's event rate follows from it, divided by its enabled bindings: with 8 starts a second measured and a headroom
+of 0.5, an endpoint with 4 enabled bindings takes 1 event a second, and one with 1 binding up to 4. A rate configured
+lower stays, the bursts stay as configured, and a tenant's rate stays as configured. A value left out keeps what it
+was; `--unset` unsets all three.
 
-Until they're set, the rates are the development-only ones in the table, and a tenant's queue stops at 10,000
-webhook requests, a development-only cap. Neither is a production value: production's are derived as above from its
-own measured starts, a headroom and a wait its operators agree to.
+**The deployment's outstanding-work limit.** With all three set, the whole deployment holds at most starts × headroom
+× wait requests' worth of webhook work outstanding (never less than 20, an endpoint's most bindings), shared by every
+tenant (2b-4b M3):
+
+- **What counts.** A pending event counts its credit: its endpoint's enabled bindings when it was accepted, at least 1.
+  A webhook request counts 1 while it's `queued` or `starting`. Nothing else does: manual, scheduled and re-run starts
+  use what the headroom leaves.
+- **Admission, at ingress.** A delivery is accepted only if its new events' credit fits the limit's room and, for a
+  tenant with work outstanding already, its share: the limit divided by the tenants with work outstanding, at most
+  half of it. A tenant with nothing outstanding may use the room whatever its share, so a delivery bigger than a share
+  still gets in while the deployment has room. Otherwise the whole delivery is refused, 429 `backlog_full`, and nothing
+  is stored; `Retry-After` is how long the budget's starts take to free what's missing (1 to 60 s), or 30 s while the
+  capacity is unset. One database row holds the deployment's count, locked as each delivery is admitted, so deliveries
+  at once, from any tenants and any ingress process, never pass the limit.
+- **Matching.** An event's requests take its credit. Bindings enabled since it was accepted need the limit's room for
+  the difference: without it the event waits, as above. Bindings disabled since give back what they held.
+- **Release.** An event leaving `pending` (matched, unmatched, dead, cancelled) or deleted gives back its credit; a
+  request leaving `queued` or `starting` (started, cancelled, dead) or deleted gives back 1; a tenant's erasure gives
+  back all it held. The database counts each as the change commits, whatever code makes it.
+- **Checked.** The dispatcher's leader compares the count with what's really outstanding at most once a minute and
+  alerts on any difference (`ingress_budget_drift`, error level). It never corrects it: a difference is a defect to
+  find.
+
+**The limit isn't a wait guarantee.** It bounds how much is outstanding, not how long an accepted event waits for its
+runs to start: that depends on the dispatchers, Temporal, slots and each tenant's run limit. The dispatcher's rounds
+give every tenant with due requests a turn each round ([runs](runs.md#the-dispatcher)), which is turn-taking, not a
+rate. What was measured is [below](#measured), as measurements. `GET /api/v1/admin/platform/ingress-capacity` shows the
+limit, what's outstanding and how many tenants have work outstanding.
+
+Until all three are set, the limit is 50,000, development-only, and the event rates are the development-only ones in
+the table. None of these is a production value: production's come from its own measured starts, a headroom and a wait
+its operators agree to.
 
 ### Measured
 
@@ -263,8 +286,8 @@ development machine, **not production capacity**:
   one a cycle, a tenant's runs started about 0.9 a second whatever the fan-out (40 runs in 46 s at fan-out 1, 100 in 110
   s at fan-out 20, 2026-10-08). **The default rates of 10 events a second aren't sustainable end to end**: at fan-out 1
   a tenant alone on its dispatcher keeps up with about 8 events a second; at fan-out 20, one every two seconds. Past
-  that, events are accepted and matched, and their requests wait queued, up to the tenant's queue cap; the ingress
-  capacity lowers the rates and sets the cap ([above](#the-ingress-capacity));
+  that, events are accepted and matched, and their requests wait queued, up to the deployment's outstanding-work
+  limit; the ingress capacity lowers the rates and sets the limit ([above](#the-ingress-capacity));
 - **each limit on its own** (`buckets`, `quotas`), at its default: every rate bucket accepted what its burst and rate
   allow over the time taken, within one call (an endpoint's events 1,029 of 1,030; its bytes 15.5 of 16.0 MiB; a
   tenant's events 5,000 of 5,030, in calls of 100 events, so the 30 refilled never made a whole one; its bytes 76 of

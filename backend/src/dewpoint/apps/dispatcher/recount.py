@@ -3,8 +3,10 @@
 leader. Each tenant `recount_candidates()` picks (at most every 10 minutes) is recounted in one transaction, under the
 one lock order: the tenant's lifecycle lock shared, its endpoint rows in id order, its counter row, all held **before**
 it counts, so no insert or match in flight is overwritten by a stale total. Every pending and retained counter that
-drifted from what the events say is corrected and warned about."""
+drifted from what the events say is corrected and warned about. The leader also checks the deployment's ingress
+budget against what's outstanding (the owner's ruling on 2b-4b's M3 checkpoint 4), alerting on any difference."""
 
+import time
 import uuid
 from collections import Counter
 
@@ -20,6 +22,30 @@ from dewpoint.core.models.ingress import InboundEvent, TenantEventCounters, Webh
 log = structlog.get_logger("dewpoint.dispatcher.recount")
 BATCH = 20  # tenants a leader's cycle
 FIELDS = ("pending_events", "pending_bytes", "retained_events", "retained_bytes")
+DRIFT_S = 60.0  # the ingress budget checked at most this often: its query sums every pending event (provisional)
+
+
+class Drift:
+    """When the leader next checks the ingress budget."""
+
+    def __init__(self) -> None:
+        self.due = 0.0
+
+
+async def check_budget(sessionmaker: async_sessionmaker[AsyncSession], drift: Drift) -> dict[str, int]:
+    """The deployment's ingress budget against its truth (pending events' credit, webhook requests queued or
+    starting), every `DRIFT_S`, alerted on, never corrected here: the counters move only with the work, so a difference
+    is a defect to find."""
+    now = time.monotonic()
+    if now < drift.due:
+        return {}
+    drift.due = now + DRIFT_S
+    async with sessionmaker() as s:
+        counted, actual = (await s.execute(text("select counted, actual from ingress_budget_drift()"))).one()
+    if counted != actual:
+        log.error("ingress_budget_drift", counted=int(counted), actual=int(actual))
+        return {"drifted": 1}
+    return {"checked": 1}
 
 
 async def _after_recount_locked() -> None:

@@ -48,7 +48,6 @@ from dewpoint.core.crypto import events
 from dewpoint.core.crypto.keys import KeySource, key_unreadable
 from dewpoint.core.db import tenant_scope, unavailable
 from dewpoint.core.ingress import keys as event_keys
-from dewpoint.core.ingress.capacity import queue_cap
 from dewpoint.core.ingress.counters import release
 from dewpoint.core.ingress.filters import MAX_BINDINGS, matches
 from dewpoint.core.models.ingress import InboundEvent, TenantEventCounters, TriggerBinding, WebhookEndpoint
@@ -68,7 +67,8 @@ TENANT_ERASING = "tenant_erasing"
 SKIPPED = "skipped"
 BUSY = "busy"  # its endpoint's row held elsewhere (ingress, another dispatcher): passed by (D9)
 BUSY_TENANT = "busy_tenant"  # its tenant's counter row held elsewhere: passed by alike
-BACKLOG_FULL = "backlog_full"  # its tenant's queued webhook requests at their cap: pending, its tenant passed by alike
+BACKLOG_FULL = "backlog_full"  # the deployment's budget without room for its new bindings: pending, its tenant passed
+# by alike
 FAN_OUT_EXCEEDED = "fan_out_exceeded"
 KEY_UNAVAILABLE = "key_unavailable"
 RETRYING = "retrying"
@@ -80,7 +80,7 @@ EVENT_ATTEMPTS = 5  # event-specific attempts before an unconfirmed failure is d
 BACKOFF = timedelta(seconds=30)  # after the first event-specific failure, doubling (§15, provisional)
 PAGES = 4  # a pass picks this many batches' candidates: one busy (D9) gives its place to the next; a batch is still
 # all it tries
-ROLLED_BACK = (GATE_OFF, ENVIRONMENT_NOT_RECORDED, TENANT_ERASING, SKIPPED, BUSY, BUSY_TENANT)
+ROLLED_BACK = (GATE_OFF, ENVIRONMENT_NOT_RECORDED, TENANT_ERASING, SKIPPED, BUSY, BUSY_TENANT, BACKLOG_FULL)
 ALERTS = "dewpoint.matching.alerts"  # in the session's `info`: alerts logged once its transaction commits
 
 
@@ -189,13 +189,10 @@ async def match_once(
     return dict(counts)
 
 
-# A tenant's webhook requests still queued, on `run_requests_queued_webhook`: its status and source the statement's
-# own, never parameters, so even a generic plan proves the partial index's predicate (the fresh M3 review 3)
-QUEUED = text("SELECT count(*) FROM run_requests WHERE tenant_id = :t AND status = 'queued' AND source = 'webhook'")
-
-
-async def _queued(s: AsyncSession, tenant_id: uuid.UUID) -> int:
-    return int((await s.execute(QUEUED, {"t": tenant_id})).scalar_one())
+# The deployment's budget (the owner's ruling on the 2b-4b M3 checkpoint 4): an event's new queued requests, counted as
+# they're inserted, take its credit (released as its transaction commits); only past it, bindings added since it was
+# accepted, do they need the limit's room. Last in its transaction: then it holds the budget's row to the commit
+MATCHED = text("SELECT ingress_matched(:credit, :k)")
 
 
 async def match_event(
@@ -301,23 +298,24 @@ async def _match(
         await s.flush()
         return FAN_OUT_EXCEEDED
     admitting = [binding for binding in bindings if matches(binding.filter, payload)]
-    # The tenant's queue, counted under its counter row, which every matcher takes before admitting: past its cap, the
-    # event waits, nothing written (the owner's ruling 2 on the 2b-4b M3 checkpoint 2)
-    if admitting and await _queued(s, tenant_id) + len(admitting) > queue_cap(platform):
-        return BACKLOG_FULL
-    admitted = 0
+    admitted = queued = 0
     for binding in admitting:
-        await admission.admit_request(
+        request = await admission.admit_request(
             s, keys, tenant_id=tenant_id, workflow_id=binding.workflow_id, source=SOURCE, actor_id=None, mode=LIVE,
             idempotency_key=f"evt:{event.id}:{binding.workflow_id}", input=payload,
             details={"endpoint_id": str(endpoint_id), "event_id": str(event.id), "binding_id": str(binding.id)},
         )  # fmt: skip
         admitted += 1
+        queued += request.new and request.request.status == "queued"
     event.status = "matched" if admitted else "unmatched"
     event.request_count = admitted
     event.ended_at = func.statement_timestamp()
     await release(s, tenant_id, endpoint_id, event.size_bytes)
     await s.flush()
+    if queued:
+        credited = await s.execute(MATCHED, {"credit": event.credit or 0, "k": queued})
+        if not credited.scalar_one():
+            return BACKLOG_FULL  # rolled back: the event pending as it was
     return event.status
 
 

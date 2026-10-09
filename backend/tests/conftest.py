@@ -160,8 +160,8 @@ def _pass_budgets(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 async def clean_db(owner_sessionmaker: async_sessionmaker[AsyncSession]) -> AsyncIterator[None]:
-    """Every table emptied after each test, but what migrating an empty database records: its revision and its tick
-    cutover (migration 0039), which a test changing restores."""
+    """Every table emptied after each test, but what migrating an empty database records: its revision, its tick
+    cutover (migration 0039), which a test changing restores, and its ingress budget's row (0050), counting nothing."""
     yield
     async with owner_sessionmaker() as s, s.begin():
         tables = (
@@ -169,13 +169,14 @@ async def clean_db(owner_sessionmaker: async_sessionmaker[AsyncSession]) -> Asyn
                 text(
                     "select string_agg(format('%I', tablename), ',') from pg_tables "
                     "where schemaname='public' and tablename not in ('alembic_version', 'tick_cutover', "
-                    "'schedule_inventory_cutover')"
+                    "'schedule_inventory_cutover', 'ingress_budget')"
                 )
             )
         ).scalar_one()
         if tables:
             await s.execute(text("SET LOCAL session_replication_role = replica"))  # bypass audit triggers
             await s.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
+            await s.execute(text("UPDATE ingress_budget SET outstanding = 0, active = 0"))
 
 
 @pytest.fixture(scope="session")

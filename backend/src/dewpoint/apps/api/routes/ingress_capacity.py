@@ -3,17 +3,18 @@
 read on an active MFA session; changed with a second factor proven within the reauthentication window, audited in the
 change's transaction with that admin's id, the attestation and the readiness it leaves. `dewpoint platform
 set-ingress-capacity` asks this API; nothing else changes it. A value left out keeps what it was, `null` unsets it,
-`unset` unsets all three; a production deployment whose runs are on keeps a whole capacity (409)."""
+`unset` unsets all three; a production deployment whose runs are on keeps a whole capacity (409). Each answer shows the
+deployment's outstanding-work limit it makes (the owner's ruling on the M3 checkpoint 4) and what's outstanding now."""
 
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, model_validator
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.core.config import Settings
 from dewpoint.core.http import active_session, ensure_fresh_reauth, get_db, get_settings_dep, require_platform_admin
-from dewpoint.core.ingress.capacity import queue_cap
 from dewpoint.core.models.identity import AuthSession, User
 from dewpoint.core.models.platform import PlatformSettings
 from dewpoint.core.platform import readiness
@@ -44,10 +45,15 @@ class CapacityIn(BaseModel):
         return {name: getattr(self, name) for name in readiness.CAPACITY if name in self.model_fields_set}
 
 
-def _shown(platform: Any) -> dict[str, Any]:
+# The limit as admission computes it, and the budget's counts, read together
+BUDGET = text("SELECT ingress_limit(), outstanding, active FROM ingress_budget WHERE id = 1")
+
+
+async def _shown(db: AsyncSession, platform: Any) -> dict[str, Any]:
+    limit, outstanding, active = (await db.execute(BUDGET)).one()
     return {"starts_per_s": platform.ingress_starts_per_s, "headroom": platform.ingress_headroom,
-            "queue_wait_s": platform.ingress_queue_wait_s, "queue_cap": queue_cap(platform),
-            "problems": readiness.ingress_capacity(platform)}  # fmt: skip
+            "queue_wait_s": platform.ingress_queue_wait_s, "limit": limit, "outstanding": outstanding,
+            "active_tenants": active, "problems": readiness.ingress_capacity(platform)}  # fmt: skip
 
 
 async def _platform(db: AsyncSession) -> PlatformSettings:
@@ -61,8 +67,9 @@ async def _platform(db: AsyncSession) -> PlatformSettings:
 async def ingress_capacity(
     _: User = Depends(require_platform_admin), db: AsyncSession = Depends(get_db, scope="function")
 ) -> dict[str, Any]:
-    """The capacity, the queue it makes for a tenant, and its values still unset (production readiness refuses then)."""
-    return _shown(await _platform(db))
+    """The capacity, the deployment's limit it makes and what's outstanding, and its values still unset (production
+    readiness refuses then)."""
+    return await _shown(db, await _platform(db))
 
 
 @router.patch("/ingress-capacity")
@@ -81,4 +88,4 @@ async def change_ingress_capacity(
         await set_ingress_capacity(db, change=body.change(), attestation=body.attestation, actor_id=admin.id)
     except IngressCapacityRequiredError:
         raise HTTPException(409, detail={"error": "ingress_capacity_required"}) from None
-    return _shown(await _platform(db))
+    return await _shown(db, await _platform(db))

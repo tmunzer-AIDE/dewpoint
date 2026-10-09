@@ -1969,7 +1969,7 @@
     },
     "/api/v1/admin/platform/ingress-capacity": {
       "get": {
-        "description": "The capacity, the queue it makes for a tenant, and its values still unset (production readiness refuses then).",
+        "description": "The capacity, the deployment's limit it makes and what's outstanding, and its values still unset (production\nreadiness refuses then).",
         "operationId": "ingress_capacity_api_v1_admin_platform_ingress_capacity_get",
         "responses": {
           "200": {

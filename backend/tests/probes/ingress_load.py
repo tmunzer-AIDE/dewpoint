@@ -19,7 +19,10 @@ with synthetic data only. From `backend/`:
 - `tenant-drain`: one tenant's endpoints drained together by one dispatcher or two (processes of their own), with two
   tenants as the control: a tenant's default event rate stays below it;
 - `scaling`: D9's acceptance, one dispatcher and then two on equal backlogs of four independent tenants, at fan-outs
-  1, 5 and 20: the aggregate drain, each tenant's, what's left, the counters and the admissions.
+  1, 5 and 20: the aggregate drain, each tenant's, what's left, the counters and the admissions;
+- `contention`: recordings across 16 tenants at once, 1, 8 and 32 connections, each a 1 KiB event a call (sealed
+  beforehand): calls a second and each call's time, what a row every recording takes would cost (the owner's ruling
+  on 2b-4b's M3 checkpoint 4: measured before a shared admission row is ruled out).
 
 Numbers depend on the machine; record them with it."""
 
@@ -320,6 +323,42 @@ async def _record(db: Database, ready: Any, n: int, *, batch: int = 1) -> list[f
             await s.execute(RECORD, params)
         times.append(time.perf_counter() - start)
     return times
+
+
+CONTENTION_S = 10.0  # each concurrency's window
+
+
+async def contention(db: Database) -> None:
+    from dewpoint.core.db import make_engine, make_sessionmaker
+    from tests.apps.dispatcher.inbound import sealed
+    from tests.core.ingress.support import RECORD
+
+    tenants = [await _inbound(db, 1) for _ in range(16)]
+    engine = make_engine(db.role_url("dewpoint_ingress"), pool_size=32, max_overflow=0)
+    ingress_ = make_sessionmaker(engine)
+    results: dict[str, Any] = {}
+    for workers in (1, 8, 32):
+        stop = time.monotonic() + CONTENTION_S
+        times: list[float] = []
+
+        async def worker(k: int, stop: float = stop, times: list[float] = times) -> None:
+            ready = tenants[k % len(tenants)]
+            while time.monotonic() < stop:
+                event = uuid.uuid4()
+                params = {"e": ready.endpoint_id, "refusal": None, "read": 0, "ids": [event],
+                          "sealed": [sealed(ready, event, {"type": "ap_down", "pad": "x" * 900})], "versions": [1],
+                          "dedupe": [None], "digests": [None]}  # fmt: skip
+                start = time.perf_counter()
+                async with ingress_() as s, s.begin():
+                    outcome = (await s.execute(RECORD, params)).scalar_one()
+                times.append(time.perf_counter() - start)
+                assert outcome["outcome"] == "recorded", outcome
+
+        await asyncio.gather(*(worker(k) for k in range(workers)))
+        results[str(workers)] = {"calls_per_s": round(len(times) / CONTENTION_S, 1), "p50": ms(pct(times, 0.5)),
+                                 "p95": ms(pct(times, 0.95)), "p99": ms(pct(times, 0.99))}  # fmt: skip
+    await engine.dispose()
+    print(json.dumps({"tenants": len(tenants), "window_s": CONTENTION_S, "by_connections": results}))
 
 
 async def lock(db: Database) -> None:
@@ -656,7 +695,7 @@ async def dispatcher_loop(dispatch_url: str) -> None:
 
 PARTS: dict[str, Callable[[Database], Coroutine[Any, Any, None]]] = {
     "candidates": candidates, "ingress": ingress, "lock": lock, "drain": drain, "buckets": buckets, "quotas": quotas,
-    "tenant-drain": tenant_drain, "scaling": scaling,
+    "tenant-drain": tenant_drain, "scaling": scaling, "contention": contention,
 }  # fmt: skip
 
 
