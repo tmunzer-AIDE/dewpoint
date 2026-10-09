@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The proofs (2b-4b M4) are opt-in: `DEWPOINT_PROOF` names the ones to run (`d6`, `d12`, or both, comma-separated),
+"""The proofs (2b-4b M4) are opt-in: `DEWPOINT_PROOF` names the ones to run (`d6`, `d12`, `pv`, comma-separated),
 and only the owner's approval of a run sets it. With `DEWPOINT_PROOF_OUT=<file>`, each case's outcome is recorded
 there as JSON lines, beside the environment's own record (images, versions, inventory), for the proof record."""
 

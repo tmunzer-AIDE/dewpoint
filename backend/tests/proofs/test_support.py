@@ -9,6 +9,7 @@ import os
 import stat
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from cryptography import x509
@@ -17,7 +18,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
-from tests.proofs import environment, pki, tokens
+from tests.proofs import environment, pki, preversioning, tokens
 
 BUCKET, PREFIX = "dewpoint-audit", "dewpoint/"
 
@@ -135,3 +136,57 @@ def test_the_compose_command_keeps_the_password_off_its_arguments(tmp_path: Path
     assert password not in " ".join(argv)
     assert env["DEWPOINT_M4_DB_PASSWORD"] == password and env["DEWPOINT_M4_CONFIG"] == "jwt"
     assert env["DEWPOINT_M4_RUN"] == str(run.root)
+
+
+class _Visibility:
+    """A client whose visibility gives these answers in turn, then the last one from then on."""
+
+    def __init__(self, *answers: list[str]) -> None:
+        self._answers, self.asked = answers, 0
+
+    def list_workflows(self, query: str) -> object:
+        answer = self._answers[min(self.asked, len(self._answers) - 1)]
+        self.asked += 1
+
+        async def executions() -> object:
+            for workflow_id in answer:
+                yield SimpleNamespace(id=workflow_id)
+
+        return executions()
+
+
+async def test_the_pre_versioning_querys_empty_answer_is_waited_for_never_taken_as_its_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(preversioning, "POLL_S", 0)
+    visibility = _Visibility([], [], ["unversioned"])
+    assert await preversioning.first_answer(visibility, "q") == ["unversioned"]  # type: ignore[arg-type]
+    assert visibility.asked == 3
+
+
+async def test_the_pre_versioning_querys_wrong_answer_isnt_asked_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(preversioning, "POLL_S", 0)
+    visibility = _Visibility(["unversioned", "versioned"], ["unversioned"])
+    assert await preversioning.first_answer(visibility, "q") == ["unversioned", "versioned"]  # type: ignore[arg-type]
+    assert visibility.asked == 1
+
+
+async def test_the_pre_versioning_query_answering_nothing_fails_at_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(preversioning, "POLL_S", 0)
+    monkeypatch.setattr(preversioning, "VISIBILITY_DEADLINE_S", 0.05)
+    with pytest.raises(AssertionError, match="listed nothing"):
+        await preversioning.first_answer(_Visibility([]), "q")  # type: ignore[arg-type]
+
+
+async def test_a_control_waits_for_its_run_and_fails_on_another_or_on_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(preversioning, "POLL_S", 0)
+    visibility = _Visibility([], [], ["closed"])
+    assert await preversioning.until_listed(visibility, "q", "closed") >= 0  # type: ignore[arg-type]
+    assert visibility.asked == 3
+    with pytest.raises(AssertionError, match="listed"):
+        await preversioning.until_listed(_Visibility(["versioned"]), "q", "closed")  # type: ignore[arg-type]
+    monkeypatch.setattr(preversioning, "VISIBILITY_DEADLINE_S", 0.05)
+    with pytest.raises(AssertionError, match="didn't list closed"):
+        await preversioning.until_listed(_Visibility([]), "q", "closed")  # type: ignore[arg-type]
