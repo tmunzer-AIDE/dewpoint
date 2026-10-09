@@ -125,6 +125,13 @@ stored: only keyed digests of them.
 
 A refused attempt pays its rate budget as an accepted one does.
 
+**A refused delivery is the sender's to retry, and not every sender does.** A 4xx or 5xx leaves nothing in Dewpoint:
+no event, no count of it, no log line for it, and nothing later replays it. A 429 or a 503 says when to try again
+(`Retry-After`), but whether the sender retries, how often and for how long is the sender's: some retry with backoff
+for a while, some drop the delivery at once, some disable a webhook that keeps failing. Check the sender's own
+documentation before relying on an endpoint whose sender may be refused, and size its rates and quotas so that a burst
+it really sends fits; what Dewpoint refused can't be recovered on its side.
+
 ## Bindings
 
 With `trigger.manage`: `POST /webhook-endpoints/{id}/bindings` `{"workflow_id": ..., "filter": [...], "enabled": true}`,
@@ -142,7 +149,11 @@ refuses is a `refused` request.
 The dispatcher matches events only while the production gate is on (always, in development), every tenant's oldest
 first. An event is then:
 
-- **`matched`**, with the number of requests it admitted, or **`unmatched`** when no binding's filter held;
+- **`matched`**, with the number of requests it admitted, or **`unmatched`** when no binding's filter held. It's
+  matched only while its tenant's queue has room: its queued webhook requests and the event's matching bindings
+  within the tenant's cap ([below](#the-ingress-capacity)). Past it, the event stays pending (`backlog_full` in the
+  dispatcher's report), nothing written, and the tenant's later events wait behind it, its order kept, until its
+  queue drains;
 - **`dead`**, only when it can never be matched: its ciphertext fails under a keypair version proven on another event,
   or its payload isn't a JSON object; or after 5 failed attempts, backing off from 30 s. Each death is audited and
   alerted on (`inbound_event_dead`);
@@ -162,7 +173,8 @@ the tenant's pending backlog and stored events against their quotas.
 
 ## Limits
 
-Provisional (spec §15):
+Provisional (spec §15). **The event rates are development-only** until the deployment's ingress capacity is set
+([below](#the-ingress-capacity)), which lowers them:
 
 | Limit | Value |
 |---|---|
@@ -185,6 +197,31 @@ one does. The bursts are budgets for a spike, which the pending quotas then hold
 past one, ingress answers 429 `quota_exceeded` and the sender retries later. They promise no throughput: matching
 drains what it can, and a sender faster than that is held back by the 429s, not served. These values are provisional,
 for development: they aren't a promise with a real Temporal or with more bindings than measured.
+
+### The ingress capacity
+
+Events cost what their requests cost to start: an event becomes a request for each of its endpoint's enabled bindings
+that matches it, and a dispatcher starts them one at a time (about 35 ms each on the dev server, [measured
+below](#measured)). So a deployment's rates come from the starts measured on its own Temporal, with headroom, and a
+tenant's queue from a wait its operators agree to. `dewpoint platform set-ingress-capacity`, run as `dewpoint_admin`
+and audited (`platform.ingress_capacity.set`, with what it was), sets the three values, none of them set by default:
+
+- `--starts-per-s`: the sustained starts a second a tenant's runs reached on this deployment's own Temporal and
+  workers (`tests/probes/test_ingress_starts.py`, with slots enough that only the dispatcher bounds them);
+- `--headroom`: the share of them ingress may use, above 0 and at most 1;
+- `--queue-wait-s`: the agreed wait, in seconds, a tenant's queued webhook requests may stand for.
+
+Once the first two are set, a tenant's events come at most at their product (starts × headroom a second) and an
+endpoint's at that divided by its enabled bindings: with 8 starts a second measured and a headroom of 0.5, a tenant's
+events at most 4 a second, an endpoint with 4 enabled bindings 1 a second. A rate configured lower stays; the bursts
+stay as configured. With the wait set too, a tenant's queued webhook requests stop at starts × headroom × wait (never
+below 20, an endpoint's most bindings), counted as the dispatcher matches, under the tenant's counter row: dispatchers
+matching at once never queue past it. An event that doesn't fit stays pending, and the endpoint's and the tenant's
+pending quotas then answer its senders with 429 `quota_exceeded`. `--unset` unsets all three.
+
+Until they're set, the rates are the development-only ones in the table, and a tenant's queue stops at 10,000
+webhook requests, a development-only cap. Neither is a production value: production's are derived as above from its
+own measured starts, a headroom and a wait its operators agree to.
 
 ### Measured
 
@@ -220,8 +257,8 @@ development machine, **not production capacity**:
   one a cycle, a tenant's runs started about 0.9 a second whatever the fan-out (40 runs in 46 s at fan-out 1, 100 in 110
   s at fan-out 20, 2026-10-08). **The default rates of 10 events a second aren't sustainable end to end**: at fan-out 1
   a tenant alone on its dispatcher keeps up with about 8 events a second; at fan-out 20, one every two seconds. Past
-  that, events are accepted and matched, and their requests wait queued, without bound: lower rates and a backlog policy
-  are the owner's decision;
+  that, events are accepted and matched, and their requests wait queued, up to the tenant's queue cap; the ingress
+  capacity lowers the rates and sets the cap ([above](#the-ingress-capacity));
 - **each limit on its own** (`buckets`, `quotas`), at its default: every rate bucket accepted what its burst and rate
   allow over the time taken, within one call (an endpoint's events 1,029 of 1,030; its bytes 15.5 of 16.0 MiB; a
   tenant's events 5,000 of 5,030, in calls of 100 events, so the 30 refilled never made a whole one; its bytes 76 of

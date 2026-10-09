@@ -21,6 +21,7 @@ from dewpoint.apps.codec import KeyringKeys, data_converter
 from dewpoint.apps.dispatcher import evidence
 from dewpoint.apps.dispatcher.dispatch import START_DEADLINE
 from dewpoint.apps.dispatcher.gate import disable_and_wait
+from dewpoint.apps.dispatcher.matching import queue_cap
 from dewpoint.apps.dispatcher.tick import admission_pollers
 from dewpoint.apps.environment import verify_environment
 from dewpoint.apps.plugin_loader import PluginLoadError, installed_plugins, prepare
@@ -41,6 +42,7 @@ from dewpoint.core.egress import allowlist
 from dewpoint.core.ingress import secrets_reseal
 from dewpoint.core.ingress.keys import retire_event_keys, rotate_event_key
 from dewpoint.core.models.identity import User
+from dewpoint.core.models.platform import PlatformSettings
 from dewpoint.core.models.tenancy import Tenant
 from dewpoint.core.platform import inventory
 from dewpoint.core.platform.service import (
@@ -48,6 +50,7 @@ from dewpoint.core.platform.service import (
     EnvironmentNotRecordedError,
     check_namespace,
     record_environment,
+    set_ingress_capacity,
 )
 from dewpoint.core.plugins import lifecycle
 from dewpoint.core.plugins.lifecycle import Entry
@@ -942,6 +945,49 @@ def platform_disable_production_runs(
         typer.echo(f"production runs are off; {len(left)} {many} still unresolved: {', '.join(map(str, left))}")
         raise typer.Exit(3)
     typer.echo("production runs are off; no start is left unresolved")
+
+
+@platform_cli.command("set-ingress-capacity")
+def platform_set_ingress_capacity(
+    starts: float | None = typer.Option(None, "--starts-per-s", help="sustained starts a second, measured on this "
+                                        "deployment's own Temporal (tests/probes/test_ingress_starts.py)"),
+    headroom: float | None = typer.Option(None, "--headroom", help="the share of them ingress may use: above 0, at "
+                                          "most 1"),
+    wait: int | None = typer.Option(None, "--queue-wait-s", help="the agreed wait, in seconds, a tenant's queued "
+                                    "webhook requests may stand for"),
+    unset: bool = typer.Option(False, "--unset", help="unset all three: the development-only rates and cap"),
+) -> None:  # fmt: skip
+    """Set this deployment's ingress capacity (the owner's ruling 2 on the 2b-4b M3 checkpoint 2), audited: once the
+    starts and the headroom are set, a tenant's events come at most at their product, an endpoint's at that divided by
+    its enabled bindings; with the wait too, a tenant's queued webhook requests stop at the product of all three. Run
+    as dewpoint_admin. Until set, ingress keeps its development-only rates and cap."""
+    if unset:
+        starts = headroom = wait = None
+    elif starts is None and headroom is None and wait is None:
+        typer.echo("ERROR: give the ingress capacity's values, or --unset")
+        raise typer.Exit(2)
+    settings = get_settings()
+
+    async def _go() -> int:
+        engine = make_engine(settings.database_url)
+        try:
+            async with make_sessionmaker(engine)() as s, s.begin():
+                await set_ingress_capacity(s, starts_per_s=starts, headroom=headroom, queue_wait_s=wait, actor_id=None)
+                platform = await s.get(PlatformSettings, 1, populate_existing=True)
+                return queue_cap(platform) if platform is not None else 0
+        finally:
+            await engine.dispose()
+
+    try:
+        cap = asyncio.run(_go())
+    except ValueError as e:
+        typer.echo(f"ERROR: {e}")
+        raise typer.Exit(2) from None
+    if unset:
+        typer.echo("ingress capacity unset: the development-only rates and cap")
+        return
+    queue = f"a {wait} s queue: a tenant's queue holds {cap} requests" if wait is not None else "no wait agreed"
+    typer.echo(f"ingress capacity: {starts} starts a second measured, {headroom} of them for ingress, {queue}")
 
 
 @deployment_cli.command("set-current")

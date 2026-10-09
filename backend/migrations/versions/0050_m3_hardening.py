@@ -7,6 +7,14 @@
   shifts matched a tenant's events out of order). Every other event keeps its tenant's order, oldest first. The
   one-argument form stays for a dispatcher of an earlier build during a rollout. Still ids and ordering only, locking
   nothing.
+- **The ingress capacity** (the owner's ruling 2 on the M3 checkpoint 2): `platform_settings` gets the sustained starts
+  measured on the deployment's Temporal, the headroom's share of them ingress may use, and the agreed wait a tenant's
+  queued webhook requests may stand for, each checked, none set by default, set only through
+  `set_ingress_capacity()` (the platform's admin, audited by its caller). Once the starts and the headroom are set,
+  `record_inbound_events()` (derived from 0039's text, as 0039 derives it from 0032's) holds a tenant's events to their
+  product and an endpoint's to that divided by its enabled bindings, a lower configured rate staying; the matcher holds
+  a tenant's queued webhook requests to the cap they make with the wait (an index of those requests, built
+  concurrently). Unset, the configured rates and a development-only cap.
 - **A tenant's next due request** (the owner's ruling 1 on the M3 checkpoint): `dispatch_next(tenants)`, each listed
   tenant's oldest due request as `dispatch_candidates` picks it, for a cycle's further rounds. Ids and ordering only.
 - **Bounded retry and recovery** (D10(1), the owner's rulings on the M3 design, rev 2), three tables of a tenant's:
@@ -21,14 +29,16 @@
 
 Online (D15), in steps; grants last. A new table locks nothing in use but `tenants`, briefly, for its key."""
 
+import importlib.util
 import uuid
 from collections.abc import Callable
+from pathlib import Path
 
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql as pg
 
-from migrations.online import exists, grants, online, step, ungranted
+from migrations.online import exists, grants, index, online, step, ungranted
 
 revision = "0050"
 down_revision = "0049"
@@ -178,6 +188,86 @@ $$""",
     "REVOKE ALL ON FUNCTION dispatch_next(uuid[]) FROM PUBLIC",
     "GRANT EXECUTE ON FUNCTION dispatch_next(uuid[]) TO dewpoint_dispatch",
 ]
+
+
+CAPACITY = (  # the deployment's ingress capacity: none set until its admin sets it
+    "ingress_starts_per_s double precision CONSTRAINT platform_ingress_starts CHECK (ingress_starts_per_s > 0)",
+    "ingress_headroom double precision "
+    "CONSTRAINT platform_ingress_headroom CHECK (ingress_headroom > 0 AND ingress_headroom <= 1)",
+    "ingress_queue_wait_s integer CONSTRAINT platform_ingress_queue_wait CHECK (ingress_queue_wait_s > 0)",
+)
+SET_CAPACITY = [
+    """CREATE FUNCTION set_ingress_capacity(starts double precision, headroom double precision, wait_s integer)
+RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+    v_before jsonb;
+BEGIN
+    SELECT jsonb_build_object('starts_per_s', p.ingress_starts_per_s, 'headroom', p.ingress_headroom,
+                              'queue_wait_s', p.ingress_queue_wait_s)
+      INTO v_before FROM platform_settings p WHERE p.id = 1 FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'the deployment''s environment is not recorded';
+    END IF;
+    UPDATE platform_settings SET ingress_starts_per_s = starts, ingress_headroom = headroom,
+        ingress_queue_wait_s = wait_s WHERE id = 1;
+    RETURN v_before;
+END
+$$""",
+    "REVOKE ALL ON FUNCTION set_ingress_capacity(double precision, double precision, integer) FROM PUBLIC",
+    "GRANT EXECUTE ON FUNCTION set_ingress_capacity(double precision, double precision, integer) TO dewpoint_admin",
+]
+QUEUED_INDEX = ("CREATE INDEX CONCURRENTLY IF NOT EXISTS run_requests_queued_webhook ON run_requests (tenant_id) "
+                "WHERE status = 'queued' AND source = 'webhook'")  # fmt: skip
+
+
+def _recorder_0039() -> str:
+    """`record_inbound_events()` as 0039 left it: 0032's text, changed as 0039 changes it."""
+    spec = importlib.util.spec_from_file_location("keys_0039", Path(__file__).with_name("0039_key_lifecycle.py"))
+    if spec is None or spec.loader is None:
+        raise RuntimeError("migration 0039 isn't beside this one")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    recorder: str = module._recorder().replace(module.NAMED, module.AGREES).replace(module.SIZED, module.RETIRED)
+    for anchor, replaced in module.KEYPAIRS.items():
+        recorder = recorder.replace(anchor, replaced)
+    return recorder
+
+
+RATES = {  # 0039's text: what it reads and how it refills and waits, the event rates derived once the capacity's set
+    "    v_wait double precision;\n": "    v_wait double precision;\n    v_budget double precision;\n"
+    "    v_fanout integer;\n    v_event_rate double precision;\n    v_tenant_rate double precision;\n",
+    "    SELECT environment INTO v_environment FROM public.platform_settings WHERE id = 1;\n":
+    "    SELECT environment, ingress_starts_per_s * ingress_headroom INTO v_environment, v_budget\n"
+    "      FROM public.platform_settings WHERE id = 1;\n",
+    "    -- The rate limits, by the clock as it is now,":
+    "    -- The event rates (the owner's ruling 2 on the 2b-4b M3 checkpoint 2): once the deployment's ingress capacity\n"
+    "    -- is set, a tenant's at most the headroom's share of its measured starts, an endpoint's that divided by its\n"
+    "    -- enabled bindings (an event becomes a request for each); a rate configured lower stays.\n"
+    "    v_event_rate := e.event_per_s;\n"
+    "    v_tenant_rate := c.event_per_s;\n"
+    "    IF v_budget IS NOT NULL THEN\n"
+    "        SELECT greatest(count(*), 1) INTO v_fanout FROM public.trigger_bindings b\n"
+    "         WHERE b.endpoint_id = p_endpoint AND b.enabled;\n"
+    "        v_event_rate := least(v_event_rate, v_budget / v_fanout);\n"
+    "        v_tenant_rate := least(v_tenant_rate, v_budget);\n"
+    "    END IF;\n\n"
+    "    -- The rate limits, by the clock as it is now,",
+    "e.event_tokens + e.event_per_s * extract": "e.event_tokens + v_event_rate * extract",
+    "(v_events - e.event_tokens) / e.event_per_s,": "(v_events - e.event_tokens) / v_event_rate,",
+    "c.event_tokens + c.event_per_s * extract": "c.event_tokens + v_tenant_rate * extract",
+    "(v_events - c.event_tokens) / c.event_per_s,": "(v_events - c.event_tokens) / v_tenant_rate,",
+}  # fmt: skip
+
+
+def _rated() -> str:
+    """0039's `record_inbound_events()`, its event rates derived from the ingress capacity."""
+    recorder = _recorder_0039()
+    for anchor, replaced in RATES.items():
+        if recorder.count(anchor) != 1:
+            raise RuntimeError(f"0039's record_inbound_events() isn't the text this migration changes: {anchor!r}")
+        recorder = recorder.replace(anchor, replaced)
+    return recorder
 
 
 KINDS = ("dispatch", "reconcile_starting", "reconcile_open", "reconcile_slot", "cancel", "match", "subrun")
@@ -421,8 +511,13 @@ def upgrade() -> None:
              done=exists("function", "work_settled_clear(integer)"))  # fmt: skip
         step(conn, "0050 a tenant's next due request", *ungranted(*NEXT),
              done=exists("function", "dispatch_next(uuid[])"))  # fmt: skip
+        added = f"ALTER TABLE platform_settings {', '.join(f'ADD COLUMN {c}' for c in CAPACITY)}"
+        step(conn, "0050 the ingress capacity", added, *ungranted(*SET_CAPACITY),
+             done=exists("column", "ingress_queue_wait_s", "platform_settings"))  # fmt: skip
+        step(conn, "0050 event rates from the ingress capacity", _rated())
+        index(conn, "0050 run_requests_queued_webhook", QUEUED_INDEX)
         step(conn, "0050 grants", *grants(*CURSOR), *grants(*CLEAR), *grants(*OPERATOR), *grants(*SETTLED),
-             *grants(*NEXT), *ACCESS)  # fmt: skip
+             *grants(*NEXT), *grants(*SET_CAPACITY), *ACCESS)  # fmt: skip
 
 
 def downgrade() -> None:
@@ -432,6 +527,11 @@ def downgrade() -> None:
         op.execute(f"DROP FUNCTION {table}_clear(text[], uuid[], uuid[])")
     op.execute("DROP FUNCTION work_settled_clear(integer)")
     op.execute("DROP FUNCTION dispatch_next(uuid[])")
+    op.execute(_recorder_0039())
+    op.execute("DROP INDEX run_requests_queued_webhook")
+    op.execute("DROP FUNCTION set_ingress_capacity(double precision, double precision, integer)")
+    op.execute("ALTER TABLE platform_settings DROP COLUMN ingress_starts_per_s, DROP COLUMN ingress_headroom, "
+               "DROP COLUMN ingress_queue_wait_s")  # fmt: skip
     for function in ("work_failures_held_count(text, timestamptz)", "work_failures_release_many(text, timestamptz, integer)",
                      "pending_commands(integer)", "platform_admin_active(uuid)", "work_failure_release(text, uuid)",
                      "work_failures_held(integer)", "recovery_items_listed(integer)"):  # fmt: skip

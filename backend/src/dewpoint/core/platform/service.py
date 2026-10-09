@@ -5,6 +5,7 @@ so a development database can't drive a namespace it wasn't set up for, and a pr
 label proves nothing about the data: keeping development's database and namespace apart from production's is the
 operator's job. Its engine worker instances record what they can do (§2.7)."""
 
+import json
 import uuid
 from collections.abc import Sequence
 from datetime import timedelta
@@ -13,6 +14,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dewpoint.core.audit import service as audit
 from dewpoint.core.models.platform import DispatcherReport, PlatformSettings, WorkerInstance
 from dewpoint.core.models.requests import CurrentBuild
 
@@ -32,6 +34,29 @@ class EnvironmentNotRecordedError(Exception):
 
 class EnvironmentMismatchError(Exception):
     pass
+
+
+async def set_ingress_capacity(
+    s: AsyncSession, *, starts_per_s: float | None, headroom: float | None, queue_wait_s: int | None,
+    actor_id: uuid.UUID | None,
+) -> None:  # fmt: skip
+    """The deployment's ingress capacity (the owner's ruling 2 on the 2b-4b M3 checkpoint 2), as `dewpoint_admin`, in
+    the caller's transaction, audited with what it was: the sustained starts measured on its own Temporal, the share
+    of them ingress may use (above 0, at most 1), and the agreed wait a tenant's queued webhook requests may stand for
+    (seconds). None unsets one: ingress keeps its configured rates (development-only) until the first two are set, and
+    a development-only cap until all three are. Raises ValueError for a value out of range."""
+    if (
+        (starts_per_s is not None and not starts_per_s > 0)
+        or (headroom is not None and not 0 < headroom <= 1)
+        or (queue_wait_s is not None and not queue_wait_s > 0)
+    ):
+        raise ValueError("The ingress capacity needs starts above 0, a headroom above 0 and at most 1, a wait above 0.")
+    found = await s.execute(text("select set_ingress_capacity(:s, :h, :w)::text"),
+                            {"s": starts_per_s, "h": headroom, "w": queue_wait_s})  # fmt: skip
+    after = {"starts_per_s": starts_per_s, "headroom": headroom, "queue_wait_s": queue_wait_s}
+    await audit.record(s, tenant_id=None, actor_id=actor_id, action="platform.ingress_capacity.set",
+                       target_type="platform", target_id="ingress_capacity",
+                       details={"before": json.loads(found.scalar_one()), "after": after})  # fmt: skip
 
 
 async def recorded(s: AsyncSession) -> PlatformSettings | None:

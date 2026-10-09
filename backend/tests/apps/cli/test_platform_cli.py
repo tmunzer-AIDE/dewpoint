@@ -42,3 +42,18 @@ def test_a_development_setup_says_so_with_its_own_namespace(monkeypatch: pytest.
         0,
         "this deployment is development, with the Temporal namespace `dewpoint-ci`\n",
     )
+
+
+@pytest.mark.usefixtures("owner_env")
+def test_the_ingress_capacity_is_set_then_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEWPOINT_ENVIRONMENT", "development")
+    get_settings.cache_clear()
+    assert CliRunner().invoke(cli.app, ["platform", "init-environment"]).exit_code == 0
+    given = ["platform", "set-ingress-capacity", "--starts-per-s", "8", "--headroom", "0.5", "--queue-wait-s", "300"]
+    set_ = CliRunner().invoke(cli.app, given)
+    said = "ingress capacity: 8.0 starts a second measured, 0.5 of them for ingress, a 300 s queue: a tenant's queue "
+    assert (set_.exit_code, set_.output) == (0, said + "holds 1200 requests\n")
+    bad = CliRunner().invoke(cli.app, ["platform", "set-ingress-capacity", "--starts-per-s", "8", "--headroom", "2"])
+    assert bad.exit_code == 2 and "ingress capacity" in bad.output
+    unset = CliRunner().invoke(cli.app, ["platform", "set-ingress-capacity", "--unset"])
+    assert (unset.exit_code, unset.output) == (0, "ingress capacity unset: the development-only rates and cap\n")

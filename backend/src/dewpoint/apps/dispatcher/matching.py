@@ -29,6 +29,7 @@ attempts (`failures`, D10): it waits 1, 2, 4, 8, 16 then 30 minutes, so it never
 owner's review of the 2b-4b M1 checkpoint 4), and the 7th in a row holds it for an operator."""
 
 import json
+import math
 import uuid
 from collections import Counter
 from dataclasses import dataclass
@@ -52,6 +53,7 @@ from dewpoint.core.ingress.counters import release
 from dewpoint.core.ingress.filters import MAX_BINDINGS, matches
 from dewpoint.core.models.ingress import InboundEvent, TenantEventCounters, TriggerBinding, WebhookEndpoint
 from dewpoint.core.models.platform import PlatformSettings
+from dewpoint.core.models.requests import RunRequest
 from dewpoint.core.models.tenancy import Tenant
 from dewpoint.core.platform.service import PRODUCTION
 from dewpoint.core.plugins import lifecycle
@@ -67,6 +69,10 @@ TENANT_ERASING = "tenant_erasing"
 SKIPPED = "skipped"
 BUSY = "busy"  # its endpoint's row held elsewhere (ingress, another dispatcher): passed by (D9)
 BUSY_TENANT = "busy_tenant"  # its tenant's counter row held elsewhere: passed by alike
+BACKLOG_FULL = "backlog_full"  # its tenant's queued webhook requests at their cap: pending, its tenant passed by alike
+# A tenant's queued webhook requests at most, until the deployment's ingress capacity is set: development-only, never a
+# production value (the owner's ruling 2 on the 2b-4b M3 checkpoint 2)
+DEV_QUEUED = 10_000
 FAN_OUT_EXCEEDED = "fan_out_exceeded"
 KEY_UNAVAILABLE = "key_unavailable"
 RETRYING = "retrying"
@@ -176,7 +182,7 @@ async def match_once(
                 continue
             if outcome == BUSY:
                 endpoints.add(endpoint_id)
-            elif outcome == BUSY_TENANT:
+            elif outcome in (BUSY_TENANT, BACKLOG_FULL):  # its later events wait behind it: its order kept
                 tenants.add(tenant_id)
             else:  # tried
                 tried += 1
@@ -185,6 +191,26 @@ async def match_once(
     await failures.cleared(sessionmaker, [failures.MATCH], done)
     admitted.reported(counts, full=len(picked) >= batch * PAGES)
     return dict(counts)
+
+
+def queue_cap(platform: PlatformSettings) -> int:
+    """A tenant's queued webhook requests at most: the headroom's share of the deployment's measured starts for the
+    agreed wait, never below an event's most bindings (one must fit, or it never matches); `DEV_QUEUED` until all
+    three are set."""
+    starts, headroom, wait = platform.ingress_starts_per_s, platform.ingress_headroom, platform.ingress_queue_wait_s
+    if starts is None or headroom is None or wait is None:
+        return DEV_QUEUED
+    return max(MAX_BINDINGS, math.floor(starts * headroom * wait))
+
+
+async def _queued(s: AsyncSession, tenant_id: uuid.UUID) -> int:
+    """The tenant's webhook requests still queued (`run_requests_queued_webhook`)."""
+    found = await s.execute(
+        select(func.count()).select_from(RunRequest).where(
+            RunRequest.tenant_id == tenant_id, RunRequest.status == "queued", RunRequest.source == SOURCE
+        )
+    )  # fmt: skip
+    return int(found.scalar_one())
 
 
 async def match_event(
@@ -213,9 +239,10 @@ async def _match(
     await tenant_scope(s, tenant_id)
     await _lock(s, GATE_LOCK)
     await _lock(s, tenant_lock(tenant_id))
-    waiting = gate_off(await s.get(PlatformSettings, 1, populate_existing=True))
-    if waiting is not None:
-        return waiting
+    platform = await s.get(PlatformSettings, 1, populate_existing=True)
+    waiting = gate_off(platform)
+    if waiting is not None or platform is None:
+        return waiting or ENVIRONMENT_NOT_RECORDED
     tenant = await s.get(Tenant, tenant_id, populate_existing=True)
     if tenant is None or tenant.status != "active":
         return TENANT_ERASING
@@ -288,10 +315,13 @@ async def _match(
         event.next_attempt_at = func.statement_timestamp() + WAIT
         await s.flush()
         return FAN_OUT_EXCEEDED
+    admitting = [binding for binding in bindings if matches(binding.filter, payload)]
+    # The tenant's queue, counted under its counter row, which every matcher takes before admitting: past its cap, the
+    # event waits, nothing written (the owner's ruling 2 on the 2b-4b M3 checkpoint 2)
+    if admitting and await _queued(s, tenant_id) + len(admitting) > queue_cap(platform):
+        return BACKLOG_FULL
     admitted = 0
-    for binding in bindings:
-        if not matches(binding.filter, payload):
-            continue
+    for binding in admitting:
         await admission.admit_request(
             s, keys, tenant_id=tenant_id, workflow_id=binding.workflow_id, source=SOURCE, actor_id=None, mode=LIVE,
             idempotency_key=f"evt:{event.id}:{binding.workflow_id}", input=payload,

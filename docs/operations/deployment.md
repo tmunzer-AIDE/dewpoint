@@ -263,6 +263,18 @@ after it. Then it waits up to `--wait` seconds (the dispatcher's start deadline 
 to settle, and exits 3 with the ids of any still unresolved: the gate stays off, and the reconciler settles and audits
 them. No role turns the gate on outside 2b-4's command.
 
+### The ingress capacity
+
+```bash
+dewpoint platform set-ingress-capacity --starts-per-s 8 --headroom 0.5 --queue-wait-s 300
+```
+
+As `dewpoint_admin`, audited (`platform.ingress_capacity.set`, with what it was): the sustained starts a second
+measured on this deployment's own Temporal, the share of them ingress may use, and the wait its operators agree a
+tenant's queued webhook requests may stand for. From them come ingress's event rates and each tenant's queue cap
+([ingress](ingress.md#the-ingress-capacity)); none is set by default, and until they are, the rates and the cap are
+development-only. The values above are an example, not a recommendation. `--unset` unsets all three.
+
 ## Encrypted payloads
 
 Every payload Dewpoint's workflows exchange with Temporal — a run's input and result, each step's input and output,
