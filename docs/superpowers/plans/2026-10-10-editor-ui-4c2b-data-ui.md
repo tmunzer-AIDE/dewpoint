@@ -3,7 +3,7 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or
 > superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Revision 2.** Nothing is built before the owner approves this plan. Nothing is pushed and no PR is opened without
+**Revision 3.** Nothing is built before the owner approves this plan. Nothing is pushed and no PR is opened without
 the owner's OK in chat.
 
 **Goal:** Data in the step drawer: text with data pills inserted from the upstream data tree, a pill's details with a
@@ -41,8 +41,30 @@ Library, Playwright with the browser gate (`e2e/gate.ts`: CSP, console, axe WCAG
   #84's code, while on main before #84 the object test of a declared field fails validation.
 - The code on `origin/main` (6f4ddec7, with #84 merged), read for this plan
   (`scratchpad/research-4c2/R3-frontend.md` for the drawer, its held edits and its tests). Every task's code was run
-  on a prototype first (`scratchpad/ui4/4c2b-proto`, local branch `proto/editor-4c2b`): the unit suite (809 tests),
+  on a prototype first (`scratchpad/ui4/4c2b-proto`, local branch `proto/editor-4c2b`): the unit suite (813 tests),
   typecheck, lint, build, and the browser gate (37 flows).
+
+## Changes from revision 2
+
+A pasted review of revision 2 (7ee93fe9) found the other five fixes of revision 1's review right, and held it for two
+defects, both reproduced. Both are fixed here, each with a test that fails on revision 2's code (its name ends "(the
+review of revision 2)"):
+
+1. **A list's first item being there read back as the list not being empty** (Task 4, P2). For an item whose guards are
+   its list's type and size, "is there" wrote the same text as "is not empty" for the list, `(type(x) == type([]) &&
+   size(x) > 0)`, and the reader took the second: reopened, the comparison moved to the list, and a later edit compared
+   the list (`(x == "alpha")`). Now "is not empty" is written `size(x) != 0`, so `size(x) > n` ends only an item's
+   presence, and neither reads as the other (ruling 10). A sweep writes every operator over each shape of guards the
+   scope gives, and reads each back as the value, operator and literal it was written for. Task 1's engine check runs
+   the new form. Tests: Task 4 `tells a list's first item being there from the list not being empty, each read back as
+   itself`, `reads every comparison back as the value, operator and literal it was written for`; Task 9 `reopens "is
+   there" for a list's first item as that item, so a later edit compares it` (the review's case, through the field).
+2. **An opened value's answer about a newer revision showed an empty list** (Task 6, P3). The tree said why only at its
+   top. Now an opened value says it too, and its other errors (ruling 6). Test: Task 6 `says so when an opened value's
+   answer is about a newer revision, and shows none of it`.
+
+The per-task commits were built again, and the plan's text applied again from scratch by the dry run; the browser gate
+and Task 1's engine check were run again (see the self-review).
 
 ## Changes from revision 1
 
@@ -105,8 +127,7 @@ the dry run; the browser gate and Task 1's engine check were run again (see the 
   the flow plugin's steps and a declared trigger input; no run is started.
 - **No backend change**, so no migration and no OpenAPI change: `check:api` stays clean. The branch starts from main
   with #84 (6f4ddec7 on): the builder writes the object test as `type(x) == type({})`, which validation accepts as the
-  shape
-  guard only from #84 on (ledger M65).
+  shape guard only from #84 on (ledger M65).
 - **Secrets.**
   - A sensitive field never takes text with pills: its fixed text would be a secret written into the workflow
     (`sensitive.literal`). It keeps 4c-1's formula and read-only reference.
@@ -144,10 +165,13 @@ the task that owns it.
   - The builder opens only the exact text it would write; anything else stays a formula, and says why.
   - Tests: Task 4 `reads back what it wrote, and only that`, `keeps a formula with text JSON doesn't read a formula, and
     never fails on it (the review of revision 1)`, `names the value it tests in "is there" and "is missing", and reads
-    that value back (the review of revision 1)`; Task 9 `keeps a formula holding text JSON doesn't read a formula, and
-    still shows the field (the review of revision 1)`, `keeps a formula it didn't write a formula, and says why`, `opens
-    a formula it wrote as comparisons, and shows the same formula in Formula mode`, `groups comparisons one level deep,
-    each group matching all or any`.
+    that value back (the review of revision 1)`, `tells a list's first item being there from the list not being empty,
+    each read back as itself (the review of revision 2)`, `reads every comparison back as the value, operator and
+    literal it was written for (the review of revision 2)`; Task 9 `keeps a formula holding text JSON doesn't read a
+    formula, and still shows the field (the review of revision 1)`, `reopens "is there" for a list's first item as that
+    item, so a later edit compares it (the review of revision 2)`, `keeps a formula it didn't write a formula, and says
+    why`, `opens a formula it wrote as comparisons, and shows the same formula in Formula mode`, `groups comparisons one
+    level deep, each group matching all or any`.
 - **Data of every shape its schema allows, and any data where it declares nothing.**
   - The cases: a path missing at any level, null at any level, another shape (a string where a list is), an empty list,
     any value where nothing is declared.
@@ -164,7 +188,8 @@ the task that owns it.
     newer revision asks again, a sample is asked for each time it's shown, and the server's reason is shown.
   - Tests: Task 3 `asks each saved revision apart, so a newer revision asks again and never shows an older answer
     (D17)`, `takes no answer about another revision than the one it asked of (the review of revision 1)`; Task 6 `says
-    so when the draft was saved again while its data was asked for, and shows none of it (the review of revision 1)`;
+    so when the draft was saved again while its data was asked for, and shows none of it (the review of revision 1)`,
+    `says so when an opened value's answer is about a newer revision, and shows none of it (the review of revision 2)`;
     Task 7 `asks for a step's sample again each time its details open: a run may have ended since (the review of
     revision 1)`; Task 6 `says why there's no data when the saved draft can't give any`; Task 8 `shows pills in a
     version's view without asking for data, and offers no ＋ Data`.
@@ -234,7 +259,8 @@ These join the ledger as rulings 125 onward when the owner accepts the plan (Tas
     guards as data, spelled with a value's type (`type(x) == type({})`, never a type's name: ledger M65); the null test
     where the scope says; a type test before an operator that would fail on another type. "is there" is the guards and
     the null test, ending with a test of the value itself (`has()` of a field, the size that holds an item, or its null
-    test), so the formula names the value even where only an ancestor's guards decide it; "is missing" its negation.
+    test), so the formula names the value even where only an ancestor's guards decide it, and "is not empty" is
+    written `size(x) != 0`, so no comparison reads back as another; "is missing" its negation.
     Operators by type; a date and time is compared as written, never ordered; "is there" only where something may be
     missing. A number is written as typed, JSON's way. Why: R6 §4: false on any
     data, never an error, and every form validates clean; checked through the run's own binding.
@@ -410,7 +436,7 @@ Write, in the session's scratchpad (not the worktree), `builder-formulas.json`:
   "(has(trigger.events) && type(trigger.events) == type([]) && size(trigger.events) > 0 && type(trigger.events[0]) == type({}) && has(trigger.events[0].ev_type) && trigger.events[0].ev_type != null)",
   "!(has(trigger.events) && type(trigger.events) == type([]) && size(trigger.events) > 0 && type(trigger.events[0]) == type({}) && has(trigger.events[0].ev_type) && trigger.events[0].ev_type != null)",
   "(has(trigger.tags) && trigger.tags != null && type(trigger.tags) == type([]) && size(trigger.tags) == 0)",
-  "(has(trigger.tags) && trigger.tags != null && type(trigger.tags) == type([]) && size(trigger.tags) > 0)",
+  "(has(trigger.tags) && trigger.tags != null && type(trigger.tags) == type([]) && size(trigger.tags) != 0)",
   "(has(trigger.device) && type(trigger.device) == type({}) && has(trigger.device.name) && trigger.device.name == \"AP\")",
   "(has(trigger.olist) && size(trigger.olist) > 0 && has(trigger.olist[0].name))",
   "!(has(trigger.olist) && size(trigger.olist) > 0 && has(trigger.olist[0].name))",
@@ -1270,9 +1296,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 Comparisons joined by all or any, one level of groups, written as CEL that is false, never an error, on any data (ruling
 10, R6 §4–5), and read back only when it's the exact text the builder writes (ruling 11), never failing on another's
 text. "is there" and "is missing" end with a test of the value itself, so the formula names it, and are offered only
-where something may be missing. The guards come from the scope as data; the builder only spells them, never with a
-type's name (ledger M65). Task 1's check has the engine validate these forms and run them through the run's own binding,
-at the branch's base.
+where something may be missing; "is not empty" is `size(x) != 0`, so every comparison reads back as itself. The guards
+come from the scope as data; the builder only spells them, never with a type's name (ledger M65). Task 1's check has the
+engine validate these forms and run them through the run's own binding, at the branch's base.
 
 **Files:**
 - Create: `frontend/src/lib/builder.test.ts`
@@ -1291,7 +1317,7 @@ at the branch's base.
 ````ts
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from "vitest";
-import { opsFor, read, rowCel, valueProblem, write, type Condition, type Row } from "./builder";
+import { NO_VALUE, OP_WORDS, opsFor, read, rowCel, valueProblem, write, type Condition, type Op, type Row } from "./builder";
 import type { Guard } from "./data";
 
 const g = (kind: Guard["kind"], path: string, size: number | null = null): Guard => ({ kind, path, size });
@@ -1400,6 +1426,47 @@ describe("the condition builder's formulas", () => {
       const back = read(cel);
       expect(back?.items[0]).toMatchObject({ path: r.path, op: r.op });
       expect(write(back!)).toBe(cel);
+    }
+  });
+
+  it("tells a list's first item being there from the list not being empty, each read back as itself (the review of revision 2)", () => {
+    const item = row({ path: "trigger.labels[0]", op: "is_there", value: null, guards: [g("is_list", "trigger.labels"), g("min_size", "trigger.labels", 0)] });
+    const list = row({ path: "trigger.labels", op: "is_not_empty", value: null });
+    expect(rowCel(list)).toBe("(type(trigger.labels) == type([]) && size(trigger.labels) != 0)");
+    expect(rowCel(item)).toBe("(type(trigger.labels) == type([]) && size(trigger.labels) > 0)");
+    expect(read(rowCel(item))?.items[0]).toMatchObject({ path: "trigger.labels[0]", op: "is_there" });
+    expect(read(rowCel(list))?.items[0]).toMatchObject({ path: "trigger.labels", op: "is_not_empty" });
+  });
+
+  it("reads every comparison back as the value, operator and literal it was written for (the review of revision 2)", () => {
+    // The shapes of guards the scope gives: none, a field's own, a list's and its item's, an item's field below them.
+    const X = "trigger.xs";
+    const shapes: [string, Guard[]][] = [
+      ["trigger.a", []],
+      ["trigger.a", [g("present", "trigger.a")]],
+      [X, []],
+      [X, [g("present", X)]],
+      [`${X}[0]`, [g("min_size", X, 0)]],
+      [`${X}[0]`, [g("is_list", X), g("min_size", X, 0)]],
+      [`${X}[2]`, [g("present", X), g("is_list", X), g("min_size", X, 2)]],
+      [`${X}[0].f`, [g("is_list", X), g("min_size", X, 0)]],
+      [`${X}[0].f`, [g("present", X), g("min_size", X, 0), g("is_map", `${X}[0]`)]],
+      [`${X}[0].f`, [g("is_list", X), g("min_size", X, 0), g("is_map", `${X}[0]`), g("present", `${X}[0].f`)]],
+    ];
+    const ops = Object.keys(OP_WORDS) as Op[];
+    const seen = new Map<string, string>();
+    for (const [path, guards] of shapes) {
+      for (const nullTest of [false, true]) {
+        for (const op of ops) {
+          for (const value of NO_VALUE.has(op) ? [null] : [{ kind: "text", text: "a" } as const, { kind: "number", text: "3" } as const]) {
+            const cel = rowCel({ path, op, value, guards, nullTest });
+            const said = `${path} ${op} ${JSON.stringify(value)}`;
+            expect(read(cel)?.items[0], `${said} wrote ${cel}`).toMatchObject({ path, op, value });
+            if (seen.has(cel) && seen.get(cel)!.split(" ").slice(0, 2).join(" ") !== `${path} ${op}`) throw new Error(`${said} and ${seen.get(cel)} both write ${cel}`);
+            seen.set(cel, said);
+          }
+        }
+      }
     }
   });
 
@@ -1605,8 +1672,8 @@ function testOf(r: Row): string[] {
       return [`${p} == false`];
     case "is_empty":
       return [`type(${p}) == type([])`, `size(${p}) == 0`];
-    case "is_not_empty":
-      return [`type(${p}) == type([])`, `size(${p}) > 0`];
+    case "is_not_empty": // `!= 0`: `size(x) > n` is an item being there, its presence's own test (the review of revision 2)
+      return [`type(${p}) == type([])`, `size(${p}) != 0`];
     default:
       return [];
   }
@@ -1723,7 +1790,7 @@ function testFrom(tests: string[]): { op: Op; path: string; value: Literal | nul
     const value = literalOf(m[3]!);
     return value && { op, path: m[1]!, value, used: 2 };
   }
-  if ((m = new RegExp(`^size\\(${PATH}\\) (==|>) 0$`).exec(last)) && prev === `type(${m[1]}) == type([])`) {
+  if ((m = new RegExp(`^size\\(${PATH}\\) (==|!=) 0$`).exec(last)) && prev === `type(${m[1]}) == type([])`) {
     return { op: m[2] === "==" ? "is_empty" : "is_not_empty", path: m[1]!, value: null, used: 2 };
   }
   return null;
@@ -1806,7 +1873,7 @@ export function read(formula: string): Condition | null {
 
 Run: `npx -y pnpm@12.6.0 exec vitest run --testTimeout=15000 src/lib/builder.test.ts`
 
-Expected: PASS: `Test Files  1 passed (1)`, `Tests  9 passed (9)`.
+Expected: PASS: `Test Files  1 passed (1)`, `Tests  11 passed (11)`.
 
 - [ ] **Step 5: Typecheck and lint**
 
@@ -2109,7 +2176,7 @@ export function fakeApi(answers: Record<string, (query: URLSearchParams) => Resp
 
 Run (from `frontend/`): `npx -y pnpm@12.6.0 exec vitest run --testTimeout=15000 src/lib src/routes/editor`
 
-Expected: FAIL: `Test Files  3 failed | 30 passed (33)`, `Tests  8 failed | 415 passed (423)`. The failing tests are
+Expected: FAIL: `Test Files  3 failed | 30 passed (33)`, `Tests  8 failed | 417 passed (425)`. The failing tests are
 this task's new and changed ones: `adds a decision once, and keeps the other settings`, `removes an entry, and the list
 with its last`, `takes text with data pills in a text field the engine lets template, never a secret, a choice or a
 formula`, `labels a field by its parts' labels`, `applies held text and pills as a template, and a literal's text as a
@@ -2570,7 +2637,7 @@ export function StepDrawer({
 
 Run: `npx -y pnpm@12.6.0 exec vitest run --testTimeout=15000 src/lib src/routes/editor`
 
-Expected: PASS: `Test Files  33 passed (33)`, `Tests  423 passed (423)`.
+Expected: PASS: `Test Files  33 passed (33)`, `Tests  425 passed (425)`.
 
 - [ ] **Step 5: Typecheck and lint**
 
@@ -2600,7 +2667,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 The data a field can read, to insert (ruling 8): an ARIA tree in the drawer's flow (ruling 2), grouped by source, each
 value with its tags and type, children loaded when opened, a search, the typed path for a trigger whose input isn't
 declared, and what can't be inserted shown disabled with why (in a condition, an object that's always there opens
-instead). An answer about a newer revision isn't shown: the tree says why.
+instead). An answer about a newer revision isn't shown, at the top or under an opened value: the tree says why.
 
 **Files:**
 - Create: `frontend/src/routes/editor/drawer/DataTree.test.tsx`
@@ -2732,6 +2799,21 @@ describe("the data tree", () => {
     tree();
     expect(await screen.findByText("The draft was saved again while its data was asked for. Close this and open it again.")).toBeTruthy();
     expect(screen.queryByText("total")).toBeNull();
+  });
+
+  it("says so when an opened value's answer is about a newer revision, and shows none of it (the review of revision 2)", async () => {
+    serve({
+      "GET /api/v1/t/t1/workflows/w1/draft/scope": (q) => {
+        const under = q.get("under");
+        if (under === null) return answer(ENTRIES.filter((e) => e.parent === null || e.parent === OUT));
+        return json({ draft_revision: 2, node: NODE_ID, field: "/message", state: "ok", reason: null, entries: ENTRIES.filter((e) => e.parent === under), more: false, problem: null });
+      },
+    });
+    tree();
+    const results = (await screen.findByText("results")).closest("li")!;
+    await userEvent.click(results); // a list can't go into text: it opens
+    expect(await within(results).findByText("The draft was saved again while its data was asked for. Close this and open it again.")).toBeTruthy();
+    expect(within(results).queryByText("[0]")).toBeNull();
   });
 
   it("shows a key a reference can't name, disabled, and never inserts it", async () => {
@@ -2909,6 +2991,11 @@ function Item({ row, where, purpose, open, active, setActive, toggle, pick, regi
       </div>
       {why !== null && <p className="px-3 pb-1 text-meta text-muted" style={{ paddingLeft: `${28 + (level - 2) * 16}px` }}>{why}</p>}
       {expanded && children.isPending && <p className="px-3 py-1 text-small text-muted">Loading…</p>}
+      {expanded && children.isError && (
+        <p className="px-3 py-1 text-small text-danger">
+          {children.error instanceof DraftMoved ? children.error.message : "Its values couldn't be loaded. Close and try again."}
+        </p>
+      )}
       {expanded && (
         <ul role="group">
           {(kids ?? []).map((k) => (
@@ -3178,7 +3265,7 @@ export function DataTree({ field, purpose, onPick, onClose }: {
 
 Run: `npx -y pnpm@12.6.0 exec vitest run --testTimeout=15000 src/routes/editor/drawer/DataTree.test.tsx`
 
-Expected: PASS: `Test Files  1 passed (1)`, `Tests  10 passed (10)`.
+Expected: PASS: `Test Files  1 passed (1)`, `Tests  11 passed (11)`.
 
 - [ ] **Step 5: Typecheck and lint**
 
@@ -3968,7 +4055,7 @@ describe("text with data pills", () => {
 
 Run (from `frontend/`): `npx -y pnpm@12.6.0 exec vitest run --testTimeout=15000 src/routes/editor`
 
-Expected: FAIL: `Test Files  2 failed | 19 passed (21)`, `Tests  14 failed | 272 passed (286)`. The failing tests are
+Expected: FAIL: `Test Files  2 failed | 19 passed (21)`, `Tests  14 failed | 273 passed (287)`. The failing tests are
 this task's new and changed ones: `labels a field by its title, its hint and the server's problems described by it`,
 `keeps what a refused write turned away, with its reason`, `shows a reference in a text field as a pill, and switches it
 to the formula that reads it`, `writes typed text as text, and the field's mode is Text`, `inserts a pill from the tree
@@ -4419,7 +4506,7 @@ export function withPill(segments: Segments, where: Caret, ref: string, slash: b
 
 Run: `npx -y pnpm@12.6.0 exec vitest run --testTimeout=15000 src/routes/editor`
 
-Expected: PASS: `Test Files  21 passed (21)`, `Tests  286 passed (286)`.
+Expected: PASS: `Test Files  21 passed (21)`, `Tests  287 passed (287)`.
 
 - [ ] **Step 5: Typecheck and lint**
 
@@ -4629,6 +4716,32 @@ describe("the condition builder", () => {
     expect(screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Condition" }).value).toBe('(steps.get_site.output.name == "\\x41")');
   });
 
+  it("reopens \"is there\" for a list's first item as that item, so a later edit compares it (the review of revision 2)", async () => {
+    const LABELS = `${OUT}.labels`;
+    const guards: ScopeEntry["formula"] extends infer F ? (F extends { guards: infer G } ? G : never) : never = [
+      { kind: "is_list", path: LABELS, size: null },
+      { kind: "min_size", path: LABELS, size: 0 },
+    ];
+    const more = [
+      entry(LABELS, { types: ["array", "string"] }),
+      entry(`${LABELS}[0]`, { parent: LABELS, name: "[0]", missing: true, formula: { guards, null_test: false, sensitive: false } }),
+    ];
+    fakeApi({
+      "GET /api/v1/t/t1/workflows/w1/draft/scope": (q) => {
+        const at = q.get("at");
+        const entries = [...ENTRIES, ...more].filter((e) => at === null || e.path === at);
+        return json({ draft_revision: 1, node: NODE_ID, field: "/condition", state: "ok", reason: null, entries, more: false, problem: null });
+      },
+    });
+    const there = write({ match: "all", items: [{ path: `${LABELS}[0]`, op: "is_there", value: null, guards, nullTest: false }] })!;
+    const f = showFields(IF, { steps, config: { condition: formula(there) } });
+    const op = await screen.findByRole("combobox", { name: "Comparison, Condition 1" });
+    await within(op).findByRole("option", { name: "is" }); // once the value's type is known
+    await userEvent.selectOptions(op, "is");
+    await userEvent.type(await screen.findByRole("textbox", { name: "Value, Condition 1" }), "alpha");
+    expect(f.config()).toEqual({ condition: formula(`(type(${LABELS}) == type([]) && size(${LABELS}) > 0 && ${LABELS}[0] == "alpha")`) });
+  });
+
   it("groups comparisons one level deep, each group matching all or any", async () => {
     const f = showFields(IF, { steps });
     await userEvent.click(screen.getByRole("button", { name: "＋ Condition" }));
@@ -4759,11 +4872,12 @@ it("offers the builder and a formula, never a fixed value, where the engine take
 
 Run (from `frontend/`): `npx -y pnpm@12.6.0 exec vitest run --testTimeout=15000 src/routes/editor`
 
-Expected: FAIL: `Test Files  2 failed | 20 passed (22)`, `Tests  9 failed | 285 passed (294)`. The failing tests are
+Expected: FAIL: `Test Files  2 failed | 20 passed (22)`, `Tests  10 failed | 286 passed (296)`. The failing tests are
 this task's new and changed ones: `builds a condition from data picked in the tree, and writes the formula`, `offers the
 operators a value's type takes, and a number only as one`, `opens a formula it wrote as comparisons, and shows the same
 formula in Formula mode`, `keeps a formula it didn't write a formula, and says why`, `keeps a formula holding text JSON
-doesn't read a formula, and still shows the field (the review of revision 1)`, `groups comparisons one level deep, each
+doesn't read a formula, and still shows the field (the review of revision 1)`, `reopens "is there" for a list's first
+item as that item, so a later edit compares it (the review of revision 2)`, `groups comparisons one level deep, each
 group matching all or any`, `says a fixed true is always true, until a condition replaces it`, `offers the builder and a
 formula, never a fixed value, where the engine takes only a formula`, `adds a case with the first free port name`.
 
@@ -5197,7 +5311,7 @@ const startMode = (spec: FieldSpec, value: unknown): Mode =>
 
 Run: `npx -y pnpm@12.6.0 exec vitest run --testTimeout=15000 src/routes/editor`
 
-Expected: PASS: `Test Files  22 passed (22)`, `Tests  294 passed (294)`.
+Expected: PASS: `Test Files  22 passed (22)`, `Tests  296 passed (296)`.
 
 - [ ] **Step 5: Typecheck and lint**
 
@@ -5353,7 +5467,7 @@ it("declassifies a decision from the toolbar's Declassify, and the draft saves t
 
 Run (from `frontend/`): `npx -y pnpm@12.6.0 exec vitest run --testTimeout=15000 src/routes/editor`
 
-Expected: FAIL: `Test Files  2 failed | 21 passed (23)`, `Tests  1 failed | 294 passed (295)`. The run can't import
+Expected: FAIL: `Test Files  2 failed | 21 passed (23)`, `Tests  1 failed | 296 passed (297)`. The run can't import
 `./DeclassifyPanel`: it doesn't exist yet. The failing tests are this task's new and changed ones: `declassifies a
 decision from the toolbar's Declassify, and the draft saves the entry`.
 
@@ -5764,7 +5878,7 @@ const NO_DIAGNOSTICS: Diagnostic[] = []; // one empty list, so a memo over it ho
 
 Run: `npx -y pnpm@12.6.0 exec vitest run --testTimeout=15000 src/routes/editor`
 
-Expected: PASS: `Test Files  23 passed (23)`, `Tests  298 passed (298)`.
+Expected: PASS: `Test Files  23 passed (23)`, `Tests  300 passed (300)`.
 
 - [ ] **Step 5: Typecheck and lint**
 
@@ -5889,7 +6003,7 @@ it("says a step that may not run, in words and dashed, beside its problems (4c-2
 
 Run (from `frontend/`): `npx -y pnpm@12.6.0 exec vitest run --testTimeout=15000 src/routes/editor`
 
-Expected: FAIL: `Test Files  2 failed | 21 passed (23)`, `Tests  133 failed | 167 passed (300)`. Every one of
+Expected: FAIL: `Test Files  2 failed | 21 passed (23)`, `Tests  133 failed | 169 passed (302)`. Every one of
 `Editor.test.tsx`'s 132 tests fails on `TypeError: props.conditional is not iterable`: its canvas stub reads the set the
 editor doesn't pass yet. The other failure is StepCard's new `says a step that may not run, in words and dashed, beside
 its problems (4c-2b)`.
@@ -6112,7 +6226,7 @@ export function StepCardBody({
 
 Run: `npx -y pnpm@12.6.0 exec vitest run --testTimeout=15000 src/routes/editor`
 
-Expected: PASS: `Test Files  23 passed (23)`, `Tests  300 passed (300)`.
+Expected: PASS: `Test Files  23 passed (23)`, `Tests  302 passed (302)`.
 
 - [ ] **Step 5: Typecheck and lint**
 
@@ -6301,7 +6415,7 @@ From `frontend/`: `npx -y pnpm@12.6.0 test`, `typecheck`, `lint`, `check:api`, `
 `git diff --stat origin/main -- backend` (nothing: the backend is untouched, so its suite doesn't run), and local
 CodeQL on the branch's head (`<scratchpad>/codeql/scan.sh <sha>`, about 40 s).
 
-Expected: unit `Test Files  62 passed (62)`, `Tests  809 passed (809)`; typecheck, lint and `check:api` clean; the build
+Expected: unit `Test Files  62 passed (62)`, `Tests  813 passed (813)`; typecheck, lint and `check:api` clean; the build
 succeeds; no backend change; no new CodeQL
 alert. A failure is read and fixed test-first, or reported as it is: never a claim that every check passes when one
 didn't.
@@ -6391,13 +6505,13 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
     `StepCardBody`.
 - **Review Focus.** Each line names the tests that pin it, in their owning tasks (1, 3, 4, 5, 6, 7, 8, 9, 10 and 12);
   every name was checked against the test files.
-- **What the dry run showed.** Revision 2's per-task commits were built again from the fixed prototype on origin/main
+- **What the dry run showed.** Revision 3's per-task commits were built again from the fixed prototype on origin/main
   6f4ddec7 (main with #84), each typechecked, linted and its tests passing. The plan's own text, applied from scratch to
   a detached worktree at 6f4ddec7 by a script that reads this file as an executor would, made those commits' tree
   exactly; each Step 2 failed and each Step 4 passed as their Expected lines say (those lines are its output); the whole
-  unit suite then passed, 809 of 809. The browser gate passed on that tree with #84's backend, 37 of 37. Task 1's engine
-  check printed the scope's guards as its Expected line says, 23 `OK` and `problems: 0` on merged main, and the device's
-  `BAD` line on main before #84. One run of the dry run failed once in Task 10's Step 4 on a 4b test,
-  `says when the latest edits aren't saved` (the announcement wasn't heard yet); it failed once more in three runs of
-  that file at that point, then passed in every one of 28 later runs (at Task 10, on the final tree and on main):
-  intermittent, cause not found, reported to the owner apart from this plan.
+  unit suite then passed, 813 of 813. The browser gate passed on that tree with #84's backend, 37 of 37. Task 1's engine
+  check printed the scope's guards as its Expected line says, 23 `OK` and `problems: 0` on merged main ("is not empty"
+  as `size(x) != 0` among them), and the device's `BAD` line on main before #84. While revision 2 was checked, a 4b
+  test, `says when the latest edits aren't saved`, failed twice at Task 10's state, then passed in every one of 28 later
+  runs (at Task 10, on the final tree and on main): intermittent, cause not found, reported to the owner apart from this
+  plan.
