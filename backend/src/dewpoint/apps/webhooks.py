@@ -38,6 +38,7 @@ from dewpoint.core.ingress.filters import MAX_BINDINGS, FilterError, validated
 from dewpoint.core.ingress.keys import ensure_event_key
 from dewpoint.core.models.ingress import InboundEvent, TenantEventCounters, TriggerBinding, WebhookEndpoint
 from dewpoint.core.models.workflows import Workflow
+from dewpoint.core.plugins import registry
 from dewpoint.core.retention.cutoff import Cutoff, cutoff, event_kept, kept
 
 MIB = 1024 * 1024
@@ -138,11 +139,32 @@ async def _audit(s: AsyncSession, tenant_id: uuid.UUID, actor_id: uuid.UUID | No
                        target_id=str(target_id), details=details)  # fmt: skip
 
 
+async def _for_trigger(s: AsyncSession, given: Mapping[str, Any], written: frozenset[str]) -> Mapping[str, Any]:
+    """`given`, with what its trigger's endpoint decides (plugins-3 D17; 4c-3a ruling 1): how it proves its sender and
+    where its events and their ids are. The trigger must be one a synced plugin declares, and a field the request wrote
+    must say what the trigger does. Raises WebhookRefusedError."""
+    named = given.get("trigger")
+    if named is None:
+        return given
+    declared = {t.get("key"): t for t in await registry.list_triggers(s)}
+    if named not in declared:
+        raise WebhookRefusedError(422, {"error": "endpoint_invalid", "fields": ["trigger"]})
+    endpoint = declared[named]["endpoint"]
+    decided = {"auth": endpoint["auth"], "events_pointer": endpoint.get("events_pointer"),
+               "id_source": endpoint.get("id_source", "none"), "id_pointer": None, "id_header": None}  # fmt: skip
+    clashing = sorted(k for k in decided if k in written and given.get(k) != decided[k])
+    if clashing:
+        raise WebhookRefusedError(422, {"error": "endpoint_invalid", "fields": clashing})
+    return {**given, **decided}
+
+
 async def create_endpoint(
     s: AsyncSession, keyring: Keyring, key: IngressKey, *, tenant_id: uuid.UUID, actor_id: uuid.UUID,
-    given: Mapping[str, Any],
+    given: Mapping[str, Any], written: frozenset[str] = frozenset(),
 ) -> tuple[WebhookEndpoint, str]:  # fmt: skip
-    """The endpoint and its secret, to show once. Raises WebhookRefusedError."""
+    """The endpoint and its secret, to show once. `written`: the fields the request gave, which its trigger, if it
+    names one, must agree with. Raises WebhookRefusedError."""
+    given = await _for_trigger(s, given, written)
     auth, id_source = given["auth"], given["id_source"]
     problems = _problems(given, auth=auth, id_source=id_source)
     if problems:
@@ -157,7 +179,7 @@ async def create_endpoint(
         timestamp_header=(given.get("timestamp_header") or TIMESTAMP_HEADER) if auth == "hmac" else None,
         tolerance_s=given["tolerance_s"], allowlist=_networks(given.get("allowlist") or []),
         body_limit=given["body_limit"], id_source=id_source, id_pointer=given.get("id_pointer"),
-        id_header=given.get("id_header"), events_pointer=given.get("events_pointer"),
+        id_header=given.get("id_header"), events_pointer=given.get("events_pointer"), trigger_key=given.get("trigger"),
         dedupe_key=key.seal(DEDUPE_KEY, str(endpoint_id), new_dedupe_key()), byte_burst=burst, byte_tokens=burst,
         created_by=actor_id,
     )  # fmt: skip
@@ -165,7 +187,8 @@ async def create_endpoint(
     await s.flush()
     await s.refresh(endpoint)  # the defaults the database set, read now (never lazily)
     await _audit(s, tenant_id, actor_id, "webhook_endpoint.create", "webhook_endpoint", endpoint_id,
-                 {"name": endpoint.name, "auth": auth, "id_source": id_source})  # fmt: skip
+                 {"name": endpoint.name, "auth": auth, "id_source": id_source,
+                  "trigger": endpoint.trigger_key})  # fmt: skip
     return endpoint, secret
 
 
@@ -356,7 +379,8 @@ def endpoint_body(endpoint: WebhookEndpoint) -> dict[str, object]:
         "signature_header": endpoint.signature_header, "timestamp_header": endpoint.timestamp_header,
         "tolerance_s": endpoint.tolerance_s, "allowlist": [str(n) for n in endpoint.allowlist or []],
         "body_limit": endpoint.body_limit, "id_source": endpoint.id_source, "id_pointer": endpoint.id_pointer,
-        "id_header": endpoint.id_header, "events_pointer": endpoint.events_pointer, "path": f"/hooks/{endpoint.id}",
+        "id_header": endpoint.id_header, "events_pointer": endpoint.events_pointer, "trigger": endpoint.trigger_key,
+        "path": f"/hooks/{endpoint.id}",
         "pending_events": endpoint.pending_events, "pending_bytes": endpoint.pending_bytes,
         "retained_events": endpoint.retained_events, "retained_bytes": endpoint.retained_bytes,
         "created_at": endpoint.created_at.isoformat() if endpoint.created_at else None,

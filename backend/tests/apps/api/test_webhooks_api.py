@@ -18,16 +18,21 @@ from sqlalchemy import event, text
 from sqlalchemy.engine import Engine
 
 from dewpoint.apps.ingress.main import create_app
+from dewpoint.apps.plugin_loader import sync_installed
 from dewpoint.core.crypto import events
 from dewpoint.core.crypto.ingress import DEDUPE_KEY, HMAC_SECRET
 from dewpoint.core.ingress.identity import canonical
+from dewpoint.plugins.flow import PLUGIN as FLOW
+from dewpoint.sdk import Plugin, Trigger
 from tests.apps.api.test_run_requests_api import as_role
+from tests.apps.api.test_trigger_types import DEMO, EVENT
 from tests.apps.dispatcher.inbound import keypair
 from tests.apps.ingress.support import KEY
 from tests.apps.ingress.support import client as ingress_client
 from tests.apps.ingress.support import settings as ingress_settings
 from tests.apps.test_admission import KEYS, OPEN_GRAPH, published
 from tests.core.ingress.support import record
+from tests.support.plugins.testkit import TESTKIT
 
 pytestmark = pytest.mark.usefixtures("development_deployment")
 MIB = 1024 * 1024
@@ -143,6 +148,100 @@ async def test_an_endpoint_that_isnt_one_is_refused_with_what_to_change(
     assert problem in answer.json()["fields"]
 
 
+@pytest.fixture
+async def demo(admin_sessionmaker) -> None:
+    """The demo plugin's trigger, `demo.webhook` (a bearer endpoint, each delivery one event), synced beside flow and
+    testkit, as `dewpoint plugins sync` would."""
+    async with admin_sessionmaker() as s, s.begin():
+        await sync_installed(s, [FLOW, TESTKIT, DEMO])
+
+
+async def test_an_endpoint_made_for_a_trigger_takes_its_settings_and_says_so(
+    keyed_app, tenant, demo, owner_sessionmaker, api_settings
+) -> None:
+    """4c-3a ruling 1: an endpoint names the trigger type it's for and takes that trigger's endpoint settings (how it
+    proves its sender, where its events and their ids are); every answer says which. Another sender's says null."""
+    ctx, _ = tenant
+    body = await made(keyed_app, owner_sessionmaker, api_settings, ctx, trigger="demo.webhook")
+    assert body.pop("secret").startswith("dwp_")
+    assert {k: body[k] for k in ("trigger", "auth", "events_pointer", "id_source", "id_pointer", "id_header")} == {
+        "trigger": "demo.webhook", "auth": "bearer", "events_pointer": None, "id_source": "none", "id_pointer": None,
+        "id_header": None,
+    }  # fmt: skip
+    assert (await row(owner_sessionmaker, "webhook_endpoints", body["id"]))["trigger_key"] == "demo.webhook"
+    other = await made(keyed_app, owner_sessionmaker, api_settings, ctx, name="other")
+    assert other["trigger"] is None
+    viewer = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "viewer")
+    listed = (await viewer.get(url(ctx, "/webhook-endpoints"))).json()["endpoints"]
+    assert {e["id"]: e["trigger"] for e in listed} == {body["id"]: "demo.webhook", other["id"]: None}
+    assert (await viewer.get(url(ctx, f"/webhook-endpoints/{body['id']}"))).json()["trigger"] == "demo.webhook"
+    made_audits = await audited(owner_sessionmaker, "webhook_endpoint.create")
+    assert [a["details"]["trigger"] for a in made_audits] == ["demo.webhook", None]
+
+
+async def test_an_endpoint_keeps_its_trigger_when_a_plugin_stops_declaring_it(
+    keyed_app, tenant, demo, admin_sessionmaker, owner_sessionmaker, api_settings
+) -> None:
+    """A plugin's later version that no longer declares a trigger: an endpoint made for it keeps the key it was made
+    for (the editor says its sender is unknown), and no new endpoint can name it."""
+    ctx, _ = tenant
+    body = await made(keyed_app, owner_sessionmaker, api_settings, ctx, trigger="demo.webhook")
+    later = Plugin(name="demo", version="1.0.1", nodes=(), connection_types=(),
+                   triggers=(Trigger("demo.other", "Demo other", "bearer", "/topic", {"a": EVENT}),))  # fmt: skip
+    async with admin_sessionmaker() as s, s.begin():
+        await sync_installed(s, [FLOW, TESTKIT, later])
+    editor = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "editor")
+    assert (await editor.get(url(ctx, f"/webhook-endpoints/{body['id']}"))).json()["trigger"] == "demo.webhook"
+    refused = await editor.post(url(ctx, "/webhook-endpoints"), json={"name": "x", "trigger": "demo.webhook"})
+    assert (refused.status_code, refused.json()) == (422, {"error": "endpoint_invalid", "fields": ["trigger"]})
+
+
+async def test_an_endpoint_for_a_signed_trigger_takes_the_default_headers(
+    keyed_app, tenant, admin_sessionmaker, owner_sessionmaker, api_settings
+) -> None:
+    """A trigger whose endpoint is signed (`hmac`): the endpoint is, with the default signature and timestamp headers,
+    its secret an HMAC secret sealed under the ingress key, shown once."""
+    signed = Plugin(name="demo", version="1.0.0", nodes=(), connection_types=(),
+                    triggers=(Trigger("demo.signed", "Demo signed", "hmac", "/topic", {"a": EVENT}),))  # fmt: skip
+    async with admin_sessionmaker() as s, s.begin():
+        await sync_installed(s, [FLOW, TESTKIT, signed])
+    ctx, _ = tenant
+    body = await made(keyed_app, owner_sessionmaker, api_settings, ctx, trigger="demo.signed")
+    assert {k: body[k] for k in ("trigger", "auth", "signature_header", "timestamp_header")} == {
+        "trigger": "demo.signed", "auth": "hmac", "signature_header": "x-dewpoint-signature",
+        "timestamp_header": "x-dewpoint-timestamp",
+    }  # fmt: skip
+    stored = await row(owner_sessionmaker, "webhook_endpoints", body["id"])
+    assert stored["bearer_digest"] is None
+    assert KEY.open(HMAC_SECRET, body["id"], stored["hmac_secret"]).decode() == body["secret"]
+
+
+@pytest.mark.parametrize(
+    ("given", "fields"),
+    [
+        ({"trigger": "demo.missing"}, ["trigger"]),
+        ({"trigger": "demo.webhook", "auth": "hmac"}, ["auth"]),
+        ({"trigger": "demo.webhook", "events_pointer": "/events"}, ["events_pointer"]),
+        ({"trigger": "demo.webhook", "id_source": "pointer", "id_pointer": "/id"}, ["id_pointer", "id_source"]),
+        ({"trigger": "demo.webhook", "id_source": "header", "id_header": "x-event-id"}, ["id_header", "id_source"]),
+    ],
+)
+async def test_an_endpoint_for_a_trigger_refuses_what_the_trigger_decides_otherwise(
+    keyed_app, tenant, demo, owner_sessionmaker, api_settings, given, fields
+) -> None:
+    """A trigger that no synced plugin declares is refused, and so is a setting the request writes that its trigger
+    decides otherwise: nothing is made. Writing what the trigger decides is no clash."""
+    ctx, _ = tenant
+    editor = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "editor")
+    answer = await editor.post(url(ctx, "/webhook-endpoints"), json={"name": "x"} | given)
+    assert (answer.status_code, answer.json()) == (422, {"error": "endpoint_invalid", "fields": fields})
+    async with owner_sessionmaker() as s:
+        assert (await s.execute(text("select count(*) from webhook_endpoints"))).scalar_one() == 0
+    agreeing = {"name": "x", "trigger": "demo.webhook", "auth": "bearer", "id_source": "none"}
+    same = await editor.post(url(ctx, "/webhook-endpoints"), json=agreeing)
+    assert same.status_code == 201, same.text
+
+
 async def test_a_large_body_limit_gets_the_burst_that_covers_it(keyed_app, tenant, owner_sessionmaker,
                                                                 api_settings) -> None:  # fmt: skip
     ctx, _ = tenant
@@ -198,7 +297,8 @@ async def test_an_endpoint_is_updated_and_disabled_but_never_its_identity(
         "name": "renamed", "enabled": False, "allowlist": ["203.0.113.0/24"],
     }  # fmt: skip
     for refused in ({"id_source": "pointer", "id_pointer": "/id"}, {"auth": "hmac"}, {"name": None},
-                    {"events_pointer": "/events"}, {"events_pointer": None}):  # fmt: skip
+                    {"events_pointer": "/events"}, {"events_pointer": None}, {"trigger": "demo.webhook"},
+                    {"trigger": None}):  # fmt: skip
         assert (await editor.patch(url(ctx, f"/webhook-endpoints/{body['id']}"), json=refused)).status_code == 422
     other = uuid.uuid4()
     assert (await editor.patch(url(ctx, f"/webhook-endpoints/{other}"), json={"name": "x"})).status_code == 404

@@ -40,11 +40,12 @@ class EndpointIn(BaseModel):
     id_pointer: str | None = None
     id_header: str | None = Field(default=None, max_length=64)
     events_pointer: str | None = None
+    trigger: str | None = Field(default=None, min_length=1, max_length=64)  # a trigger type's key (4c-3a ruling 1)
 
 
 class EndpointPatch(BaseModel):
     """Only the fields given change, never an endpoint's identity (how it authenticates, where its events and their ids
-    are)."""
+    are, the trigger it's for)."""
 
     model_config = ConfigDict(extra="forbid")
     name: str | None = Field(default=None, min_length=1, max_length=120)
@@ -94,7 +95,8 @@ async def create_endpoint(
 ) -> dict[str, object]:
     try:
         endpoint, secret = await webhooks.create_endpoint(db, keyring, key, tenant_id=ctx.tenant_id,
-                                                          actor_id=ctx.user.id, given=given.model_dump())  # fmt: skip
+                                                          actor_id=ctx.user.id, given=given.model_dump(),
+                                                          written=frozenset(given.model_fields_set))  # fmt: skip
     except webhooks.WebhookRefusedError as e:
         raise _refused(e) from None
     except Exception as e:
