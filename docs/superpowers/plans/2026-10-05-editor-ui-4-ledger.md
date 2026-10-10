@@ -2273,3 +2273,16 @@ commit as the plan says ("You may commit as the plan says; start the build"). Pu
      - a schedule past the bounds isn't checked: it's counted, so the editor can say so.
 146. **Accepted. Migration slot 0054** (Task 2), the owner's (2026-10-10), chained after main's head, 0045.
      0050–0053 are 2b-4b's.
+
+### 4c-3a, milestone 1 (2026-10-10)
+
+Built inline on `feat/editor-4c3a` (worktree `scratchpad/ui4c3/build`, from origin/main aed887f8 with the plan merged,
+5aca7730; `uv sync --frozen`), test-first, each test seen failing as the plan's step says before its code:
+- Task 1 (9d374ac7): this ledger: the owner's 4c-3 rulings, slot 0054, the plan accepted (rulings 139–146).
+- Task 2 (ba2e2037): migration 0054, `webhook_endpoints.trigger_key`; 6 failed, then the chain, ingress schema and
+  model tests 35 passed.
+- Task 3 (7ebff3c3): an endpoint made for a trigger; 8 failed, then the webhook and trigger-type API tests 35 passed.
+- Task 4 (a6fce0a0): B13, `GET …/workflows/{workflow_id}/webhook-bindings`; 1 failed (`404 == 200`), then the webhook
+  API tests 34 passed.
+
+ruff, mypy and the formatter clean after each. No mid-slice ruling: the code is the plan's, as written.
