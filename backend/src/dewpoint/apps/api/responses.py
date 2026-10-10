@@ -244,6 +244,15 @@ class TaintOut(_Answer):
     declassified: list[DeclassifiedOut]
 
 
+class ScheduleBreakOut(_Answer):
+    """A live schedule the draft, published, would make fail at every firing (4c-3a ruling 7): why, by its stored
+    input's shape, in the draft's own words; never what the input holds."""
+
+    schedule_id: str
+    reasons: list[str]  # at most 5, each of 300 characters at most
+    more: bool  # the check stopped at its budget with more to say about this one
+
+
 class ValidationOut(_Answer):
     """The saved draft's diagnostics, at the revision they were computed for: an editor shows an answer for an older
     revision as stale, never as current (D17; 4b ruling 24)."""
@@ -254,6 +263,7 @@ class ValidationOut(_Answer):
     expressions: list[ExpressionOut]
     taint: TaintOut
     conditional_steps: list[str]  # the steps that may not run, by id (4c-2a ruling 3; ledger ruling 70's badge)
+    schedule_breaks: list[ScheduleBreakOut]  # the live schedules it would break, published, the oldest first
 
 
 class GuardOut(_Answer):

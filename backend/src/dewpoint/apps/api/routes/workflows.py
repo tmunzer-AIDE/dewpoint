@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import dataclasses
 import re
 import uuid
 from typing import Any
@@ -9,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from dewpoint.apps import workflow_ops, workflow_summary
+from dewpoint.apps import schedule_checks, workflow_ops, workflow_summary
 from dewpoint.apps.api.deps import get_keyring
 from dewpoint.apps.api.responses import (
     ActivatedOut,
@@ -27,10 +28,12 @@ from dewpoint.apps.api.responses import (
     WorkflowUpdatedOut,
 )
 from dewpoint.apps.api.routes.node_types import ask_and_wait, options_reply, still_current
+from dewpoint.apps.api.routes.run_requests import get_keys
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.config import Settings
 from dewpoint.core.connections.declared import declared_types
 from dewpoint.core.crypto.keyring import Keyring
+from dewpoint.core.crypto.keys import KeySource
 from dewpoint.core.http import TenantContext, get_db, get_settings_dep, require
 from dewpoint.core.models.connections import Connection
 from dewpoint.core.models.workflows import Workflow, WorkflowVersion
@@ -246,15 +249,28 @@ async def validate_draft(
     ctx: TenantContext = Depends(require(P.WORKFLOW_EDIT)),
     db: AsyncSession = Depends(get_db, scope="function"),
     settings: Settings = Depends(get_settings_dep),
+    keys: KeySource = Depends(get_keys),
 ) -> dict[str, object]:
     wf = await _get(db, ctx, workflow_id)
     checked = await workflow_ops.check_draft(db, ctx.tenant_id, wf.draft, settings)
     result = checked.result
     expressions = result.expressions if result is not None else ()
+    # The live schedules this draft would break, published (4c-3a ruling 7): a warning, by the stored input's shape.
+    found = schedule_checks.Breaks([], 0)
+    if checked.graph is not None and schedule_checks.checkable(checked.diagnostics):
+        takes_csv = checked.graph.settings.csv is not None
+        found = await schedule_checks.breaks(db, keys, ctx.tenant_id, wf.id, takes_csv=takes_csv,
+                                             input_schema=checked.graph.settings.input_schema)  # fmt: skip
+        checked = dataclasses.replace(
+            checked, diagnostics=[*checked.diagnostics, *schedule_checks.warnings(found, takes_csv=takes_csv)]
+        )
     return {
         "draft_revision": wf.draft_revision,
         "valid": not any(d.severity == "error" for d in checked.diagnostics),
         "diagnostics": [d.to_json() for d in checked.diagnostics],
+        "schedule_breaks": [
+            {"schedule_id": str(sid), "reasons": why.reasons, "more": why.more} for sid, why in found.refused
+        ],
         # How each CEL value runs, for the editor (spec §5.10): "local" runs inline, "activity" as a separate step.
         "expressions": [{"node": r.node, "field": r.field, "mode": r.mode, "reason": r.reason} for r in expressions],
         # The steps that may not run on every path: the canvas's "conditional" badge (ledger ruling 70).
@@ -332,6 +348,7 @@ async def publish(
     ctx: TenantContext = Depends(require(P.WORKFLOW_PUBLISH)),
     db: AsyncSession = Depends(get_db, scope="function"),
     settings: Settings = Depends(get_settings_dep),
+    keys: KeySource = Depends(get_keys),
 ) -> dict[str, object]:
     expected = _revision(if_match)
     wf = await _get(db, ctx, workflow_id, for_update=True)
@@ -351,10 +368,13 @@ async def publish(
     if out.version is None:
         diagnostics = [d.to_json() for d in [*out.errors, *out.warnings]]
         raise HTTPException(422, detail={"error": "invalid", "diagnostics": diagnostics})
+    takes_csv = workflow_ops.declares_csv(out.version.graph)
+    found = await schedule_checks.breaks(db, keys, ctx.tenant_id, wf.id, input_schema=out.version.input_schema or {},
+                                         takes_csv=takes_csv)  # fmt: skip
     return {
         "version_id": str(out.version.id),
         "number": out.version.number,
-        "warnings": [d.to_json() for d in out.warnings],
+        "warnings": [d.to_json() for d in [*out.warnings, *schedule_checks.warnings(found, takes_csv=takes_csv)]],
     }
 
 
