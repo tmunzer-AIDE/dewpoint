@@ -21,6 +21,7 @@ import (
 
 	"dewpoint.local/temporal-server/internal/audit"
 	"dewpoint.local/temporal-server/internal/policy"
+	"dewpoint.local/temporal-server/internal/startcheck"
 )
 
 // AuditTimeout bounds one audit write: a bucket that doesn't answer refuses the change rather than holding the call.
@@ -31,6 +32,12 @@ type Namespaces interface {
 	Config(ctx context.Context, name string) (policy.Config, error)
 }
 
+// StartCheck is the engine queue's root starts' check (internal/startcheck, the start-check slice).
+type StartCheck struct {
+	Checker startcheck.Checker
+	Queue   string // the engine's task queue
+}
+
 type Authorizer struct {
 	Delegate     authorization.Authorizer // Temporal's default authorizer: the caller's role
 	Namespaces   Namespaces
@@ -39,6 +46,7 @@ type Authorizer struct {
 	Server       string        // the server binary's SHA-256, in each record
 	Logger       log.Logger
 	Now          func() time.Time
+	Starts       *StartCheck // nil only when the start check is explicitly off (DEWPOINT_AUTHZ_START_CHECK=off)
 }
 
 var _ authorization.Authorizer = (*Authorizer)(nil)
@@ -64,11 +72,57 @@ func (a *Authorizer) Authorize(ctx context.Context, claims *authorization.Claims
 	d := policy.Decide(target.APIName, requested, steps)
 	switch {
 	case d.Allowed:
+		if reason, denied := a.startDenied(ctx, target); denied {
+			return authorization.Result{Decision: authorization.DecisionDeny, Reason: reason}, nil
+		}
 		return delegated, nil
 	case policy.Classify(target.APIName) == policy.Delegated:
 		return authorization.Result{Decision: authorization.DecisionDeny, Reason: delegated.Reason}, nil
 	}
 	return authorization.Result{Decision: authorization.DecisionDeny, Reason: d.Reason}, nil
+}
+
+// startDenied is the start check, once the caller's role allowed the call: a StartWorkflowExecution on the engine
+// queue asks Dewpoint's database, afresh each time, and is denied with a fixed reason unless an eligible request
+// permits it; a SignalWithStart or an ExecuteMultiOperation start there is never Dewpoint's, so it's not permitted.
+// Never an error: an unavailable check is a denial with its own reason, which the dispatcher reads.
+func (a *Authorizer) startDenied(ctx context.Context, target *authorization.CallTarget) (string, bool) {
+	if a.Starts == nil {
+		return "", false
+	}
+	reason := ""
+	switch r := target.Request.(type) {
+	case *workflowservice.StartWorkflowExecutionRequest:
+		if r.GetTaskQueue().GetName() != a.Starts.Queue {
+			return "", false
+		}
+		switch v := a.Starts.Checker.Check(ctx, r.GetWorkflowId(), r.GetRequestId()); v {
+		case startcheck.Allow:
+			return "", false
+		case startcheck.NotPermitted:
+			reason = startcheck.ReasonNotPermitted
+		default:
+			reason = startcheck.ReasonUnavailable
+		}
+	case *workflowservice.SignalWithStartWorkflowExecutionRequest:
+		if r.GetTaskQueue().GetName() != a.Starts.Queue {
+			return "", false
+		}
+		reason = startcheck.ReasonNotPermitted
+	case *workflowservice.ExecuteMultiOperationRequest:
+		for _, op := range r.GetOperations() {
+			if op.GetStartWorkflow().GetTaskQueue().GetName() == a.Starts.Queue {
+				reason = startcheck.ReasonNotPermitted
+			}
+		}
+		if reason == "" {
+			return "", false
+		}
+	default:
+		return "", false
+	}
+	a.Logger.Warn("an engine start denied", tag.NewStringTag("api", target.APIName), tag.NewStringTag("reason", reason))
+	return reason, true
 }
 
 func (a *Authorizer) write(ctx context.Context, claims *authorization.Claims, target *authorization.CallTarget,

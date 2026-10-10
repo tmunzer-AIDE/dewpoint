@@ -25,6 +25,7 @@ TEST_ROLES = [
     "dewpoint_admin",
     "dewpoint_auditor",
     "dewpoint_retention",
+    "dewpoint_start_check",
 ]
 
 

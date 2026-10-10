@@ -5,11 +5,16 @@
 # put-only credentials and roles, and the key set.
 #
 #   DEWPOINT_M4_RUN=<run directory> DEWPOINT_M4_CONFIG=mtls|jwt DEWPOINT_M4_DB_PASSWORD=<the run's> \
-#     docker compose -p dewpoint-m4 -f deploy/temporal/compose.yaml up -d
+#     DEWPOINT_M4_START_CHECK=on|off docker compose -p dewpoint-m4-<run id> -f deploy/temporal/compose.yaml up -d
 #
-# Each container mounts only its own part of the run directory: the server its certificates and the authorizer's
-# credentials, roles and fault file; never MinIO's root credentials. Published ports are on 127.0.0.1 only. The database password reaches the server as an environment variable
-# (Temporal's configuration template reads only those): a disposable environment's random value, never a real one.
+# Each run is its own project (`dewpoint-m4-<random>`, revision 17.3.1), its containers and network named after it; its
+# host ports are Docker's to assign (`127.0.0.1::<port>`), read back with `docker compose port`, so two runs never
+# collide. Each container mounts only its own part of the run directory: the server its certificates and the
+# authorizer's credentials, roles, fault file and start check's DSN; never MinIO's root credentials. Published ports
+# are on 127.0.0.1 only. The start check's mode is required (DEWPOINT_M4_START_CHECK): never off by omission; with it
+# on, the run sets COMPOSE_PROFILES=start-check, which brings up Dewpoint's database (`dewpoint-db`) for its check. The
+# database password reaches the server as an environment variable (Temporal's configuration template reads only
+# those): a disposable environment's random value, never a real one.
 name: dewpoint-m4
 
 services:
@@ -54,7 +59,7 @@ services:
       MINIO_ROOT_PASSWORD_FILE: /run/secrets/minio_root_password
     secrets: [minio_root_user, minio_root_password]
     tmpfs: ["/data:mode=1777"]
-    ports: ["127.0.0.1:${DEWPOINT_M4_S3_PORT:-19000}:9000"]
+    ports: ["127.0.0.1::9000"]
 
   jwks:
     image: python:3.12-slim-bookworm@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258
@@ -80,6 +85,10 @@ services:
       DEWPOINT_AUTHZ_AUDIT_PREFIX: dewpoint/
       DEWPOINT_AUTHZ_AUDIT_ENDPOINT: http://minio:9000
       DEWPOINT_AUTHZ_AUDIT_FAULTS: /run/m4/authz/faults/namespaces
+      DEWPOINT_AUTHZ_START_CHECK: ${DEWPOINT_M4_START_CHECK:?on or off}
+      DEWPOINT_AUTHZ_START_CHECK_DSN_FILE: /run/m4/authz/start_check_dsn
+      DEWPOINT_AUTHZ_START_CHECK_DEADLINE: 2s
+      DEWPOINT_AUTHZ_START_CHECK_QUEUE: dewpoint-engine
       AWS_SHARED_CREDENTIALS_FILE: /run/m4/authz/credentials
       AWS_CONFIG_FILE: /dev/null
     volumes:
@@ -87,12 +96,29 @@ services:
       - ${DEWPOINT_M4_RUN:?the run directory}/authz:/run/m4/authz:ro
       - ${DEWPOINT_M4_RUN:?the run directory}/tls:/etc/temporal/tls:ro
     ports:
-      - "127.0.0.1:${DEWPOINT_M4_GRPC_PORT:-17233}:7233"
-      - "127.0.0.1:${DEWPOINT_M4_HTTP_PORT:-17243}:7243"
+      - "127.0.0.1::7233"
+      - "127.0.0.1::7243"
+
+  # Dewpoint's database for the start-check proof only (the profile): the dispatcher's and the start check's logins
+  dewpoint-db:
+    profiles: [start-check]
+    image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+    environment:
+      POSTGRES_USER: dewpoint
+      POSTGRES_PASSWORD_FILE: /run/secrets/dewpoint_db_password
+    secrets: [dewpoint_db_password]
+    tmpfs: [/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "dewpoint"]
+      interval: 2s
+      retries: 30
+    ports: ["127.0.0.1::5432"]
 
 secrets:
   db_password:
     file: ${DEWPOINT_M4_RUN:?the run directory}/db_password
+  dewpoint_db_password:
+    file: ${DEWPOINT_M4_RUN:?the run directory}/dewpoint_db_password
   minio_root_user:
     file: ${DEWPOINT_M4_RUN:?the run directory}/minio/root_user
   minio_root_password:

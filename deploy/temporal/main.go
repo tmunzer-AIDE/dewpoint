@@ -5,13 +5,19 @@
 // (configuration A, mutual TLS only) or Temporal's JWT claim mapper (configuration B, a bearer token only).
 //
 //	temporal-server              run the server
-//	temporal-server inventory    print D12.1's inventory: this binary's identity, the frontend's every RPC and its
-//	                             class, and every listener the configuration opens
+//	temporal-server inventory    print D12.1's inventory: this binary's identity and its build context's, the
+//	                             frontend's every RPC and its class, and every listener the configuration opens
 //
 // Settings (environment): DEWPOINT_TEMPORAL_CONFIG (the server's YAML), DEWPOINT_AUTHZ_CLAIMS (mtls or jwt),
 // DEWPOINT_AUTHZ_CERT_ROLES (mtls: the roles file), DEWPOINT_AUTHZ_AUDIT_BUCKET, _PREFIX, _REGION, _ENDPOINT (the
 // audit trail; its credentials are the standard AWS ones, a shared credentials file preferred), and
 // DEWPOINT_AUTHZ_AUDIT_FAULTS (real-target qualification only: a file naming the namespaces whose audit writes fail).
+// The start check (internal/startcheck): DEWPOINT_AUTHZ_START_CHECK, on or off, required, never off by omission; on
+// needs DEWPOINT_AUTHZ_START_CHECK_DSN_FILE (Dewpoint's database, as the start check's role), _DEADLINE and _QUEUE
+// (the engine's task queue). The inventory names the mode as configured: a prerequisite, not proof of the boundary.
+// Turned on last: only once Dewpoint's migration 0052 is applied and every dispatcher runs a build that sends its
+// recorded start request id. An older dispatcher sends without one, so every start it sends is denied, and it takes
+// each denial for a refusal: its requests would end dead after ten (the rollout order, the owner's ruling 2026-10-10).
 package main
 
 import (
@@ -36,6 +42,7 @@ import (
 	"dewpoint.local/temporal-server/internal/auditbucket"
 	"dewpoint.local/temporal-server/internal/authz"
 	"dewpoint.local/temporal-server/internal/policy"
+	"dewpoint.local/temporal-server/internal/startcheck"
 )
 
 func setting(name, fallback string) string {
@@ -49,6 +56,10 @@ func fail(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "temporal-server: "+format+"\n", args...)
 	os.Exit(1)
 }
+
+// source is the identity of the build context this binary was built from, stamped by the image build (`-X
+// main.source`; the Dockerfile): the proofs refuse an image whose inventory doesn't name this tree's.
+var source = "unrecorded"
 
 // binaryHash is this executable's SHA-256: the server build's identity in each audit record and the inventory.
 func binaryHash() string {
@@ -81,6 +92,10 @@ func main() {
 	if err := authz.CheckConfig(cfg, mode); err != nil {
 		fail("refused: %v", err)
 	}
+	starts, err := startcheck.FromEnv(os.Getenv, os.ReadFile)
+	if err != nil {
+		fail("refused: %v", err)
+	}
 	bucket := os.Getenv("DEWPOINT_AUTHZ_AUDIT_BUCKET")
 	if bucket == "" {
 		fail("refused: DEWPOINT_AUTHZ_AUDIT_BUCKET is required (the authorizer's audit trail)")
@@ -103,6 +118,17 @@ func main() {
 		Delegate: authorization.NewDefaultAuthorizer(), Namespaces: namespaces, Audit: writer,
 		NewNamespace: policy.Config{History: policy.ArchivalDisabled, Visibility: policy.ArchivalDisabled},
 		Server:       binaryHash(), Logger: logger,
+	}
+	if starts.Mode == startcheck.ModeOn {
+		pool, err := startcheck.NewPool(context.Background(), starts) // lazy: an unreachable database denies per start
+		if err != nil {
+			fail("refused: %v", err)
+		}
+		authorizer.Starts = &authz.StartCheck{Checker: startcheck.DB{Pool: pool, Deadline: starts.Deadline},
+			Queue: starts.Queue}
+	} else {
+		logger.Warn("the start check is off (" + startcheck.EnvMode + "=off): engine-queue starts aren't checked, " +
+			"and this server claims no admission boundary")
 	}
 	var claims authorization.ClaimMapper
 	options := []temporal.ServerOption{}
@@ -152,11 +178,13 @@ func inventory(cfg *config.Config) {
 	out.SetIndent("", "  ")
 	if err := out.Encode(map[string]any{
 		"binary":         binaryHash(),
+		"source":         source,
 		"server_version": headers.ServerVersion,
 		"go_version":     runtime.Version(),
 		"modules":        modules,
 		"rpcs":           authz.RPCs(),
 		"endpoints":      authz.Endpoints(cfg),
+		"start_check":    startcheck.Reported(os.Getenv),
 	}); err != nil {
 		fail("the inventory can't be written: %T", err)
 	}

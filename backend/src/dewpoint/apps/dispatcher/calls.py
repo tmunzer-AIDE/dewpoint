@@ -6,6 +6,10 @@ and one item's calls, each at its own worst; no number here is approved as a cyc
 
 from dewpoint.apps.dispatcher import evidence, schedule_sync
 
+VERIFY = 2  # `dispatch.verify`'s longest path: two describes (`started_by`); a request without an id, one history page
+# dispatch and reconcile, 1 + VERIFY = 3: accepted provisionally by the owner (2026-10-10) rather than weaken the
+# request-id identity to save a call; D16's production budget still needs measuring on the M4 server.
+
 
 def calls() -> dict[str, int]:
     """The table, from the passes' numbers as they are now."""
@@ -17,8 +21,12 @@ def calls() -> dict[str, int]:
     # each paused or deleted
     tombstone = 2 + 2 * (1 + earlier)
     return {
-        "dispatch": 2,  # its start; already started, its history's first page (verified against it)
-        "reconcile": 2,  # a describe; then a closed run's result, an uncertain start's history page, or the namespace
+        # its start; already started, `verify`: its chain's latest run described, its first one when that differs (the
+        # start request id's identity, the start-check slice); a request with no id (from before 0052), its history's
+        # first page instead
+        "dispatch": 1 + VERIFY,
+        # a describe; then a closed run's result, the namespace, or an uncertain start's `verify`
+        "reconcile": 1 + VERIFY,
         "subruns": 2,  # a describe; then a closed run's result, or, NOT_FOUND, the namespace
         "cancels": 2,  # the cancel; NOT_FOUND, the namespace
         "sync": max(live, tombstone),

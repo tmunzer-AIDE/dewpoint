@@ -7,6 +7,7 @@ item's calls are counted too, against its pass's most (`calls.CALLS`, the owner'
 call maxima before any budget's numbers): the longest path of each kind is driven here."""
 
 import contextlib
+import dataclasses
 import uuid
 from collections.abc import Iterator
 from datetime import timedelta
@@ -58,8 +59,9 @@ async def test_an_uncertain_start_found_is_described_and_verified_with_deadlines
     await aged(owner_sessionmaker, request.id)
     with recorded(env.client) as seen:
         assert await reconcile.reconcile_once(dispatch_sessionmaker, env.client, KEYS, api_settings) == {"started": 1}
-    assert {"describe_workflow_execution", "get_workflow_execution_history"} <= {rpc for rpc, _ in seen}
-    assert without_deadline(seen) == [] and len(seen) == calls.CALLS["reconcile"]
+    rpcs = [rpc for rpc, _ in seen]  # identified by its recorded request id: its history isn't read
+    assert "describe_workflow_execution" in rpcs and "get_workflow_execution_history" not in rpcs
+    assert without_deadline(seen) == [] and len(seen) <= calls.CALLS["reconcile"]  # one run: not the longest path
 
 
 async def test_an_uncertain_start_absent_and_its_namespace_are_asked_with_deadlines(
@@ -71,7 +73,7 @@ async def test_an_uncertain_start_absent_and_its_namespace_are_asked_with_deadli
     with recorded(env.client) as seen:
         assert await reconcile.reconcile_once(dispatch_sessionmaker, env.client, KEYS, api_settings) == {"absent": 1}
     assert {"describe_workflow_execution", "describe_namespace"} <= {rpc for rpc, _ in seen}
-    assert without_deadline(seen) == [] and len(seen) == calls.CALLS["reconcile"]
+    assert without_deadline(seen) == [] and len(seen) == 2 <= calls.CALLS["reconcile"]  # a describe, the namespace
 
 
 async def _started(queued: Any, dispatch_sessionmaker: Any, api_settings: Any, client: Client) -> Any:
@@ -130,11 +132,15 @@ async def test_a_dispatch_start_carries_its_deadline(queued, dispatch_sessionmak
     _, _, request = queued
     found = await starting(dispatch_sessionmaker, request, api_settings)
     with recorded(env.client) as first:
-        await dispatch.start(env.client, found)
-    with recorded(env.client) as seen:
-        await dispatch.start(env.client, found)  # already started: verified against its history, its longest path
-    assert [rpc for rpc, _ in seen] == ["start_workflow_execution", "get_workflow_execution_history"]
-    assert without_deadline(first + seen) == [] and len(seen) == calls.CALLS["dispatch"]
+        assert (await dispatch.start(env.client, found)).kind == "started"
+    with recorded(env.client) as again:  # its own recorded id again: Temporal answers with the execution it has
+        assert (await dispatch.start(env.client, found)).kind == "started"
+    other = dataclasses.replace(found, start_request_id=uuid.uuid4())
+    with recorded(env.client) as seen:  # already started under another id: `verify`, by the request id alone
+        assert (await dispatch.start(env.client, other)).kind == "uncertain"
+    assert [rpc for rpc, _ in again] == ["start_workflow_execution"]
+    assert [rpc for rpc, _ in seen] == ["start_workflow_execution", "describe_workflow_execution"]
+    assert without_deadline(first + again + seen) == [] and len(seen) <= calls.CALLS["dispatch"]  # one run
 
 
 async def test_the_current_build_is_asked_with_a_deadline(env) -> None:

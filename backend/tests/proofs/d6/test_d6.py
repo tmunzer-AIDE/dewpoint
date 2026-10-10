@@ -62,7 +62,7 @@ class Lab:
 
 @pytest.fixture(scope="module")
 def lab(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Lab]:
-    run = environment.prepare(tmp_path_factory.mktemp("d6") / "run")
+    run = environment.prepare(tmp_path_factory.mktemp("d6") / "run", start_check="off")  # MinIO only: no server
     environment.run_compose(run, "mtls", "up", "-d", "minio")
     try:
         environment.wait_for_s3(run)
@@ -80,7 +80,7 @@ def lab(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Lab]:
             )
         yield lab
     finally:
-        environment.run_compose(run, "mtls", "down", "-v", "--remove-orphans")
+        environment.down(run, "mtls")
 
 
 def _as(monkeypatch: pytest.MonkeyPatch, credentials: dict[str, str]) -> None:
@@ -99,7 +99,7 @@ def _configure(monkeypatch: pytest.MonkeyPatch, pg_url: str, lab: Lab, prefix: s
         else {"DEWPOINT_AUDIT_PUBLIC_KEYS": json.dumps({"audit-1": lab.public_b64})}
     )
     _env(monkeypatch, _url_for(pg_url, "dewpoint_auditor"), DEWPOINT_AUDIT_S3_BUCKET=BUCKET,
-         DEWPOINT_AUDIT_S3_PREFIX=prefix, DEWPOINT_AUDIT_S3_ENDPOINT_URL=environment.S3_ENDPOINT,
+         DEWPOINT_AUDIT_S3_PREFIX=prefix, DEWPOINT_AUDIT_S3_ENDPOINT_URL=environment.s3_endpoint(lab.run),
          DEWPOINT_AUDIT_S3_REGION=environment.REGION, **keys, **extra)  # fmt: skip
     _as(monkeypatch, lab.writer if writer else lab.verifier)
 

@@ -127,31 +127,29 @@ async def test_a_late_confirmation_never_changes_a_run_that_already_ended(
 async def test_already_started_is_verified_from_the_executions_own_start(
     queued, owner_sessionmaker, dispatch_sessionmaker, api_settings, env
 ) -> None:
-    """A start whose answer was lost, sent again: Temporal refuses the duplicate id, and the execution's started event,
-    decoded with the tenant's key, names this request: it's `started` (§7.4)."""
+    """A start whose answer was lost, sent again: it carries the request's recorded start request id, as the lost one
+    did, so the execution is this request's: it's `started` (§7.4; the start-check slice)."""
     _, _, request = queued
     starting = await started(dispatch_sessionmaker, request, api_settings)
-    await env.client.start_workflow(
-        RunGraph.run,
-        starting.start,
-        id=run_workflow_id(starting.start.tenant_id, starting.start.run_id),
-        task_queue=ENGINE_QUEUE,
-    )  # fmt: skip  (the lost one)
+    assert (await dispatch.start(env.client, starting)).kind == "started"  # the lost one
     assert await through(dispatch_sessionmaker, starting, env.client) == "started"
     assert (await state(owner_sessionmaker, request.id))["request"][0] == "started"
 
 
-async def test_another_execution_under_the_runs_id_is_an_id_collision(
+async def test_another_execution_under_the_runs_id_is_never_taken_for_the_requests(
     queued, owner_sessionmaker, dispatch_sessionmaker, api_settings, env
 ) -> None:
+    """An execution under the run's id that doesn't carry the request's recorded start request id is unidentified:
+    uncertain, left `starting` with its slot for the reconciler (the upgrade barrier's revision 17). Only a request
+    from before 0052, with no recorded id, is still told from one by its payload (test_reconcile)."""
     _, _, request = queued
     starting = await started(dispatch_sessionmaker, request, api_settings)
     impostor = starting.start.__class__(**{**starting.start.__dict__, "version_id": str(uuid.uuid4())})
     await env.client.start_workflow(RunGraph.run, impostor, id=run_workflow_id(impostor.tenant_id, impostor.run_id),
                                     task_queue=ENGINE_QUEUE)  # fmt: skip
-    assert await through(dispatch_sessionmaker, starting, env.client) == "dead"
+    assert await through(dispatch_sessionmaker, starting, env.client) == "uncertain"
     after = await state(owner_sessionmaker, request.id)
-    assert after["request"][:2] == ("dead", "id_collision") and after["run"][0] == "failed" and after["slot"] == 0
+    assert after["request"][0] == "starting" and after["run"][0] == "running" and after["slot"] == 1
 
 
 async def test_a_cycle_starts_each_tenants_oldest_due_request(

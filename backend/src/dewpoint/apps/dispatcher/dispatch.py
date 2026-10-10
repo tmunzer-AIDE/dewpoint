@@ -21,9 +21,14 @@ from typing import Any, Protocol
 
 import structlog
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from google.protobuf.message import DecodeError
 from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from temporalio.api.common.v1 import WorkflowExecution
+from temporalio.api.enums.v1 import EventType
+from temporalio.api.errordetails.v1 import PermissionDeniedFailure
+from temporalio.api.workflowservice.v1 import DescribeWorkflowExecutionRequest
 from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.converter import DataConverter, WorkflowSerializationContext
@@ -32,7 +37,7 @@ from temporalio.service import RPCError, RPCStatusCode
 
 from dewpoint.apps.cancels import USER_CANCELLED
 from dewpoint.apps.codec import CodecRefusedError
-from dewpoint.apps.dispatcher import budget, failures, recovery
+from dewpoint.apps.dispatcher import budget, failures, recovery, start_call
 from dewpoint.apps.dispatcher.observe import REQUIRED, Build
 from dewpoint.core.audit import service as audit
 from dewpoint.core.claims import service as claims
@@ -42,6 +47,7 @@ from dewpoint.core.crypto.keys import KeySource, key_unreadable
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.models.platform import PlatformSettings
 from dewpoint.core.models.requests import RunRequest, RunSlot, TenantRunLimits
+from dewpoint.core.models.runs import ExecutionEvidence
 from dewpoint.core.models.tenancy import Tenant
 from dewpoint.core.models.workflows import WorkflowVersion
 from dewpoint.core.platform.service import PRODUCTION, workers_ready
@@ -64,6 +70,11 @@ ID_COLLISION = "id_collision"
 START_FAILED = "start_failed"
 ENVELOPE_UNREADABLE = "envelope_unreadable"
 RUN_ENDED = "run_ended"
+SEND_CAP = "send_cap"  # its start sends are spent: never sent again (`start_call.CAP`)
+# D12's start check denies with one of two fixed reasons, in the error's `PermissionDeniedFailure` (revision 17)
+NOT_PERMITTED, CHECK_UNAVAILABLE = "dewpoint:start-not-permitted", "dewpoint:start-check-unavailable"
+START_CHECK_UNAVAILABLE = "start_check_unavailable"  # every send spent, none created anything: infrastructure
+START_THROTTLED = "start_throttled"  # every send spent, Temporal throttled or refused each: none created anything
 RETIRING = "retiring"  # a retirement holds the closure's lifecycle lock: back next cycle
 KEY_UNUSABLE = "key_unusable"
 RETENTION_UNHEALTHY = "retention_unhealthy"  # no recent successful sweep, or it left data a day past its cutoff
@@ -71,6 +82,15 @@ ENVELOPE_MESSAGE = (
     "The request's trigger envelope doesn't open or isn't JSON; repairing a key never reopens it (engine 2b spec §7.1)."
 )
 REFUSED_MESSAGE = "Temporal refused the run's start 10 times (engine 2b spec §7.4)."
+UNAVAILABLE_MESSAGE = (
+    "The run's 10 start sends are spent and none created anything: the start check couldn't be "
+    "made for some of them, an infrastructure failure, not a refusal."
+)
+THROTTLED_MESSAGE = "The run's 10 start sends are spent and none created anything: Temporal throttled or refused each."
+NOT_PERMITTED_MESSAGE = (
+    "The start check refused the run's start: its request wasn't eligible when it was sent. An integrity failure, "
+    "alerted (the upgrade barrier, revision 17)."
+)
 COLLISION_MESSAGE = "Another execution holds this run's workflow id (engine 2b spec §7.4)."
 # A status Temporal answers with when it certainly refused the start (2a's rule, `apps.runs`).
 REFUSED = {
@@ -91,6 +111,7 @@ class Starting:
     request_id: uuid.UUID
     tenant_id: uuid.UUID
     start: RunInput
+    start_request_id: uuid.UUID | None = None  # every start of the request carries it (the start-check slice)
 
 
 # Why a request is left queued, no attempt counted: waiting isn't failing, nor a success that clears its failures
@@ -210,6 +231,16 @@ async def _after_lifecycle_lock() -> None:
     """Runs right after the starting transaction takes its lifecycle locks. A no-op; the race tests pause here."""
 
 
+async def _after_starting_commit(request_id: uuid.UUID) -> None:
+    """Runs once the starting transaction has committed, before the start is sent. A no-op; the start-check proof
+    pauses here (the upgrade barrier's revision 17.1)."""
+
+
+async def _after_start_call(request_id: uuid.UUID) -> None:
+    """Runs once the start's call has returned, before its outcome is settled. A no-op; the start-check proof pauses
+    here (revision 17.2's lock variant)."""
+
+
 async def _lock(s: AsyncSession, key: str) -> None:
     await s.execute(text("select pg_advisory_xact_lock_shared(hashtextextended(:k, 0))"), {"k": key})
 
@@ -267,6 +298,12 @@ async def _begin(
         await s.flush()
         await recovery.noted(s, request.tenant_id, recovery.START_AFTER_END, request.id)  # for an operator (2b-4b M3)
         return Held(RUN_ENDED)
+    if request.sends >= start_call.CAP:  # settling never queues it again at the cap: a bug, or a hand's edit
+        log.error("start_send_cap", request_id=str(request.id))
+        request.status, request.starting_at = "starting", func.statement_timestamp()
+        await s.flush()
+        await recovery.noted(s, request.tenant_id, recovery.START_UNRESOLVED, request.id)  # the reconciler observes it
+        return Held(SEND_CAP)
     platform = await s.get(PlatformSettings, 1, populate_existing=True)
     if platform is None:
         return Waiting("environment_not_recorded")
@@ -330,10 +367,13 @@ async def _begin(
         mode=request.mode, started_by=request.actor_id, queued_at=request.queued_at,
     )  # fmt: skip
     await runs.record_attempt(s, tenant_id, request.id)  # its execution's evidence, before Temporal is asked
+    if request.start_request_id is None:  # recorded once: every start of it carries it (the start-check slice)
+        request.start_request_id = uuid.uuid4()
+    request.sends += 1  # counted before the send, in the same commit that makes it `starting`
     request.status = "starting"
     request.starting_at = func.statement_timestamp()  # the reconciler's grace runs from here, slot or not (§7.6)
     await s.flush()
-    return Starting(request.id, tenant_id, start)
+    return Starting(request.id, tenant_id, start, request.start_request_id)
 
 
 def run_input(request: RunRequest, version_id: uuid.UUID, envelope: Any, settings: Settings) -> RunInput:
@@ -389,21 +429,45 @@ def backoff(attempts: int) -> timedelta:
     return timedelta(seconds=min(5 * 2 ** (attempts - 1), 600))
 
 
-async def start(client: Client, starting: Starting) -> Outcome:
-    """One start, `REJECT_DUPLICATE` under the run's server-built id (§6.1), with its own deadline. Its answer is
-    classified, never acted on here: no transaction is open across the call."""
+def deny_reason(e: RPCError) -> str | None:
+    """The reason a denial carries in its `PermissionDeniedFailure` details, read from the response itself; None when it
+    carries none, or none that can be read (its attempt is then uncertain). Never the message: it's only words."""
+    try:
+        for detail in e.grpc_status.details:
+            failure = PermissionDeniedFailure()
+            if detail.Unpack(failure):
+                return failure.reason
+    except DecodeError:
+        return None
+    return None
+
+
+async def start(client: Client, starting: Starting, *, reasons: bool = False) -> Outcome:
+    """One start, `REJECT_DUPLICATE` under the run's server-built id (§6.1), with its own deadline, carrying the
+    request's recorded start request id as one RPC attempt (`start_call`). Its answer is classified, never acted on
+    here: no transaction is open across the call."""
+    if starting.start_request_id is None:
+        raise ValueError("A start is sent only with its request's recorded start request id.")
     workflow_id = run_workflow_id(starting.start.tenant_id, starting.start.run_id)
     try:
-        await client.start_workflow(
-            RunGraph.run, starting.start, id=workflow_id, task_queue=ENGINE_QUEUE,
-            id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE, rpc_timeout=START_DEADLINE,
-        )  # fmt: skip
+        with start_call.sending(starting.start_request_id):
+            await client.start_workflow(
+                RunGraph.run, starting.start, id=workflow_id, task_queue=ENGINE_QUEUE,
+                id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE, rpc_timeout=START_DEADLINE,
+            )  # fmt: skip
         return Outcome("started")
     except WorkflowAlreadyStartedError:
         return await verify(client, starting)
     except CodecRefusedError:  # the client seals the start again, and failed: it was never sent
         return Outcome("throttled", detail="unsealed")
     except RPCError as e:
+        if e.status == RPCStatusCode.PERMISSION_DENIED:  # told apart only by D12's own reasons, once confirmed
+            reason = deny_reason(e) if reasons else None
+            if reason == NOT_PERMITTED:
+                return Outcome("not_permitted")
+            if reason == CHECK_UNAVAILABLE:
+                return Outcome("check_unavailable")
+            return Outcome("uncertain", detail=e.status.name)  # unconfirmed, unknown or missing: conservative
         if e.status in REFUSED:
             return Outcome("refused", detail=e.status.name)
         if e.status == RPCStatusCode.RESOURCE_EXHAUSTED:  # throttled before anything was created
@@ -413,12 +477,47 @@ async def start(client: Client, starting: Starting) -> Outcome:
         return Outcome("uncertain", detail=type(e).__name__)
 
 
+async def started_by(client: Client, workflow_id: str, request_id: uuid.UUID) -> Any | None:
+    """The chain's first run (its `workflow_execution_info`) when its started event carries `request_id`, else None.
+    Temporal attaches a start's request id to the execution with its started event, and describe returns it: identity
+    without any key. A later run, or the id attached to any other event, is never taken for it."""
+    latest = await client.workflow_service.describe_workflow_execution(
+        DescribeWorkflowExecutionRequest(
+            namespace=client.namespace, execution=WorkflowExecution(workflow_id=workflow_id)
+        ),
+        timeout=START_DEADLINE,
+    )
+    first = latest.workflow_execution_info.first_run_id or latest.workflow_execution_info.execution.run_id
+    described = latest
+    if first != latest.workflow_execution_info.execution.run_id:
+        described = await client.workflow_service.describe_workflow_execution(
+            DescribeWorkflowExecutionRequest(
+                namespace=client.namespace, execution=WorkflowExecution(workflow_id=workflow_id, run_id=first)
+            ),
+            timeout=START_DEADLINE,
+        )
+    info = described.workflow_extended_info.request_id_infos.get(str(request_id))
+    if info is None or info.event_type != EventType.EVENT_TYPE_WORKFLOW_EXECUTION_STARTED:
+        return None
+    return described.workflow_execution_info
+
+
 async def verify(client: Client, starting: Starting) -> Outcome:
-    """ "Already started" counts only once the execution's own start names this request (§7.4): its started event's
-    input, decoded with the tenant's key, has the request's tenant, run id, frozen version, mode and envelope.
-    Anything else is an id collision, which the server-built ids make impossible. A history that can't be read leaves
-    the start uncertain, for the reconciler."""
+    """ "Already started" counts only once the execution is shown to be this request's. A request with a recorded start
+    request id: only by that id, on its chain's first run's started event (`started_by`); anything else, a describe
+    that fails included, is uncertain (the upgrade barrier's revision 17; the start-check slice's plan). A request
+    without one (`starting` from before 0052): its started event's input, decoded with the tenant's key, has the
+    request's tenant, run id, frozen version, mode and envelope (§7.4); anything else is an id collision, which the
+    server-built ids make impossible. A history that can't be read leaves the start uncertain, for the reconciler."""
     workflow_id = run_workflow_id(starting.start.tenant_id, starting.start.run_id)
+    if starting.start_request_id is not None:
+        try:
+            first_run = await started_by(client, workflow_id, starting.start_request_id)
+        except Exception as e:
+            return Outcome("uncertain", detail=f"unidentified ({type(e).__name__})")
+        if first_run is None:
+            return Outcome("uncertain", detail="unidentified")
+        return Outcome("started", at=first_run.start_time.ToDatetime(tzinfo=UTC))
     try:
         first: Any = None
         async for event in client.get_workflow_handle(workflow_id).fetch_history_events(rpc_timeout=START_DEADLINE):
@@ -471,20 +570,45 @@ async def _settle(s: AsyncSession, starting: Target, outcome: Outcome) -> str:
     if outcome.kind == "uncertain":
         log.warning("start_uncertain", request_id=str(request.id), detail=outcome.detail)
         return "uncertain"  # starting, its slot held, for the reconciler (§7.6)
-    if outcome.kind == "absent" and not await _unstarted(s, request.id):
+    if outcome.kind == "absent":
         # Its end write ran (its row records an end, or its slot was released): a start did happen, and only its
-        # history is gone. Never queued or started again; left as it is for an operator (the owner's M3 reviews).
-        return "history_missing"
+        # history is gone. Never queued or started again; left as it is for an operator (the owner's M3 reviews). At
+        # the cap it holds no slot (`_at_cap`, `Held(SEND_CAP)`): its run's row alone says so (the final review's I1).
+        at_cap = request.sends >= start_call.CAP
+        if not (await _running(s, request.id) if at_cap else await _unstarted(s, request.id)):
+            return "history_missing"
     await release(s, request.id)
-    if outcome.kind in ("refused", "throttled"):  # Temporal refused this attempt: it created nothing
+    certain = ("refused", "throttled", "not_permitted", "check_unavailable")  # this attempt created nothing
+    if outcome.kind in certain:  # its evidence goes, unless an earlier attempt is unproven: that one stays unproven
         await runs.settle_attempt(s, request.tenant_id, request.id, "refused")
     elif outcome.kind in ("absent", "collision"):  # an absence seen once fences nothing; a collision's exists
         await runs.settle_attempt(s, request.tenant_id, request.id, "unproven")
-    if outcome.kind in ("refused", "throttled", "absent") and request.cancel_requested_at is not None:
+    if outcome.kind == "check_unavailable":
+        request.unavailable_sends += 1
+    if outcome.kind == "not_permitted":
+        request.not_permitted_sends += 1
+        if request.cancel_requested_at is None:  # a cancelled request's denial is expected
+            log.warning("start_not_permitted", request_id=str(request.id))
+    if outcome.kind in (*certain, "absent") and request.cancel_requested_at is not None:
         # A cancel recorded while it was starting, applied now that it didn't start (§7.8). A 10th refusal is
         # cancelled too: the user asked first.
         await _cancel(s, request, USER_CANCELLED, {"reason": USER_CANCELLED})
         return "cancelled"
+    if outcome.kind == "collision":
+        log.error("start_id_collision", request_id=str(request.id))
+        await _dead(s, request, ID_COLLISION, COLLISION_MESSAGE)
+        return "dead"
+    if outcome.kind in ("refused", "not_permitted"):
+        request.attempts += 1
+        if request.attempts >= MAX_ATTEMPTS:
+            await _refused(s, request)
+            return "dead"
+    if request.sends >= start_call.CAP:  # its sends are spent: never queued again
+        return await _at_cap(s, request)
+    if outcome.kind == "check_unavailable":  # infrastructure: backs off, no refusal counted
+        request.status = "queued"
+        request.next_attempt_at = datetime.now(UTC) + backoff(request.unavailable_sends)
+        return "check_unavailable"
     if outcome.kind == "throttled":
         request.status, request.next_attempt_at = "queued", datetime.now(UTC) + backoff(1)
         return "throttled"
@@ -493,16 +617,50 @@ async def _settle(s: AsyncSession, starting: Target, outcome: Outcome) -> str:
         # by the clock `begin` reads, the database's: this process's may run ahead of it
         request.status, request.next_attempt_at = "queued", func.statement_timestamp()
         return "absent"
-    if outcome.kind == "collision":
-        log.error("start_id_collision", request_id=str(request.id))
-        await _dead(s, request, ID_COLLISION, COLLISION_MESSAGE)
-        return "dead"
-    request.attempts += 1
-    if request.attempts >= MAX_ATTEMPTS:
-        await _dead(s, request, START_REFUSED, REFUSED_MESSAGE)
-        return "dead"
     request.status, request.next_attempt_at = "queued", datetime.now(UTC) + backoff(request.attempts)
     return "refused"
+
+
+async def _at_cap(s: AsyncSession, request: RunRequest) -> str:
+    """A request whose sends are spent (`start_call.CAP`): ended only when every send certainly created nothing, its
+    reason saying which (the start check's refusals first: an integrity failure; then an unavailable check:
+    infrastructure; else Temporal's throttling); with any attempt unproven, left `starting`, without a slot, for the
+    reconciler to observe and an operator to see (never ended for an uncertainty)."""
+    unproven = await s.scalar(
+        select(ExecutionEvidence.unproven).where(
+            ExecutionEvidence.workflow_id == run_workflow_id(str(request.tenant_id), str(request.id)),
+            ExecutionEvidence.run_id.is_(None),
+        )
+    )
+    if unproven:
+        log.error("start_unresolved_at_cap", request_id=str(request.id))
+        await recovery.noted(s, request.tenant_id, recovery.START_UNRESOLVED, request.id)
+        return "unresolved"
+    if request.not_permitted_sends > 0:  # the start check refused some: an integrity failure, whatever the others got
+        await _refused(s, request)
+    elif request.unavailable_sends > 0:
+        log.error("start_check_unavailable", request_id=str(request.id))
+        await _dead(s, request, START_CHECK_UNAVAILABLE, UNAVAILABLE_MESSAGE)
+    else:
+        await _dead(s, request, START_THROTTLED, THROTTLED_MESSAGE)
+    return "dead"
+
+
+async def _refused(s: AsyncSession, request: RunRequest) -> None:
+    """Refused for good: `dead`, `start_refused`. When the start check refused any of its sends, and it wasn't
+    cancelled (which `_settle` applies first), an integrity failure: alerted, its message naming the check, never
+    Temporal (revision 17, section 2)."""
+    if request.not_permitted_sends > 0:
+        log.error("start_integrity_failure", request_id=str(request.id), reason=START_REFUSED)
+        await _dead(s, request, START_REFUSED, NOT_PERMITTED_MESSAGE)
+    else:
+        await _dead(s, request, START_REFUSED, REFUSED_MESSAGE)
+
+
+async def _running(s: AsyncSession, run_id: uuid.UUID) -> bool:
+    """Its run's row still `running`, read under its lock: an end write in flight is waited for, then seen."""
+    status = (await s.execute(text("select status from runs where id = :i for update"), {"i": run_id})).scalar()
+    return bool(status == "running")
 
 
 async def _unstarted(s: AsyncSession, run_id: uuid.UUID) -> bool:
@@ -510,8 +668,7 @@ async def _unstarted(s: AsyncSession, run_id: uuid.UUID) -> bool:
     dispatch still held, which only the root's end write releases while a request is `starting`. Read under those rows'
     locks, taken in the end write's own order (row, then slot): an end write in flight is waited for and then seen. The
     slot is released here when it was held."""
-    status = (await s.execute(text("select status from runs where id = :i for update"), {"i": run_id})).scalar()
-    if status != "running":
+    if not await _running(s, run_id):
         return False
     held = await s.execute(text("delete from run_slots where run_id = :i returning run_id"), {"i": run_id})
     return held.first() is not None
@@ -646,5 +803,8 @@ async def _dispatch(
     """One candidate begun, started and settled: what happened to it; None when another dispatcher had it."""
     outcome = await begin(sessionmaker, seal, settings, keys, tenant_id=tenant_id, request_id=request_id, build=build)
     if isinstance(outcome, Starting):
-        return await settle(sessionmaker, outcome, await start(client, outcome))
+        await _after_starting_commit(outcome.request_id)
+        answered = await start(client, outcome, reasons=settings.start_check_reasons_confirmed)
+        await _after_start_call(outcome.request_id)
+        return await settle(sessionmaker, outcome, answered)
     return outcome.reason if outcome is not None else None

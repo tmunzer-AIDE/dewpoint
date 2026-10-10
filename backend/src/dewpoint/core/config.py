@@ -49,6 +49,9 @@ class Settings(TemporalConnection):  # Temporal's §10.4 security settings with 
     # One build at a time (Compose): the worker makes its build the one new runs start on, once it polls. Leave it off
     # where builds overlap, and promote each with `dewpoint deployment set-current` (docs/operations/deployment.md).
     worker_set_current: bool = False
+    # D12's start check's two denial reasons are told apart only once they're confirmed to reach the SDK end to end on
+    # D12 (the upgrade barrier's revision 17.1): until then every PERMISSION_DENIED on a start is uncertain.
+    start_check_reasons_confirmed: bool = False
     audit_signing_key_b64: str | None = None  # Ed25519 private key (raw 32 bytes, base64)
     audit_anchor_path: str | None = None
     # The platform's audit retention (engine 2b spec §10.2): `dewpoint audit prune` deletes older entries, never newer

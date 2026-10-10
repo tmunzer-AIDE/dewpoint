@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # D12's Temporal target (2b-4b M4): built in the pinned golang, run on the pinned distroless base, both by digest.
 # The build vets, runs every test (the classification against the compiled-in services among them), then builds a
-# static binary. Modules come from the proxy and are checked against go.sum; for an offline build, pass an already
-# verified module cache as a named context and no network:
+# static binary, stamped with its build context's identity (every file's SHA-256 by path, in C order, hashed: the
+# proofs refuse an image whose inventory doesn't name this tree's, backend/tests/proofs/environment.SOURCE_PIPELINE).
+# Modules come from the proxy and are checked against go.sum; for an offline build, pass an already verified module
+# cache as a named context and no network:
 #
 #   docker build --network none --build-context gomod=<module cache> --build-arg GOPROXY=off -t <tag> deploy/temporal
 FROM scratch AS gomod
@@ -14,10 +16,11 @@ WORKDIR /src
 COPY . .
 RUN --mount=type=bind,from=gomod,target=/go/pkg/mod,rw \
     --mount=type=cache,target=/root/.cache/go-build \
-    go mod verify \
+    identity="$(find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)" \
+    && go mod verify \
     && go vet ./... \
     && go test -count=1 ./... \
-    && go build -trimpath -buildvcs=false -ldflags="-s -w" -o /out/temporal-server . \
+    && go build -trimpath -buildvcs=false -ldflags="-s -w -X main.source=${identity}" -o /out/temporal-server . \
     && go build -trimpath -buildvcs=false -ldflags="-s -w" -o /out/proofclient ./cmd/proofclient
 
 # The proof's exhaustive gRPC caller (`--target proofclient`): never part of the server's image.

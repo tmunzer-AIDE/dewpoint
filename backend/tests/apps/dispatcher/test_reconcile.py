@@ -177,18 +177,29 @@ async def test_a_start_unresolved_past_its_alert_is_recorded_for_an_operator(
     assert await reasons(owner_sessionmaker, request.id) == {"start_unresolved": False}
 
 
-async def test_another_execution_found_under_the_runs_id_is_an_id_collision(
-    queued, owner_sessionmaker, dispatch_sessionmaker, api_settings, env
+@pytest.mark.parametrize("recorded", [True, False], ids=["recorded", "from_before_0052"])
+async def test_another_execution_found_under_the_runs_id_is_unidentified_or_for_a_request_without_an_id_a_collision(
+    queued, owner_sessionmaker, dispatch_sessionmaker, api_settings, env, recorded
 ) -> None:
+    """With a recorded start request id, only that id identifies the execution: another one is unresolved, left for an
+    operator (the start-check slice). A request from before 0052, with none, is told from it by its payload, as
+    before: an id collision."""
     _, _, request = queued
     lost = await starting(dispatch_sessionmaker, request, api_settings)
+    if not recorded:
+        async with owner_sessionmaker() as s, s.begin():
+            await s.execute(text("update run_requests set start_request_id = null where id = :i"), {"i": request.id})
     impostor = lost.start.__class__(**{**lost.start.__dict__, "version_id": str(uuid.uuid4())})
     await env.client.start_workflow(RunGraph.run, impostor, id=run_workflow_id(impostor.tenant_id, impostor.run_id),
                                     task_queue=ENGINE_QUEUE)  # fmt: skip
     await aged(owner_sessionmaker, request.id)
-    assert await once(dispatch_sessionmaker, env.client, api_settings) == {"dead": 1}
+    after_pass = await once(dispatch_sessionmaker, env.client, api_settings)
     after = await state(owner_sessionmaker, request.id)
-    assert after["request"][:2] == ("dead", "id_collision") and after["slot"] == 0
+    if recorded:
+        assert after_pass == {"unresolved": 1} and after["request"][0] == "starting" and after["slot"] == 1
+    else:
+        assert after_pass == {"dead": 1}
+        assert after["request"][:2] == ("dead", "id_collision") and after["slot"] == 0
 
 
 async def test_a_leaked_slot_is_released_only_once_its_runs_execution_is_closed(

@@ -22,9 +22,11 @@ from dewpoint.core.platform.boundary import (
 BUILD = "sha256:" + "ab" * 32
 
 
-def inventory(config: str, build: str = BUILD) -> dict[str, object]:
-    return {"environment": f"d12-{config}", "inventory": {"binary": build, "server_version": "1.32.0", "rpcs": [],
-                                                          "endpoints": []}}  # fmt: skip
+def inventory(config: str, build: str = BUILD, start_check: str | None = "on") -> dict[str, object]:
+    found: dict[str, object] = {"binary": build, "server_version": "1.32.0", "rpcs": [], "endpoints": []}
+    if start_check is not None:
+        found["start_check"] = start_check
+    return {"environment": f"d12-{config}", "inventory": found}
 
 
 def case(name: str, outcome: str = "passed", config: str | None = "mtls", proof: str = "d12") -> dict[str, object]:
@@ -74,6 +76,20 @@ def test_a_passed_record_gives_its_digest_and_the_server_build() -> None:
 def test_a_record_that_isnt_a_whole_pass_is_refused(entries: tuple[dict[str, object], ...], why: str) -> None:
     with pytest.raises(ProofRefusedError, match=re.escape(why)):
         proof_evidence(lines(*entries))
+
+
+@pytest.mark.parametrize("mode", ["off", "unset", "invalid", None])
+def test_a_server_whose_start_check_isnt_on_is_refused(mode: str | None) -> None:
+    """The start-check slice: an inventory must show the check on, in every configuration, before a boundary is
+    recorded from its run; one off by omission or explicitly is never enough."""
+    with pytest.raises(ProofRefusedError, match="start check"):
+        proof_evidence(lines(inventory("mtls"), inventory("jwt", start_check=mode), *CASES))
+
+
+def test_the_start_check_on_is_a_prerequisite_never_the_proof() -> None:
+    """On is required, and proves nothing by itself: a run whose cases didn't all pass is refused all the same."""
+    with pytest.raises(ProofRefusedError, match="didn't pass"):
+        proof_evidence(lines(inventory("mtls"), inventory("jwt")))
 
 
 def test_a_record_that_isnt_json_lines_is_refused() -> None:

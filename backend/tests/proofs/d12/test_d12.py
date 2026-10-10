@@ -25,6 +25,7 @@ Passing doesn't prove the owner's deployment: real-target qualification reruns i
 test namespace and D12.4 through the namespace-scoped fault file, never the shared bucket."""
 
 import asyncio
+import contextlib
 import http.client
 import json
 import os
@@ -62,12 +63,12 @@ from tests.support.temporal import _External, start_local
 
 pytestmark = [gate("d12")]
 
+# Each run may name its images (DEWPOINT_M4_IMAGE, DEWPOINT_M4_PROOF_CLIENT); the shared `:local` tags by default. A
+# module with EXPLICIT_IMAGES (the start-check proof) runs only with both named, and never falls back to `:local`.
 SERVER_IMAGE = os.environ.get("DEWPOINT_M4_IMAGE", "dewpoint-m4/temporal-server:local")
-PROOF_CLIENT = "dewpoint-m4/proofclient:local"
+PROOF_CLIENT = os.environ.get("DEWPOINT_M4_PROOF_CLIENT", "dewpoint-m4/proofclient:local")
 ADMIN_TOOLS = "temporalio/admin-tools:1.32.0@sha256:a9f84fb9a374b2374fe2e67c8efc0468ff3f1c66c8a0b14597ec86e349e62bca"
-GRPC = f"127.0.0.1:{os.environ.get('DEWPOINT_M4_GRPC_PORT', '17233')}"
-HTTP_PORT = int(os.environ.get("DEWPOINT_M4_HTTP_PORT", "17243"))
-NETWORK, CONTAINER = f"{environment.PROJECT}_default", f"{environment.PROJECT}-temporal-1"
+START_CHECK = "off"  # its engine starts are made directly, not through eligible requests: it claims no such boundary
 AUDIENCE, DAY = "dewpoint-temporal", 86400
 NAMESPACE = environment.NAMESPACE
 BACKEND = Path(__file__).resolve().parents[3]
@@ -103,12 +104,47 @@ class Server:
     def compose(self, *args: str) -> str:
         return environment.run_compose(self.run, self.config, *args)
 
+    # the run's own: its project's names, and the host ports Docker assigned (revision 17.3.1)
+    @property
+    def grpc(self) -> str:
+        return f"127.0.0.1:{environment.assigned_port(self.run, 'temporal', 7233)}"
 
-def _need_images() -> None:
+    @property
+    def http_port(self) -> int:
+        return environment.assigned_port(self.run, "temporal", 7243)
+
+    @property
+    def network(self) -> str:
+        return f"{self.run.project}_default"
+
+    @property
+    def container(self) -> str:
+        return f"{self.run.project}-temporal-1"
+
+
+def _need_images(module: Any) -> None:
+    """Every image the proof uses is on this machine, its IDs recorded, and the server's built from this tree. A
+    module with EXPLICIT_IMAGES runs only with the images its run named, both of them, and exactly those."""
+    named = {"DEWPOINT_M4_IMAGE": SERVER_IMAGE, "DEWPOINT_M4_PROOF_CLIENT": PROOF_CLIENT}
+    if getattr(module, "EXPLICIT_IMAGES", False):
+        unnamed = [setting for setting in named if not os.environ.get(setting)]
+        if unnamed:
+            pytest.fail(f"this proof's run names its images: {', '.join(unnamed)} unset (no `:local` fallback)")
+        for setting, image in named.items():
+            if os.environ[setting] != image:
+                pytest.fail(f"{image} is not the one the run named ({setting}={os.environ[setting]})")
+    ids = {}
     for image in (SERVER_IMAGE, PROOF_CLIENT, ADMIN_TOOLS):
-        found = subprocess.run(["docker", "image", "inspect", image], capture_output=True, check=False)
+        found = subprocess.run(["docker", "image", "inspect", "--format", "{{.Id}}", image], capture_output=True,
+                               text=True, check=False)  # fmt: skip
         if found.returncode != 0:
             pytest.fail(f"{image} isn't on this machine: the run request's build (or pin) step comes first")
+        ids[image] = found.stdout.strip()
+    record({"images": ids})
+    try:  # built from this tree, never an older server than the code the proof claims to test
+        environment.check_server_image(SERVER_IMAGE, environment.SERVER_CONTEXT / "config" / "jwt.yaml")
+    except RuntimeError as e:
+        pytest.fail(str(e))
 
 
 async def connect(server: Server, who: str = "proof-admin", *, ca: Path | None = None, cert: bool = True,
@@ -125,7 +161,7 @@ async def connect(server: Server, who: str = "proof-admin", *, ca: Path | None =
         tls = TLSConfig(server_root_ca_cert=ca_pem, domain=environment.SERVER_NAME)
     if server.config == environment.JWT and token is not None:
         kwargs["api_key"] = token or server.token(who)
-    return await Client.connect(GRPC, namespace=namespace, tls=tls, **kwargs)
+    return await Client.connect(server.grpc, namespace=namespace, tls=tls, **kwargs)
 
 
 def _retention(days: int) -> Duration:
@@ -171,14 +207,31 @@ def _outcomes(server: Server, namespace: str) -> list[tuple[str, bool]]:
     return [(d["api"].rsplit("/", 1)[1], d["allowed"]) for d in _decisions(server, namespace)]
 
 
+def _need_project_record(module: Any) -> None:
+    """A module whose run has an outer runner to clean up after it (OUTER_CLEANUP) records its project's name there
+    before the first `up` (DEWPOINT_PROOF_PROJECTS): without it, a killed run's project couldn't be found by name."""
+    if getattr(module, "OUTER_CLEANUP", False) and not os.environ.get("DEWPOINT_PROOF_PROJECTS"):
+        pytest.fail("this proof's run records its projects for its outer runner: DEWPOINT_PROOF_PROJECTS unset")
+
+
 @pytest.fixture(scope="module", params=[environment.MTLS, environment.JWT])
 def server(request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory) -> Iterator[Server]:
-    _need_images()
-    config = request.param
-    run = environment.prepare(tmp_path_factory.mktemp(f"d12-{config}") / "run")
+    _need_images(request.module)
+    _need_project_record(request.module)
+    root = tmp_path_factory.mktemp(f"d12-{request.param}") / "run"
+    with _served(request.module, request.param, root) as served:
+        yield served
+
+
+@contextlib.contextmanager
+def _served(module: Any, config: str, root: Path) -> Iterator[Server]:
+    """D12's server for one configuration, in a project of its own. Every step from the first `up` on runs under the
+    cleanup guard; the server's logs are kept when they can be read and written, and the project is removed whether
+    they could or not (the owner's review of this fixture)."""
+    run = environment.prepare(root, start_check=module.START_CHECK)  # each module names it: never by omission
     server = Server(run, config)
-    server.compose("up", "-d", "minio")
     try:
+        server.compose("up", "-d", "minio")
         environment.wait_for_s3(run)
         environment.make_bucket(environment.s3(root=run), environment.BUCKET)
         server.authorizer = environment.assume(run, "authorizer", environment.BUCKET, "dewpoint/", seconds=4 * 3600)
@@ -190,10 +243,16 @@ def server(request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFact
         asyncio.run(_register_proof_namespace(server))
         yield server
     finally:
-        logs = subprocess.run(["docker", "logs", "--tail", "200", CONTAINER], capture_output=True, text=True,
-                              check=False)  # fmt: skip
-        (run.root.parent / "temporal.log").write_text(logs.stdout + logs.stderr)
-        server.compose("down", "-v", "--remove-orphans")
+        try:
+            _keep_logs(server)
+        finally:
+            environment.down(run, config)  # the run's own project only, checked first; none if it brought none up
+
+
+def _keep_logs(server: Server) -> None:
+    logs = subprocess.run(["docker", "logs", "--tail", "200", server.container], capture_output=True, text=True,
+                          check=False, timeout=60)  # fmt: skip
+    (server.run.root.parent / "temporal.log").write_text(logs.stdout + logs.stderr)
 
 
 def _wait_for_frontend(server: Server, deadline_s: float = 180) -> None:
@@ -235,6 +294,7 @@ def _fresh(prefix: str) -> str:
 def test_d12_1_the_inventory_classes_every_rpc_and_lists_every_endpoint(server: Server) -> None:
     config = environment.COMPOSE.parent / "config" / f"{server.config}.yaml"
     done = subprocess.run(["docker", "run", "--rm", "-e", "DEWPOINT_TEMPORAL_CONFIG=/etc/temporal/config.yaml",
+                           "-e", f"DEWPOINT_AUTHZ_START_CHECK={server.run.start_check}",
                            "-v", f"{config}:/etc/temporal/config.yaml:ro", SERVER_IMAGE, "inventory"],
                           capture_output=True, text=True, check=True)  # fmt: skip
     inventory = json.loads(done.stdout)
@@ -263,7 +323,7 @@ def test_d12_1_only_the_frontend_listens_on_the_network(server: Server) -> None:
     which Temporal binds on the same address) answers."""
     reached = {}
     for port in (7233, 7243, 6933, 7234, 7235, 7236, 7246, 7239, 6934, 6935, 6936, 6939):
-        done = subprocess.run(["docker", "run", "--rm", "--network", NETWORK, "--entrypoint", "python",
+        done = subprocess.run(["docker", "run", "--rm", "--network", server.network, "--entrypoint", "python",
                                "python:3.12-slim-bookworm@sha256:"
                                "34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258", "-I", "-c",
                                f"import socket; socket.create_connection(('temporal', {port}), 3)"],
@@ -310,7 +370,7 @@ def _cli(server: Server, *args: str) -> subprocess.CompletedProcess[str]:
     """The `temporal` CLI from the pinned admin-tools image, as the proof's admin; B's token in the environment
     (TEMPORAL_API_KEY, named on the command line, its value never)."""
     pki = server.run.root / "pki"
-    argv = ["docker", "run", "--rm", "--network", NETWORK, "-v", f"{pki / 'ca.pem'}:/pki/ca.pem:ro"]
+    argv = ["docker", "run", "--rm", "--network", server.network, "-v", f"{pki / 'ca.pem'}:/pki/ca.pem:ro"]
     connection = ["--address", "temporal:7233", "--tls-ca-path", "/pki/ca.pem", "--tls-server-name",
                   environment.SERVER_NAME]  # fmt: skip
     env = dict(os.environ)
@@ -350,7 +410,7 @@ def _http(server: Server, method: str, path: str, body: dict[str, Any] | None = 
         context.load_cert_chain(cert, key)
     elif token is not None:
         headers["Authorization"] = f"Bearer {token or server.token(who)}"
-    connection = http.client.HTTPSConnection("127.0.0.1", HTTP_PORT, context=context, timeout=30)
+    connection = http.client.HTTPSConnection("127.0.0.1", server.http_port, context=context, timeout=30)
     try:
         connection.request(method, path, json.dumps(body) if body is not None else None, headers)
         answer = connection.getresponse()
@@ -386,13 +446,13 @@ def _proof_client(server: Server, *args: str, internal: bool = False) -> list[di
     internal frontend from inside the server's network namespace with the internode certificate."""
     tls, pki = server.run.root / "tls", server.run.root / "pki"
     if internal:
-        argv = ["docker", "run", "--rm", "--network", f"container:{CONTAINER}",
+        argv = ["docker", "run", "--rm", "--network", f"container:{server.container}",
                 "-v", f"{tls / 'internode-ca.pem'}:/pki/ca.pem:ro", "-v", f"{tls / 'internode.pem'}:/pki/cert.pem:ro",
                 "-v", f"{tls / 'internode-key.pem'}:/pki/key.pem:ro", PROOF_CLIENT, *args,
                 "--address", "127.0.0.1:7236", "--ca", "/pki/ca.pem", "--server-name", environment.INTERNODE_NAME,
                 "--cert", "/pki/cert.pem", "--key", "/pki/key.pem"]  # fmt: skip
     else:
-        argv = ["docker", "run", "--rm", "--network", NETWORK, "-v", f"{pki / 'ca.pem'}:/pki/ca.pem:ro"]
+        argv = ["docker", "run", "--rm", "--network", server.network, "-v", f"{pki / 'ca.pem'}:/pki/ca.pem:ro"]
         tail = ["--address", "temporal:7233", "--ca", "/pki/ca.pem", "--server-name", environment.SERVER_NAME]
         if server.config == environment.MTLS:
             cert, key = server.run.client("proof-admin")
@@ -584,7 +644,7 @@ def _dewpoint_settings(server: Server) -> dict[str, str]:
 
 
 def _pytest_on_this_server(server: Server, *selection: str, probe: bool = False) -> None:
-    env = {**os.environ, **_dewpoint_settings(server), "DEWPOINT_PROBE_TEMPORAL_ADDRESS": GRPC,
+    env = {**os.environ, **_dewpoint_settings(server), "DEWPOINT_PROBE_TEMPORAL_ADDRESS": server.grpc,
            "DEWPOINT_PROBE_TEMPORAL_NAMESPACE": NAMESPACE}  # fmt: skip
     env.pop("DEWPOINT_TEMPORAL_INSECURE_DEV", None)
     env.pop("DEWPOINT_PROOF", None)
@@ -649,7 +709,7 @@ def test_dw_1_plaintext_is_refused_outside_development_and_isnt_served(server: S
     with pytest.raises(temporal_connect.TemporalConfigError):
         temporal_connect.options(settings, "production")
     with pytest.raises(Exception):  # noqa: B017, PT011 - plaintext against the TLS frontend fails
-        asyncio.run(Client.connect(GRPC, namespace=NAMESPACE, tls=False))
+        asyncio.run(Client.connect(server.grpc, namespace=NAMESPACE, tls=False))
 
 
 def test_dw_3_a_replaced_token_is_picked_up_without_a_restart(server: Server) -> None:
@@ -659,7 +719,7 @@ def test_dw_3_a_replaced_token_is_picked_up_without_a_restart(server: Server) ->
     async def scenario() -> None:
         path = server.token_file("dewpoint-proof", server.token("dewpoint-proof", lifetime=15))
         settings = _External(
-            temporal_address=GRPC, temporal_namespace=NAMESPACE, temporal_bearer_token_file=str(path),
+            temporal_address=server.grpc, temporal_namespace=NAMESPACE, temporal_bearer_token_file=str(path),
             temporal_tls_ca=str(server.run.root / "pki" / "ca.pem"),
             temporal_tls_server_name=environment.SERVER_NAME)  # fmt: skip
         client = await temporal_connect.connect(settings, "production")
@@ -681,7 +741,7 @@ def test_dw_4_the_check_passes_here(server: Server, pg_url, _test_users, monkeyp
     _env(monkeypatch, pg_url, DEWPOINT_KEK_B64=base64.b64encode(bytes(32)).decode())
     _recorded(pg_url, NAMESPACE)
     monkeypatch.delenv("DEWPOINT_TEMPORAL_INSECURE_DEV", raising=False)
-    for name, value in {**_dewpoint_settings(server), "DEWPOINT_TEMPORAL_ADDRESS": GRPC,
+    for name, value in {**_dewpoint_settings(server), "DEWPOINT_TEMPORAL_ADDRESS": server.grpc,
                         "DEWPOINT_TEMPORAL_NAMESPACE": NAMESPACE}.items():  # fmt: skip
         monkeypatch.setenv(name, value)
     from dewpoint.core.config import get_settings

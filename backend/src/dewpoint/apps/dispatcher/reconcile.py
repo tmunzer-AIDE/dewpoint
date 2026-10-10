@@ -145,6 +145,9 @@ async def _starting(
         if e.status == RPCStatusCode.NOT_FOUND and await namespace_answers(client):
             ref = dispatch.Ref(request_id, tenant_id)
             happened = await dispatch.settle(sessionmaker, ref, dispatch.Outcome("absent"), audited=True)
+            if happened == "unresolved":  # its sends spent, an attempt unproven: observed again after RECHECK
+                await _checked_alone(sessionmaker, tenant_id, request_id)
+                return happened
             if happened != "history_missing":
                 return happened
             log.error("start_history_missing", request_id=str(request_id))  # its row ended: an operator recovers it
@@ -182,7 +185,8 @@ async def _expected(
         cipher = ClaimCipher(dispatch.KeyFailures(keys))
         envelope = await claims.read_envelope(s, cipher, tenant_id, request_id=request_id)
         start = dispatch.run_input(request, request.workflow_version_id, envelope, settings)
-    return dispatch.Starting(request_id, tenant_id, start)
+        recorded = request.start_request_id
+    return dispatch.Starting(request_id, tenant_id, start, recorded)
 
 
 async def namespace_answers(client: Client) -> bool:

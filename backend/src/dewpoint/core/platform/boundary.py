@@ -80,6 +80,7 @@ class Evidence:
 
 def proof_evidence(record: bytes) -> Evidence:
     builds: dict[str, str] = {}
+    start_checks: dict[str, str] = {}  # each configuration's server: its start check's mode, as its inventory names it
     failed: list[str] = []
     outcomes: dict[tuple[str, str, str], str] = {}  # (proof, case, configuration) -> passed or skipped
     for number, line in enumerate(record.decode().splitlines(), start=1):
@@ -92,6 +93,7 @@ def proof_evidence(record: bytes) -> Evidence:
         environment = str(entry.get("environment", ""))
         if environment.startswith("d12-") and isinstance(entry.get("inventory"), dict):
             builds[environment.removeprefix("d12-")] = str(entry["inventory"].get("binary", ""))
+            start_checks[environment.removeprefix("d12-")] = str(entry["inventory"].get("start_check", "missing"))
         if "case" in entry:
             if entry.get("outcome") == "failed":
                 failed.append(str(entry["case"]))
@@ -106,6 +108,11 @@ def proof_evidence(record: bytes) -> Evidence:
             raise ProofRefusedError(f"no inventory for {name}")
     if len(set(builds.values())) != 1:
         raise ProofRefusedError("the inventories name two server builds")
+    for configuration, name in CONFIGURATIONS.items():  # a prerequisite only: on proves nothing by itself
+        mode = start_checks.get(configuration)
+        if mode != "on":
+            raise ProofRefusedError(f"the start check wasn't on for {name} (its inventory shows {mode}): "
+                                    "a prerequisite of any boundary's record")  # fmt: skip
     required = [("d6", name, "") for name in D6_CASES]
     required += [("d12", name, config) for name in D12_CASES for config in CONFIGURATIONS]
     required += [("d12", name, "") for name in D12_ELSEWHERE]

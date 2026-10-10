@@ -18,7 +18,7 @@ from temporalio.worker import Worker
 
 from dewpoint.apps import tick_contract
 from dewpoint.apps.codec import KeyringKeys, data_converter
-from dewpoint.apps.dispatcher import budget, evidence, matching, recovery
+from dewpoint.apps.dispatcher import budget, evidence, matching, recovery, start_call
 from dewpoint.apps.dispatcher.cancels import send_cancels
 from dewpoint.apps.dispatcher.commands import commands_once
 from dewpoint.apps.dispatcher.dispatch import Rotation, dispatch_once
@@ -151,6 +151,7 @@ async def run(settings: Settings) -> None:
         )  # fmt: skip
         refreshing = asyncio.create_task(keep_token_fresh(client, settings))  # bearer mode: a rotated token
         budget.instrument(client)  # its passes' soft budget: every call timed (D16 prototype)
+        start_call.install(client)  # its starts carry their recorded request id, one RPC attempt each
         instance = uuid.uuid4()
         reconciler, leader = uuid.uuid5(instance, "reconciler"), Leader(engine)
         log.info("dispatcher_started", instance=str(instance), build=this_build())

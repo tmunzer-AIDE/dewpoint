@@ -6,21 +6,26 @@
 - `tls/`: what the server mounts: the frontend's certificate and key, the test CA's certificate, the internode CA's
   certificate and the internode certificate and key. No CA key and no client certificate is ever here.
 - `authz/`: the authorizer's roles file and its fault directory (empty: no injection); its S3 credentials are written
-  here once MinIO is up (`write_credentials`).
+  here once MinIO is up (`write_credentials`); with the start check on, its DSN (`start_check_dsn`): the project's own
+  `dewpoint-db`, as `START_CHECK_LOGIN`.
 - `jwks/`: the key set the JWKS server publishes.
-- `db_password`, `minio/root_user`, `minio/root_password`: random, each read by its own container only.
+- `db_password`, `dewpoint_db_password`, `minio/root_user`, `minio/root_password`: random, each read by its own
+  container only; `start_check_password` (with the start check on): the harness's, to create the authorizer's login.
 - `pki/`: the CAs' keys, the clients' certificates and keys, and another CA (D12.5's wrong one); never mounted.
 
 Files are world-readable inside the 0700 directory, so each container's non-root user can read its bind mounts.
 `policy` gives each S3 credential set its session policy: the anchor writer and the authorizer may only put under
 their own prefixes; the verifier may only read. MinIO's root credentials stay with the harness."""
 
+import hashlib
 import json
 import os
+import re
 import secrets
 import subprocess
 import time
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -30,7 +35,15 @@ from tests.proofs import pki, tokens
 
 REPO = Path(__file__).resolve().parents[3]
 COMPOSE = REPO / "deploy" / "temporal" / "compose.yaml"
-PROJECT = "dewpoint-m4"
+SERVER_CONTEXT = COMPOSE.parent  # the server image's build context: all of it (`COPY . .`, no .dockerignore)
+# Its identity, as the Dockerfile's build stage computes it before anything else writes there and stamps it into the
+# server binary (`-X main.source`), whose inventory reports it: every file's SHA-256 by path, in C order, hashed.
+SOURCE_PIPELINE = "find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1"
+PROJECT = "dewpoint-m4"  # each run's project is this and a random id of its own (revision 17.3.1)
+START_CHECK_MODES = ("on", "off")  # D12's start check, as each run sets it: never left unset
+START_CHECK_PROFILE = "start-check"  # compose.yaml's profile for Dewpoint's database, which only `on` needs
+START_CHECK_LOGIN = "dewpoint_authz"  # the authorizer's login: a member of dewpoint_start_check, nothing else
+DEWPOINT_DB = "dewpoint"  # dewpoint-db's superuser and its database (compose.yaml)
 MTLS, JWT = "mtls", "jwt"  # configuration A (mutual TLS only) and B (a JWT bearer token only)
 NAMESPACE = "default"  # Dewpoint's namespace on the proof server: the one its tests' recorded deployment names
 SERVER_NAME = "temporal.dewpoint-m4.test"
@@ -46,6 +59,10 @@ class Run:
     internode: pki.Authority
     other: pki.Authority  # a CA the server doesn't trust (D12.5)
     keys: tokens.KeySet
+    project: str  # its own Compose project: `dewpoint-m4-<random>`, recorded, never another run's
+    start_check: str  # D12's start check for this run's server: on or off, always explicit
+    ports: dict[tuple[str, int], int] = field(default_factory=dict)  # the host ports Docker assigned, read back
+    state: dict[str, Any] = field(default_factory=dict)  # whether its project was checked fresh; its last config
 
     def client(self, name: str) -> tuple[Path, Path]:
         return self.root / "pki" / f"{name}.pem", self.root / "pki" / f"{name}-key.pem"
@@ -57,7 +74,9 @@ def _write(path: Path, data: bytes | str) -> None:
     path.chmod(0o644)
 
 
-def prepare(root: Path) -> Run:
+def prepare(root: Path, *, start_check: str) -> Run:
+    if start_check not in START_CHECK_MODES:
+        raise ValueError("start_check is on or off: a run always names its server's start check")
     root.mkdir(parents=True)
     root.chmod(0o700)
     run = Run(
@@ -66,6 +85,8 @@ def prepare(root: Path) -> Run:
         pki.Authority.create("dewpoint-m4 internode CA"),
         pki.Authority.create("another CA"),
         tokens.KeySet.create("proof-1"),
+        f"{PROJECT}-{secrets.token_hex(6)}",
+        start_check,
     )
     frontend = run.ca.issue(SERVER_NAME, server=True, names=[SERVER_NAME, "localhost"], ips=["127.0.0.1"])
     # internode: one certificate serves and dials (Temporal presents the internode server certificate as a client)
@@ -84,8 +105,13 @@ def prepare(root: Path) -> Run:
     _write(root / "authz" / "roles.json", json.dumps(CLIENTS, indent=2))
     (root / "authz" / "faults").mkdir()
     _write(root / "jwks" / "jwks.json", json.dumps(run.keys.jwks()))
-    for secret in ("db_password", "minio/root_user", "minio/root_password"):
+    for secret in ("db_password", "dewpoint_db_password", "minio/root_user", "minio/root_password"):
         _write(root / secret, secrets.token_urlsafe(24))
+    if start_check == "on":  # the authorizer's DSN: the project's own database, through its network, never another
+        password = secrets.token_urlsafe(24)
+        _write(root / "start_check_password", password)  # the harness's, to create the login with: never mounted
+        dsn = f"postgresql://{START_CHECK_LOGIN}:{password}@dewpoint-db:5432/{DEWPOINT_DB}?sslmode=disable"
+        _write(root / "authz" / "start_check_dsn", dsn)
     for name, authority in {"ca": run.ca, "internode-ca": run.internode, "other-ca": run.other}.items():
         _write(root / "pki" / f"{name}.pem", authority.cert_pem())
         _write(root / "pki" / f"{name}-key.pem", authority.key_pem())
@@ -105,8 +131,10 @@ def compose(run: Run, config: str, *args: str) -> tuple[list[str], dict[str, str
         "DEWPOINT_M4_RUN": str(run.root),
         "DEWPOINT_M4_CONFIG": config,
         "DEWPOINT_M4_DB_PASSWORD": (run.root / "db_password").read_text(),
+        "DEWPOINT_M4_START_CHECK": run.start_check,
+        "COMPOSE_PROFILES": START_CHECK_PROFILE if run.start_check == "on" else "",  # its database, with the check only
     }
-    return ["docker", "compose", "-p", PROJECT, "-f", str(COMPOSE), *args], env
+    return ["docker", "compose", "-p", run.project, "-f", str(COMPOSE), *args], env
 
 
 def policy(kind: str, bucket: str, prefix: str) -> dict[str, Any]:
@@ -139,7 +167,6 @@ def write_credentials(path: Path, credentials: dict[str, str]) -> None:
 
 # ---- running it (the proofs only; never the normal suite) ----
 
-S3_ENDPOINT = f"http://127.0.0.1:{os.environ.get('DEWPOINT_M4_S3_PORT', '19000')}"
 REGION = "us-east-1"
 BUCKET = "dewpoint-audit"  # compose.yaml's DEWPOINT_AUTHZ_AUDIT_BUCKET: anchors and the authorizer's records
 RETENTION_DAYS = 435  # audit retention 400 + backups 35: D6.9's default, and each version's lock at least that
@@ -147,7 +174,140 @@ BUCKET_DAYS = RETENTION_DAYS + 1  # the bucket's default: a day more, as the ver
 STS_ROLE = "arn:minio:iam:::role/dewpoint-proof"  # MinIO ignores the role for its own users; boto3 requires one
 
 
+def _docker(argv: list[str], env: dict[str, str] | None = None) -> str:
+    done = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=120, check=False)
+    if done.returncode != 0:
+        raise RuntimeError(f"docker {argv[1]} failed ({done.returncode})")  # its words can carry the run's names
+    return done.stdout
+
+
+DOCKER: Callable[..., str] = _docker  # the tests' fake replaces it
+_LABEL = "com.docker.compose.project"
+PROJECT_NAME = re.compile(rf"{PROJECT}-[0-9a-f]{{12}}")  # `prepare`'s: the only names `remove_project` acts on
+_CHANGES_PORTS = {"up", "down", "start", "stop", "restart", "rm", "kill", "create"}  # a recreated service may move
+
+
+def guard_fresh(run: Run) -> None:
+    """Before the run's first `up`: its project has no container and no network. A random id makes any a collision,
+    reported and never removed."""
+    containers = DOCKER(["docker", "ps", "-a", "--filter", f"label={_LABEL}={run.project}", "-q"])
+    networks = DOCKER(["docker", "network", "ls", "--filter", f"label={_LABEL}={run.project}", "-q"])
+    if containers.strip() or networks.strip():
+        raise RuntimeError(f"the project {run.project} already has containers or networks: a collision, not removed")
+
+
+def guard_own(run: Run) -> None:
+    """Before any cleanup: every container listed under the run's project carries exactly its recorded project name
+    (Compose's own label; the file adds no run-id label of its own)."""
+    labels = DOCKER(["docker", "ps", "-a", "--filter", f"label={_LABEL}={run.project}",
+                     "--format", '{{.Label "' + _LABEL + '"}}'])  # fmt: skip
+    for label in filter(None, (line.strip() for line in labels.splitlines())):
+        if label != run.project:
+            raise RuntimeError("a container listed under the run's project is not this run's: nothing removed")
+
+
+def source_identity(root: Path = SERVER_CONTEXT) -> str:
+    """`SOURCE_PIPELINE`'s answer, computed here: what a server image built from `root` reports as its source."""
+    files = [p for p in root.rglob("*") if p.is_file() and not p.is_symlink()]  # find's -type f
+    named = sorted(((f"./{p.relative_to(root).as_posix()}", p) for p in files), key=lambda e: e[0].encode())
+    lines = "".join(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {name}\n" for name, p in named)
+    return hashlib.sha256(lines.encode()).hexdigest()
+
+
+def check_server_image(image: str, config: Path) -> None:
+    """Before a proof uses the server's `image`: it was built from this tree. Its inventory (run with no network)
+    names the identity of the build context its binary came from; anything else is refused, a stale image's missing
+    one included: a proof never runs an older server than the code it claims to test."""
+    expected = source_identity()
+    answer = DOCKER(["docker", "run", "--rm", "--network", "none", "-e",
+                     "DEWPOINT_TEMPORAL_CONFIG=/etc/temporal/config.yaml", "-v",
+                     f"{config}:/etc/temporal/config.yaml:ro", image, "inventory"])  # fmt: skip
+    try:
+        reported = json.loads(answer).get("source")
+    except (ValueError, AttributeError):
+        reported = None
+    if reported != expected:
+        found = reported or "unrecorded"
+        raise RuntimeError(f"{image} wasn't built from this tree: its source is {found}, this tree's {expected}. "
+                           "Rebuild it (the run request's build step) before the proof.")  # fmt: skip
+
+
+def forget_ports(run: Run) -> None:
+    run.ports.clear()
+
+
+def assigned_port(run: Run, service: str, port: int) -> int:
+    """The host port Docker assigned `service`'s `port` (published as `127.0.0.1::<port>`), read back once."""
+    if (service, port) not in run.ports:
+        # the file's required settings need a configuration: the run's last, which the port doesn't depend on
+        argv, env = compose(run, run.state.get("config", "jwt"), "port", service, str(port))
+        answer = DOCKER(argv, env).strip()
+        found = re.fullmatch(r"127\.0\.0\.1:(\d+)", answer.splitlines()[0] if answer else "")
+        if found is None:
+            raise RuntimeError(f"no port assigned to {service}:{port} on 127.0.0.1")
+        run.ports[(service, port)] = int(found.group(1))
+    return run.ports[(service, port)]
+
+
+def s3_endpoint(run: Run) -> str:
+    return f"http://127.0.0.1:{assigned_port(run, 'minio', 9000)}"
+
+
+def record_project(run: Run) -> None:
+    """The run's project, recorded once its guard found it fresh and before its first `up`, in the file the run's outer
+    runner names (DEWPOINT_PROOF_PROJECTS): a run whose pytest is killed is then still removed, by that exact name
+    (`remove_project`, `python -m tests.proofs.cleanup`)."""
+    path = os.environ.get("DEWPOINT_PROOF_PROJECTS")
+    if path:
+        with Path(path).open("a") as f:
+            f.write(run.project + "\n")
+
+
+def remove_project(project: str) -> list[str]:
+    """After a killed run, by its recorded name: the containers (with their anonymous volumes), the volumes and the
+    networks labelled with exactly that project. Each listing is checked whole first, every entry carrying the full
+    name, and nothing is removed if one doesn't; a name `prepare` couldn't have made is refused outright."""
+    if not PROJECT_NAME.fullmatch(project):
+        raise ValueError(f"{project!r} is not a proof run's project")
+    kinds = [("container", ["docker", "ps", "-a"], "{{.ID}}", ["docker", "rm", "-f", "-v"]),
+             ("volume", ["docker", "volume", "ls"], "{{.Name}}", ["docker", "volume", "rm"]),
+             ("network", ["docker", "network", "ls"], "{{.ID}}", ["docker", "network", "rm"])]  # fmt: skip
+    found: list[tuple[str, list[str], list[str]]] = []
+    for kind, listing, key, remove in kinds:
+        rows = DOCKER([*listing, "--filter", f"label={_LABEL}={project}",
+                       "--format", key + ' {{.Label "' + _LABEL + '"}}'])  # fmt: skip
+        ids = []
+        for row in filter(None, (line.strip() for line in rows.splitlines())):
+            entry, _, label = row.partition(" ")
+            if label != project:
+                raise RuntimeError(f"a {kind} listed under {project} is not the recorded project's: nothing removed")
+            ids.append(entry)
+        found.append((kind, ids, remove))
+    removed = []
+    for kind, ids, remove in found:  # containers first: a network or volume in use can't go
+        if ids:
+            DOCKER([*remove, *ids])
+            removed += [f"{kind} {entry}" for entry in ids]
+    return removed
+
+
+def down(run: Run, config: str) -> None:
+    """The run's own project removed, after checking it's the run's: every profile's services, their volumes. Only a
+    project the run brought up itself: a name its guard found taken (a collision) is someone else's, never removed."""
+    if not run.state.get("fresh"):
+        return
+    guard_own(run)
+    run_compose(run, config, "--profile", START_CHECK_PROFILE, "down", "-v", "--remove-orphans")
+
+
 def run_compose(run: Run, config: str, *args: str, timeout: float = 300) -> str:
+    run.state["config"] = config
+    if "up" in args and not run.state.get("fresh"):
+        guard_fresh(run)
+        record_project(run)
+        run.state["fresh"] = True  # from here on, the project is the run's own: `down` removes it
+    if _CHANGES_PORTS & set(args):
+        forget_ports(run)
     argv, env = compose(run, config, *args)
     done = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=timeout, check=False)
     if done.returncode != 0:
@@ -157,18 +317,20 @@ def run_compose(run: Run, config: str, *args: str, timeout: float = 300) -> str:
 
 
 def s3(credentials: dict[str, str] | None = None, *, root: Run | None = None) -> Any:
-    """An S3 client on the proof's MinIO: with STS credentials, or with the root ones (`root`)."""
+    """An S3 client on the proof's MinIO: with STS credentials (which carry the endpoint `assume` found), or with the
+    root ones (`root`)."""
     if root is not None:
+        endpoint = s3_endpoint(root)
         access = (root.root / "minio" / "root_user").read_text()
         secret = (root.root / "minio" / "root_password").read_text()
         token = None
     else:
         assert credentials is not None
         access, secret = credentials["AccessKeyId"], credentials["SecretAccessKey"]
-        token = credentials["SessionToken"]
+        token, endpoint = credentials["SessionToken"], credentials["Endpoint"]
     return boto3.client(
         "s3",
-        endpoint_url=S3_ENDPOINT,
+        endpoint_url=endpoint,
         region_name=REGION,
         aws_access_key_id=access,
         aws_secret_access_key=secret,
@@ -180,9 +342,10 @@ def assume(run: Run, kind: str, bucket: str, prefix: str, seconds: int = 3600) -
     """One credential set: STS AssumeRole from the root credentials, narrowed by `kind`'s session policy. Whether
     MinIO grants that to its root user is the run's first check; if it refuses, the proof stops (a credential decision
     for the owner)."""
+    endpoint = s3_endpoint(run)
     sts = boto3.client(
         "sts",
-        endpoint_url=S3_ENDPOINT,
+        endpoint_url=endpoint,
         region_name=REGION,
         aws_access_key_id=(run.root / "minio" / "root_user").read_text(),
         aws_secret_access_key=(run.root / "minio" / "root_password").read_text(),
@@ -193,7 +356,7 @@ def assume(run: Run, kind: str, bucket: str, prefix: str, seconds: int = 3600) -
         Policy=json.dumps(policy(kind, bucket, prefix)),
         DurationSeconds=seconds,
     )
-    return dict(answer["Credentials"])
+    return {**answer["Credentials"], "Endpoint": endpoint}  # the run's MinIO, which `s3` needs
 
 
 def make_bucket(client: Any, bucket: str, *, days: int | None = BUCKET_DAYS) -> None:

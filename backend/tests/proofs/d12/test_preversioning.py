@@ -21,6 +21,7 @@ from tests.proofs.conftest import gate, record
 from tests.proofs.d12.test_d12 import SERVER_IMAGE, Server, connect, server  # noqa: F401
 
 pytestmark = [gate("pv")]
+START_CHECK = "off"  # it starts its runs on the engine queue directly: no eligible requests, no such boundary claimed
 
 
 @pytest.mark.parametrize("server", [environment.JWT], indirect=True)
