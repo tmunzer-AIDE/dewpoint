@@ -1834,3 +1834,23 @@ ambiguous nodes; `analyze()` per scope request (ruling 117); no sample past the 
 `searched_runs` (ruling 122); the engine's own redaction in previews (engine-core §8).
 
 Paused at the final checkpoint. Nothing is pushed: a push and a PR wait for the owner's word.
+
+### 4c-2a, after the review of 6cc2a4f3 (2026-10-10)
+
+A pasted review held 6cc2a4f3 for two P2 defects in sample matching, both reproduced through the public API; it found
+M62 correct and the recording-outage handling as claimed.
+
+M63. **A sample compares a step's config as JSON, as the graph hash does**: `true` and `1`, `false` and `0`, were
+    equal in Python, so a value changed between them kept a sample fresh. M62's default stays (a missing config is
+    `{}`). Test: "marks a sample stale when a value changes its JSON type" (`true`→`1`, `false`→`0`, nested; each
+    failed first).
+M64. **Ids are read as UUIDs, as the engine and the worker read them.** A draft's step id written in capitals is the same
+    step (its graph hash doesn't change), so its sample stays; a connection field's value written in capitals names the
+    connection, as `DbConnections.named_by` already held, so a run from before records says "unknown", not "none".
+    Tests: "finds a sample whatever the case of the step's id" (the review's case) and "names a connection whatever
+    the case of its id" (the same cause, found while fixing it); both failed first. A version's own graph is written
+    by `graph_json`, its ids already in one spelling, so reading the step in it (here and in the worker) stays as is.
+    Fixed in 8ec43351; the API, `workflow_ops` and core run tests: 456 passed (the whole suite wasn't rerun: two
+    functions of one route and the sample query); the OpenAPI is unchanged.
+
+Paused at the final checkpoint again. Nothing is pushed: a push and a PR wait for the owner's word.
