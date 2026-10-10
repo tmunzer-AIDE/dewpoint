@@ -2282,7 +2282,7 @@ Built inline on `feat/editor-4c3a` (worktree `scratchpad/ui4c3/build`, from orig
 - Task 2 (ba2e2037): migration 0054, `webhook_endpoints.trigger_key`; 6 failed, then the chain, ingress schema and
   model tests 35 passed.
 - Task 3 (7ebff3c3): an endpoint made for a trigger; 8 failed, then the webhook and trigger-type API tests 35 passed.
-- Task 4 (a6fce0a0): B13, `GET …/workflows/{workflow_id}/webhook-bindings`; 1 failed (`404 == 200`), then the webhook
+- Task 4 (a6fce0ac): B13, `GET …/workflows/{workflow_id}/webhook-bindings`; 1 failed (`404 == 200`), then the webhook
   API tests 34 passed.
 
 ruff, mypy and the formatter clean after each. No mid-slice ruling: the code is the plan's, as written.
@@ -2293,7 +2293,7 @@ ruff, mypy and the formatter clean after each. No mid-slice ruling: the code is 
   tests 62 passed.
 - Task 6 (e39a2119): the list's `triggers` and `schedule_sync_failed`; 3 failed, then the summary and workflow tests
   40 passed; the list's reads stay fixed, 7 at most.
-- Task 7 (2ce370c4): validate and publish say which live schedules a draft would break (ruling 145): the shape check,
+- Task 7 (2ce370cb): validate and publish say which live schedules a draft would break (ruling 145): the shape check,
   bounded in work units (2 MiB of input fetched, 50,000 steps, 100 errors and 5 reasons an input), off the event loop;
   2 collection errors (the module missing), then the check's and the workflow routes' tests 106 passed.
 
@@ -2303,3 +2303,29 @@ contracts (11 kept) clean. No mid-slice ruling: the code is the plan's, as writt
 
 Paused for the owner's review, as the plan says: Task 7 decides what validate may reveal of a schedule's sealed input.
 Milestone 3 (the named answers, the client's types, every check and the final review) starts on the owner's word.
+
+### 4c-3a, milestone 3 and the final checkpoint (2026-10-11)
+
+On the owner's word after milestone 2's review ("Continue with Milestone 3"):
+- Task 8 (688db154): named answers for the trigger routes and the start form (ruling 143); 15 failed, then the
+  OpenAPI, webhook, schedule, CSV start, run request and schedule check API tests 179 passed.
+- Task 9 (3a0adebd): the OpenAPI document and the client's types regenerated; the frontend's three typed validation
+  answers failed typecheck without `schedule_breaks`, then `check:api`, typecheck, lint and build clean, and the unit
+  suite 828 passed.
+- Task 10: §5's B13 row in the outline says where it was built.
+
+Checks, as run at 3a0adebd (no code changed after it):
+- the whole backend suite as CI runs it, on the owner's word ("You may run the full backend suite"): 4825 passed in
+  10 min 38 s (`-n auto`, without the CEL gate tests); the CEL gate tests apart, serially: 442 passed, 8 skipped
+  (Linux only: the evaluator's rlimits and the estimator's peak reset, which CI's runner runs);
+- ruff (check and format), mypy on `src` (285 files), the import contracts (11 kept), and CI's diff of the OpenAPI
+  document the backend serves against `frontend/src/api/openapi.json`: clean, no difference;
+- the frontend, Task 9's run: `check:api`, typecheck, lint and build clean; the unit suite 828 passed. The browser
+  gate wasn't run: no screen changed;
+- local CodeQL: no finding in either language.
+
+Milestone 1's Task 4 and milestone 2's Task 7 now read a6fce0ac and 2ce370cb: they were written a6fce0a0 and 2ce370c4
+(the P3 of milestone 2's pasted review). No mid-slice ruling: the code is the plan's, as written.
+
+Next, a fresh reviewer reviews the whole branch; its findings and their fixes follow in a section of their own.
+Nothing is pushed: a push and a PR wait for the owner's word.
