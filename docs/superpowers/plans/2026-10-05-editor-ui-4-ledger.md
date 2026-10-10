@@ -2035,3 +2035,69 @@ their screens in 4c-2b). Checks, as run on the isolated stack and in the worktre
 - the unit suite: 815 passed (62 files); typecheck, lint, `check:api` and build clean;
 - no backend change (`git diff origin/main -- backend` is empty), so its suite doesn't run.
 Local CodeQL, the screenshots and the fresh review follow at the final checkpoint.
+
+### 4c-2b, the final checkpoint (2026-10-10)
+
+Screenshots, light and dark at 1280 and 320 px, on the isolated stack: text with pills, the tree, a pill's details (a
+trigger value that may be missing; a step's value with no run yet: a sample needs a finished run, which this slice
+starts none of, so the samples' other states rest on the details' unit tests), the builder with a comparison and a group
+(read back from the builder's own text), a formula the builder didn't write, Declassify with a decision and a stale
+entry, and two cards that may not run. Local CodeQL at d99c56d0: no finding in either language.
+
+A fresh reviewer (the most capable model) reviewed fa69a2cf..d99c56d0 against the plan, its Review Focus, the mockups
+and the screenshots, with a test for each claim: no critical finding; six important, nine minor; "ready to merge: with
+fixes". It found none of the Review Focus failure modes, and ran the engine's CEL runtime over the builder's number
+comparisons with an int against a double, and back: always a value, never an error. Re-graded by what a person gets,
+two of its minors are important (a control's errors describe it, a Global Constraint; focus lost on closing a panel),
+and were fixed with the six, in one pass, each test failing first:
+
+M68. **The builder keeps focus in the drawer.** Escape in its tree, a pick, and removing a comparison or a group left
+    focus on the page's body, out of the drawer: Escape now returns it to the button that opened the tree, a pick puts
+    it on the new comparison's operator, a removal on "＋ Condition" (ruling 132's "Escape closes it and gives focus
+    back"). Tests: "gives focus back to ＋ Condition when the tree closes with Escape", "puts focus on a picked
+    comparison's operator, and on ＋ Condition once it's removed".
+M69. **A pill to a step no longer in the draft says it has no sample.** Its sample query never runs, so it said
+    "Looking for a sample…" for good (as M67's version's view did). Test: "says a pill to a step no longer in the draft
+    has no sample, never that it's looking".
+M70. **A pill keeps its state while the next saved revision's answer comes.** The `at` answer is per revision (ruling
+    130), so at each save every pill turned solid, lost its "?" and "may be missing", until the server answered. The
+    previous answer now stands in while the next is asked, for the same value only, and only for the draft: the next
+    answer replaces it, an answer about another revision is still refused (`DraftMoved`), a version's view still shows
+    nothing. Test: "keeps a pill dashed while the next saved revision's answer comes".
+M71. **A default written on a pill always shows.** It showed only while the value may be missing, so one written then
+    couldn't be seen or removed once the value was always there, nor seen in a version's view. It shows whenever it's
+    there (read only in a version; "It's always there now, so this default isn't used." when so); "Add a default…" is
+    offered only where something may be missing. Tests: "shows a default already written though the value is always
+    there now, and removable", "shows a default in a version's view, read only".
+M72. **"＋ Data" pressed before the text was ever focused gives focus back to the text.** Escape asked for a place past
+    the last text, and focus went to the body; it now goes to the end of the last text. Test: "gives focus back to the
+    text when the tree ＋ Data opened closes, the text never focused before".
+M73. **Adding a default focuses it; removing one focuses "Add a default…".** The pressed button went, and focus with it.
+    Test: "puts focus on the default once added, and on Add a default… once it's removed".
+M74. **A comparison's value is described by its problem** (`aria-describedby`): the Global Constraints' "its hint and
+    errors describe it". Test: "describes a comparison's value by its problem".
+M75. **Closing Declassify after its last entry is removed lands on Versions**, its toolbar button gone with the last
+    entry. Test: "lands on Versions when Declassify closes after its last entry is removed".
+    Fixed in e7b660a6. Checks, as run on it: the unit suite 825 passed (62 files); typecheck, lint, `check:api` and
+    build clean; the browser gate 37 passed; local CodeQL no finding in either language; no backend change.
+
+Deferred minors, for the owner: the builder's pill is a button that opens nothing (`aria-haspopup`, no details);
+Declassify alone of the side panels doesn't close on Escape; the pills note shows in a version's view and for a viewer,
+where "＋ Data" and "/" aren't offered; "is" and "is not" on a value of no declared type compare with text only, so
+`trigger.count is 3` writes `== "3"` and never matches the number 3 (a choice of kind needs a design); ← on a value
+shown directly under its group doesn't move to the group (↑ does); the tree's search asks on every keystroke (cached per
+revision); "/" is tested in unit tests only, not in the browser.
+
+What the reviewer set aside, ruled to stand: the typed path for an undeclared trigger in text fields only (the plan's
+code, accepted; a condition on it is a formula); the builder's operator and value without a visible label of their own
+(the row's pill names them, as the signed-off board shows); one `at` question per pill per revision (ruling 130); a
+sensitive value insertable as a pill (the server's taint check decides, the tree tags it); the badge from the last
+check until the next (ruling 137); a boolean literal in a condition shown as not the builder's (never written so); the
+panels without the boards' shadow (ruling 126, outline §6); a value typed both text and object refused in text
+(`template.part_not_scalar`).
+
+Twice before this slice's code, 4b tests failed once on main's own code and passed when run again: `says when the
+latest edits aren't saved` and `stops placing a step, and says so`, each asserting an announcement right after a screen
+change. Not reproduced since; the owner's word: watch for them.
+
+Paused at the final checkpoint. Nothing is pushed: a push and a PR wait for the owner's word.
