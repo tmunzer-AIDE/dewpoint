@@ -35,6 +35,7 @@ import httpx
 import structlog
 from pydantic import ValidationError
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from dewpoint.core.claims.cipher import ClaimCipher, ClaimUnreadableError
@@ -76,10 +77,11 @@ from dewpoint.core.egress.ws import (
     WsLimits,
 )
 from dewpoint.core.models.connections import Connection as ConnectionRow
-from dewpoint.core.models.runs import Run
+from dewpoint.core.models.runs import Run, RunStepConnection
 from dewpoint.core.models.workflows import WorkflowVersion
 from dewpoint.core.ratelimit import scopes as rate_scopes
 from dewpoint.core.ratelimit.buckets import CooldownError, Scope, acquire, block
+from dewpoint.engine.canonical import canonical_json
 from dewpoint.sdk import (
     AuthUnavailable,
     ConnectionType,
@@ -123,6 +125,7 @@ SMTP_BEAT_S = 10.0  # a mail send heartbeats at least this often while its threa
 SCOPE_WAIT_S = 10.0  # the longest wait for a quota token before `Cooldown` (D9)
 RECEIVE_BEAT_S = 10.0  # a stream's receive heartbeats at least this often while it waits (D26; review L7)
 MIN_SECRET = 4  # the secret index's shortest string (engine 2b spec §3.7)
+CONTEXT_BYTES = 4096  # the longest config a step attempt's connection record keeps (B7)
 URL_PART = 8  # a secret URL's path segments and query values this long are secrets too
 type Remember = Callable[[str, str, Sequence[str]], Awaitable[object]]
 
@@ -181,6 +184,7 @@ class StoredConnection:
     config: Mapping[str, Any]
     secret_ct: bytes | None
     revision: int = 0
+    name: str = ""
 
 
 @dataclass(frozen=True)
@@ -208,6 +212,11 @@ class ConnectionSource(Protocol):
     ) -> frozenset[uuid.UUID]: ...
 
     async def load(self, tenant_id: uuid.UUID, connection_id: uuid.UUID) -> StoredConnection | None: ...
+
+    async def opened(
+        self, tenant_id: uuid.UUID, run_id: uuid.UUID, step_id: uuid.UUID, iteration_key: str, attempt: int,
+        connection_id: uuid.UUID, stored: StoredConnection,
+    ) -> None: ...  # fmt: skip
 
 
 def connection_fields(node: type[Node]) -> list[str]:
@@ -258,12 +267,36 @@ class DbConnections:
         async with self.sessionmaker() as s, s.begin():
             await tenant_scope(s, tenant_id)
             found = await s.execute(
-                select(ConnectionRow.type, ConnectionRow.config, ConnectionRow.secret_ct, ConnectionRow.revision).where(
-                    ConnectionRow.id == connection_id, ConnectionRow.tenant_id == tenant_id
-                )
+                select(
+                    ConnectionRow.type,
+                    ConnectionRow.config,
+                    ConnectionRow.secret_ct,
+                    ConnectionRow.revision,
+                    ConnectionRow.name,
+                ).where(ConnectionRow.id == connection_id, ConnectionRow.tenant_id == tenant_id)
             )
             row = found.first()
-        return StoredConnection(row[0], dict(row[1]), row[2], row[3]) if row is not None else None
+        return StoredConnection(row[0], dict(row[1]), row[2], row[3], row[4]) if row is not None else None
+
+    async def opened(
+        self, tenant_id: uuid.UUID, run_id: uuid.UUID, step_id: uuid.UUID, iteration_key: str, attempt: int,
+        connection_id: uuid.UUID, stored: StoredConnection,
+    ) -> None:  # fmt: skip
+        """Records that a step attempt opened this connection, as it was (B7; 4c-2a ruling 8): what a sample says it ran
+        with. Once per attempt and connection, however often the node opens it. Its config is non-secret; past
+        CONTEXT_BYTES it isn't kept."""
+        context = dict(stored.config) if len(canonical_json(stored.config)) <= CONTEXT_BYTES else {}
+        async with self.sessionmaker() as s, s.begin():
+            await tenant_scope(s, tenant_id)
+            await s.execute(
+                insert(RunStepConnection)
+                .values(
+                    tenant_id=tenant_id, run_id=run_id, step_id=step_id, iteration_key=iteration_key, attempt=attempt,
+                    connection_id=connection_id, type=stored.type, name=stored.name, revision=stored.revision,
+                    context=context,
+                )
+                .on_conflict_do_nothing()
+            )  # fmt: skip
 
 
 def secret_strings(secret: Mapping[str, Any], minimum: int = MIN_SECRET) -> list[str]:
@@ -334,8 +367,12 @@ class Network:
         simulated: bool,
         remember: Remember,
         beat: Callable[[], None],
+        iteration_key: str = "",
+        attempt: int = 1,
     ) -> "AttemptNetwork":
-        return AttemptNetwork(self, tenant_id, run_id, step_id, root_run_id, node, simulated, remember, beat)
+        return AttemptNetwork(
+            self, tenant_id, run_id, step_id, root_run_id, node, simulated, remember, beat, iteration_key, attempt
+        )
 
 
 class Channel(Protocol):
@@ -821,8 +858,11 @@ class AttemptNetwork:
         simulated: bool,
         remember: Remember,
         beat: Callable[[], None],
+        iteration_key: str = "",
+        attempt: int = 1,
     ) -> None:
         self.network, self.tenant_id, self.run_id, self.step_id = network, tenant_id, run_id, step_id
+        self.iteration_key, self.attempt = iteration_key, attempt  # which attempt a connection record names (B7)
         self.root_run_id, self.node, self.simulated, self.beat = root_run_id, node, simulated, beat
         self._remember = remember
         self.may_have_sent = False  # once a request may have left this attempt
@@ -937,6 +977,14 @@ class AttemptNetwork:
             raise ConnectionUnavailable()
         unsealed = await unseal(self.network, self.tenant_id, connection_id, stored, frozenset(self.node.credentials))
         await self._remember(str(self.tenant_id), str(self.root_run_id), secret_strings(unsealed.secret))
+        try:  # before the node can use it: a sample says which connection, as it was (B7)
+            await self.network.connections.opened(
+                self.tenant_id, self.run_id, self.step_id, self.iteration_key, self.attempt, connection_id, stored
+            )
+        except Exception as e:
+            if unavailable(e):  # the database didn't answer: nothing was sent
+                raise NotSent() from None
+            raise
         return unsealed.opened(self, self._credential_key)
 
     async def aclose(self) -> None:

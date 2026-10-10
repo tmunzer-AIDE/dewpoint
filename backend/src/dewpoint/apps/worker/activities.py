@@ -416,6 +416,7 @@ def step_activity_for(
                     tenant_id=uuid.UUID(step.tenant_id), run_id=uuid.UUID(step.run_id),
                     step_id=uuid.UUID(step.step_id), root_run_id=uuid.UUID(root), node=node,
                     simulated=step.mode == SIMULATE, remember=answered.remember, beat=activity.heartbeat,
+                    iteration_key=step.iteration_key, attempt=step.attempt,
                 )
                 if network is not None
                 else None
