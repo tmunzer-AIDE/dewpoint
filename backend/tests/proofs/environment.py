@@ -182,8 +182,23 @@ def _docker(argv: list[str], env: dict[str, str] | None = None) -> str:
 
 
 DOCKER: Callable[..., str] = _docker  # the tests' fake replaces it
+
+
+def _processes() -> list[str]:
+    """Every process's command line on this host: where a compose client of a project shows (`-p <project>`)."""
+    return subprocess.run(["ps", "-A", "-o", "args="], capture_output=True, text=True, timeout=30,
+                          check=True).stdout.splitlines()  # fmt: skip
+
+
+PROCESSES: Callable[[], list[str]] = _processes  # the tests' fake replaces it
+SLEEP: Callable[[float], None] = time.sleep  # and this
 _LABEL = "com.docker.compose.project"
 PROJECT_NAME = re.compile(rf"{PROJECT}-[0-9a-f]{{12}}")  # `prepare`'s: the only names `remove_project` acts on
+REMOVE_PASSES, SETTLE_S = 6, 2.0  # a project's removal: listed again after each pass, until it's found quiet
+# How long a project must stay empty, no compose client of it alive, before it's found quiet: longer than a create
+# the daemon had already accepted from a killed compose usually takes to land (a local image's: well under a second).
+# Best effort only: an interrupted create is told by the creates' record, never by this wait
+QUIET_S = 10.0
 _CHANGES_PORTS = {"up", "down", "start", "stop", "restart", "rm", "kill", "create"}  # a recreated service may move
 
 
@@ -263,12 +278,99 @@ def record_project(run: Run) -> None:
             f.write(run.project + "\n")
 
 
+# The compose commands that make a project's containers, networks or volumes: each recorded in flight
+CREATES = {"up", "create", "run", "scale"}
+
+
+def creates_record(projects: Path) -> Path:
+    """Where a run's compose creates are recorded in flight: beside its projects' record (DEWPOINT_PROOF_PROJECTS)."""
+    return projects.with_name(projects.name + ".creates")
+
+
+def _record_create(line: str) -> None:
+    """One line appended to the creates' record and flushed to disk before it returns: a process killed right after
+    still leaves it."""
+    path = creates_record(Path(os.environ["DEWPOINT_PROOF_PROJECTS"]))
+    with path.open("a") as f:
+        f.write(line + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def _begin_create(run: Run) -> str | None:
+    """A compose create of the run's project, recorded in flight before it launches (when the outer runner records
+    projects): its token. Nothing is launched unrecorded: a record that can't be written raises."""
+    if not os.environ.get("DEWPOINT_PROOF_PROJECTS"):
+        return None
+    token = secrets.token_hex(8)
+    _record_create(f"begin {run.project} {token}")
+    return token
+
+
+def interrupted_creates(projects: Path, project: str) -> list[str]:
+    """The project's compose creates begun and never ended: their client stopped (killed, interrupted, timed out)
+    while the daemon may still have been making what it had accepted, which can land at any time after."""
+    record = creates_record(projects)
+    if not record.exists():
+        return []
+    begun: list[str] = []
+    ended: set[str] = set()
+    for line in record.read_text().splitlines():
+        what, _, rest = line.partition(" ")
+        name, _, token = rest.partition(" ")
+        if name == project and what == "begin":
+            begun.append(token)
+        elif name == project and what == "end":
+            ended.add(token)
+    return [token for token in begun if token not in ended]
+
+
 def remove_project(project: str) -> list[str]:
     """After a killed run, by its recorded name: the containers (with their anonymous volumes), the volumes and the
     networks labelled with exactly that project. Each listing is checked whole first, every entry carrying the full
-    name, and nothing is removed if one doesn't; a name `prepare` couldn't have made is refused outright."""
+    name, and nothing is removed if one doesn't; a name `prepare` couldn't have made is refused outright.
+
+    Best effort, never a confirmation on its own: it returns once the project is found quiet, never on one empty
+    listing. Quiet is no compose client of the project alive (one SIGKILL didn't end may create more at any time), then
+    two whole listings QUIET_S apart, both finding nothing, with no client alive at either; anything found in between is
+    removed, and the quiet starts over. Not quiet after REMOVE_PASSES, it raises. A create in flight when its client was
+    stopped can still land after the second listing: whether one was is the creates' record's (`interrupted_creates`),
+    and the cleanup never confirms such a project."""
     if not PROJECT_NAME.fullmatch(project):
         raise ValueError(f"{project!r} is not a proof run's project")
+    removed: list[str] = []
+    empty_since_quiet_began = False  # the last pass found nothing, with no client alive, and waited QUIET_S since
+    for _ in range(REMOVE_PASSES):
+        if _clients(project):
+            empty_since_quiet_began = False
+            SLEEP(SETTLE_S)
+            continue
+        found = _listed(project)
+        if not any(ids for _, ids, _ in found):
+            if empty_since_quiet_began:
+                return removed
+            empty_since_quiet_began = True
+            SLEEP(QUIET_S)
+            continue
+        empty_since_quiet_began = False
+        for kind, ids, remove in found:  # containers first: a network or volume in use can't go
+            if ids:
+                try:
+                    DOCKER([*remove, *ids])
+                except RuntimeError:  # one already being removed, say: the next listing says what's left
+                    continue
+                removed += [f"{kind} {entry}" for entry in ids]
+        SLEEP(SETTLE_S)
+    raise RuntimeError(f"{project} still has a compose client, or containers, volumes or networks, after "
+                       f"{REMOVE_PASSES} passes: never found quiet")  # fmt: skip
+
+
+def _clients(project: str) -> list[str]:
+    """The live processes naming the project as a word of their command line: a compose client of it."""
+    return [line for line in PROCESSES() if project in line.split()]
+
+
+def _listed(project: str) -> list[tuple[str, list[str], list[str]]]:
     kinds = [("container", ["docker", "ps", "-a"], "{{.ID}}", ["docker", "rm", "-f", "-v"]),
              ("volume", ["docker", "volume", "ls"], "{{.Name}}", ["docker", "volume", "rm"]),
              ("network", ["docker", "network", "ls"], "{{.ID}}", ["docker", "network", "rm"])]  # fmt: skip
@@ -283,12 +385,16 @@ def remove_project(project: str) -> list[str]:
                 raise RuntimeError(f"a {kind} listed under {project} is not the recorded project's: nothing removed")
             ids.append(entry)
         found.append((kind, ids, remove))
-    removed = []
-    for kind, ids, remove in found:  # containers first: a network or volume in use can't go
-        if ids:
-            DOCKER([*remove, *ids])
-            removed += [f"{kind} {entry}" for entry in ids]
-    return removed
+    return found
+
+
+def check_running_image(run: Run, service: str, image_id: str) -> None:
+    """After an `up` that created `service`: its container runs exactly `image_id`, the image whose identity was
+    checked (`check_server_image` resolves a tag once; a tag moved since must never run under that record)."""
+    container = f"{run.project}-{service}-1"
+    running = DOCKER(["docker", "inspect", "--format", "{{.Image}}", container]).strip()
+    if running != image_id:
+        raise RuntimeError(f"{container} runs {running or 'nothing'}, not the image the run checked ({image_id})")
 
 
 def down(run: Run, config: str) -> None:
@@ -309,7 +415,14 @@ def run_compose(run: Run, config: str, *args: str, timeout: float = 300) -> str:
     if _CHANGES_PORTS & set(args):
         forget_ports(run)
     argv, env = compose(run, config, *args)
+    # A create is recorded in flight before compose launches, and cleared only once its client returns (failing or
+    # not): a client stopped mid-create leaves the record, and the cleanup never confirms the project then (the owner's
+    # reviews of the race fix). Stopped is a timeout or an interruption (subprocess.run kills the client and raises),
+    # or a signal that ended it (a negative code: no return of its own)
+    create = _begin_create(run) if CREATES & set(args) else None
     done = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=timeout, check=False)
+    if create is not None and done.returncode >= 0:
+        _record_create(f"end {run.project} {create}")
     if done.returncode != 0:
         # Compose's own message, not the environment: it holds the run's password
         raise RuntimeError(f"docker compose {args[0]} failed ({done.returncode}): {done.stderr[-2000:]}")

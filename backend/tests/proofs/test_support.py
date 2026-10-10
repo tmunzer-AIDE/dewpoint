@@ -26,6 +26,13 @@ from tests.proofs import environment, pki, preversioning, tokens
 BUCKET, PREFIX = "dewpoint-audit", "dewpoint/"
 
 
+@pytest.fixture(autouse=True)
+def _no_outer_record(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """These unit tests never append to a real run's project record (a runner's DEWPOINT_PROOF_PROJECTS): a test that
+    needs one names its own."""
+    monkeypatch.delenv("DEWPOINT_PROOF_PROJECTS", raising=False)
+
+
 def _san(cert: x509.Certificate) -> list[str]:
     names = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
     return [str(n) for n in names.get_values_for_type(x509.DNSName)] + [
@@ -442,7 +449,7 @@ def test_the_start_check_proofs_fixture_inspects_the_images_its_run_named(monkey
     from tests.proofs.d12 import test_start_check
 
     test_d12, ran, checked = _selected(monkeypatch)
-    test_d12._need_images(test_start_check)
+    assert test_d12._need_images(test_start_check) == "sha256:" + "0" * 64  # the checked server's ID, for its runs
     inspected = [argv[-1] for argv in ran if argv[:3] == ["docker", "image", "inspect"]]
     assert inspected == [SC_SERVER, SC_CLIENT, test_d12.ADMIN_TOOLS] and checked == [SC_SERVER]
 
@@ -553,7 +560,7 @@ def test_a_project_name_collision_is_never_removed(monkeypatch, tmp_path: Path) 
     with pytest.raises(RuntimeError, match="already"):
         with test_d12._served(test_d12, environment.JWT, tmp_path / "run"):
             pass
-    assert fake.ran == [argv for argv in fake.ran if argv[:2] == ["docker", "logs"]] and not projects.exists()
+    assert fake.ran == [] and not projects.exists()  # not even its logs: the container of that name isn't the run's
 
 
 def test_the_project_is_recorded_before_its_first_up_and_after_its_guard(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
@@ -569,18 +576,55 @@ def test_the_project_is_recorded_before_its_first_up_and_after_its_guard(monkeyp
     assert seen == [f"{run.project}\n"] * 2  # there before the first `up` began, once
 
 
+class _Listings:
+    """`docker`, faked for `remove_project`: each listing answers from its own queue in turn (its last answer from then
+    on); every command recorded."""
+
+    def __init__(self, answers: dict[str, list[str]]) -> None:
+        self.answers, self.ran = {k: list(v) for k, v in answers.items()}, list[list[str]]()
+
+    def __call__(self, argv: list[str], env: dict[str, str] | None = None) -> str:
+        self.ran.append(argv)
+        for start, queue in self.answers.items():
+            if " ".join(argv).startswith(start):
+                return queue.pop(0) if len(queue) > 1 else queue[0]
+        return ""
+
+
+class _Processes:
+    """The host's processes' command lines, faked for `remove_project`: each look answers from its queue in turn (its
+    last answer from then on)."""
+
+    def __init__(self, *answers: list[str]) -> None:
+        self.answers, self.looks = list(answers) or [[]], 0
+
+    def __call__(self) -> list[str]:
+        self.looks += 1
+        return self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+
+
+def _quick(monkeypatch, processes: _Processes | None = None) -> list[float]:  # type: ignore[no-untyped-def]
+    """`remove_project` without its waits (each recorded, returned), and with no compose client alive unless
+    `processes` says otherwise."""
+    slept: list[float] = []
+    monkeypatch.setattr(environment, "SLEEP", slept.append)
+    monkeypatch.setattr(environment, "PROCESSES", processes or _Processes())
+    return slept
+
+
 def test_a_killed_runs_project_is_removed_by_its_exact_name_only(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     project = "dewpoint-m4-0123456789ab"
+    _quick(monkeypatch)
     listing = {"docker ps -a": f"c1 {project}\nc2 {project}\n", "docker volume ls": f"v1 {project}\n",
                "docker network ls": f"n1 {project}\n"}  # fmt: skip
-    docker = _Docker(listing)
+    docker = _Listings({start: [answer, ""] for start, answer in listing.items()})  # gone once removed
     monkeypatch.setattr(environment, "DOCKER", docker)
     assert environment.remove_project(project) == ["container c1", "container c2", "volume v1", "network n1"]
     removals = [argv for argv in docker.ran if "rm" in argv]
     assert removals == [["docker", "rm", "-f", "-v", "c1", "c2"], ["docker", "volume", "rm", "v1"],
                         ["docker", "network", "rm", "n1"]]  # fmt: skip
     for listed in ("docker ps -a", "docker volume ls", "docker network ls"):
-        docker = _Docker({**listing, listed: f"x1 {project}\nx2 {project}-other\n"})
+        docker = _Listings({**{k: [v] for k, v in listing.items()}, listed: [f"x1 {project}\nx2 {project}-other\n"]})
         monkeypatch.setattr(environment, "DOCKER", docker)
         with pytest.raises(RuntimeError, match="not the recorded project's"):
             environment.remove_project(project)
@@ -615,3 +659,221 @@ def test_the_start_check_run_requires_its_project_record(monkeypatch) -> None:  
     test_d12._need_project_record(test_d12)  # the other proofs don't require it
     monkeypatch.setenv("DEWPOINT_PROOF_PROJECTS", "/somewhere/projects")
     test_d12._need_project_record(test_start_check)
+
+
+def test_a_container_that_appears_after_the_listing_is_removed_too_and_the_project_confirmed_empty(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The final review's M8: a create still in flight in the daemon (compose killed mid-`up`) can land after the first
+    listing. The project is listed again after each removal, and removal is confirmed only once nothing is left."""
+    project = "dewpoint-m4-0123456789ab"
+    _quick(monkeypatch)
+    docker = _Listings({"docker ps -a": [f"c1 {project}\n", f"c3 {project}\n", ""], "docker volume ls": [""],
+                        "docker network ls": [f"n1 {project}\n", ""]})  # fmt: skip
+    monkeypatch.setattr(environment, "DOCKER", docker)
+    assert environment.remove_project(project) == ["container c1", "network n1", "container c3"]
+    last = [argv[:3] for argv in docker.ran[-3:]]  # it ended on a whole listing, found empty
+    assert last == [["docker", "ps", "-a"], ["docker", "volume", "ls"], ["docker", "network", "ls"]]
+
+
+def test_a_project_that_wont_go_is_never_confirmed_removed(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    project = "dewpoint-m4-0123456789ab"
+    _quick(monkeypatch)
+    monkeypatch.setattr(environment, "DOCKER", _Listings({"docker ps -a": [f"c1 {project}\n"]}))  # always there
+    with pytest.raises(RuntimeError, match="still has"):
+        environment.remove_project(project)
+
+
+def test_an_empty_project_is_confirmed_only_after_a_quiet_window(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The owner's review of the follow-up: never confirmed on one empty listing. Two whole listings, QUIET_S apart,
+    both find nothing, with no compose client of the project alive at either."""
+    project = "dewpoint-m4-0123456789ab"
+    processes = _Processes()
+    slept = _quick(monkeypatch, processes)
+    docker = _Listings({"docker ps -a": [""], "docker volume ls": [""], "docker network ls": [""]})
+    monkeypatch.setattr(environment, "DOCKER", docker)
+    assert environment.remove_project(project) == []
+    assert slept == [environment.QUIET_S]
+    assert [argv[:3] for argv in docker.ran] == [["docker", "ps", "-a"], ["docker", "volume", "ls"],
+                                                 ["docker", "network", "ls"]] * 2  # fmt: skip
+    assert processes.looks == 2
+
+
+def test_a_create_landing_after_an_empty_listing_is_removed_before_the_project_is_confirmed(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The owner's review of the follow-up: the first listing finds nothing, then a create compose sent before it was
+    killed lands. It shows in the listing after the quiet window, is removed, and the quiet window starts over."""
+    project = "dewpoint-m4-0123456789ab"
+    slept = _quick(monkeypatch)
+    docker = _Listings({"docker ps -a": ["", f"c9 {project}\n", ""], "docker volume ls": [""],
+                        "docker network ls": [""]})  # fmt: skip
+    monkeypatch.setattr(environment, "DOCKER", docker)
+    assert environment.remove_project(project) == ["container c9"]
+    assert ["docker", "rm", "-f", "-v", "c9"] in docker.ran
+    assert slept == [environment.QUIET_S, environment.SETTLE_S, environment.QUIET_S]
+
+
+def test_a_live_compose_client_of_the_project_keeps_it_unconfirmed(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A compose client of the project still alive (one SIGKILL didn't end) may create more at any time: never
+    confirmed while it lives, whatever the listings say. A client of another project doesn't count."""
+    project = "dewpoint-m4-0123456789ab"
+    monkeypatch.setattr(environment, "DOCKER", _Listings({"docker ps -a": [""], "docker volume ls": [""],
+                                                          "docker network ls": [""]}))  # fmt: skip
+    client = f"/usr/local/bin/docker compose -p {project} -f compose.yml up -d"
+    _quick(monkeypatch, _Processes([client]))
+    with pytest.raises(RuntimeError, match="still has"):
+        environment.remove_project(project)
+    _quick(monkeypatch, _Processes([], [client]))  # one there at the window's end: not quiet either
+    with pytest.raises(RuntimeError, match="still has"):
+        environment.remove_project(project)
+    _quick(monkeypatch, _Processes([client], []))  # it ends: the quiet window starts after
+    assert environment.remove_project(project) == []
+    _quick(monkeypatch, _Processes([client.replace(project, "dewpoint-m4-ba9876543210")]))
+    assert environment.remove_project(project) == []
+
+
+def _recording(monkeypatch, tmp_path: Path, name: str = "run") -> tuple[Any, Path]:  # type: ignore[no-untyped-def]
+    """A run whose projects (and creates in flight) are recorded, as the outer runner has them, its listings empty."""
+    run = environment.prepare(tmp_path / name, start_check="on")
+    projects = tmp_path / f"{name}-projects"
+    monkeypatch.setenv("DEWPOINT_PROOF_PROJECTS", str(projects))
+    monkeypatch.setattr(environment, "DOCKER", _Docker({}))
+    return run, projects
+
+
+def test_a_create_is_in_flight_from_before_launch_until_its_client_returns(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    """The owner's review of the race fix: confirmation fails closed for an interrupted create. Its record is written
+    before compose starts and cleared only once the client returns, failing or not; nothing else is recorded."""
+    run, projects = _recording(monkeypatch, tmp_path)
+    during: list[list[str]] = []
+    fake = _Compose(on_up=lambda: during.append(environment.interrupted_creates(projects, run.project)))
+    monkeypatch.setattr(subprocess, "run", fake)
+    environment.run_compose(run, environment.JWT, "up", "-d", "minio")
+    assert [len(d) for d in during] == [1]  # in flight while compose ran
+    assert environment.interrupted_creates(projects, run.project) == []  # its client returned
+    fake.failing_up = True
+    with pytest.raises(RuntimeError, match="failed"):
+        environment.run_compose(run, environment.JWT, "up", "-d")
+    assert [len(d) for d in during] == [1, 1]
+    assert environment.interrupted_creates(projects, run.project) == []  # failing, it still returned
+    lines = environment.creates_record(projects).read_text().splitlines()
+    for args in (("pause", "minio"), ("exec", "-T", "minio", "true"), ("down", "-v")):
+        environment.run_compose(run, environment.JWT, *args)
+    assert environment.creates_record(projects).read_text().splitlines() == lines and len(lines) == 4
+
+
+@pytest.mark.parametrize("stopped", [KeyboardInterrupt(), subprocess.TimeoutExpired(["docker"], 300)],
+                         ids=["interrupted", "timed out"])  # fmt: skip
+def test_a_create_whose_client_is_stopped_stays_in_flight(monkeypatch, tmp_path: Path, stopped: BaseException) -> None:  # type: ignore[no-untyped-def]
+    """Stopped mid-create (the runner's SIGINT, the harness's timeout), subprocess.run kills its client, but the daemon
+    may still land what it had accepted: the record stays."""
+    run, projects = _recording(monkeypatch, tmp_path)
+
+    def killed(argv: list[str], **kwargs: Any) -> Any:
+        if argv[:2] == ["docker", "compose"] and "up" in argv:
+            raise stopped
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", killed)
+    with pytest.raises(type(stopped)):
+        environment.run_compose(run, environment.JWT, "up", "-d")
+    assert len(environment.interrupted_creates(projects, run.project)) == 1
+
+
+@pytest.mark.parametrize("signal_number", [9, 15, 2], ids=["SIGKILL", "SIGTERM", "SIGINT"])
+def test_cleanup_never_confirms_a_project_whose_client_a_signal_ended(  # type: ignore[no-untyped-def]
+    monkeypatch, tmp_path: Path, capsys, signal_number: int
+) -> None:
+    """The owner's review of the in-flight record: a compose client a signal ended returns to subprocess.run as a
+    negative code, not as a raise. That's a stopped client, not a return: its create stays in flight, and the cleanup,
+    its listings empty, reports the project NOT confirmed. An ordinary failing exit (a positive code) still returned."""
+    from tests.proofs import cleanup
+
+    run, projects = _recording(monkeypatch, tmp_path)
+
+    def ended(argv: list[str], **kwargs: Any) -> Any:
+        return SimpleNamespace(returncode=-signal_number, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", ended)
+    with pytest.raises(RuntimeError, match="failed"):
+        environment.run_compose(run, environment.JWT, "up", "-d")
+    assert len(environment.interrupted_creates(projects, run.project)) == 1
+    _quick(monkeypatch)
+    empty = _Listings({"docker ps -a": [""], "docker volume ls": [""], "docker network ls": [""]})
+    monkeypatch.setattr(environment, "DOCKER", empty)
+    assert cleanup.main([str(projects)]) == 1
+    assert "NOT confirmed" in capsys.readouterr().out
+
+
+def test_a_create_is_never_launched_unrecorded(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    run, projects = _recording(monkeypatch, tmp_path)
+    environment.creates_record(projects).mkdir()  # the record can't be written
+    fake = _Compose()
+    monkeypatch.setattr(subprocess, "run", fake)
+    with pytest.raises(OSError):
+        environment.run_compose(run, environment.JWT, "up", "-d")
+    assert not [argv for argv in fake.ran if argv[:2] == ["docker", "compose"]]
+
+
+def test_cleanup_never_confirms_a_project_whose_create_was_in_flight(monkeypatch, tmp_path: Path, capsys) -> None:  # type: ignore[no-untyped-def]
+    """The owner's review: a create in flight when its client was stopped can land after the second empty listing. The
+    cleanup still removes what it finds, but reports the project not confirmed while its record says so; a project
+    whose creates all returned is confirmed."""
+    from tests.proofs import cleanup
+
+    run, projects = _recording(monkeypatch, tmp_path)
+
+    def killed(argv: list[str], **kwargs: Any) -> Any:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(subprocess, "run", killed)
+    with pytest.raises(KeyboardInterrupt):
+        environment.run_compose(run, environment.JWT, "up", "-d")
+    _quick(monkeypatch)
+    late = _Listings({"docker ps -a": ["", "", f"c9 {run.project}\n"], "docker volume ls": [""],
+                      "docker network ls": [""]})  # fmt: skip  # it lands after the second empty listing
+    monkeypatch.setattr(environment, "DOCKER", late)
+    assert cleanup.main([str(projects)]) == 1
+    assert "NOT confirmed" in capsys.readouterr().out
+    assert not [argv for argv in late.ran if "rm" in argv]  # never seen: only the record knew
+
+    returned, returned_projects = _recording(monkeypatch, tmp_path, "returned")
+    monkeypatch.setattr(subprocess, "run", _Compose())
+    environment.run_compose(returned, environment.JWT, "up", "-d")
+    _quick(monkeypatch)
+    monkeypatch.setattr(environment, "DOCKER", _Listings({"docker ps -a": [""], "docker volume ls": [""],
+                                                          "docker network ls": [""]}))  # fmt: skip
+    assert cleanup.main([str(returned_projects)]) == 0
+    assert "NOT confirmed" not in capsys.readouterr().out
+
+
+def test_the_server_that_runs_is_the_image_its_run_checked(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    """The final review's M3: the identity check resolves the tag once; every `up` that creates the server is then
+    checked to run that very image ID (D12.4's recreate included), so a tag moved in between fails the run."""
+    from tests.proofs.d12 import test_d12
+
+    checked, other = "sha256:" + "a" * 64, "sha256:" + "b" * 64
+    server = test_d12.Server(
+        environment.prepare(tmp_path / "run", start_check="off"), environment.JWT, image_id=checked
+    )
+    monkeypatch.setattr(environment, "run_compose", lambda *a, **k: "")
+    docker = _Docker({"docker inspect": f"{checked}\n"})
+    monkeypatch.setattr(environment, "DOCKER", docker)
+    server.compose("up", "-d", "minio")  # not the server: nothing to check
+    server.compose("up", "-d")  # every service: the server's container checked
+    server.compose("up", "-d", "--force-recreate", "temporal")  # D12.4's recreate: checked again
+    inspected = [argv for argv in docker.ran if argv[:2] == ["docker", "inspect"]]
+    assert [argv[-1] for argv in inspected] == [server.container] * 2
+    monkeypatch.setattr(environment, "DOCKER", _Docker({"docker inspect": f"{other}\n"}))
+    with pytest.raises(RuntimeError, match="not the image the run checked"):
+        server.compose("up", "-d")
+
+
+def test_a_fixture_whose_server_isnt_the_checked_image_fails_and_still_removes_its_project(
+    monkeypatch, tmp_path: Path
+) -> None:  # type: ignore[no-untyped-def]
+    test_d12 = _quiet_setup(monkeypatch)
+    fake = _Compose()
+    monkeypatch.setattr(subprocess, "run", fake)
+    monkeypatch.setattr(environment, "DOCKER", _Docker({"docker inspect": "sha256:" + "b" * 64 + "\n"}))
+    with pytest.raises(RuntimeError, match="not the image the run checked"):
+        with test_d12._served(test_d12, environment.JWT, tmp_path / "run", image_id="sha256:" + "a" * 64):
+            pass
+    assert len(fake.downs()) == 1

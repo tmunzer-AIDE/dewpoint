@@ -89,6 +89,7 @@ class Server:
     verifier: dict[str, str] = field(default_factory=dict)
     authorizer: dict[str, str] = field(default_factory=dict)
     anchor_writer: dict[str, str] = field(default_factory=dict)
+    image_id: str = ""  # the server image whose identity was checked: every `up` that creates the server runs it
 
     def token(self, who: str = "proof-admin", *, lifetime: int = 3600, **claims: Any) -> str:
         return self.run.keys.sign({"sub": who, "permissions": environment.CLIENTS[who], "aud": AUDIENCE, **claims},
@@ -102,7 +103,10 @@ class Server:
         return path
 
     def compose(self, *args: str) -> str:
-        return environment.run_compose(self.run, self.config, *args)
+        answer = environment.run_compose(self.run, self.config, *args)
+        if self.image_id and _creates_server(args):
+            environment.check_running_image(self.run, "temporal", self.image_id)
+        return answer
 
     # the run's own: its project's names, and the host ports Docker assigned (revision 17.3.1)
     @property
@@ -122,9 +126,18 @@ class Server:
         return f"{self.run.project}-temporal-1"
 
 
-def _need_images(module: Any) -> None:
-    """Every image the proof uses is on this machine, its IDs recorded, and the server's built from this tree. A
-    module with EXPLICIT_IMAGES runs only with the images its run named, both of them, and exactly those."""
+def _creates_server(args: tuple[str, ...]) -> bool:
+    """A compose `up` that creates (or recreates) the server: one naming no service, or naming it."""
+    if "up" not in args:
+        return False
+    services = [a for a in args[args.index("up") + 1 :] if not a.startswith("-")]
+    return not services or "temporal" in services
+
+
+def _need_images(module: Any) -> str:
+    """Every image the proof uses is on this machine, its IDs recorded, and the server's built from this tree: its ID,
+    which every `up` then runs. A module with EXPLICIT_IMAGES runs only with the images its run named, both of them,
+    and exactly those."""
     named = {"DEWPOINT_M4_IMAGE": SERVER_IMAGE, "DEWPOINT_M4_PROOF_CLIENT": PROOF_CLIENT}
     if getattr(module, "EXPLICIT_IMAGES", False):
         unnamed = [setting for setting in named if not os.environ.get(setting)]
@@ -145,6 +158,7 @@ def _need_images(module: Any) -> None:
         environment.check_server_image(SERVER_IMAGE, environment.SERVER_CONTEXT / "config" / "jwt.yaml")
     except RuntimeError as e:
         pytest.fail(str(e))
+    return ids[SERVER_IMAGE]
 
 
 async def connect(server: Server, who: str = "proof-admin", *, ca: Path | None = None, cert: bool = True,
@@ -216,20 +230,20 @@ def _need_project_record(module: Any) -> None:
 
 @pytest.fixture(scope="module", params=[environment.MTLS, environment.JWT])
 def server(request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory) -> Iterator[Server]:
-    _need_images(request.module)
+    image_id = _need_images(request.module)
     _need_project_record(request.module)
     root = tmp_path_factory.mktemp(f"d12-{request.param}") / "run"
-    with _served(request.module, request.param, root) as served:
+    with _served(request.module, request.param, root, image_id=image_id) as served:
         yield served
 
 
 @contextlib.contextmanager
-def _served(module: Any, config: str, root: Path) -> Iterator[Server]:
+def _served(module: Any, config: str, root: Path, *, image_id: str = "") -> Iterator[Server]:
     """D12's server for one configuration, in a project of its own. Every step from the first `up` on runs under the
     cleanup guard; the server's logs are kept when they can be read and written, and the project is removed whether
     they could or not (the owner's review of this fixture)."""
     run = environment.prepare(root, start_check=module.START_CHECK)  # each module names it: never by omission
-    server = Server(run, config)
+    server = Server(run, config, image_id=image_id)
     try:
         server.compose("up", "-d", "minio")
         environment.wait_for_s3(run)
@@ -244,7 +258,8 @@ def _served(module: Any, config: str, root: Path) -> Iterator[Server]:
         yield server
     finally:
         try:
-            _keep_logs(server)
+            if run.state.get("fresh"):  # the run's own server: a refused collision's container isn't
+                _keep_logs(server)
         finally:
             environment.down(run, config)  # the run's own project only, checked first; none if it brought none up
 

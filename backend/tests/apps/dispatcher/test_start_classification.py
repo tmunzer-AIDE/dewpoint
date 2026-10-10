@@ -522,3 +522,50 @@ async def test_a_request_starting_from_before_0052_whose_start_landed_is_identif
         assert await once(dispatch_sessionmaker, env.client, api_settings) == {"started": 1}
     finally:
         await handle.terminate()
+
+
+# --- an uncertain start never becomes `dead`, whichever limit it reaches first (the final review's M6)
+
+
+async def _refusals_carried_over(owner: Any, request: Any, attempts: int) -> None:
+    """Refusals counted before 0052 counted sends: `attempts` ahead of `sends`."""
+    async with owner() as s, s.begin():
+        await s.execute(text("update run_requests set attempts = :n where id = :i"), {"n": attempts, "i": request.id})
+
+
+async def test_the_last_refusal_after_an_unproven_attempt_leaves_the_start_unresolved_never_dead(
+    queued, owner_sessionmaker, dispatch_sessionmaker, api_settings, env
+) -> None:
+    """Refusals carried over from before 0052 can reach MAX_ATTEMPTS before the sends' cap. An earlier attempt left
+    unproven (an absence seen once) then holds the end back exactly as it does at the cap: `starting`, unresolved,
+    noted for an operator, and observed by the reconciler, paced; never `dead` (the owner's rule)."""
+    _, _, request = queued
+    found = await begin(dispatch_sessionmaker, request, api_settings)
+    assert await dispatch.settle(dispatch_sessionmaker, found, dispatch.Outcome("absent")) == "absent"  # unproven
+    await _refusals_carried_over(owner_sessionmaker, request, dispatch.MAX_ATTEMPTS - 1)
+    again = await begin(dispatch_sessionmaker, request, api_settings)
+    assert await dispatch.settle(dispatch_sessionmaker, again, dispatch.Outcome("refused")) == "unresolved"
+    state = await _state(owner_sessionmaker, request.id)
+    assert (state["status"], state["reason"], state["attempts"], state["sends"]) == (
+        "starting", None, dispatch.MAX_ATTEMPTS, 2,
+    )  # fmt: skip
+    await _observed_twice_as_unresolved(owner_sessionmaker, dispatch_sessionmaker, api_settings, env.client, request)
+
+
+async def test_the_last_refusal_with_nothing_unproven_still_ends_the_request_refused(
+    queued, owner_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    _, _, request = queued
+    await _refusals_carried_over(owner_sessionmaker, request, dispatch.MAX_ATTEMPTS - 1)
+    found = await begin(dispatch_sessionmaker, request, api_settings)
+    assert await dispatch.settle(dispatch_sessionmaker, found, dispatch.Outcome("refused")) == "dead"
+    assert await _end(owner_sessionmaker, request.id) == ("dead", dispatch.START_REFUSED, dispatch.REFUSED_MESSAGE)
+
+
+async def test_a_request_found_queued_with_its_refusals_spent_is_held_never_sent(
+    queued, owner_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    _, _, request = queued
+    await _refusals_carried_over(owner_sessionmaker, request, dispatch.MAX_ATTEMPTS)  # a bug's, or a hand's edit
+    assert await begin(dispatch_sessionmaker, request, api_settings) == dispatch.Held(dispatch.SEND_CAP)
+    assert set(await reasons(owner_sessionmaker, request.id)) == {"start_unresolved"}

@@ -6,8 +6,10 @@ SIGTERM and SIGINT are only noted, so neither cuts anything short; pytest is sto
 removed, whatever stopping met; an interruption inside the cleanup leaves the record and an explicit failure; and the
 whole run, cleanup included, stays within its cap."""
 
+import builtins
 import signal
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +19,12 @@ from tests.proofs import runner
 
 CAP, RESERVE = 1200.0, 300.0
 PROJECT = "dewpoint-m4-0123456789ab"
+WALL, RUNNER_PID = 1_000_000.0, 777
+
+
+@pytest.fixture(autouse=True)
+def _no_interruptions_noted() -> None:
+    runner.INTERRUPTIONS.noted.clear()  # `main` clears them before it installs its handlers; `run` itself doesn't
 
 
 class Clock:
@@ -99,7 +107,8 @@ class World:
         return int(self.cleanup_answer)
 
     def seams(self) -> runner.Seams:
-        return runner.Seams(popen=self.popen, killpg=self.killpg, clock=self.clock, cleanup=self.cleanup)
+        return runner.Seams(popen=self.popen, killpg=self.killpg, clock=self.clock, cleanup=self.cleanup,
+                            wall=lambda: WALL, pid=lambda: RUNNER_PID)  # fmt: skip
 
     def here(self) -> Path:
         return Path(self.started[0]["env"]["DEWPOINT_PROOF_PROJECTS"]).parent
@@ -211,20 +220,81 @@ def test_an_interruption_raised_inside_the_cleanup_keeps_the_record_and_an_expli
     assert runner.unfinished(out) == [here]
 
 
-def test_the_runner_notes_sigterm_and_sigint_while_it_runs_and_restores_them_after(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    before = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
-    seen: dict[int, Any] = {}
+NOTED = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT)
 
-    def fake_run(*args: Any, **kwargs: Any) -> int:
-        seen.update({sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)})
+
+def test_the_runner_notes_every_stopping_signal_while_it_runs_and_restores_them_after(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """SIGHUP (a closed terminal) and SIGQUIT too, as SIGTERM and SIGINT: noted, never the runner's death (the final
+    review's I1). Anything noted before `main` installs them is cleared first, never after (so none is dropped)."""
+    before = {sig: signal.getsignal(sig) for sig in NOTED}
+    seen: dict[str, Any] = {}
+
+    def fake_run(proof: str, selection: list[str], out: Path, **kwargs: Any) -> int:
+        handlers = {sig: signal.getsignal(sig) for sig in NOTED}
+        seen.update({"handlers": handlers, "noted": list(runner.INTERRUPTIONS.noted), "out": out})
         return 0
 
     monkeypatch.setattr(runner, "run", fake_run)
-    assert runner.main(["--proof", "sc", "--out", "/nowhere", "--cap", "1200", "--reserve", "300", "x.py"]) == 0
-    assert seen == {signal.SIGTERM: runner.INTERRUPTIONS, signal.SIGINT: runner.INTERRUPTIONS}
+    runner.INTERRUPTIONS.noted.append("SIGTERM")  # an earlier run's, stale
+    assert runner.main(["--proof", "sc", "--out", "relative/runs", "--cap", "1200", "--reserve", "300", "x.py"]) == 0
+    assert seen["handlers"] == dict.fromkeys(NOTED, runner.INTERRUPTIONS) and seen["noted"] == []
+    assert seen["out"].is_absolute()  # wherever pytest runs, its record and projects files are where they were named
     assert {sig: signal.getsignal(sig) for sig in before} == before
-    runner.INTERRUPTIONS(signal.SIGTERM, None)  # a handler that returns: nothing is raised where it lands
-    assert runner.INTERRUPTIONS.noted[-1] == "SIGTERM"
+    runner.INTERRUPTIONS(signal.SIGHUP, None)  # a handler that returns: nothing is raised where it lands
+    assert runner.INTERRUPTIONS.noted[-1] == "SIGHUP"
+
+
+# --- the runner gone: pytest stops itself (the final review's I1)
+
+
+def test_pytest_is_told_who_its_runner_is_and_when_to_stop_itself(tmp_path: Path) -> None:
+    world = World([0])
+    assert _run(world, tmp_path / "runs") == 0
+    env = world.started[0]["env"]
+    assert env["DEWPOINT_PROOF_RUNNER_PID"] == str(RUNNER_PID)
+    # its share of the cap, then the grace the runner itself would give it: past that, it's on its own
+    assert float(env["DEWPOINT_PROOF_DEADLINE"]) == pytest.approx(WALL + CAP - RESERVE + runner.GRACE_S)
+
+
+def _watched(parents: list[int], times: list[float]) -> tuple[str | None, list[str]]:
+    interrupted: list[str] = []
+    ppid, now = iter(parents), iter(times)
+    why = runner.watch(RUNNER_PID, WALL + 100, stop=threading.Event(), poll=0.0, getppid=lambda: next(ppid),
+                       now=lambda: next(now), interrupt=lambda: interrupted.append("SIGINT"))  # fmt: skip
+    return why, interrupted
+
+
+def test_pytest_interrupts_itself_once_when_its_runner_is_gone() -> None:
+    why, interrupted = _watched([RUNNER_PID, RUNNER_PID, 1], [WALL, WALL + 1, WALL + 2])  # reparented: it died
+    assert why == "the runner is gone" and interrupted == ["SIGINT"]
+
+
+def test_pytest_interrupts_itself_once_its_deadline_has_passed() -> None:
+    why, interrupted = _watched([RUNNER_PID] * 3, [WALL, WALL + 50, WALL + 100])
+    assert why == "its deadline passed" and interrupted == ["SIGINT"]
+
+
+def test_the_guard_does_nothing_while_its_runner_lives_and_stops_when_asked() -> None:
+    stop, interrupted = threading.Event(), []
+    stop.set()
+    assert runner.watch(RUNNER_PID, WALL + 100, stop=stop, poll=0.0, getppid=lambda: RUNNER_PID, now=lambda: WALL,
+                        interrupt=lambda: interrupted.append("x")) is None  # fmt: skip
+    assert interrupted == []
+
+
+def test_the_guard_starts_in_pytest_only_under_a_runner(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    assert runner.guard_from({}) is None  # an ordinary run of the suite: no guard
+    under = {"DEWPOINT_PROOF_RUNNER_PID": "1", "DEWPOINT_PROOF_DEADLINE": "0"}  # past due, and not its parent
+    assert runner.guard_from({**under, "PYTEST_XDIST_WORKER": "gw0"}) is None  # a worker's parent is the controller
+    guard = runner.guard_from(
+        {"DEWPOINT_PROOF_RUNNER_PID": str(runner.os.getppid()), "DEWPOINT_PROOF_DEADLINE": "9e18"}
+    )
+    assert guard is not None
+    thread, stop = guard
+    assert thread.daemon and thread.is_alive()
+    stop.set()
+    thread.join(5)
+    assert not thread.is_alive()  # its runner (this process's parent) is there and its deadline far off: no interrupt
 
 
 # --- stopping, the cap, and the cleanup's own failures
@@ -268,6 +338,58 @@ def test_a_cleanup_that_overruns_or_fails_is_reported_and_its_record_kept(tmp_pa
     failing = World([0], cleanup=1)
     assert _run(failing, tmp_path / "other") == runner.UNCLEANED
     assert (failing.here() / "cleanup.txt").read_text().startswith("failed (exit 1): not confirmed")
+
+
+# --- the runner's own results: distinct, and reported whatever fails
+
+
+def test_the_runners_own_exit_codes_never_collide_with_pytests() -> None:
+    ours = [runner.CAPPED, runner.INTERRUPTED, runner.REFUSED, runner.UNCLEANED, runner.ERROR]
+    assert len(set(ours)) == len(ours) and not set(ours) & {int(code) for code in pytest.ExitCode}
+
+
+def test_a_pytest_that_cant_be_started_still_gets_the_cleanup_and_a_result(tmp_path: Path) -> None:
+    world = World([0])
+
+    def broken(argv: list[str], **kwargs: Any) -> Any:
+        raise OSError("no such interpreter")
+
+    world.popen = broken  # type: ignore[method-assign]
+    assert runner.run("sc", ["x.py"], tmp_path / "runs", cap=CAP, reserve=RESERVE, seams=world.seams()) == runner.ERROR
+    [here] = _dirs(tmp_path / "runs")
+    assert "runner error (OSError)" in (here / "run.txt").read_text() and (here / "cleaned").exists()
+
+
+def test_a_cleanup_that_cant_be_started_is_an_explicit_failure(tmp_path: Path) -> None:
+    world = World([0], cleanup=OSError("no python"), records=True)
+    assert _run(world, tmp_path / "runs") == runner.UNCLEANED
+    assert (world.here() / "cleanup.txt").read_text().startswith("failed (OSError): not confirmed")
+
+
+def test_a_status_that_cant_be_written_is_never_taken_for_a_confirmed_cleanup(tmp_path: Path) -> None:
+    world = World([0], records=True)
+    real_popen = world.popen
+
+    def locking(argv: list[str], **kwargs: Any) -> Any:
+        proc = real_popen(argv, **kwargs)
+        world.here().chmod(0o500)  # its directory read-only from here on: cleanup.txt and `cleaned` can't be written
+        return proc
+
+    world.popen = locking  # type: ignore[method-assign]
+    try:
+        assert _run(world, tmp_path / "runs") == runner.UNCLEANED
+    finally:
+        world.here().chmod(0o700)
+    assert len(world.cleanups) == 1 and not (world.here() / "cleaned").exists()
+    assert "couldn't be written" in (world.here() / "run.txt").read_text()
+
+
+def test_a_terminal_gone_by_the_end_never_turns_a_result_into_an_error(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def gone(*args: Any, **kwargs: Any) -> None:
+        raise OSError(5, "Input/output error")  # stdout's terminal closed (SIGHUP noted, the run went on)
+
+    monkeypatch.setattr(builtins, "print", gone)
+    assert _run(World([0]), tmp_path / "runs") == 0
 
 
 def test_a_cap_without_room_for_cleanup_is_refused(tmp_path: Path) -> None:

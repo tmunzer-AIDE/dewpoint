@@ -70,7 +70,7 @@ ID_COLLISION = "id_collision"
 START_FAILED = "start_failed"
 ENVELOPE_UNREADABLE = "envelope_unreadable"
 RUN_ENDED = "run_ended"
-SEND_CAP = "send_cap"  # its start sends are spent: never sent again (`start_call.CAP`)
+SEND_CAP = "send_cap"  # its start sends, or its refusals, are spent (`_spent`): never sent again
 # D12's start check denies with one of two fixed reasons, in the error's `PermissionDeniedFailure` (revision 17)
 NOT_PERMITTED, CHECK_UNAVAILABLE = "dewpoint:start-not-permitted", "dewpoint:start-check-unavailable"
 START_CHECK_UNAVAILABLE = "start_check_unavailable"  # every send spent, none created anything: infrastructure
@@ -298,7 +298,7 @@ async def _begin(
         await s.flush()
         await recovery.noted(s, request.tenant_id, recovery.START_AFTER_END, request.id)  # for an operator (2b-4b M3)
         return Held(RUN_ENDED)
-    if request.sends >= start_call.CAP:  # settling never queues it again at the cap: a bug, or a hand's edit
+    if _spent(request):  # settling never queues a spent request again: a bug, or a hand's edit
         log.error("start_send_cap", request_id=str(request.id))
         request.status, request.starting_at = "starting", func.statement_timestamp()
         await s.flush()
@@ -572,10 +572,9 @@ async def _settle(s: AsyncSession, starting: Target, outcome: Outcome) -> str:
         return "uncertain"  # starting, its slot held, for the reconciler (§7.6)
     if outcome.kind == "absent":
         # Its end write ran (its row records an end, or its slot was released): a start did happen, and only its
-        # history is gone. Never queued or started again; left as it is for an operator (the owner's M3 reviews). At
-        # the cap it holds no slot (`_at_cap`, `Held(SEND_CAP)`): its run's row alone says so (the final review's I1).
-        at_cap = request.sends >= start_call.CAP
-        if not (await _running(s, request.id) if at_cap else await _unstarted(s, request.id)):
+        # history is gone. Never queued or started again; left as it is for an operator (the owner's M3 reviews). A
+        # spent request holds no slot (`_at_end`, `Held(SEND_CAP)`): its run's row alone says so (final review I1).
+        if not (await _running(s, request.id) if _spent(request) else await _unstarted(s, request.id)):
             return "history_missing"
     await release(s, request.id)
     certain = ("refused", "throttled", "not_permitted", "check_unavailable")  # this attempt created nothing
@@ -600,11 +599,8 @@ async def _settle(s: AsyncSession, starting: Target, outcome: Outcome) -> str:
         return "dead"
     if outcome.kind in ("refused", "not_permitted"):
         request.attempts += 1
-        if request.attempts >= MAX_ATTEMPTS:
-            await _refused(s, request)
-            return "dead"
-    if request.sends >= start_call.CAP:  # its sends are spent: never queued again
-        return await _at_cap(s, request)
+    if _spent(request):  # its sends, or its refusals, are spent: never queued again
+        return await _at_end(s, request)
     if outcome.kind == "check_unavailable":  # infrastructure: backs off, no refusal counted
         request.status = "queued"
         request.next_attempt_at = datetime.now(UTC) + backoff(request.unavailable_sends)
@@ -621,11 +617,17 @@ async def _settle(s: AsyncSession, starting: Target, outcome: Outcome) -> str:
     return "refused"
 
 
-async def _at_cap(s: AsyncSession, request: RunRequest) -> str:
-    """A request whose sends are spent (`start_call.CAP`): ended only when every send certainly created nothing, its
-    reason saying which (the start check's refusals first: an integrity failure; then an unavailable check:
-    infrastructure; else Temporal's throttling); with any attempt unproven, left `starting`, without a slot, for the
-    reconciler to observe and an operator to see (never ended for an uncertainty)."""
+def _spent(request: RunRequest) -> bool:
+    """Its sends are spent (`start_call.CAP`), or its confirmed refusals (MAX_ATTEMPTS: refusals counted before 0052
+    counted sends can reach it first): it's never sent again."""
+    return request.sends >= start_call.CAP or request.attempts >= MAX_ATTEMPTS
+
+
+async def _at_end(s: AsyncSession, request: RunRequest) -> str:
+    """A spent request (`_spent`): with any attempt unproven, left `starting`, without a slot, for the reconciler to
+    observe and an operator to see: never ended for an uncertainty, whichever limit came first (the final review's M6).
+    Otherwise ended, its reason saying which: refused (its refusals spent, or the start check refused some: an
+    integrity failure), then an unavailable check (infrastructure), else Temporal's throttling."""
     unproven = await s.scalar(
         select(ExecutionEvidence.unproven).where(
             ExecutionEvidence.workflow_id == run_workflow_id(str(request.tenant_id), str(request.id)),
@@ -633,10 +635,10 @@ async def _at_cap(s: AsyncSession, request: RunRequest) -> str:
         )
     )
     if unproven:
-        log.error("start_unresolved_at_cap", request_id=str(request.id))
+        log.error("start_unresolved_at_end", request_id=str(request.id))
         await recovery.noted(s, request.tenant_id, recovery.START_UNRESOLVED, request.id)
         return "unresolved"
-    if request.not_permitted_sends > 0:  # the start check refused some: an integrity failure, whatever the others got
+    if request.attempts >= MAX_ATTEMPTS or request.not_permitted_sends > 0:  # refused for good; the check's: integrity
         await _refused(s, request)
     elif request.unavailable_sends > 0:
         log.error("start_check_unavailable", request_id=str(request.id))

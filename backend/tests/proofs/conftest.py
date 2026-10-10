@@ -11,6 +11,14 @@ from pathlib import Path
 import pytest
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    """Under the proof runner (tests/proofs/runner.py), pytest's guard: it interrupts itself, so its teardowns run and
+    remove its project, once its runner is gone or its deadline has passed. Nothing outside the runner."""
+    from tests.proofs import runner
+
+    runner.guard_from(os.environ)
+
+
 def enabled(proof: str) -> bool:
     return proof in {p.strip() for p in os.environ.get("DEWPOINT_PROOF", "").split(",")}
 
