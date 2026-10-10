@@ -9,9 +9,13 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from dewpoint.engine.cel import types as T
+from dewpoint.engine.cel.bind import ScopeView
+from dewpoint.engine.cel.evaluate import evaluate_local
+from dewpoint.engine.cel.record import ExpressionRecord
 from dewpoint.engine.cel.runtime import compile_checked, evaluate
 from dewpoint.engine.graph.scope import Entry, scope
 from dewpoint.engine.graph.validate import ValidationResult, validate
+from dewpoint.engine.runtime import resolve
 from tests.engine.graph.test_scope import CTX, graph
 from tests.support.graphs import G, cel, nid
 
@@ -155,8 +159,14 @@ def _data(draw: Any, e: Entry) -> Any:
 
 
 @functools.cache
-def programs() -> tuple[tuple[str, Any], ...]:
-    return tuple((e.path, compile_checked(guarded(e, f"{e.path} == {e.path}"), _DECLS)) for e in entries())
+def records() -> tuple[tuple[str, ExpressionRecord], ...]:
+    """Each guarded read as validation records it, with what it declares and the names it binds: what a run
+    evaluates."""
+    out: list[tuple[str, ExpressionRecord]] = []
+    for e in entries():
+        result = checked(guarded(e, f"{e.path} == {e.path}"))
+        out.append((e.path, next(x for x in result.expressions if x.node == str(nid("c")) and x.field == "/condition")))
+    return tuple(out)
 
 
 @settings(max_examples=120, deadline=None)
@@ -170,11 +180,15 @@ def test_a_guarded_read_is_never_an_error_at_run_time(data: st.DataObject) -> No
         if path.startswith("steps.") and path.endswith(".output"):
             ran = not e.missing or data.draw(st.booleans())
             steps[path.split(".")[1]] = {"output": _data(data.draw, e)} if ran else {}
-    bindings = {"trigger": trigger, "steps": steps, "vars": {"count": 0}, "loops": {},
-                "run": {"id": "r", "started_at": "2026-01-01T00:00:00Z", "now": "2026-01-01T00:00:00Z"}}  # fmt: skip
-    for path, program in programs():
-        result = evaluate(program, bindings)
-        assert result.kind == "value", (path, result.message)
+    run = {"id": "r", "started_at": "2026-01-01T00:00:00Z", "now": "2026-01-01T00:00:00Z"}
+    view = ScopeView(trigger=trigger, steps=steps, vars={"count": 0}, loops={}, run=run)
+    for path, record in records():
+        # As a run evaluates it (engine/runtime/execution.py's _cel_task): bound first, each name it reads a root, then
+        # evaluated. A name it can't bind, a type's, failed every run though the raw evaluation passed (the fix found
+        # while planning 4c-2b).
+        resolve.bind_view(record, view)
+        result = evaluate_local(record, view)
+        assert result.ok, (path, result.message)
 
 
 def test_is_there_is_false_for_a_value_only_null() -> None:

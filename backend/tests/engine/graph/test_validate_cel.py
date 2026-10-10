@@ -396,7 +396,7 @@ SPELLINGS: dict[str, dict[str, Any]] = {
     "allOf and anyOf": {"allOf": [{"anyOf": [_OBJECT, {"type": "string"}]}]},
     "allOf and oneOf": {"allOf": [{"oneOf": [_OBJECT, {"type": "string"}]}, {"type": ["object", "string"]}]},
 }
-SAFE = "type(trigger.variant) == map && has(trigger.variant.n) && trigger.variant.n > 0"
+SAFE = "type(trigger.variant) == type({}) && has(trigger.variant.n) && trigger.variant.n > 0"
 UNSAFE = ("trigger.variant.n > 0", "has(trigger.variant.n) && trigger.variant.n > 0")
 
 
@@ -421,6 +421,10 @@ def test_a_value_that_may_not_be_an_object_is_guarded_before_any_read(spelling: 
         assert shape == [
             "`trigger.variant` may not be an object in its schema, so reading its fields fails when it isn't."
         ]
+        fixes = [
+            d.fix for d in check(one(expr, input_schema=schema)).diagnostics if "may not be an object" in d.message
+        ]
+        assert fixes == ["Guard it with `type(trigger.variant) == type({})`."]  # a spelling that runs (no type name)
         failed = evaluate(compile_checked(expr, {"trigger": T.MAP}), {"trigger": scalar})
         assert failed.kind == "error", expr
     assert codes(one(SAFE, input_schema=schema)) == []
@@ -447,7 +451,7 @@ def test_a_name_bound_as_map_is_no_object_test() -> None:
     """The review of revision 4: a comprehension may bind `map`; then `type(x) == map` compares with that variable,
     not the built-in type, and guards nothing."""
     schema = holder(SPELLINGS["anyOf"])
-    shadowed = "[string].all(map, " + SAFE + ")"
+    shadowed = '[type("")].all(map, type(trigger.variant) == map && has(trigger.variant.n) && trigger.variant.n > 0)'
     said = [d.message for d in check(one(shadowed, input_schema=schema)).diagnostics]
     assert "`trigger.variant` may not be an object in its schema, so reading its fields fails when it isn't." in said
     failed = evaluate(compile_checked(shadowed, {"trigger": T.MAP}), {"trigger": {"variant": "accepted scalar"}})
@@ -462,3 +466,47 @@ def test_open_data_and_indexes_keep_their_rules() -> None:
     assert "may not be an object" not in said
     listed = holder({"type": "array", "items": {"anyOf": [_OBJECT, {"type": "string"}]}})
     assert codes(one("trigger.variant[0].n > 0", input_schema=listed)) == []
+
+
+# A formula is bound when it runs: every name it reads is a run's root (engine/cel/bind.py). A CEL type's name isn't
+# one, so a formula naming one failed every run though it validated (found while planning 4c-2b): it's refused, with
+# the spelling that runs.
+TYPE_NAMES = {
+    "map": "type({})", "list": "type([])", "string": 'type("")', "int": "type(0)", "double": "type(0.0)",
+    "bool": "type(true)", "null_type": "type(null)", "uint": "type(0u)", "bytes": 'type(b"")',
+}  # fmt: skip
+
+
+@pytest.mark.parametrize("name", [*TYPE_NAMES, ".string", "dyn", "type", "google.protobuf.Timestamp"])
+def test_a_formula_naming_a_type_is_refused(name: str) -> None:
+    expr = f"trigger.x == {name}" if name.startswith("google.") else f"type(trigger.x) == {name}"
+    found = [(d.code, d.message, d.fix) for d in check(one(expr)).diagnostics if d.code == "cel.type_name"]
+    spelled = TYPE_NAMES.get(name.lstrip("."))
+    fix = (
+        f"Compare with a value's type instead: `{spelled}`."
+        if spelled
+        else "Compare with a value's type instead, such as `type({})`."
+    )
+    said = f"`{name.lstrip('.')}` names a type, which a formula can't read when it runs."
+    assert found == [("cel.type_name", said, fix)]
+
+
+def test_a_comprehension_variable_named_like_a_type_is_no_type_name() -> None:
+    assert "cel.type_name" not in codes(one("[1, 2].all(map, map > 0) && trigger.x != null"))
+
+
+@pytest.mark.parametrize("spelling", TYPE_NAMES.values())
+def test_a_type_test_spelt_with_a_value_runs(spelling: str) -> None:
+    """Through the run's own binding (engine/runtime/resolve.py's bind_view), for every JSON value."""
+    from dewpoint.engine.cel.bind import ScopeView
+    from dewpoint.engine.cel.evaluate import evaluate_local
+    from dewpoint.engine.runtime import resolve
+
+    result = check(one(f"has(trigger.x) && type(trigger.x) == {spelling}"))
+    assert [d.code for d in result.diagnostics if d.code.startswith("cel.")] == []
+    record = next(x for x in result.expressions if x.field == "/value")
+    run = {"id": "r", "started_at": "2026-01-01T00:00:00Z", "now": "2026-01-01T00:00:00Z"}
+    for x in (3, 3.5, "s", True, None, [1], {"a": 1}):
+        view = ScopeView(trigger={"x": x}, steps={}, vars={}, loops={}, run=run)
+        resolve.bind_view(record, view)  # raises when it can't bind: what failed every run before
+        assert evaluate_local(record, view).ok, (spelling, x)

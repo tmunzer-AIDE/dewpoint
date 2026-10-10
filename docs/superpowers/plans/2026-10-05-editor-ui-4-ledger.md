@@ -1862,3 +1862,25 @@ closed, no new blocker. Its 56 focused checks passed, including the uppercase co
 worker and answers "unknown" when records are absent; the five new regression cases fail on the held head's source
 and M62's baseline still passes. It didn't rerun the whole suite or CodeQL. The five deferred minors stay the owner's
 decisions. It authorizes no push, PR or issue: those stay the owner's.
+
+### A formula names no type (2026-10-10, the owner in chat)
+
+While the 4c-2b plan was researched, a formula naming a CEL type (`type(x) == map`, `list`, `string`, `int`, …) was
+found to validate clean and fail every run: a run binds every name a formula reads as one of its roots
+(`engine/cel/bind.py`), and a type's name is none ("`` `map` isn't available here ``"). 4c-2a's shape rule told people
+to write `type(x) == map`, and the scope's guards were written so; 4c-2a's run-time test evaluated without the run's
+binding, so it didn't see it. The owner chose to fix it at validation, with no runtime change (ENGINE_ABI stays 6,
+the golden histories unchanged), and signed off the spelling amendment below.
+
+M65. **A formula names no type.**
+    - Validation refuses one (`cel.type_name`, an error): "`` `map` names a type, which a formula can't read when it
+      runs. ``", with the spelling that runs as its fix (`type({})`, `type([])`, `type("")`, `type(0)`, `type(0.0)`,
+      `type(true)`, `type(null)`, `type(0u)`, `type(b"")`). A comprehension's own variable of such a name is no type.
+    - Rulings 114, 119 and 120 spell the object test `type(x) == type({})` and the list test `type(x) == type([])`:
+      the shape rule's fix says so, `guards.shape` recognises it (and `map` still, so a formula using it is told one
+      thing), and the scope's guards are written so. The engine spec's §4.3 and §5.10 say it.
+    - The guarded-read property test now evaluates what validation records through the run's own binding
+      (`resolve.bind_view`, then `evaluate_local`); it failed first on "`` `list` isn't available here ``".
+    - The cost: a draft whose formula names a type meets the new error at its next validation (it failed every run
+      already). A version published with one still fails at run time, as before; published again, it's refused with
+      how to fix it.

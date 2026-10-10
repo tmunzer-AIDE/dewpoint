@@ -46,9 +46,9 @@ class Guard:
         if self.kind == "not_null":
             return f"{self.path} != null"
         if self.kind == "is_map":
-            return f"type({self.path}) == map"
+            return f"type({self.path}) == type({{}})"  # a type's name can't be bound by a run (cel.type_name)
         if self.kind == "is_list":
-            return f"type({self.path}) == list"
+            return f"type({self.path}) == type([])"
         return f"size({self.path}) > {self.size}"
 
 
