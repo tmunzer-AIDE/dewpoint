@@ -132,6 +132,40 @@ command, with `--attest --confirm`, once Temporal is reachable and before the AP
 **Until the cutover is recorded, no session may set `session_replication_role = replica`** on this database (a
 superuser's setting): such a session's inserts skip the capture trigger unseen, which nothing here can detect.
 
+## Migration 0053: name the database, one per cluster
+
+Migration 0053 tightens the database's privileges for operator recovery. It runs in one transaction: its checks, its
+changes and its recorded revision commit together or not at all. It locks no application table, and waits at most
+5 seconds for each lock. When it refuses or fails, nothing changed: fix the cause, then run the upgrade again.
+
+- **Name the database you migrate,** apart from its URL: `DEWPOINT_EXPECTED_DATABASE=<name>` in the migrating
+  process's environment, or `alembic -x expected_database=<name> upgrade head`. Compose's `migrate` service sets
+  `DEWPOINT_EXPECTED_DATABASE: dewpoint`. The upgrade refuses when:
+  - no name is given;
+  - the name isn't the database it's connected to;
+  - that database isn't Dewpoint's (no `alembic_version` or `platform_settings` table);
+  - it's at another revision.
+- **Run one Dewpoint database per PostgreSQL cluster.** 0053 makes a cluster-wide group role, `dewpoint_recovery`
+  (`NOLOGIN`), for the recovery functions to come. It refuses when that role already exists, whoever made it, so a
+  second Dewpoint database in the same cluster can't migrate past 0052. Other applications' databases may share the
+  cluster: that role is 0053's only change outside the database it migrates.
+- **The database's privileges must be the reviewed reference's.** Before changing anything, 0053 compares every object,
+  owner and grant of the database with the reference it carries. It refuses on any difference, listing up to 20
+  (a grant added by hand, say).
+  - The reference expects the migrating role to own the database, its objects and its languages, as Compose's
+    bootstrap superuser does.
+  - A deployment where another role owns them (a managed PostgreSQL, say) needs a reviewed reference of its own first.
+- **What PUBLIC loses:**
+  - EXECUTE on the application's functions;
+  - USAGE on schema `public`;
+  - USAGE on the languages `plpgsql` and `sql`;
+  - TEMPORARY on the database.
+
+  Each service role keeps what it uses through explicit grants. A role of your own that reads the application's
+  tables, a reporting login say, needs `GRANT USAGE ON SCHEMA public` after 0053, and its table grants as before.
+- **Downgrading** to 0052 refuses while `dewpoint_recovery` has a member (a provisioned recovery login): remove the
+  member first.
+
 ## A build with a new engine ABI
 
 A build ID ends with its engine ABI (`+abi7`), which changes whenever a build could execute a workflow differently. A
@@ -413,11 +447,12 @@ Compose's services set `DEWPOINT_TEMPORAL_INSECURE_DEV=true` to reach the dev se
 recorded `development` environment accepts: a Compose deployment recorded as `production` needs an external Temporal
 and the settings above.
 
-Compose's `migrate` service upgrades the schema, records the environment (`DEWPOINT_ENVIRONMENT`, `production` unless
-set) with the Temporal namespace (`DEWPOINT_TEMPORAL_NAMESPACE`, `default` unless set), and gives every tenant a data
-key as `dewpoint_admin_login`. Set the namespace in `.env`: every service takes it from there, and the worker exits 2
-unless its own matches the record. Ordinary Compose is `production`, so no run starts; CI and local development use the
-development override, on a database of their own (a project's own volume), with synthetic data only:
+Compose's `migrate` service upgrades the schema (naming its database for migration 0053, above), records the
+environment (`DEWPOINT_ENVIRONMENT`, `production` unless set) with the Temporal namespace
+(`DEWPOINT_TEMPORAL_NAMESPACE`, `default` unless set), and gives every tenant a data key as `dewpoint_admin_login`. Set
+the namespace in `.env`: every service takes it from there, and the worker exits 2 unless its own matches the record.
+Ordinary Compose is `production`, so no run starts; CI and local development use the development override, on a
+database of their own (a project's own volume), with synthetic data only:
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d

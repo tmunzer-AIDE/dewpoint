@@ -163,6 +163,11 @@ async def _deployment(db: Database) -> None:
         await admin.dispose()
 
 
+def _named(url: str) -> str:
+    """The database a url names: what migration 0053 expects (DEWPOINT_EXPECTED_DATABASE)."""
+    return url.rsplit("/", 1)[1].split("?", 1)[0]
+
+
 @pytest.fixture(scope="module")
 def database(server: Server) -> Database:  # noqa: F811
     """The run's `dewpoint-db` (its profile is up with the server), migrated to head as the suite's own is, with its
@@ -172,7 +177,8 @@ def database(server: Server) -> Database:  # noqa: F811
     log = server.run.root.parent / "migrate.log"
     with log.open("w") as out:  # its words stay in the run's directory: a connection error can name the database
         done = subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"], cwd=BACKEND, stdout=out,
-                              stderr=subprocess.STDOUT, env={**os.environ, "DEWPOINT_DATABASE_URL": db.url()},
+                              stderr=subprocess.STDOUT, env={**os.environ, "DEWPOINT_DATABASE_URL": db.url(),
+                                                             "DEWPOINT_EXPECTED_DATABASE": _named(db.url())},
                               timeout=300, check=False)  # fmt: skip
     if done.returncode != 0:
         pytest.fail(f"migrating the run's database failed ({done.returncode}); see migrate.log")

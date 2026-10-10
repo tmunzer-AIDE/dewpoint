@@ -139,7 +139,9 @@ class Database:
 
         self._container = PostgresContainer("postgres:16-alpine", driver="asyncpg").__enter__()
         self.url = self._container.get_connection_url()
-        env = {**os.environ, "DEWPOINT_DATABASE_URL": self.url, "UV_NO_SYNC": "1"}
+        # migration 0053 refuses a database not named apart from the URL (DEWPOINT_EXPECTED_DATABASE)
+        named = self.url.rsplit("/", 1)[1]
+        env = {**os.environ, "DEWPOINT_DATABASE_URL": self.url, "DEWPOINT_EXPECTED_DATABASE": named, "UV_NO_SYNC": "1"}
         subprocess.run([".venv/bin/alembic", "upgrade", "head"], cwd=BACKEND, env=env, check=True, capture_output=True)
         return self
 

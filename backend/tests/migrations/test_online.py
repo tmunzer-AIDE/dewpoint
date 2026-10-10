@@ -38,6 +38,8 @@ from tests.probes.migration_locks import Load, seed
 
 ROOTS = 300  # root runs seeded: 450 runs, in batches of `BATCH` below
 BATCH = 40
+# The last revision these tests cover, where every upgrade here stops: 0053 runs once per cluster, in one transaction,
+# and has tests of its own (test_0053.py)
 HEAD = "0052"
 # each deployed starting revision's migrations, in order (D15)
 LATER = ["0035", "0036", "0037", "0038", "0039", "0040", "0043", "0044", "0048", "0049", "0050", "0051", "0052"]
@@ -123,7 +125,7 @@ async def test_every_committed_step_keeps_the_boundaries_its_migration_keeps(clu
     url = await copy(cluster, templates[start])
     before = await read(url, security)
     with recorded() as steps:
-        await asyncio.to_thread(upgrade, url)
+        await asyncio.to_thread(upgrade, url, HEAD)
     migrated = by_migration(steps)
     assert list(migrated) == PATHS[start]
     found, at_start = [], before
@@ -143,9 +145,9 @@ async def test_an_upgraded_database_ends_as_a_fresh_one_does(cluster, templates,
     and grant the same; its data backfilled: each run's root its tree's, each root's execution recorded, each schedule
     its incarnation 0 with its life before the migration."""
     url = await copy(cluster, templates[start])
-    await asyncio.to_thread(upgrade, url)
+    await asyncio.to_thread(upgrade, url, HEAD)
     empty = await copy(cluster, "template0")
-    await asyncio.to_thread(upgrade, empty)
+    await asyncio.to_thread(upgrade, empty, HEAD)
     upgraded, fresh = await read(url, schema), await read(empty, schema)
     assert {k: v for k, v in upgraded.items() if v != fresh[k]} == {}
     assert all(valid and ready for _, valid, ready in upgraded["valid"])
@@ -205,7 +207,7 @@ UPDATE run_requests SET status = 'queued'
     finally:
         await c.close()
     assert sum(expected.values()) == 42 and len(expected) > 1
-    await asyncio.to_thread(upgrade, url)
+    await asyncio.to_thread(upgrade, url, HEAD)
     c = await asyncpg.connect(url)
     try:
         counted = {r[0]: r[1] for r in await c.fetch("SELECT tenant_id, outstanding FROM ingress_outstanding")}
@@ -231,10 +233,10 @@ async def round_trip(url: str) -> None:
     await asyncio.to_thread(upgrade, url, "0034")
     await seed(url, ROOTS)
     before = await read(url, schema)
-    await asyncio.to_thread(upgrade, url)
+    await asyncio.to_thread(upgrade, url, HEAD)
     await asyncio.to_thread(downgrade, url, "0034")
     assert await read(url, schema) == before
-    await asyncio.to_thread(upgrade, url)
+    await asyncio.to_thread(upgrade, url, HEAD)
     assert await scalar(url, TREE) == 0
 
 
@@ -259,7 +261,7 @@ async def test_an_interrupted_backfill_goes_on_from_its_committed_batches(cluste
     online.AFTER.append(interrupt)
     try:
         with pytest.raises(Interrupted):
-            await asyncio.to_thread(upgrade, url)
+            await asyncio.to_thread(upgrade, url, HEAD)
     finally:
         online.AFTER.remove(interrupt)
     assert await scalar(url, "SELECT version_num FROM alembic_version") == revision
@@ -268,14 +270,14 @@ async def test_an_interrupted_backfill_goes_on_from_its_committed_batches(cluste
     else:
         assert await scalar(url, "SELECT count(*) FROM execution_evidence") == 3 * BATCH
     with recorded() as steps:
-        await asyncio.to_thread(upgrade, url)
+        await asyncio.to_thread(upgrade, url, HEAD)
     assert await scalar(url, "SELECT version_num FROM alembic_version") == HEAD
     assert await scalar(url, TREE) == 0
     assert await scalar(url, UNRECORDED) == 0
     remaining = (450 if at.startswith("0037") else ROOTS) - 3 * BATCH  # runs, or root runs, not done yet
     assert len([n for n, _ in steps if n.startswith(f"{at} backfill")]) == remaining // BATCH + 1
     straight = await copy(cluster, templates["0034"])
-    await asyncio.to_thread(upgrade, straight)
+    await asyncio.to_thread(upgrade, straight, HEAD)
     assert await read(url, schema) == await read(straight, schema)
 
 
@@ -299,7 +301,7 @@ async def test_an_upgrade_interrupted_after_any_step_goes_on_from_there(cluster,
             runs += 1
             assert runs < 1_000
             try:
-                await asyncio.to_thread(upgrade, url)
+                await asyncio.to_thread(upgrade, url, HEAD)
                 break
             except Interrupted:
                 pass
@@ -307,7 +309,7 @@ async def test_an_upgrade_interrupted_after_any_step_goes_on_from_there(cluster,
         online.AFTER.remove(interrupt)
     assert runs == len(seen) + 1 > 100
     straight = await copy(cluster, templates["0034"])
-    await asyncio.to_thread(upgrade, straight)
+    await asyncio.to_thread(upgrade, straight, HEAD)
     assert await read(url, schema) == await read(straight, schema)
     for query in (TREE, UNRECORDED, UNINCARNATED, UNSPANNED):
         assert await scalar(url, query) == 0, query
@@ -324,7 +326,7 @@ async def test_both_paths_upgrade_under_a_continuing_load(cluster, templates, st
     await load.prepare()
     loops = [asyncio.create_task(load._loop(kind)) for kind in Load.KINDS]
     try:
-        await asyncio.wait_for(asyncio.to_thread(upgrade, url), 120)
+        await asyncio.wait_for(asyncio.to_thread(upgrade, url, HEAD), 120)
     finally:
         load.stop.set()
         await asyncio.gather(*loops)
@@ -377,7 +379,7 @@ async def test_a_schedule_the_old_code_makes_after_the_backfill_is_still_invento
 
     online.AFTER.append(old_code)
     try:
-        await asyncio.to_thread(upgrade, url)
+        await asyncio.to_thread(upgrade, url, HEAD)
     finally:
         online.AFTER.remove(old_code)
     assert len(made) >= 2
@@ -397,7 +399,7 @@ async def test_once_the_cutover_is_recorded_a_new_schedule_is_the_new_syncs_alon
     """After `dewpoint schedules inventory-cutover` (no writer from before 0040 left), a schedule added is the new
     sync's to incarnate: nothing is captured for it."""
     url = await copy(cluster, templates["0042"])
-    await asyncio.to_thread(upgrade, url)
+    await asyncio.to_thread(upgrade, url, HEAD)
     await execute(url, "INSERT INTO schedule_inventory_cutover DEFAULT VALUES")
     made = uuid.uuid4()
     await execute(
@@ -494,7 +496,7 @@ async def test_a_step_behind_a_held_lock_gives_way_until_it_is_released(cluster,
     giving_way = GivingWay()
     logging.getLogger("alembic.online").addHandler(giving_way)
     async with Holder(url, table, mode) as holder:
-        upgrading = asyncio.create_task(asyncio.to_thread(upgrade, url))
+        upgrading = asyncio.create_task(asyncio.to_thread(upgrade, url, HEAD))
         try:
             await asyncio.wait_for(giving_way.seen.wait(), 60)
         finally:
@@ -527,12 +529,12 @@ async def test_a_lock_never_released_stops_the_upgrade_naming_its_step(cluster, 
     url = await copy(cluster, templates["0042"])
     t0 = time.monotonic()
     async with Holder(url):
-        upgrading = asyncio.create_task(asyncio.to_thread(upgrade, url))
+        upgrading = asyncio.create_task(asyncio.to_thread(upgrade, url, HEAD))
         with pytest.raises(online.StepFailedError, match=r"^online step 0037 .+ gave way 10 times \((lock|budget)\)"):
             await asyncio.wait_for(asyncio.shield(upgrading), 60)
     assert time.monotonic() - t0 < 30
     assert await scalar(url, "SELECT version_num FROM alembic_version") == "0036"
-    await asyncio.to_thread(upgrade, url)
+    await asyncio.to_thread(upgrade, url, HEAD)
     assert await scalar(url, "SELECT version_num FROM alembic_version") == HEAD
 
 
@@ -931,7 +933,7 @@ async def test_no_application_role_can_set_its_own_deadlock_timeout(cluster, tem
     """The owner's review of checkpoint 3, verified: every role the migrations make (`dewpoint_*`) is refused `SET
     deadlock_timeout` in its sessions (a superuser's parameter, granted to none of them)."""
     url = await copy(cluster, templates["0042"])
-    await asyncio.to_thread(upgrade, url)
+    await asyncio.to_thread(upgrade, url, HEAD)
     c = await asyncpg.connect(url)
     try:
         roles = [r["rolname"] for r in await c.fetch("SELECT rolname FROM pg_roles WHERE rolname LIKE 'dewpoint\\_%' "

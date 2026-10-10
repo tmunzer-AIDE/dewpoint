@@ -6,10 +6,13 @@ evidence for the accounting, so the migration records that span, from its creati
 import asyncio
 import os
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 
+import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from testcontainers.community.postgres import PostgresContainer
 
 from dewpoint.apps import schedules
 from dewpoint.core.auth.users import create_user
@@ -19,20 +22,28 @@ from tests.support.workflows import seed_workflow
 BACKEND = Path(__file__).parents[2]
 
 
+@pytest.fixture
+def own_cluster() -> Iterator[str]:
+    """A PostgreSQL cluster of this test's own (a url of its default database): 0053 runs once per cluster, and the
+    session's database has run it."""
+    with PostgresContainer("postgres:16-alpine", driver="asyncpg") as pg:
+        yield pg.get_connection_url()
+
+
 async def migrated(url: str, revision: str) -> None:
-    env = {**os.environ, "DEWPOINT_DATABASE_URL": url}
+    env = {**os.environ, "DEWPOINT_DATABASE_URL": url, "DEWPOINT_EXPECTED_DATABASE": url.rsplit("/", 1)[1]}
     migrating = await asyncio.create_subprocess_exec("uv", "run", "alembic", "upgrade", revision, cwd=BACKEND,
                                                      env=env, stdout=asyncio.subprocess.DEVNULL,
                                                      stderr=asyncio.subprocess.DEVNULL)  # fmt: skip
     assert await migrating.wait() == 0
 
 
-async def test_a_schedule_from_before_the_migration_shows_its_unproven_history_as_unknown(pg_url: str) -> None:
+async def test_a_schedule_from_before_the_migration_shows_its_unproven_history_as_unknown(own_cluster: str) -> None:
     fresh = f"legacy_{uuid.uuid4().hex[:12]}"
-    admin = create_async_engine(pg_url, isolation_level="AUTOCOMMIT")
+    admin = create_async_engine(own_cluster, isolation_level="AUTOCOMMIT")
     async with admin.connect() as c:
         await c.execute(text(f'CREATE DATABASE "{fresh}"'))
-    url = pg_url.rsplit("/", 1)[0] + f"/{fresh}"
+    url = own_cluster.rsplit("/", 1)[0] + f"/{fresh}"
     engine = make_engine(url)
     try:
         await migrated(url, "0039")

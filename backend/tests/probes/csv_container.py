@@ -138,8 +138,9 @@ class Stack:
         time.sleep(2)  # the init scripts' restart
         owner = self.url("dewpoint_owner", "OWNER")
         admin = self.url("dewpoint_admin_login", "ADMIN")
-        _docker("run", "--rm", "--network", self.net, *self.app_env(owner), self.image, "sh", "-c",
-                "set -e; alembic upgrade head; dewpoint platform init-environment; "
+        # as Compose's migrate step, the database named apart from the URL (migration 0053 refuses it otherwise)
+        _docker("run", "--rm", "--network", self.net, *self.app_env(owner), "-e", "DEWPOINT_EXPECTED_DATABASE=dewpoint",
+                self.image, "sh", "-c", "set -e; alembic upgrade head; dewpoint platform init-environment; "
                 f"DEWPOINT_DATABASE_URL={admin} dewpoint plugins sync")  # fmt: skip
         seeded = _docker("run", "--rm", "-i", "--network", self.net, *self.app_env(owner), self.image,
                          "python", "-", "200", stdin=SEED)  # fmt: skip

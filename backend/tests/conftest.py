@@ -61,7 +61,8 @@ def _attest_inventory_cutover(url: str) -> None:
 def pg_url() -> str:
     with PostgresContainer("postgres:16-alpine", driver="asyncpg") as pg:
         url = pg.get_connection_url()
-        env = {**os.environ, "DEWPOINT_DATABASE_URL": url}
+        # 0053's guard: the database it migrates, named explicitly
+        env = {**os.environ, "DEWPOINT_DATABASE_URL": url, "DEWPOINT_EXPECTED_DATABASE": url.rsplit("/", 1)[1]}
         subprocess.run(["uv", "run", "alembic", "upgrade", "head"], cwd=BACKEND, env=env, check=True)
         _attest_tick_cutover(url)
         _attest_inventory_cutover(url)

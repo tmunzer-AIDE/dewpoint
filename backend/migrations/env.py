@@ -59,7 +59,20 @@ def run_migrations_offline() -> None:
 def do_run_migrations(connection: Connection) -> None:
     # A transaction per migration (2b-4b, D15): 0035 to 0044 commit in short steps of their own (`migrations/online.py`),
     # and each migration is recorded as it ends, so an interrupted upgrade goes on from the last one recorded.
-    context.configure(connection=connection, target_metadata=target_metadata, transaction_per_migration=True)
+    # 0053's guard compares the database it runs on with one named explicitly, never taken from the connection's URL:
+    # `alembic -x expected_database=<name>`, or DEWPOINT_EXPECTED_DATABASE. A test may hook its changes (`after_change`).
+    expected = (
+        context.get_x_argument(as_dictionary=True).get("expected_database")
+        or config.attributes.get("expected_database")
+        or os.environ.get("DEWPOINT_EXPECTED_DATABASE")
+    )
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        transaction_per_migration=True,
+        expected_database=expected or None,
+        after_change=config.attributes.get("after_change"),
+    )
 
     with context.begin_transaction():
         context.run_migrations()

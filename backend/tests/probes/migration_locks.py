@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """The large-table migration locks' probe (the 2b-4b plan's M1a; the owner's D15): how long upgrading a populated
-database to the head holds each table, and what that costs normal readers and writers meanwhile. Run by hand, never in
+database to `TARGET` (0052, the last revision it measures) holds each table, and what that costs normal readers and
+writers meanwhile. Run by hand, never in
 CI; each run is bounded and uses a disposable Postgres 16 container (testcontainers), with synthetic data only. From
 `backend/`:
 
     PYTHONPATH=$PWD/src:$PWD .venv/bin/python -m tests.probes.migration_locks <from> <roots> [--out FILE]
 
 `<from>` is the starting revision (`0034` or `0042`, D15's two paths) and `<roots>` the root runs seeded there, the rest
-in proportion (`PROFILE`). The seeded database is copied twice, and `alembic upgrade head` runs on each copy, as a
+in proportion (`PROFILE`). The seeded database is copied twice, and `alembic upgrade 0052` runs on each copy, as a
 deployment's would (0035 to 0044 in their online steps since D15's ruling, `migrations/online.py`):
 - **control**, alone: a sampler reads the migrating backend's relation locks and statement every `SAMPLE` seconds, so
   each existing table's reads and writes are blocked for as long as the upgrade holds such a lock without a break
@@ -286,11 +287,16 @@ class Sampler:
             await c.close()
 
 
+# Where both copies' upgrades stop: 0053 runs once per PostgreSQL cluster (its role is the cluster's), and both copies
+# share this probe's cluster; it locks no application table, and has tests of its own (tests/migrations/test_0053.py)
+TARGET = "0052"
+
+
 def _upgrade(url: str, marks: list[tuple[float, str]], t0: float, gave_way: dict[str, int]) -> tuple[int, list[str]]:
-    """`alembic upgrade head`, its "Running upgrade" lines stamped as they come, its steps' giving-way counted by why;
+    """`alembic upgrade TARGET`, its "Running upgrade" lines stamped as they come, its steps' giving-way counted by why;
     its exit and its last lines."""
     env = {**os.environ, "DEWPOINT_DATABASE_URL": url.replace("postgresql://", "postgresql+asyncpg://")}
-    proc = subprocess.Popen([str(BACKEND / ".venv/bin/alembic"), "upgrade", "head"], cwd=BACKEND, env=env,  # noqa: S603
+    proc = subprocess.Popen([str(BACKEND / ".venv/bin/alembic"), "upgrade", TARGET], cwd=BACKEND, env=env,  # noqa: S603
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)  # fmt: skip
     assert proc.stdout is not None
     tail: list[str] = []

@@ -181,26 +181,36 @@ def alembic_config(migrations: Path = BACKEND / "migrations") -> Config:
     return config
 
 
-def _alembic(url: str, config: Config | None, run: Callable[[Config], None]) -> None:
-    """An Alembic command in this process (its hooks seen here), on `url` (asyncpg's, plain); env.py reads the url from
-    the environment, restored after."""
-    before = os.environ.get("DEWPOINT_DATABASE_URL")
+FROM_URL = "<the url's database>"  # the default expected name (0053's guard): the database `url` names
+
+
+def _alembic(url: str, config: Config | None, run: Callable[[Config], None], expected: str | None = FROM_URL) -> None:
+    """An Alembic command in this process (its hooks seen here), on `url` (asyncpg's, plain); env.py reads the url, and
+    the expected database's name 0053's guard compares (`expected`: the url's own by default, None for none), from the
+    environment, restored after."""
+    before = {k: os.environ.get(k) for k in ("DEWPOINT_DATABASE_URL", "DEWPOINT_EXPECTED_DATABASE")}
     os.environ["DEWPOINT_DATABASE_URL"] = url.replace("postgresql://", "postgresql+asyncpg://")
+    name = url.rsplit("/", 1)[1].split("?", 1)[0] if expected == FROM_URL else expected
+    if name is None:
+        os.environ.pop("DEWPOINT_EXPECTED_DATABASE", None)
+    else:
+        os.environ["DEWPOINT_EXPECTED_DATABASE"] = name
     try:
         run(config or alembic_config())
     finally:
-        if before is None:
-            del os.environ["DEWPOINT_DATABASE_URL"]
-        else:
-            os.environ["DEWPOINT_DATABASE_URL"] = before
+        for key, value in before.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
-def upgrade(url: str, target: str = "head", config: Config | None = None) -> None:
-    _alembic(url, config, lambda c: command.upgrade(c, target))
+def upgrade(url: str, target: str = "head", config: Config | None = None, expected: str | None = FROM_URL) -> None:
+    _alembic(url, config, lambda c: command.upgrade(c, target), expected)
 
 
-def downgrade(url: str, target: str, config: Config | None = None) -> None:
-    _alembic(url, config, lambda c: command.downgrade(c, target))
+def downgrade(url: str, target: str, config: Config | None = None, expected: str | None = FROM_URL) -> None:
+    _alembic(url, config, lambda c: command.downgrade(c, target), expected)
 
 
 def autocommitted[T](url: str, fn: Callable[[Connection], T]) -> T:

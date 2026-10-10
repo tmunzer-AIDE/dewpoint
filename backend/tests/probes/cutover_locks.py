@@ -182,7 +182,9 @@ def main() -> None:
     args = parser.parse_args()
     with PostgresContainer("postgres:16-alpine", driver=None) as pg:
         url = pg.get_connection_url()
-        env = {**os.environ, "DEWPOINT_DATABASE_URL": url.replace("postgresql://", "postgresql+asyncpg://")}
+        # migration 0053 refuses a database not named apart from the URL (DEWPOINT_EXPECTED_DATABASE)
+        env = {**os.environ, "DEWPOINT_DATABASE_URL": url.replace("postgresql://", "postgresql+asyncpg://"),
+               "DEWPOINT_EXPECTED_DATABASE": url.rsplit("/", 1)[1]}  # fmt: skip
         subprocess.run([str(BACKEND / ".venv/bin/alembic"), "upgrade", "head"], cwd=BACKEND, env=env,  # noqa: S603
                        check=True, capture_output=True)  # fmt: skip
         t = time.monotonic()

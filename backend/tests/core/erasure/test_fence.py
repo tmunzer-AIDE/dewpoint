@@ -213,6 +213,8 @@ async def test_the_fence_refuses_rather_than_lets_through_when_its_owner_cant_by
         await s.begin()
         await s.execute(text(f"create role {owner} nologin"))
         await s.execute(text(f"grant select on tenant_erasures to {owner}"))
+        # the fence finds its table through `public`, which PUBLIC may use no more (0053): as any owner of it would
+        await s.execute(text(f"grant usage on schema public to {owner}"))
         await s.execute(text(f"alter function tenant_insert_fence() owner to {owner}"))
         with pytest.raises(DBAPIError) as e:
             await s.execute(text(LIMITS), {"t": tenant})

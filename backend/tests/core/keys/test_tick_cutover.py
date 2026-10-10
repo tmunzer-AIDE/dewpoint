@@ -7,24 +7,35 @@ key retires (`legacy_ticks`). The suite's own database records one at its setup,
 import asyncio
 import os
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 
+import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
+from testcontainers.community.postgres import PostgresContainer
 
 from dewpoint.core.db import make_engine
 
 BACKEND = Path(__file__).parents[3]
 
 
-async def test_even_a_fresh_deployments_migration_records_no_tick_cutover(pg_url: str) -> None:
+@pytest.fixture
+def own_cluster() -> Iterator[str]:
+    """A PostgreSQL cluster of this test's own (a url of its default database): 0053 runs once per cluster, and the
+    session's database has run it."""
+    with PostgresContainer("postgres:16-alpine", driver="asyncpg") as pg:
+        yield pg.get_connection_url()
+
+
+async def test_even_a_fresh_deployments_migration_records_no_tick_cutover(own_cluster: str) -> None:
     fresh = f"fresh_{uuid.uuid4().hex[:12]}"
-    admin = create_async_engine(pg_url, isolation_level="AUTOCOMMIT")
+    admin = create_async_engine(own_cluster, isolation_level="AUTOCOMMIT")
     async with admin.connect() as c:
         await c.execute(text(f'CREATE DATABASE "{fresh}"'))
-    url = pg_url.rsplit("/", 1)[0] + f"/{fresh}"
+    url = own_cluster.rsplit("/", 1)[0] + f"/{fresh}"
     try:
-        env = {**os.environ, "DEWPOINT_DATABASE_URL": url}
+        env = {**os.environ, "DEWPOINT_DATABASE_URL": url, "DEWPOINT_EXPECTED_DATABASE": fresh}
         migrating = await asyncio.create_subprocess_exec("uv", "run", "alembic", "upgrade", "head", cwd=BACKEND,
                                                          env=env, stdout=asyncio.subprocess.DEVNULL,
                                                          stderr=asyncio.subprocess.DEVNULL)  # fmt: skip
