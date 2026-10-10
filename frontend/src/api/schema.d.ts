@@ -2297,6 +2297,8 @@ export interface components {
          *     revision as stale, never as current (D17; 4b ruling 24).
          */
         ValidationOut: {
+            /** Conditional Steps */
+            conditional_steps: string[];
             /** Diagnostics */
             diagnostics: components["schemas"]["DiagnosticOut"][];
             /** Draft Revision */

@@ -243,6 +243,7 @@ class ValidationOut(_Answer):
     diagnostics: list[DiagnosticOut]
     expressions: list[ExpressionOut]
     taint: TaintOut
+    conditional_steps: list[str]  # the steps that may not run, by id (4c-2a ruling 3; ledger ruling 70's badge)
 
 
 class PublishedOut(_Answer):

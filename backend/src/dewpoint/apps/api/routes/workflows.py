@@ -243,6 +243,8 @@ async def validate_draft(
         "diagnostics": [d.to_json() for d in checked.diagnostics],
         # How each CEL value runs, for the editor (spec §5.10): "local" runs inline, "activity" as a separate step.
         "expressions": [{"node": r.node, "field": r.field, "mode": r.mode, "reason": r.reason} for r in expressions],
+        # The steps that may not run on every path: the canvas's "conditional" badge (ledger ruling 70).
+        "conditional_steps": list(result.conditional_steps) if result is not None else [],
         # Which values read sensitive data, and what each declassified site reveals (engine 2b spec §4.1, §4.3).
         "taint": {
             "sites": [{"node": n, "field": f} for n, f in (result.tainted_sites if result is not None else ())],

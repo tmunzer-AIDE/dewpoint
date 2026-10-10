@@ -2663,6 +2663,13 @@
         "additionalProperties": false,
         "description": "The saved draft's diagnostics, at the revision they were computed for: an editor shows an answer for an older\nrevision as stale, never as current (D17; 4b ruling 24).",
         "properties": {
+          "conditional_steps": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Conditional Steps",
+            "type": "array"
+          },
           "diagnostics": {
             "items": {
               "$ref": "#/components/schemas/DiagnosticOut"
@@ -2694,7 +2701,8 @@
           "valid",
           "diagnostics",
           "expressions",
-          "taint"
+          "taint",
+          "conditional_steps"
         ],
         "title": "ValidationOut",
         "type": "object"
