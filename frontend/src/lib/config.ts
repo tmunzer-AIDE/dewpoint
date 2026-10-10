@@ -423,3 +423,19 @@ export function renameKey(doc: GraphDoc, nodeId: string, key: string): { doc: Gr
   const settings = doc.settings && outputs !== doc.settings.outputs ? { ...doc.settings, outputs } : doc.settings;
   return { doc: { ...doc, nodes, ...(settings ? { settings } : {}) }, mentions };
 }
+
+/** The draft with a decision declassified (4c-2b): its entry added to `settings.declassify`, once. */
+export function declassify(doc: GraphDoc, site: { node: string; field: string }): GraphDoc {
+  const entries = doc.settings?.declassify ?? [];
+  if (entries.some((e) => sameId(e.node, site.node) && e.field === site.field)) return doc;
+  return { ...doc, settings: { ...doc.settings, declassify: [...entries, { node: site.node, field: site.field }] } };
+}
+
+/** The draft without its `index`th declassify entry; with none left, without the list. */
+export function undeclassify(doc: GraphDoc, index: number): GraphDoc {
+  const entries = doc.settings?.declassify ?? [];
+  if (index < 0 || index >= entries.length) return doc;
+  const kept = entries.filter((_, i) => i !== index);
+  const rest = Object.fromEntries(Object.entries(doc.settings ?? {}).filter(([k]) => k !== "declassify"));
+  return { ...doc, settings: kept.length > 0 ? { ...rest, declassify: kept } : rest };
+}

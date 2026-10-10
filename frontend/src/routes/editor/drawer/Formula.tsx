@@ -42,8 +42,9 @@ export function FormulaControl({ spec, value, id, describedBy, invalid, disabled
 export const runsText = (x: Expression | undefined): string | null =>
   !x ? null : x.mode === "local" ? "Runs inline" : `Runs as a separate step: ${x.reason ?? "no reason given"}`;
 
-export function ModeSwitch({ label, mode, disabled, onChange }: {
-  label: string; mode: Mode; disabled: boolean; onChange: (mode: Mode) => void;
+export function ModeSwitch({ label, mode, disabled, onChange, fixedName = "Fixed", fixedWhyNot }: {
+  label: string; mode: Mode; disabled: boolean; onChange: (mode: Mode) => void; fixedName?: string;
+  fixedWhyNot?: { id: string } | null; // the fixed mode can't take this value: its button says why, described by it
 }) {  // prettier-ignore
   return (
     // 1c's segmented look, never pills (outline §6): the chosen one pressed, by weight and fill.
@@ -53,14 +54,15 @@ export function ModeSwitch({ label, mode, disabled, onChange }: {
           key={m}
           type="button"
           aria-pressed={mode === m}
-          disabled={disabled}
+          disabled={disabled || (m === "fixed" && !!fixedWhyNot)}
+          aria-describedby={m === "fixed" && fixedWhyNot ? fixedWhyNot.id : undefined}
           onClick={() => {
             if (mode !== m) onChange(m);
           }}
           // Disabled, the chosen mode still reads by its weight (the owner's ruling O2).
           className={`min-h-8 px-3 text-small disabled:bg-disabled-bg disabled:text-muted ${mode === m ? "bg-accent-soft font-semibold text-accent-ink" : "bg-surface text-ink enabled:hover:bg-surface-hover"}`}
         >
-          {m === "fixed" ? "Fixed" : "Formula"}
+          {m === "fixed" ? fixedName : "Formula"}
         </button>
       ))}
     </div>

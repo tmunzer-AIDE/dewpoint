@@ -2,8 +2,8 @@
 import { describe, expect, it } from "vitest";
 import { IF, SWITCH } from "../test/nodeTypes";
 import {
-  CEL_WORDS, admission, fixedOf, formula, formulaOf, freePort, isPlainRef, keyProblem, kindOf, parseJson, referenceText,
-  renameEntry, renameKey, renamePort, rootOf, setAt, setConfig, setOptions, valueAt,
+  CEL_WORDS, admission, declassify, fixedOf, formula, formulaOf, freePort, isPlainRef, keyProblem, kindOf, parseJson, referenceText,
+  renameEntry, renameKey, renamePort, rootOf, setAt, setConfig, setOptions, undeclassify, valueAt,
 } from "./config";  // prettier-ignore
 import type { GraphDoc } from "./workflows";
 
@@ -340,5 +340,23 @@ describe("keys", () => {
       ],
     };  // prettier-ignore
     expect(renameKey(doc, A, "route").mentions).toBe(2);
+  });
+});
+
+describe("declassify entries (4c-2b)", () => {
+  const doc = (declassify?: { node: string; field: string }[]) =>
+    ({ graph_format: 1, nodes: [], settings: { input_schema: { type: "object" }, ...(declassify ? { declassify } : {}) } }) as GraphDoc;
+  it("adds a decision once, and keeps the other settings", () => {
+    const site = { node: "00000000-0000-4000-8000-000000000001", field: "/condition" };
+    const once = declassify(doc(), site);
+    expect(once.settings).toEqual({ input_schema: { type: "object" }, declassify: [site] });
+    expect(declassify(once, { ...site, node: site.node.toUpperCase() })).toBe(once); // the same step, however spelt
+  });
+  it("removes an entry, and the list with its last", () => {
+    const a = { node: "a", field: "/condition" };
+    const b = { node: "b", field: "/items" };
+    expect(undeclassify(doc([a, b]), 0).settings).toEqual({ input_schema: { type: "object" }, declassify: [b] });
+    expect(undeclassify(doc([a]), 0).settings).toEqual({ input_schema: { type: "object" } });
+    expect(undeclassify(doc([a]), 3)).toEqual(doc([a]));
   });
 });

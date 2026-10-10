@@ -199,3 +199,47 @@ it("never applies a formula past the engine's limit, and says why (the review of
   const result = applyUnapplied(doc, held(doc, "formula", "/condition", ["condition"], long), IF);
   expect(result).toEqual({ problem: "A formula can be at most 16,384 characters: this one has 16,392, so it isn't saved." });
 });
+
+it("applies held text and pills as a template, and a literal's text as a literal (4c-2b)", () => {
+  const doc = fetch({ name: literal("hi") });
+  const segments = { texts: ["AP ", ""], pills: [{ ref: "run.now" }] };
+  const u = held(doc, "template", "/name", ["name"], "AP {run.now}", { segments, literal: true });
+  expect(applied(applyUnapplied(doc, u, TRANSFORM)).doc.nodes![0]!.config).toEqual({
+    name: { $value: { kind: "template", parts: [{ text: "AP " }, { ref: "run.now" }] } },
+  });
+  const plain = held(doc, "template", "/name", ["name"], "hey", { segments: { texts: ["hey"], pills: [] }, literal: true });
+  expect(applied(applyUnapplied(doc, plain, TRANSFORM)).doc.nodes![0]!.config).toEqual({ name: literal("hey") });
+});
+
+it("applies a held condition once each comparison can be written (4c-2b)", () => {
+  const doc = fetch({});
+  const row = { path: "steps.a.output.n", op: "more" as const, value: { kind: "number" as const, text: "3x" }, guards: [], nullTest: false };
+  const half = held(doc, "condition", "/when", ["when"], "", { condition: { match: "all", items: [row] } });
+  expect(applyUnapplied(doc, half, TRANSFORM)).toEqual({ problem: "Write a number, like 3, -2 or 0.5." });
+  const done = held(doc, "condition", "/when", ["when"], "", { condition: { match: "all", items: [{ ...row, value: { kind: "number", text: "3" } }] } });
+  const n = "steps.a.output.n";
+  expect(applied(applyUnapplied(doc, done, TRANSFORM)).doc.nodes![0]!.config).toEqual({
+    when: formula(`((type(${n}) == type(0) || type(${n}) == type(0.0)) && ${n} > 3)`),
+  });
+});
+
+it("applies held text as it would have been written: alone, a template where the field takes no fixed value (the review of revision 1)", () => {
+  const doc = fetch({});
+  const u = held(doc, "template", "/name", ["name"], "hello", { segments: { texts: ["hello"], pills: [] }, literalOk: false });
+  expect(applied(applyUnapplied(doc, u, TRANSFORM)).doc.nodes![0]!.config).toEqual({
+    name: { $value: { kind: "template", parts: [{ text: "hello" }] } },
+  });
+});
+
+it("writes held text and pills, and a condition being built, whole into the recovery file (the review of revision 1)", () => {
+  const doc = fetch({});
+  const segments = { texts: ["at ", ""], pills: [{ ref: "trigger.site", default: "HQ" }] };
+  const text = held(doc, "template", "/name", ["name"], "at {trigger.site}", { label: "Name", why: "Not written.", segments });
+  const row = { path: "steps.a.output.n", op: "more" as const, value: { kind: "number" as const, text: "3x" }, guards: [], nullTest: false };
+  const condition = { match: "all" as const, items: [row] };
+  const built = held(doc, "condition", "/when", ["when"], "", { label: "When", why: "Write a number, like 3, -2 or 0.5.", condition });
+  expect(unappliedFile([text, built], () => "fetch").edits).toEqual([
+    { step: "fetch", field: "Name", at: "/name", text: "at {trigger.site}", why: "Not written.", segments },
+    { step: "fetch", field: "When", at: "/when", text: "", why: "Write a number, like 3, -2 or 0.5.", condition },
+  ]);
+});

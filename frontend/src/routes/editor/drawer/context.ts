@@ -38,6 +38,13 @@ export interface Drawer extends DrawerActions {
   tenantId: string;
   workflowId: string;
   problems: Diagnostic[]; // the step's, from a current check
+  /** The saved draft's revision, which the data a field reads is asked of; null in a version's view, which has none
+   * (4c-2b). */
+  revision: number | null;
+  /** The draft's steps, by key, with their type's title: what the data a field reads is grouped by (4c-2b). */
+  steps: { id: string; key: string; title: string | null }[];
+  /** Opens the workflow's Declassify list (4c-2b); absent where it can't be (a version's view). */
+  openDeclassify?: () => void;
   expressions: Expression[]; // how its formulas run
   /** A field that says how its formula runs, while it's shown: the drawer's own list leaves it out (the owner's
    * ruling O4). Answers its undoing. */

@@ -1192,6 +1192,8 @@ function Editor({
             type={typeMap.get(open.type)}
             tenantId={tenantId}
             workflowId={workflow.id}
+            revision={viewing ? null : sync.revision}
+            steps={nodesOf(shownDoc).map((n) => ({ id: n.id, key: n.key, title: typeMap.get(n.type)?.title ?? null }))}
             ports={portMap.get(idKey(open.id)) ?? []}
             problems={
               viewing || !trusted ? null : [...trusted.diagnostics, ...published].filter((d) => d.node !== null && sameId(d.node, open.id))
