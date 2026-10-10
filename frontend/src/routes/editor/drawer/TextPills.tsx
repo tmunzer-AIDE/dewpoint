@@ -90,8 +90,7 @@ export function TextPills({ spec, value, literal, id, describedBy, invalid, disa
 
   const onPillKey = (index: number) => (e: KeyboardEvent<HTMLButtonElement>) => {
     if (e.key === "ArrowLeft") {
-      e.preventDefault();
-      panel.focus.current = { segment: index, offset: segments.texts[index]!.length };
+      e.preventDefault(); // focused now, as → does: a focus request left for later would move the caret back as one types
       inputs.current[index]?.focus();
       inputs.current[index]?.setSelectionRange(segments.texts[index]!.length, segments.texts[index]!.length);
     } else if (e.key === "ArrowRight") {

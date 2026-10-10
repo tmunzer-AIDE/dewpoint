@@ -66,6 +66,14 @@ describe("a pill's details", () => {
     expect(await screen.findByText(/America\/Los_Angeles/)).toBeTruthy();
   });
 
+  it("says a version's details show no sample, and never asks for one (the review of milestone 2)", () => {
+    const sent = fakeApi({});
+    showFields(NOTE, { steps, revision: null, editable: false }, <PillDetails field="/message" pill={{ ref: PATH }} defaults onDefault={vi.fn()} onReplace={vi.fn()} onRemove={vi.fn()} onClose={vi.fn()} />);
+    expect(screen.getByText("A version's data isn't shown: open the draft to see a past run's sample.")).toBeTruthy();
+    expect(screen.queryByText("Looking for a sample…")).toBeNull();
+    expect(sent).toEqual([]);
+  });
+
   it("shows a redacted value as a chip, never the value", async () => {
     show({ sample: sample({ output: { timezone: "Bearer [redacted]" } }) });
     const chip = await screen.findByText("redacted");

@@ -108,6 +108,14 @@ describe("text with data pills", () => {
     await waitFor(() => expect((document.activeElement as HTMLInputElement).selectionStart).toBe(3));
   });
 
+  it("types where the caret is after ← from a pill, as after → (the review of milestone 2)", async () => {
+    const f = showFields(NOTE, { steps, config: { message: template({ text: "AP " }, { ref: "run.now" }) } });
+    screen.getByRole("button", { name: /^run › now, run\.now/ }).focus();
+    await userEvent.keyboard("{ArrowLeft}");
+    await userEvent.keyboard("abc");
+    expect(f.config()).toEqual({ message: template({ text: "AP abc" }, { ref: "run.now" }) });
+  });
+
   it("draws a pill whose value may be missing dashed, and says so in its name", async () => {
     showFields(NOTE, { steps, config: { message: template({ ref: "steps.get_site.output.timezone" }) } });
     const pill = await screen.findByRole("button", { name: /^get_site › timezone \?, steps\.get_site\.output\.timezone, may be missing, no default$/ });

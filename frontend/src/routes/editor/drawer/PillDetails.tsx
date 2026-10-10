@@ -208,7 +208,10 @@ export function PillDetails({ field, pill, defaults, onDefault, onReplace, onRem
       {isStep && (
         <section aria-label="From a past run" className="flex flex-col gap-2">
           <h4 className="text-small font-semibold">From a past run</h4>
-          {samples.isPending ? (
+          {drawer.revision === null ? (
+            // A version's view asks nothing (ruling 130): its query never runs, so it's never "looking".
+            <p className="text-small text-muted">A version&apos;s data isn&apos;t shown: open the draft to see a past run&apos;s sample.</p>
+          ) : samples.isPending ? (
             <p className="text-small text-muted">Looking for a sample…</p>
           ) : samples.isError ? (
             <p className="text-small text-muted">{samples.error instanceof DraftMoved ? samples.error.message : "The sample couldn't be loaded."}</p>
