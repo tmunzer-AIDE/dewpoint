@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """What the workflows list shows of each workflow beyond its row (sub-project 4, B3): its last live root run and, apart,
 its last simulated one; its root runs in the last 24 hours, live and simulated apart; whether its draft differs from
-its active version; and why it needs attention. Live runs alone drive attention (4b ruling 7): a simulation is a
-test, and a later successful one says nothing about the live failure before it."""
+its active version; what starts it (4c-3a ruling 3); and why it needs attention. Live runs alone drive attention (4b
+ruling 7): a simulation is a test, and a later successful one says nothing about the live failure before it."""
 
 import asyncio
 import uuid
@@ -45,6 +45,22 @@ COUNTS_24H = text(
     " and queued_at >= now() - interval '24 hours' group by workflow_id"
 )
 
+# Each workflow's triggers, in one statement for every workflow (4c-3a ruling 3): its live schedules (a deleted one's
+# tombstone left out), how many are on and whether any last failed to sync (ruling 74; 4c-3a ruling 4), from
+# `schedules_workflow`; and its webhook bindings, from `trigger_bindings_one`, whose tenant leads.
+TRIGGERS = text(
+    "select w.id as workflow_id, coalesce(s.live, 0) as schedules, coalesce(s.on_, 0) as schedules_enabled,"
+    " coalesce(s.failed, 0) > 0 as sync_failed, coalesce(b.bound, 0) as webhook_bindings"
+    " from unnest(cast(:ids as uuid[])) as w(id)"
+    " left join (select workflow_id, count(*) as live, count(*) filter (where enabled) as on_,"
+    " count(*) filter (where sync_error is not null) as failed from schedules"
+    " where tenant_id = :tenant and workflow_id = any(cast(:ids as uuid[])) and deleted_at is null"
+    " group by workflow_id) as s on s.workflow_id = w.id"
+    " left join (select workflow_id, count(*) as bound from trigger_bindings"
+    " where tenant_id = :tenant and workflow_id = any(cast(:ids as uuid[])) group by workflow_id) as b"
+    " on b.workflow_id = w.id"
+)
+
 
 @dataclass(frozen=True)
 class LastRun:
@@ -82,14 +98,40 @@ async def run_stats(
     }
 
 
-def attention(stats: RunStats, *, published: bool, blocked: Sequence[str]) -> list[str]:
-    """Why a workflow needs attention: its last live root run failed or ran out of time, or its active version can't
-    run. Simulations never count (4b ruling 7)."""
+@dataclass(frozen=True)
+class TriggerStats:
+    schedules: int  # live: a deleted one's tombstone left out
+    schedules_enabled: int
+    sync_failed: bool  # a live schedule's last sync failed
+    webhook_bindings: int
+
+
+async def trigger_stats(
+    s: AsyncSession, tenant_id: uuid.UUID, workflow_ids: Iterable[uuid.UUID]
+) -> dict[uuid.UUID, TriggerStats]:
+    """Each workflow's schedules and webhook bindings, in one statement for any number of workflows."""
+    ids = sorted(set(workflow_ids), key=str)
+    if not ids:
+        return {}
+    found = await s.execute(TRIGGERS, {"tenant": tenant_id, "ids": ids})
+    return {
+        r.workflow_id: TriggerStats(
+            int(r.schedules), int(r.schedules_enabled), bool(r.sync_failed), int(r.webhook_bindings)
+        )
+        for r in found
+    }
+
+
+def attention(stats: RunStats, *, published: bool, blocked: Sequence[str], sync_failed: bool = False) -> list[str]:
+    """Why a workflow needs attention: its last live root run failed or ran out of time, its active version can't
+    run, or a live schedule's last sync failed (ruling 74; 4c-3a ruling 4). Simulations never count (4b ruling 7)."""
     out: list[str] = []
     if stats.last_live is not None and stats.last_live.status in ATTENTION_STATUSES:
         out.append("last_run_failed")
     if published and blocked:
         out.append("not_executable")
+    if sync_failed:
+        out.append("schedule_sync_failed")
     return out
 
 

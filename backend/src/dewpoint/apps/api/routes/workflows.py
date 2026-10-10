@@ -98,17 +98,18 @@ def _last(run: workflow_summary.LastRun | None) -> dict[str, str] | None:
 
 async def _summaries(db: AsyncSession, tenant_id: uuid.UUID, wfs: list[Workflow]) -> list[dict[str, object]]:
     """Each workflow's row (B3), in a fixed number of reads whatever their number: the active versions, the lifecycle
-    states of every entry they use, the last runs and the 24-hour counts, each read once for all."""
+    states of every entry they use, the last runs and the 24-hour counts, and the triggers, each read once for all."""
     ids = [wf.id for wf in wfs]
     actives = await service.active_versions(db, tenant_id, ids)
     blocked = await service.blocked_by_many(db, actives.values())
     stats = await workflow_summary.run_stats(db, tenant_id, ids)
+    triggers = await workflow_summary.trigger_stats(db, tenant_id, ids)
     hashes = await workflow_summary.HASHES.of([(wf.id, wf.draft_revision, wf.draft) for wf in wfs])
     out: list[dict[str, object]] = []
     for wf in wfs:
         active = actives.get(wf.id)
         stops = blocked[active.id] if active else []
-        runs = stats[wf.id]
+        runs, starts = stats[wf.id], triggers[wf.id]
         out.append(
             {
                 "id": str(wf.id),
@@ -126,7 +127,15 @@ async def _summaries(db: AsyncSession, tenant_id: uuid.UUID, wfs: list[Workflow]
                 "last_run": _last(runs.last_live),
                 "last_simulation": _last(runs.last_simulated),
                 "runs_24h": {"live": runs.live_24h, "simulate": runs.simulated_24h},
-                "needs_attention": workflow_summary.attention(runs, published=active is not None, blocked=stops),
+                "triggers": {
+                    "schedules": starts.schedules,
+                    "schedules_enabled": starts.schedules_enabled,
+                    "webhook_bindings": starts.webhook_bindings,
+                    "csv": active is not None and workflow_ops.declares_csv(active.graph),
+                },
+                "needs_attention": workflow_summary.attention(
+                    runs, published=active is not None, blocked=stops, sync_failed=starts.sync_failed
+                ),
             }
         )
     return out

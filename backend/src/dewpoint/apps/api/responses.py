@@ -174,6 +174,15 @@ class RunCountOut(_Answer):
     simulate: int
 
 
+class TriggersOut(_Answer):
+    """What starts a workflow besides a person (4c-3a ruling 3): by hand is always possible once it's published."""
+
+    schedules: int  # its live schedules: a deleted one's tombstone left out
+    schedules_enabled: int
+    webhook_bindings: int
+    csv: bool  # its active version takes a CSV file: it's started by hand, with one
+
+
 class WorkflowOut(_Answer):
     id: str
     name: str
@@ -190,7 +199,8 @@ class WorkflowOut(_Answer):
     last_run: LastRunOut | None  # its last live root run: what attention follows
     last_simulation: LastRunOut | None  # its last simulated root run, shown apart, never attention
     runs_24h: RunCountOut  # its root runs queued in the last 24 hours, live and simulated apart
-    needs_attention: list[Literal["last_run_failed", "not_executable"]]
+    triggers: TriggersOut
+    needs_attention: list[Literal["last_run_failed", "not_executable", "schedule_sync_failed"]]
 
 
 class WorkflowDetailOut(WorkflowOut):
