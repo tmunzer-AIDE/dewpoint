@@ -1186,6 +1186,33 @@
         "title": "ExpressionOut",
         "type": "object"
       },
+      "FormulaUseOut": {
+        "additionalProperties": false,
+        "properties": {
+          "guards": {
+            "items": {
+              "$ref": "#/components/schemas/GuardOut"
+            },
+            "title": "Guards",
+            "type": "array"
+          },
+          "null_test": {
+            "title": "Null Test",
+            "type": "boolean"
+          },
+          "sensitive": {
+            "title": "Sensitive",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "guards",
+          "sensitive",
+          "null_test"
+        ],
+        "title": "FormulaUseOut",
+        "type": "object"
+      },
       "Graph": {
         "additionalProperties": false,
         "properties": {
@@ -1310,6 +1337,45 @@
           }
         },
         "title": "GraphSettings",
+        "type": "object"
+      },
+      "GuardOut": {
+        "additionalProperties": false,
+        "description": "A test a formula makes before it reads a path (4c-2a ruling 6). `size`, for `min_size`: the list's size must\nexceed it.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "present",
+              "not_null",
+              "is_map",
+              "is_list",
+              "min_size"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "size": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size"
+          }
+        },
+        "required": [
+          "kind",
+          "path",
+          "size"
+        ],
+        "title": "GuardOut",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -2237,6 +2303,209 @@
           }
         },
         "title": "SchedulePatch",
+        "type": "object"
+      },
+      "ScopeEntryOut": {
+        "additionalProperties": false,
+        "properties": {
+          "children": {
+            "title": "Children",
+            "type": "boolean"
+          },
+          "format": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Format"
+          },
+          "formula": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FormulaUseOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "missing": {
+            "title": "Missing",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "nameable": {
+            "title": "Nameable",
+            "type": "boolean"
+          },
+          "nullable": {
+            "title": "Nullable",
+            "type": "boolean"
+          },
+          "parent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "problem": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DiagnosticOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "root": {
+            "enum": [
+              "trigger",
+              "steps",
+              "vars",
+              "item",
+              "index",
+              "loops",
+              "run"
+            ],
+            "title": "Root",
+            "type": "string"
+          },
+          "sensitive": {
+            "title": "Sensitive",
+            "type": "boolean"
+          },
+          "step": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Step"
+          },
+          "types": {
+            "items": {
+              "enum": [
+                "string",
+                "integer",
+                "number",
+                "boolean",
+                "array",
+                "object",
+                "null"
+              ],
+              "type": "string"
+            },
+            "title": "Types",
+            "type": "array"
+          }
+        },
+        "required": [
+          "path",
+          "parent",
+          "name",
+          "root",
+          "step",
+          "types",
+          "format",
+          "missing",
+          "nullable",
+          "sensitive",
+          "nameable",
+          "children",
+          "formula",
+          "problem"
+        ],
+        "title": "ScopeEntryOut",
+        "type": "object"
+      },
+      "ScopeOut": {
+        "additionalProperties": false,
+        "description": "What one field of the saved draft's step can read (B6), at the revision it was computed for: an editor drops an\nanswer for an older revision (D17).",
+        "properties": {
+          "draft_revision": {
+            "title": "Draft Revision",
+            "type": "integer"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/ScopeEntryOut"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "field": {
+            "title": "Field",
+            "type": "string"
+          },
+          "more": {
+            "title": "More",
+            "type": "boolean"
+          },
+          "node": {
+            "title": "Node",
+            "type": "string"
+          },
+          "problem": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DiagnosticOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "state": {
+            "enum": [
+              "ok",
+              "unavailable"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "draft_revision",
+          "node",
+          "field",
+          "state",
+          "reason",
+          "entries",
+          "more",
+          "problem"
+        ],
+        "title": "ScopeOut",
         "type": "object"
       },
       "SessionOut": {
@@ -6984,6 +7253,132 @@
           }
         },
         "summary": "Put Draft",
+        "tags": [
+          "workflows"
+        ]
+      }
+    },
+    "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/scope": {
+      "get": {
+        "description": "What one field of the saved draft's step can read (B6; 4c-2a rulings 4\u20137): the top of each root, the children\nof one path (`under`), one path (`at`), or fields by name (`find`).",
+        "operationId": "draft_scope_api_v1_t__tenant_id__workflows__workflow_id__draft_scope_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "node",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Node",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "field",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "title": "Field",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "under",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 512,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Under"
+            }
+          },
+          {
+            "in": "query",
+            "name": "at",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 512,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "At"
+            }
+          },
+          {
+            "in": "query",
+            "name": "find",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 100,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Find"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScopeOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Draft Scope",
         "tags": [
           "workflows"
         ]

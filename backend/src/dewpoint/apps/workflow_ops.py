@@ -2,6 +2,7 @@
 """Validate, publish and activate workflows: wires core storage to the engine validator (spec §4.4–4.5)."""
 
 import asyncio
+import dataclasses
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ from dewpoint.core.plugins import lifecycle, registry
 from dewpoint.core.workflows import service
 from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
+from dewpoint.engine.graph import scope as scopes
 from dewpoint.engine.graph.diagnostics import Diagnostic
 from dewpoint.engine.graph.model import Graph, GraphFormatError, graph_hash, graph_json, parse_graph, version_hash
 from dewpoint.engine.graph.validate import (
@@ -55,11 +57,10 @@ class Checked:
     result: ValidationResult | None
 
 
-async def check_draft(s: AsyncSession, tenant_id: uuid.UUID, draft: Any, settings: Settings) -> Checked:
-    try:
-        graph = parse_graph(draft)
-    except GraphFormatError as e:
-        return Checked(None, list(e.diagnostics), {}, None)
+async def validation_context(
+    s: AsyncSession, tenant_id: uuid.UUID, graph: Graph, settings: Settings
+) -> tuple[ValidationContext, dict[uuid.UUID, WorkflowVersion]]:
+    """What validating `graph` needs: its node types, and the active versions of the workflows it pins."""
     rows = await registry.load_node_types(s, {n.type for n in graph.nodes} | picker_refs(graph))
     catalog = Catalog(spec_from_manifest(r.manifest, r.state) for r in rows)
     pins = await service.active_versions(s, tenant_id, referenced_workflows(graph))
@@ -73,8 +74,51 @@ async def check_draft(s: AsyncSession, tenant_id: uuid.UUID, draft: Any, setting
         },
         max_run_duration=timedelta(days=settings.max_run_duration_days),
     )
+    return ctx, pins
+
+
+async def check_draft(s: AsyncSession, tenant_id: uuid.UUID, draft: Any, settings: Settings) -> Checked:
+    try:
+        graph = parse_graph(draft)
+    except GraphFormatError as e:
+        return Checked(None, list(e.diagnostics), {}, None)
+    ctx, pins = await validation_context(s, tenant_id, graph, settings)
     result = await asyncio.to_thread(validate, graph, ctx)  # CPU-bound: keep the event loop serving others
     return Checked(graph, list(result.diagnostics), pins, result)
+
+
+async def draft_scope(
+    s: AsyncSession,
+    tenant_id: uuid.UUID,
+    draft: Any,
+    settings: Settings,
+    node: uuid.UUID,
+    field: str,
+    *,
+    under: str | None = None,
+    at: str | None = None,
+    find: str | None = None,
+) -> scopes.Scope:
+    """What `field` of `node` can read in the saved draft (B6; 4c-2a ruling 4)."""
+    try:
+        graph = parse_graph(draft)
+    except GraphFormatError:
+        return scopes.Scope(unavailable=scopes.UNREADABLE)
+    ctx, _ = await validation_context(s, tenant_id, graph, settings)
+    return await asyncio.to_thread(scopes.scope, graph, ctx, node, field, under=under, at=at, find=find)
+
+
+def scope_answer(found: scopes.Scope) -> dict[str, object]:
+    return {
+        "state": "unavailable" if found.unavailable is not None else "ok",
+        "reason": found.unavailable,
+        "entries": [
+            {**dataclasses.asdict(e), "problem": e.problem.to_json() if e.problem is not None else None}
+            for e in found.entries
+        ],
+        "more": found.more,
+        "problem": found.problem.to_json() if found.problem is not None else None,
+    }
 
 
 @dataclass(frozen=True)

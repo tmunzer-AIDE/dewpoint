@@ -92,6 +92,8 @@ async def test_permission_matrix(app, owner_sessionmaker, api_settings) -> None:
             assert (await c.post(f"/api/v1/t/{tid}/workflows", json={"name": role})).status_code == 403
             assert (await c.put(f"{base}/draft", json=GRAPH, headers={"If-Match": "1"})).status_code == 403
             assert (await c.post(f"{base}/validate")).status_code == 403
+            scope = await c.get(f"{base}/draft/scope", params={"node": str(nid("a")), "field": "/value"})
+            assert scope.status_code == 200  # workflow.view: a read-only drawer shows a pill's details too
             assert (await c.post(f"{base}/publish", headers={"If-Match": "1"})).status_code == 403
             assert (await c.patch(base, json={"enabled": False})).status_code == 403
     stranger, other_tenant = await session_client(app, owner_sessionmaker, api_settings, "owner")
