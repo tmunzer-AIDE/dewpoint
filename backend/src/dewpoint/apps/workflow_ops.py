@@ -132,7 +132,9 @@ def draft_node(draft: Any, node: uuid.UUID) -> Mapping[str, Any] | None:
 def sample_answer(found: samples.Sample, drafted: Mapping[str, Any]) -> dict[str, object]:
     """B7's answer (4c-2a ruling 10): the sample, and whether it still represents the draft's step."""
     ran = found.node or {}
-    same_type, same_config = ran.get("type") == drafted.get("type"), ran.get("config") == drafted.get("config")
+    same_type = ran.get("type") == drafted.get("type")
+    # A step left without a config has an empty one, as a version writes it (`GraphNode.config`)
+    same_config = ran.get("config", {}) == drafted.get("config", {})
     if found.connections:
         state = "recorded"
     elif found.mode == "simulate":

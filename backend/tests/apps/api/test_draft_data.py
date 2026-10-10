@@ -182,3 +182,19 @@ def test_tells_the_four_connection_states() -> None:
     assert sample_answer(cases["recorded"], step)["stale"]  # its connection changed since
     simulated = Sample(**{**base, "mode": "simulate"}, connections=(), names_connection=True)
     assert sample_answer(simulated, step)["connections"]["state"] == "simulated"  # type: ignore[index]
+
+
+def test_a_step_written_without_a_config_has_the_same_config_as_an_empty_one() -> None:
+    """The draft is stored as written, so a step may leave `config` out; a version always writes it, `{}` when left out
+    (`GraphNode.config`). Both are the same config: the sample isn't stale (the final review of 4c-2a)."""
+    from datetime import UTC, datetime
+
+    from dewpoint.apps.workflow_ops import sample_answer
+    from dewpoint.core.runs.samples import Sample
+
+    ran = {"id": "x", "key": "a", "type": "testkit.echo@1", "config": {}}
+    sample = Sample(run_id=uuid.uuid4(), run_kind="run", mode="live", version_id=uuid.uuid4(), version_number=1,
+                    iteration_key="", attempt=1, captured_at=datetime.now(UTC), output={}, node=ran, connections=(),
+                    names_connection=False)  # fmt: skip
+    answer = sample_answer(sample, {"id": "x", "key": "a", "type": "testkit.echo@1"})
+    assert answer["same_config"] and not answer["stale"]
