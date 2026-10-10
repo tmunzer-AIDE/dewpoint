@@ -1998,3 +1998,22 @@ message with three pills (one dashed, its value may be missing), the tree for a 
 details (a trigger value that may be missing; a step's value with no run yet). The mockups' boards aren't rendered
 beside them, as the plan asks: they need the Design canvas's own runtime; each sheet names the boards it maps to on the
 canvas (version 10). Mid-slice rulings: none.
+
+### Milestone 2 reviewed (2026-10-10, pasted)
+
+A pasted review held milestone 2 at fcb0a1b0 for two defects in the accepted plan's own code (Task 8's and Task 7's),
+both reproduced through the field components; it found the screens readable in both themes and widths, noted the
+narrow canvas controls' overlap (Canvas.tsx unchanged from main), and couldn't judge visual fidelity without the
+mockups' images. It gives no go-ahead for milestone 3.
+
+### 4c-2b, after the milestone 2 review (2026-10-10)
+
+M66. **← from a pill moves to the text before it once, and typing stays there.** `onPillKey` focused the text and also
+    left a focus request, which the next render (after the first key typed) applied, moving the caret back: `AP ` and
+    a pill, ←, `abc` saved `AP bca`. ← now focuses at once and leaves none, as → did. Test: "types where the caret is
+    after ← from a pill, as after →" (it saved `AP bca` first).
+M67. **A version's pill details say they show no sample.** The sample query never runs in a version's view (ruling
+    130), so it stayed pending and the details said "Looking for a sample…" for good. They now say "A version's data
+    isn't shown: open the draft to see a past run's sample." Test: "says a version's details show no sample, and never
+    asks for one" (it found "Looking…" first; no request is made).
+    Fixed in 7776d7cc: the unit suite 800 passed (60 files); typecheck, lint and build clean.
