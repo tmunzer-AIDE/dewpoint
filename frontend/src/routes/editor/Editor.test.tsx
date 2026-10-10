@@ -1896,3 +1896,26 @@ it("keeps a formula past the limit out of the draft, held and counted, never cut
   expect(stepConfig("check")).toEqual({ condition: formula("false") });
   expect(screen.getByRole("button", { name: "1 edit not applied" })).toBeTruthy();
 });
+
+// 4c-2b: the steps a check says may not run (ledger ruling 116), and declassifying a decision from the toolbar.
+it("declassifies a decision from the toolbar's Declassify, and the draft saves the entry", async () => {
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: draftWith("a") }));
+  answers.set(`POST ${BASE}/validate`, () =>
+    json({
+      // The revision checked: the saved one, 2 once the entry is saved (the PUT's answer).
+      draft_revision: sent.some((r) => r.method === "PUT") ? 2 : 1,
+      valid: false, expressions: [], conditional_steps: [], taint: { sites: [{ node: "id-a", field: "/x" }], declassified: [] },
+      diagnostics: [{ code: "taint.undeclassified", severity: "error", node: "id-a", field: "/x", message: "This decision reads sensitive data, so the branch taken becomes visible.", fix: null }],
+    }));  // prettier-ignore
+  await show();
+  await userEvent.click(await screen.findByRole("button", { name: "Declassify" }));
+  const panel = screen.getByRole("complementary", { name: "Declassify" });
+  await userEvent.click(within(panel).getByLabelText(/may be visible in run history/));
+  await userEvent.click(within(panel).getByRole("button", { name: "Declassify this decision" }));
+  await vi.waitFor(() => expect(sent.find((r) => r.method === "PUT")).toBeTruthy(), { timeout: 3000 });
+  const put = sent.find((r) => r.method === "PUT")!;
+  expect((put.body as GraphDoc).settings?.declassify).toEqual([{ node: "id-a", field: "/x" }]);
+  expect(within(panel).getByText("Declassified · 1")).toBeTruthy();
+  // Checked again after the save: the server still names the decision (the fake does), listed now: none to make.
+  expect(await within(panel).findByText("Needs your decision · 0")).toBeTruthy();
+});

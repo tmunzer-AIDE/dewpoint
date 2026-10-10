@@ -9,7 +9,7 @@ import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { LoadError } from "../../components/LoadError";
 import { announce } from "../../lib/announce";
 import { ApiError, client, ok } from "../../lib/client";
-import { admission, setConfig, setOptions, unlisted, unlistedNote, valueAt, type Changed } from "../../lib/config";
+import { admission, declassify, setConfig, setOptions, undeclassify, unlisted, unlistedNote, valueAt, type Changed } from "../../lib/config";
 import { downloadJson, fileName } from "../../lib/download";
 import { ConflictError, DraftSync, type SyncState } from "../../lib/draftSync";
 import {
@@ -37,6 +37,7 @@ import { ConnectDialog } from "./ConnectDialog";
 import type { DrawerActions } from "./drawer/context";
 import { StepDrawer } from "./drawer/StepDrawer";
 import { addsOf, item, type ItemAction } from "./items";
+import { DeclassifyPanel } from "./DeclassifyPanel";
 import { ProblemsPanel, type PublishProblems } from "./ProblemsPanel";
 import { SaveState } from "./SaveState";
 import { type Problems } from "./StepCard";
@@ -48,7 +49,7 @@ import { Toolbar } from "./Toolbar";
 type Opened = { workflow: WorkflowDetail; types: NodeType[]; role: string | null };
 
 /** The editor's right column: a step's panel, the problems, or the versions (Task 15). */
-type Side = { kind: "step"; node: string; field?: { pointer: string; kind?: UnappliedKind; n: number } } | { kind: "problems" } | { kind: "versions" } | { kind: "unapplied" } | null;
+type Side = { kind: "step"; node: string; field?: { pointer: string; kind?: UnappliedKind; n: number } } | { kind: "problems" } | { kind: "versions" } | { kind: "unapplied" } | { kind: "declassify" } | null;
 const NO_DIAGNOSTICS: Diagnostic[] = []; // one empty list, so a memo over it holds
 
 /** Whether a request's outcome is unknown: no answer reached the editor (the network), or a 5xx came in the API's
@@ -354,9 +355,10 @@ function Editor({
   const versionsButton = useRef<HTMLButtonElement>(null);
   const publishButton = useRef<HTMLButtonElement>(null);
   const unappliedButton = useRef<HTMLButtonElement>(null);
+  const declassifyButton = useRef<HTMLButtonElement>(null);
   const jumps = useRef(0); // each "Go to" a field, so the same one twice still focuses it
   const [landing, setLanding] = useState<{
-    on: "problems" | "versions" | "publish" | "problems-panel" | "versions-panel" | "unapplied" | "unapplied-panel";
+    on: "problems" | "versions" | "publish" | "problems-panel" | "versions-panel" | "unapplied" | "unapplied-panel" | "declassify" | "declassify-panel";
     n: number;
   } | null>(null);
   const land = (on: NonNullable<typeof landing>["on"]) => setLanding((l) => ({ on, n: (l?.n ?? 0) + 1 }));
@@ -372,6 +374,8 @@ function Editor({
         "versions-panel": () => document.getElementById("versions-title") ?? usable(versionsButton.current),
         unapplied: () => usable(unappliedButton.current),
         "unapplied-panel": () => document.getElementById("unapplied-title") ?? usable(unappliedButton.current),
+        declassify: () => usable(declassifyButton.current),
+        "declassify-panel": () => document.getElementById("declassify-title") ?? usable(declassifyButton.current),
       }[landing.on]();
       target?.focus();
     });
@@ -429,6 +433,9 @@ function Editor({
     return counts;
   }, [trusted]);
   const count = (last?.diagnostics.length ?? 0) + published.length; // a stale publish finding never counts
+  // Declassify: shown once there's a decision to make or one listed (4c-2b).
+  const listed = doc.settings?.declassify ?? [];
+  const undecided = (trusted?.diagnostics ?? []).filter((d) => d.code === "taint.undeclassified");
   const [placing, setPlacing] = useState<string | null>(null); // the step the next click on the canvas puts there
   const qc = useQueryClient();
   const versions = useQuery(versionsQuery(tenantId, workflow.id));
@@ -1083,6 +1090,11 @@ function Editor({
             {checkLabel(checked, count)}
           </Button>
         )}
+        {canEdit(role) && viewing === null && (undecided.length > 0 || listed.length > 0) && (
+          <Button ref={declassifyButton} size="md" aria-expanded={side?.kind === "declassify"} onClick={() => setSide(side?.kind === "declassify" ? null : { kind: "declassify" })}>
+            Declassify
+          </Button>
+        )}
         <Button ref={versionsButton} size="md" aria-expanded={side?.kind === "versions"} onClick={() => setSide(side?.kind === "versions" ? null : { kind: "versions" })}>
           Versions
         </Button>
@@ -1193,6 +1205,7 @@ function Editor({
             tenantId={tenantId}
             workflowId={workflow.id}
             revision={viewing ? null : sync.revision}
+            openDeclassify={viewing || !canEdit(role) ? undefined : () => setSide({ kind: "declassify" })}
             steps={nodesOf(shownDoc).map((n) => ({ id: n.id, key: n.key, title: typeMap.get(n.type)?.title ?? null }))}
             ports={portMap.get(idKey(open.id)) ?? []}
             problems={
@@ -1246,6 +1259,30 @@ function Editor({
             onClose={() => {
               setSide(null);
               land("versions");
+            }}
+          />
+        )}
+        {side?.kind === "declassify" && (
+          <DeclassifyPanel
+            doc={doc}
+            types={typeMap}
+            check={trusted && {
+              ...trusted,
+              // A decision listed since the check isn't one to make: it shows as listed at once.
+              diagnostics: trusted.diagnostics.filter((d) => d.code !== "taint.undeclassified" || !listed.some((e) => d.node !== null && sameId(e.node, d.node) && e.field === d.field)),
+            }}
+            editable={editable}
+            onDeclassify={(site) => {
+              if (change(declassify(draftNow(), site), `Declassified ${keyOf(site.node)}.`)) land("declassify-panel");
+            }}
+            onRemove={(i) => {
+              const e = listed[i];
+              if (change(undeclassify(draftNow(), i), `Removed ${e ? keyOf(e.node) : "an entry"} from Declassify.`)) land("declassify-panel");
+            }}
+            onGo={(site) => setSide({ kind: "step", node: site.node, field: { pointer: site.field, n: ++jumps.current } })}
+            onClose={() => {
+              setSide(null);
+              land("declassify");
             }}
           />
         )}

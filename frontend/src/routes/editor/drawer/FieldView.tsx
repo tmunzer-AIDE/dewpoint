@@ -280,6 +280,11 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
       ? PortControl
       : (controlFor(spec.widget === "formula" ? spec.base : spec.widget) ?? controlFor(spec.base) ?? JsonControl);
   const Held = held && held.kind !== "template" ? heldControl(held.kind, spec) : null;
+  // A decision that reads sensitive data (the server's taint.undeclassified, under its field): the list where it's
+  // declassified is a click away (4c-2b, the builder's and the formula's boards).
+  const declassifiable = drawer.openDeclassify && problems.some((d) => d.code === "taint.undeclassified") && (
+    <div><Button size="sm" onClick={drawer.openDeclassify}>Review in Declassify…</Button></div>
+  );
   const panel = { opened, open: setOpened, caret, focus: focusNext };
   const textPills = (c: Described) => (
     <TextPills
@@ -296,7 +301,7 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
     body = (
       <GroupFrame
         label={spec.label} required={required} hint={spec.hint} local={held?.why ?? local ?? missing} problems={problems} actions={actions}
-        below={runs && <p className="text-small text-muted">{runs}</p>}
+        below={<>{runs && <p className="text-small text-muted">{runs}</p>}{declassifiable}</>}
       >
         <ConditionBuilder key={generation} spec={spec} value={value} disabled={disabled} onChange={write} />
       </GroupFrame>
@@ -357,7 +362,10 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
     body = frame(
       (c) => <FormulaControl key={generation} {...c} spec={spec} value={value} literal={false} disabled={disabled} onChange={write} />,
       spec.hint,
-      runs && <p className="text-small text-muted">{runs}</p>,
+      <>
+        {runs && <p className="text-small text-muted">{runs}</p>}
+        {declassifiable}
+      </>,
     );
   } else if (container) {
     body = (
