@@ -1975,3 +1975,15 @@ required list, are the ones the builder spells.
 138. **Accepted. 4c-1's tests that change on purpose**: a text field's hint gains the pills note; text a write refused
      is held as a `template`; a reference in a text field is a pill (the read-only view tests move to a number field);
      the If and the Filter conditions open in the builder; the browser flows that type a condition press Formula first.
+
+### 4c-2b, milestone 1 (2026-10-10)
+
+Tasks 1–5 at 0a19f515, on `feat/editor-4c2b` (from origin/main 6f4ddec7, the plan merged in fa69a2cf): the plan's
+acceptance and rulings (82c2cc6f), text and pills (0536d97f), the scope and samples client (1a816128), the builder's
+formulas (0f1ccf71), held text and conditions, Declassify's writers and the drawer's revision (0a19f515). Each task's
+tests failed first as its plan says, then passed. Checks, as run: the unit suite 768 passed (57 files); typecheck and
+lint clean. Task 1's engine check, at 6f4ddec7: 23 formulas clean, 20 shapes, no error. Mid-slice rulings: none.
+
+The base suite's first run, before any change, failed one 4b test on main's own code, `stops placing a step, and says
+so` (an announcement asserted after a screen change, like `says when the latest edits aren't saved`); it passed when
+run again, and in four runs of its file. Not reproduced; recorded, as the owner asked, and raised at Milestone 2.
