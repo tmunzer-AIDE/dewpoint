@@ -1987,3 +1987,14 @@ lint clean. Task 1's engine check, at 6f4ddec7: 23 formulas clean, 20 shapes, no
 The base suite's first run, before any change, failed one 4b test on main's own code, `stops placing a step, and says
 so` (an announcement asserted after a screen change, like `says when the latest edits aren't saved`); it passed when
 run again, and in four runs of its file. Not reproduced; recorded, as the owner asked, and raised at Milestone 2.
+
+### 4c-2b, milestone 2 (2026-10-10)
+
+Tasks 6–8 at 51f047a3: the data tree (fdce9255), a pill and its details (1c93307a), text with data pills (51f047a3).
+Each task's tests failed first as its plan says, then passed. Checks, as run: the unit suite 798 passed (60 files);
+typecheck, lint and build clean; the browser gate on the isolated stack 33 passed (main's flows; this slice's four come
+with Task 12), no console error. Screenshots for the owner's review, light and dark at 1280 and 320 px, of a Fail step's
+message with three pills (one dashed, its value may be missing), the tree for a declared trigger input, and a pill's
+details (a trigger value that may be missing; a step's value with no run yet). The mockups' boards aren't rendered
+beside them, as the plan asks: they need the Design canvas's own runtime; each sheet names the boards it maps to on the
+canvas (version 10). Mid-slice rulings: none.
