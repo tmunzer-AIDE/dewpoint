@@ -1778,3 +1778,12 @@ A pasted review signed off milestone 1 on the review side at 5a0ce3da (ledger 21
 remaining blockers. Its 55 focused checks passed, the four corrective tests fail on the old scope code while the
 complete-search baseline passes; it didn't rerun the whole engine or backend suites. It authorizes neither milestone 2
 nor a push: those stay the owner's.
+
+### 4c-2a, milestone 2 (2026-10-10)
+
+The owner started milestone 2 in chat (2026-10-10), with milestone 3 to follow and a pause at the final checkpoint.
+Tasks 6–7 are at 5329bd58: validate answers `conditional_steps` (fb987fcb), and `GET …/draft/scope` answers what a
+field of the saved draft can read (5329bd58, `workflow.view`, one question at a time). API tests: 95 passed
+(test_draft_data, test_openapi, test_workflows, test_workflow_ops). The regenerated client schema passes `check:api`;
+typecheck, lint and the frontend's 731 tests pass with no fixture change for the route. Ruff, mypy and the 11 import
+contracts are clean. No plan deviation.
