@@ -1884,3 +1884,94 @@ M65. **A formula names no type.**
     - The cost: a draft whose formula names a type meets the new error at its next validation (it failed every run
       already). A version published with one still fails at run time, as before; published again, it's refused with
       how to fix it.
+
+### 4c-2b plan accepted (2026-10-10, in chat)
+
+`docs/superpowers/plans/2026-10-10-editor-ui-4c2b-data-ui.md`. Reviews pasted in chat held revision 1 (f8e2fa80) for six
+defects in its code and revision 2 (7ee93fe9) for two; revision 3 (b6fced02) answered them, each with a test that fails
+on the previous revision's code, and a pasted review signed it off on the review side (no rulings accepted by it). The
+owner, asked in chat, accepted revision 3 and adopted its rulings 1–14, which join this ledger as 125–138, copied as
+ruled; chose inline execution with the milestone pauses (the screens of text, pills, the tree and a pill's details after
+Milestone 2; a fresh review at the end); and the branch `feat/editor-4c2b` from origin/main (6f4ddec7, with #84), the
+plan's docs branch merged in. Push and a PR stay the owner's decisions. On a 4b test that failed intermittently while
+revision 2 was checked (`says when the latest edits aren't saved`), the owner: leave it, and raise it if it fails again.
+
+The builder's formulas, checked on that base (`builder_check.py`, the plan's Task 1): 23 formulas validate clean as an
+If's condition and, bound and evaluated as a run would, give true or false, never an error, over 20 shapes of trigger
+data; the scope's guards for a declared field that may be a string, and for an item's field in an optional and a
+required list, are the ones the builder spells.
+125. **Accepted. One editor of inputs and pills.** Text with pills is a row of text inputs with a pill button between
+     each two, in one box: text is typed as in any text field, and a pill is a whole that's moved past, opened or
+     removed. No `contenteditable`, no rich-text library, no new dependency. Each input sizes to its text
+     (`field-sizing: content`, with `size` as the fallback), 24 px at least. Why: a contenteditable can't be tested in
+     jsdom and fights React and the editor's undo; inputs keep 4c-1's typing, held edits and undo as they are. The cost:
+     a text longer than the box scrolls within its line, as a text field does today, and a newline isn't typed (4c-1's
+     text field takes none either).
+126. **Accepted. The tree and a pill's details open in the drawer's flow, under their field**, at every width (the
+     mockups' panels are full width in the flow; the 320 px board: "under its field, never over the canvas"). No
+     popover, no portal: the outline's pre-approved `@radix-ui/react-popover` stays unused. Why: a portal would sit
+     outside the field's focus region (its blur applies held edits, its undo session starts on focus) and its Escape
+     would reach the drawer. The cost: the drawer scrolls to show them.
+127. **Accepted. Where pills are written.** A text field (`string`, a date and time too) whose kinds take a template, or
+     any value, gets "Text" as its fixed mode, with "＋ Data" beside the switch (`takesPills`). Not a sensitive field, a
+     choice (`enum`), live options, a port's name or a literal-only field. A reference in any other field shows read
+     only, as in 4c-1, with Replace. "＋ Data" is offered in Text mode and in the builder, not in Formula mode. Why: the
+     owner's ruling (one text and pill editor as a text field's fixed mode); a template is text only
+     (`template.not_string`).
+128. **Accepted. A lone pill is a template.** Inserting a pill writes a template, a lone one too (the owner's ruling),
+     so the field gets text whatever the value's type. A plain reference already in the draft is shown as a pill and
+     kept as it is until the text changes. Text where the field takes no fixed value is written as a template of one
+     text part. Switching to Formula turns a lone plain reference into its path, and text with pills into an empty
+     formula (Undo brings it back): text around references isn't a formula. Text held because a write was refused is
+     applied later as the write would have been (a template of one text part where the field takes no fixed value), and
+     the recovery file keeps it whole: its text and pills, each default included, beside the text in braces.
+129. **Accepted. "/" asks for data at a text's start or after a space**, never inside a word or a URL. The "/" stays as
+     typed until a pick replaces it; Escape keeps it. Why: the mockup's "/" without eating the slashes of a path or a
+     URL.
+130. **Accepted. A pill knows its value from the saved draft's scope**, one `at` question per pill and per saved
+     revision, kept while the revision is (D17): dashed and "?" when it may be missing. The API answers for the saved
+     draft as it is, so an answer about another revision than the one asked of is never shown as it: the drawer says the
+     draft was saved again, and the next revision asks again. A version's view asks nothing: its pills show as written,
+     with no tree and no data in their details. Why: B6 answers per field and path; the cost is one analysis per pill
+     per revision on the server, cached in the client.
+131. **Accepted. A pill's accessible name starts with its visible text** (WCAG 2.5.3), then its path, and what may
+     happen to its value and its default: "get_site › timezone ?, steps.get_site.output.timezone, may be missing, no
+     default". The mockups' names gave the path alone.
+132. **Accepted. The tree.** An ARIA tree: each source (the trigger, a step, the run…) a top-level item holding its
+     values, a value with children opened by → and loaded then (`under`). A root's own name is the last part of its
+     path. The search asks the server (`find`). What can't be inserted shows, disabled, with why: a key a reference
+     can't name, a value validation refuses here, in text an object or a list (`template.part_not_scalar`), in a
+     condition a value a formula can't read or an object that's always there (it has nothing to compare: it opens, to
+     pick one of its values). A trigger whose input isn't declared offers the typed path, which the server checks (`at`)
+     before it's inserted (the owner's ruling). Opened, focus goes to its search; Escape closes it and gives focus back.
+133. **Accepted. A pill's details.** Its type, and why it may be missing, in words from its guards (a step that may not
+     run, an optional field, a shorter list, a null). A default only for a pill in text: text, which replaces a missing
+     or null value ("Add a default…" starts one, empty text a value too). A sample only for a step's output (B7), with
+     its run, attempt, connection and whether it still matches; `[redacted]` and `[truncated]` as chips; a value kept
+     apart from the run's history said so. A sample is asked for each time the details open: runs end, connections
+     change and history expires whatever the draft's revision. The run's id is text: there's no run page before 4e.
+134. **Accepted. The builder's formulas.** Each comparison is "(guards && null test && type test && comparison)": the
+     scope's guards as data, spelled with a value's type (`type(x) == type({})`, never a type's name: ledger M65); the
+     null test where the scope says; a type test before an operator that would fail on another type. "is there" is the
+     guards and the null test, ending with a test of the value itself (`has()` of a field, the size that holds an item,
+     or its null test), so the formula names the value even where only an ancestor's guards decide it, and "is not
+     empty" is written `size(x) != 0`, so no comparison reads back as another; "is missing" its negation. Operators by
+     type; a date and time is compared as written, never ordered; "is there" only where something may be missing. A
+     number is written as typed, JSON's way. Why: R6 §4: false on any data, never an error, and every form validates
+     clean; checked through the run's own binding.
+135. **Accepted. The builder's own behaviour.** "Builder" replaces "Fixed" for a condition (the owner's ruling); a
+     formula it didn't write stays a formula, Builder disabled with why. It reads back only the text it would write, and
+     never fails on another: text CEL reads and JSON doesn't (`"\x41"`) isn't its own. "＋ Group" picks the group's first
+     comparison; all/any is chosen once there are two. A fixed true or false says "Always true." / "Always false.". What
+     can't be written yet (a number half typed, a write refused) is held whole as a `condition`.
+136. **Accepted. Declassify.** A side panel, opened from the toolbar (while there's a decision to make or an entry) and
+     from "Review in Declassify…" under a field the server says reads sensitive data. A decision to make shows the
+     server's own words for what it reveals (`taint.undeclassified`'s message: no table of reveals in the client, D18),
+     and is declassified only once the person ticks that it may be visible in run history. An entry shows what it
+     reveals (`taint.declassified`) or why it declassifies nothing (`taint.stale_declassify`), and can be removed. Each
+     change is one undo step. A viewer gets no button: validate is the editors'.
+137. **Accepted. The badge.** "may not run", dashed, on a card the current check lists in `conditional_steps` (ruling
+     116), and in its accessible name. None in a version's view, and none for a viewer, who has no check.
+138. **Accepted. 4c-1's tests that change on purpose**: a text field's hint gains the pills note; text a write refused
+     is held as a `template`; a reference in a text field is a pill (the read-only view tests move to a number field);
+     the If and the Filter conditions open in the builder; the browser flows that type a condition press Formula first.
