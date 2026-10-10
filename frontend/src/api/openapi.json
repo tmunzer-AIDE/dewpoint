@@ -124,6 +124,57 @@
         "title": "Binding",
         "type": "object"
       },
+      "BindingEndpointOut": {
+        "additionalProperties": false,
+        "description": "What a workflow's Triggers panel shows of a binding's endpoint (B13; 4c-3a ruling 2).",
+        "properties": {
+          "auth": {
+            "enum": [
+              "bearer",
+              "hmac"
+            ],
+            "title": "Auth",
+            "type": "string"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "trigger": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trigger"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "enabled",
+          "auth",
+          "path",
+          "trigger"
+        ],
+        "title": "BindingEndpointOut",
+        "type": "object"
+      },
       "BindingIn": {
         "additionalProperties": false,
         "properties": {
@@ -622,6 +673,84 @@
         "title": "CsvColumn",
         "type": "object"
       },
+      "CsvColumnFormOut": {
+        "additionalProperties": false,
+        "properties": {
+          "default": {
+            "title": "Default"
+          },
+          "header": {
+            "title": "Header",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "required": {
+            "title": "Required",
+            "type": "boolean"
+          },
+          "sensitive": {
+            "title": "Sensitive",
+            "type": "boolean"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          },
+          "values": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Values"
+          }
+        },
+        "required": [
+          "header",
+          "name",
+          "type",
+          "required",
+          "sensitive"
+        ],
+        "title": "CsvColumnFormOut",
+        "type": "object"
+      },
+      "CsvFormOut": {
+        "additionalProperties": false,
+        "properties": {
+          "columns": {
+            "items": {
+              "$ref": "#/components/schemas/CsvColumnFormOut"
+            },
+            "title": "Columns",
+            "type": "array"
+          },
+          "max_bytes": {
+            "title": "Max Bytes",
+            "type": "integer"
+          },
+          "max_rows": {
+            "title": "Max Rows",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "max_rows",
+          "max_bytes",
+          "columns"
+        ],
+        "title": "CsvFormOut",
+        "type": "object"
+      },
       "CsvIn": {
         "additionalProperties": false,
         "description": "A staged upload (`POST \u2026/csv-uploads`), the mapping from declared column names to its headers, and whether rows\nthat break a rule are skipped (and recorded) rather than refusing the start (engine 2b spec \u00a78.1).",
@@ -908,6 +1037,181 @@
         "title": "EdgeTo",
         "type": "object"
       },
+      "EndpointCreatedOut": {
+        "additionalProperties": false,
+        "properties": {
+          "allowlist": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Allowlist",
+            "type": "array"
+          },
+          "auth": {
+            "enum": [
+              "bearer",
+              "hmac"
+            ],
+            "title": "Auth",
+            "type": "string"
+          },
+          "body_limit": {
+            "title": "Body Limit",
+            "type": "integer"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "events_pointer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Events Pointer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "id_header": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id Header"
+          },
+          "id_pointer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id Pointer"
+          },
+          "id_source": {
+            "enum": [
+              "pointer",
+              "header",
+              "none"
+            ],
+            "title": "Id Source",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "pending_bytes": {
+            "title": "Pending Bytes",
+            "type": "integer"
+          },
+          "pending_events": {
+            "title": "Pending Events",
+            "type": "integer"
+          },
+          "retained_bytes": {
+            "title": "Retained Bytes",
+            "type": "integer"
+          },
+          "retained_events": {
+            "title": "Retained Events",
+            "type": "integer"
+          },
+          "secret": {
+            "title": "Secret",
+            "type": "string"
+          },
+          "signature_header": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Signature Header"
+          },
+          "timestamp_header": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timestamp Header"
+          },
+          "tolerance_s": {
+            "title": "Tolerance S",
+            "type": "integer"
+          },
+          "trigger": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trigger"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "enabled",
+          "auth",
+          "signature_header",
+          "timestamp_header",
+          "tolerance_s",
+          "allowlist",
+          "body_limit",
+          "id_source",
+          "id_pointer",
+          "id_header",
+          "events_pointer",
+          "trigger",
+          "path",
+          "pending_events",
+          "pending_bytes",
+          "retained_events",
+          "retained_bytes",
+          "created_at",
+          "secret"
+        ],
+        "title": "EndpointCreatedOut",
+        "type": "object"
+      },
       "EndpointIn": {
         "additionalProperties": false,
         "properties": {
@@ -1019,6 +1323,19 @@
             "minimum": 60.0,
             "title": "Tolerance S",
             "type": "integer"
+          },
+          "trigger": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trigger"
           }
         },
         "required": [
@@ -1027,9 +1344,180 @@
         "title": "EndpointIn",
         "type": "object"
       },
+      "EndpointOut": {
+        "additionalProperties": false,
+        "description": "A webhook endpoint (engine 2b spec \u00a78.3), never its secret, its digest or its dedupe key. `path` is relative:\nits URL is this path on the deployment's webhook address.",
+        "properties": {
+          "allowlist": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Allowlist",
+            "type": "array"
+          },
+          "auth": {
+            "enum": [
+              "bearer",
+              "hmac"
+            ],
+            "title": "Auth",
+            "type": "string"
+          },
+          "body_limit": {
+            "title": "Body Limit",
+            "type": "integer"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "events_pointer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Events Pointer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "id_header": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id Header"
+          },
+          "id_pointer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id Pointer"
+          },
+          "id_source": {
+            "enum": [
+              "pointer",
+              "header",
+              "none"
+            ],
+            "title": "Id Source",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "pending_bytes": {
+            "title": "Pending Bytes",
+            "type": "integer"
+          },
+          "pending_events": {
+            "title": "Pending Events",
+            "type": "integer"
+          },
+          "retained_bytes": {
+            "title": "Retained Bytes",
+            "type": "integer"
+          },
+          "retained_events": {
+            "title": "Retained Events",
+            "type": "integer"
+          },
+          "signature_header": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Signature Header"
+          },
+          "timestamp_header": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timestamp Header"
+          },
+          "tolerance_s": {
+            "title": "Tolerance S",
+            "type": "integer"
+          },
+          "trigger": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trigger"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "enabled",
+          "auth",
+          "signature_header",
+          "timestamp_header",
+          "tolerance_s",
+          "allowlist",
+          "body_limit",
+          "id_source",
+          "id_pointer",
+          "id_header",
+          "events_pointer",
+          "trigger",
+          "path",
+          "pending_events",
+          "pending_bytes",
+          "retained_events",
+          "retained_bytes",
+          "created_at"
+        ],
+        "title": "EndpointOut",
+        "type": "object"
+      },
       "EndpointPatch": {
         "additionalProperties": false,
-        "description": "Only the fields given change, never an endpoint's identity (how it authenticates, where its events and their ids\nare).",
+        "description": "Only the fields given change, never an endpoint's identity (how it authenticates, where its events and their ids\nare, the trigger it's for).",
         "properties": {
           "allowlist": {
             "anyOf": [
@@ -1123,6 +1611,23 @@
         "title": "EndpointPatch",
         "type": "object"
       },
+      "EndpointsOut": {
+        "additionalProperties": false,
+        "properties": {
+          "endpoints": {
+            "items": {
+              "$ref": "#/components/schemas/EndpointOut"
+            },
+            "title": "Endpoints",
+            "type": "array"
+          }
+        },
+        "required": [
+          "endpoints"
+        ],
+        "title": "EndpointsOut",
+        "type": "object"
+      },
       "ErasureStartIn": {
         "properties": {
           "confirm": {
@@ -1184,6 +1689,38 @@
           "reason"
         ],
         "title": "ExpressionOut",
+        "type": "object"
+      },
+      "FilterClauseOut": {
+        "additionalProperties": false,
+        "properties": {
+          "pointer": {
+            "title": "Pointer",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "pointer",
+          "value"
+        ],
+        "title": "FilterClauseOut",
         "type": "object"
       },
       "FormulaUseOut": {
@@ -2364,6 +2901,34 @@
         "title": "SamplesOut",
         "type": "object"
       },
+      "ScheduleBreakOut": {
+        "additionalProperties": false,
+        "description": "A live schedule the draft, published, would make fail at every firing (4c-3a ruling 7): why, by its stored\ninput's shape, in the draft's own words; never what the input holds.",
+        "properties": {
+          "more": {
+            "title": "More",
+            "type": "boolean"
+          },
+          "reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reasons",
+            "type": "array"
+          },
+          "schedule_id": {
+            "title": "Schedule Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schedule_id",
+          "reasons",
+          "more"
+        ],
+        "title": "ScheduleBreakOut",
+        "type": "object"
+      },
       "ScheduleIn": {
         "additionalProperties": false,
         "properties": {
@@ -2427,6 +2992,163 @@
           }
         },
         "title": "ScheduleIn",
+        "type": "object"
+      },
+      "ScheduleOut": {
+        "additionalProperties": false,
+        "description": "A schedule (engine 2b spec \u00a78.2), never its input; its sync's state and its missed-firing accounting (D3f).",
+        "properties": {
+          "accounting_complete": {
+            "title": "Accounting Complete",
+            "type": "boolean"
+          },
+          "catchup_window_s": {
+            "title": "Catchup Window S",
+            "type": "integer"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "cron": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cron"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "every_s": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Every S"
+          },
+          "generation": {
+            "title": "Generation",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "missed_while_created": {
+            "title": "Missed While Created",
+            "type": "integer"
+          },
+          "misses": {
+            "title": "Misses",
+            "type": "integer"
+          },
+          "misses_read_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Misses Read At"
+          },
+          "mode": {
+            "enum": [
+              "live",
+              "simulate"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "never_unpaused": {
+            "title": "Never Unpaused",
+            "type": "boolean"
+          },
+          "offset_s": {
+            "title": "Offset S",
+            "type": "integer"
+          },
+          "sync_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sync Error"
+          },
+          "sync_error_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sync Error At"
+          },
+          "synced_generation": {
+            "title": "Synced Generation",
+            "type": "integer"
+          },
+          "time_zone": {
+            "title": "Time Zone",
+            "type": "string"
+          },
+          "uncounted_intervals": {
+            "items": {
+              "$ref": "#/components/schemas/UncountedOut"
+            },
+            "title": "Uncounted Intervals",
+            "type": "array"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          },
+          "workflow_id": {
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "workflow_id",
+          "cron",
+          "every_s",
+          "offset_s",
+          "time_zone",
+          "catchup_window_s",
+          "mode",
+          "enabled",
+          "generation",
+          "synced_generation",
+          "misses",
+          "missed_while_created",
+          "misses_read_at",
+          "accounting_complete",
+          "uncounted_intervals",
+          "sync_error",
+          "sync_error_at",
+          "never_unpaused",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ScheduleOut",
         "type": "object"
       },
       "SchedulePatch": {
@@ -2530,6 +3252,23 @@
           }
         },
         "title": "SchedulePatch",
+        "type": "object"
+      },
+      "SchedulesOut": {
+        "additionalProperties": false,
+        "properties": {
+          "schedules": {
+            "items": {
+              "$ref": "#/components/schemas/ScheduleOut"
+            },
+            "title": "Schedules",
+            "type": "array"
+          }
+        },
+        "required": [
+          "schedules"
+        ],
+        "title": "SchedulesOut",
         "type": "object"
       },
       "ScopeEntryOut": {
@@ -2735,6 +3474,25 @@
         "title": "ScopeOut",
         "type": "object"
       },
+      "SecretOut": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "secret": {
+            "title": "Secret",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "secret"
+        ],
+        "title": "SecretOut",
+        "type": "object"
+      },
       "SessionOut": {
         "additionalProperties": false,
         "properties": {
@@ -2793,6 +3551,145 @@
           "is_platform_admin"
         ],
         "title": "SessionUserOut",
+        "type": "object"
+      },
+      "StartFieldOut": {
+        "additionalProperties": false,
+        "description": "A start form's field (engine 2b spec \u00a77.7). A key it doesn't have is left out of the answer (the route excludes\nwhat's unset): a sensitive field's default and enum are masked, never sent.",
+        "properties": {
+          "default": {
+            "title": "Default"
+          },
+          "default_masked": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Masked"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "enum": {
+            "anyOf": [
+              {
+                "items": {},
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enum"
+          },
+          "enum_masked": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enum Masked"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "picker": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Picker"
+          },
+          "required": {
+            "title": "Required",
+            "type": "boolean"
+          },
+          "sensitive": {
+            "title": "Sensitive",
+            "type": "boolean"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "type": {
+            "title": "Type"
+          }
+        },
+        "required": [
+          "name",
+          "type",
+          "required",
+          "sensitive"
+        ],
+        "title": "StartFieldOut",
+        "type": "object"
+      },
+      "StartFormOut": {
+        "additionalProperties": false,
+        "description": "The active version's input, as a form: what a schedule's input is entered on (4c-3a ruling 5).",
+        "properties": {
+          "csv": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CsvFormOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "fields": {
+            "items": {
+              "$ref": "#/components/schemas/StartFieldOut"
+            },
+            "title": "Fields",
+            "type": "array"
+          },
+          "version_id": {
+            "title": "Version Id",
+            "type": "string"
+          },
+          "workflow_id": {
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workflow_id",
+          "version_id",
+          "fields",
+          "csv"
+        ],
+        "title": "StartFormOut",
         "type": "object"
       },
       "StartIn": {
@@ -3092,6 +3989,78 @@
         "title": "TriggerTypeOut",
         "type": "object"
       },
+      "TriggersOut": {
+        "additionalProperties": false,
+        "description": "What starts a workflow besides a person (4c-3a ruling 3): by hand is always possible once it's published.",
+        "properties": {
+          "csv": {
+            "title": "Csv",
+            "type": "boolean"
+          },
+          "schedules": {
+            "title": "Schedules",
+            "type": "integer"
+          },
+          "schedules_enabled": {
+            "title": "Schedules Enabled",
+            "type": "integer"
+          },
+          "webhook_bindings": {
+            "title": "Webhook Bindings",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "schedules",
+          "schedules_enabled",
+          "webhook_bindings",
+          "csv"
+        ],
+        "title": "TriggersOut",
+        "type": "object"
+      },
+      "UncountedOut": {
+        "additionalProperties": false,
+        "description": "A span of a schedule's life whose missed firings aren't counted (D3f): possibly missed, unknown, or pending\nuntil its count is read. `from` and `class` are Python keywords, so the fields are aliased to them.",
+        "properties": {
+          "class": {
+            "enum": [
+              "possibly_missed",
+              "unknown",
+              "pending"
+            ],
+            "title": "Class",
+            "type": "string"
+          },
+          "from": {
+            "title": "From",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "To"
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "class",
+          "reason"
+        ],
+        "title": "UncountedOut",
+        "type": "object"
+      },
       "UserIn": {
         "properties": {
           "email": {
@@ -3184,6 +4153,13 @@
             "title": "Expressions",
             "type": "array"
           },
+          "schedule_breaks": {
+            "items": {
+              "$ref": "#/components/schemas/ScheduleBreakOut"
+            },
+            "title": "Schedule Breaks",
+            "type": "array"
+          },
           "taint": {
             "$ref": "#/components/schemas/TaintOut"
           },
@@ -3198,7 +4174,8 @@
           "diagnostics",
           "expressions",
           "taint",
-          "conditional_steps"
+          "conditional_steps",
+          "schedule_breaks"
         ],
         "title": "ValidationOut",
         "type": "object"
@@ -3406,6 +4383,118 @@
         "title": "VersionOut",
         "type": "object"
       },
+      "WebhookBindingOut": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "endpoint_id": {
+            "title": "Endpoint Id",
+            "type": "string"
+          },
+          "filter": {
+            "items": {
+              "$ref": "#/components/schemas/FilterClauseOut"
+            },
+            "title": "Filter",
+            "type": "array"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "workflow_id": {
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "endpoint_id",
+          "workflow_id",
+          "filter",
+          "enabled"
+        ],
+        "title": "WebhookBindingOut",
+        "type": "object"
+      },
+      "WebhookBindingsOut": {
+        "additionalProperties": false,
+        "properties": {
+          "bindings": {
+            "items": {
+              "$ref": "#/components/schemas/WebhookBindingOut"
+            },
+            "title": "Bindings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "bindings"
+        ],
+        "title": "WebhookBindingsOut",
+        "type": "object"
+      },
+      "WorkflowBindingOut": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "endpoint": {
+            "$ref": "#/components/schemas/BindingEndpointOut"
+          },
+          "endpoint_id": {
+            "title": "Endpoint Id",
+            "type": "string"
+          },
+          "filter": {
+            "items": {
+              "$ref": "#/components/schemas/FilterClauseOut"
+            },
+            "title": "Filter",
+            "type": "array"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "workflow_id": {
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "endpoint_id",
+          "workflow_id",
+          "filter",
+          "enabled",
+          "endpoint"
+        ],
+        "title": "WorkflowBindingOut",
+        "type": "object"
+      },
+      "WorkflowBindingsOut": {
+        "additionalProperties": false,
+        "properties": {
+          "bindings": {
+            "items": {
+              "$ref": "#/components/schemas/WorkflowBindingOut"
+            },
+            "title": "Bindings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "bindings"
+        ],
+        "title": "WorkflowBindingsOut",
+        "type": "object"
+      },
       "WorkflowCreateIn": {
         "properties": {
           "draft": {
@@ -3534,7 +4623,8 @@
             "items": {
               "enum": [
                 "last_run_failed",
-                "not_executable"
+                "not_executable",
+                "schedule_sync_failed"
               ],
               "type": "string"
             },
@@ -3543,6 +4633,9 @@
           },
           "runs_24h": {
             "$ref": "#/components/schemas/RunCountOut"
+          },
+          "triggers": {
+            "$ref": "#/components/schemas/TriggersOut"
           },
           "unpublished_changes": {
             "title": "Unpublished Changes",
@@ -3569,6 +4662,7 @@
           "last_run",
           "last_simulation",
           "runs_24h",
+          "triggers",
           "needs_attention",
           "draft"
         ],
@@ -3742,7 +4836,8 @@
             "items": {
               "enum": [
                 "last_run_failed",
-                "not_executable"
+                "not_executable",
+                "schedule_sync_failed"
               ],
               "type": "string"
             },
@@ -3751,6 +4846,9 @@
           },
           "runs_24h": {
             "$ref": "#/components/schemas/RunCountOut"
+          },
+          "triggers": {
+            "$ref": "#/components/schemas/TriggersOut"
           },
           "unpublished_changes": {
             "title": "Unpublished Changes",
@@ -3777,6 +4875,7 @@
           "last_run",
           "last_simulation",
           "runs_24h",
+          "triggers",
           "needs_attention"
         ],
         "title": "WorkflowOut",
@@ -3910,7 +5009,8 @@
             "items": {
               "enum": [
                 "last_run_failed",
-                "not_executable"
+                "not_executable",
+                "schedule_sync_failed"
               ],
               "type": "string"
             },
@@ -3919,6 +5019,9 @@
           },
           "runs_24h": {
             "$ref": "#/components/schemas/RunCountOut"
+          },
+          "triggers": {
+            "$ref": "#/components/schemas/TriggersOut"
           },
           "unpublished_changes": {
             "title": "Unpublished Changes",
@@ -3952,6 +5055,7 @@
           "last_run",
           "last_simulation",
           "runs_24h",
+          "triggers",
           "needs_attention",
           "warnings"
         ],
@@ -6236,9 +7340,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Schedule Api V1 T  Tenant Id  Schedules  Schedule Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/ScheduleOut"
                 }
               }
             },
@@ -6299,9 +7401,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Update Schedule Api V1 T  Tenant Id  Schedules  Schedule Id  Patch",
-                  "type": "object"
+                  "$ref": "#/components/schemas/ScheduleOut"
                 }
               }
             },
@@ -6408,9 +7508,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Update Binding Api V1 T  Tenant Id  Webhook Bindings  Binding Id  Patch",
-                  "type": "object"
+                  "$ref": "#/components/schemas/WebhookBindingOut"
                 }
               }
             },
@@ -6453,9 +7551,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Endpoints Api V1 T  Tenant Id  Webhook Endpoints Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/EndpointsOut"
                 }
               }
             },
@@ -6506,9 +7602,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Create Endpoint Api V1 T  Tenant Id  Webhook Endpoints Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/EndpointCreatedOut"
                 }
               }
             },
@@ -6561,9 +7655,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Endpoint Api V1 T  Tenant Id  Webhook Endpoints  Endpoint Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/EndpointOut"
                 }
               }
             },
@@ -6624,9 +7716,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Update Endpoint Api V1 T  Tenant Id  Webhook Endpoints  Endpoint Id  Patch",
-                  "type": "object"
+                  "$ref": "#/components/schemas/EndpointOut"
                 }
               }
             },
@@ -6679,9 +7769,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Bindings Api V1 T  Tenant Id  Webhook Endpoints  Endpoint Id  Bindings Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/WebhookBindingsOut"
                 }
               }
             },
@@ -6742,9 +7830,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Create Binding Api V1 T  Tenant Id  Webhook Endpoints  Endpoint Id  Bindings Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/WebhookBindingOut"
                 }
               }
             },
@@ -6930,9 +8016,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Rotate Secret Api V1 T  Tenant Id  Webhook Endpoints  Endpoint Id  Secret Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/SecretOut"
                 }
               }
             },
@@ -8008,9 +9092,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Schedules Api V1 T  Tenant Id  Workflows  Workflow Id  Schedules Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/SchedulesOut"
                 }
               }
             },
@@ -8071,9 +9153,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Create Schedule Api V1 T  Tenant Id  Workflows  Workflow Id  Schedules Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/ScheduleOut"
                 }
               }
             },
@@ -8127,9 +9207,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Start Form Api V1 T  Tenant Id  Workflows  Workflow Id  Start Form Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/StartFormOut"
                 }
               }
             },
@@ -8322,6 +9400,60 @@
         "summary": "Version",
         "tags": [
           "workflows"
+        ]
+      }
+    },
+    "/api/v1/t/{tenant_id}/workflows/{workflow_id}/webhook-bindings": {
+      "get": {
+        "description": "The webhooks that start a workflow (B13; 4c-3a ruling 2), each with what its Triggers panel shows of the\nendpoint, by the endpoint's name.",
+        "operationId": "workflow_bindings_api_v1_t__tenant_id__workflows__workflow_id__webhook_bindings_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowBindingsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Workflow Bindings",
+        "tags": [
+          "webhooks"
         ]
       }
     },

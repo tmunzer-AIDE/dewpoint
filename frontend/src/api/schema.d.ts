@@ -1257,6 +1257,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/t/{tenant_id}/workflows/{workflow_id}/webhook-bindings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Workflow Bindings
+         * @description The webhooks that start a workflow (B13; 4c-3a ruling 2), each with what its Triggers panel shows of the
+         *     endpoint, by the endpoint's name.
+         */
+        get: operations["workflow_bindings_api_v1_t__tenant_id__workflows__workflow_id__webhook_bindings_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tenants": {
         parameters: {
             query?: never;
@@ -1379,6 +1400,27 @@ export interface components {
             sites: components["schemas"]["BindingSite"][];
             /** Type */
             type: string | null;
+        };
+        /**
+         * BindingEndpointOut
+         * @description What a workflow's Triggers panel shows of a binding's endpoint (B13; 4c-3a ruling 2).
+         */
+        BindingEndpointOut: {
+            /**
+             * Auth
+             * @enum {string}
+             */
+            auth: "bearer" | "hmac";
+            /** Enabled */
+            enabled: boolean;
+            /** Id */
+            id: string;
+            /** Name */
+            name: string;
+            /** Path */
+            path: string;
+            /** Trigger */
+            trigger: string | null;
         };
         /** BindingIn */
         BindingIn: {
@@ -1569,6 +1611,32 @@ export interface components {
              */
             values?: string[] | null;
         };
+        /** CsvColumnFormOut */
+        CsvColumnFormOut: {
+            /** Default */
+            default?: unknown;
+            /** Header */
+            header: string;
+            /** Name */
+            name: string;
+            /** Required */
+            required: boolean;
+            /** Sensitive */
+            sensitive: boolean;
+            /** Type */
+            type: string;
+            /** Values */
+            values?: string[] | null;
+        };
+        /** CsvFormOut */
+        CsvFormOut: {
+            /** Columns */
+            columns: components["schemas"]["CsvColumnFormOut"][];
+            /** Max Bytes */
+            max_bytes: number;
+            /** Max Rows */
+            max_rows: number;
+        };
         /**
          * CsvIn
          * @description A staged upload (`POST …/csv-uploads`), the mapping from declared column names to its headers, and whether rows
@@ -1688,6 +1756,57 @@ export interface components {
              */
             node: string;
         };
+        /** EndpointCreatedOut */
+        EndpointCreatedOut: {
+            /** Allowlist */
+            allowlist: string[];
+            /**
+             * Auth
+             * @enum {string}
+             */
+            auth: "bearer" | "hmac";
+            /** Body Limit */
+            body_limit: number;
+            /** Created At */
+            created_at: string | null;
+            /** Enabled */
+            enabled: boolean;
+            /** Events Pointer */
+            events_pointer: string | null;
+            /** Id */
+            id: string;
+            /** Id Header */
+            id_header: string | null;
+            /** Id Pointer */
+            id_pointer: string | null;
+            /**
+             * Id Source
+             * @enum {string}
+             */
+            id_source: "pointer" | "header" | "none";
+            /** Name */
+            name: string;
+            /** Path */
+            path: string;
+            /** Pending Bytes */
+            pending_bytes: number;
+            /** Pending Events */
+            pending_events: number;
+            /** Retained Bytes */
+            retained_bytes: number;
+            /** Retained Events */
+            retained_events: number;
+            /** Secret */
+            secret: string;
+            /** Signature Header */
+            signature_header: string | null;
+            /** Timestamp Header */
+            timestamp_header: string | null;
+            /** Tolerance S */
+            tolerance_s: number;
+            /** Trigger */
+            trigger: string | null;
+        };
         /** EndpointIn */
         EndpointIn: {
             /** Allowlist */
@@ -1731,11 +1850,66 @@ export interface components {
              * @default 300
              */
             tolerance_s?: number;
+            /** Trigger */
+            trigger?: string | null;
+        };
+        /**
+         * EndpointOut
+         * @description A webhook endpoint (engine 2b spec §8.3), never its secret, its digest or its dedupe key. `path` is relative:
+         *     its URL is this path on the deployment's webhook address.
+         */
+        EndpointOut: {
+            /** Allowlist */
+            allowlist: string[];
+            /**
+             * Auth
+             * @enum {string}
+             */
+            auth: "bearer" | "hmac";
+            /** Body Limit */
+            body_limit: number;
+            /** Created At */
+            created_at: string | null;
+            /** Enabled */
+            enabled: boolean;
+            /** Events Pointer */
+            events_pointer: string | null;
+            /** Id */
+            id: string;
+            /** Id Header */
+            id_header: string | null;
+            /** Id Pointer */
+            id_pointer: string | null;
+            /**
+             * Id Source
+             * @enum {string}
+             */
+            id_source: "pointer" | "header" | "none";
+            /** Name */
+            name: string;
+            /** Path */
+            path: string;
+            /** Pending Bytes */
+            pending_bytes: number;
+            /** Pending Events */
+            pending_events: number;
+            /** Retained Bytes */
+            retained_bytes: number;
+            /** Retained Events */
+            retained_events: number;
+            /** Signature Header */
+            signature_header: string | null;
+            /** Timestamp Header */
+            timestamp_header: string | null;
+            /** Tolerance S */
+            tolerance_s: number;
+            /** Trigger */
+            trigger: string | null;
         };
         /**
          * EndpointPatch
          * @description Only the fields given change, never an endpoint's identity (how it authenticates, where its events and their ids
-         *     are).
+         *     are, the trigger it's for).
          */
         EndpointPatch: {
             /** Allowlist */
@@ -1752,6 +1926,11 @@ export interface components {
             timestamp_header?: string | null;
             /** Tolerance S */
             tolerance_s?: number | null;
+        };
+        /** EndpointsOut */
+        EndpointsOut: {
+            /** Endpoints */
+            endpoints: components["schemas"]["EndpointOut"][];
         };
         /** ErasureStartIn */
         ErasureStartIn: {
@@ -1774,6 +1953,13 @@ export interface components {
             node: string | null;
             /** Reason */
             reason: string | null;
+        };
+        /** FilterClauseOut */
+        FilterClauseOut: {
+            /** Pointer */
+            pointer: string;
+            /** Value */
+            value: string | number | boolean | null;
         };
         /** FormulaUseOut */
         FormulaUseOut: {
@@ -2234,6 +2420,19 @@ export interface components {
             /** Searched Runs */
             searched_runs: number;
         };
+        /**
+         * ScheduleBreakOut
+         * @description A live schedule the draft, published, would make fail at every firing (4c-3a ruling 7): why, by its stored
+         *     input's shape, in the draft's own words; never what the input holds.
+         */
+        ScheduleBreakOut: {
+            /** More */
+            more: boolean;
+            /** Reasons */
+            reasons: string[];
+            /** Schedule Id */
+            schedule_id: string;
+        };
         /** ScheduleIn */
         ScheduleIn: {
             /**
@@ -2272,6 +2471,57 @@ export interface components {
             time_zone?: string;
         };
         /**
+         * ScheduleOut
+         * @description A schedule (engine 2b spec §8.2), never its input; its sync's state and its missed-firing accounting (D3f).
+         */
+        ScheduleOut: {
+            /** Accounting Complete */
+            accounting_complete: boolean;
+            /** Catchup Window S */
+            catchup_window_s: number;
+            /** Created At */
+            created_at: string;
+            /** Cron */
+            cron: string | null;
+            /** Enabled */
+            enabled: boolean;
+            /** Every S */
+            every_s: number | null;
+            /** Generation */
+            generation: number;
+            /** Id */
+            id: string;
+            /** Missed While Created */
+            missed_while_created: number;
+            /** Misses */
+            misses: number;
+            /** Misses Read At */
+            misses_read_at: string | null;
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "live" | "simulate";
+            /** Never Unpaused */
+            never_unpaused: boolean;
+            /** Offset S */
+            offset_s: number;
+            /** Sync Error */
+            sync_error: string | null;
+            /** Sync Error At */
+            sync_error_at: string | null;
+            /** Synced Generation */
+            synced_generation: number;
+            /** Time Zone */
+            time_zone: string;
+            /** Uncounted Intervals */
+            uncounted_intervals: components["schemas"]["UncountedOut"][];
+            /** Updated At */
+            updated_at: string;
+            /** Workflow Id */
+            workflow_id: string;
+        };
+        /**
          * SchedulePatch
          * @description Only the fields given change; `cron` or `every_s` given as null switches the timing's kind. Any other field
          *     given as null is refused (422): it has no null to become (the owner's M3 review).
@@ -2295,6 +2545,11 @@ export interface components {
             offset_s?: number | null;
             /** Time Zone */
             time_zone?: string | null;
+        };
+        /** SchedulesOut */
+        SchedulesOut: {
+            /** Schedules */
+            schedules: components["schemas"]["ScheduleOut"][];
         };
         /** ScopeEntryOut */
         ScopeEntryOut: {
@@ -2353,6 +2608,13 @@ export interface components {
              */
             state: "ok" | "unavailable";
         };
+        /** SecretOut */
+        SecretOut: {
+            /** Id */
+            id: string;
+            /** Secret */
+            secret: string;
+        };
         /** SessionOut */
         SessionOut: {
             /** Auth Methods */
@@ -2374,6 +2636,50 @@ export interface components {
             id: string;
             /** Is Platform Admin */
             is_platform_admin: boolean;
+        };
+        /**
+         * StartFieldOut
+         * @description A start form's field (engine 2b spec §7.7). A key it doesn't have is left out of the answer (the route excludes
+         *     what's unset): a sensitive field's default and enum are masked, never sent.
+         */
+        StartFieldOut: {
+            /** Default */
+            default?: unknown;
+            /** Default Masked */
+            default_masked?: boolean | null;
+            /** Description */
+            description?: string | null;
+            /** Enum */
+            enum?: unknown[] | null;
+            /** Enum Masked */
+            enum_masked?: boolean | null;
+            /** Name */
+            name: string;
+            /** Picker */
+            picker?: {
+                [key: string]: unknown;
+            } | null;
+            /** Required */
+            required: boolean;
+            /** Sensitive */
+            sensitive: boolean;
+            /** Title */
+            title?: string | null;
+            /** Type */
+            type: unknown;
+        };
+        /**
+         * StartFormOut
+         * @description The active version's input, as a form: what a schedule's input is entered on (4c-3a ruling 5).
+         */
+        StartFormOut: {
+            csv: components["schemas"]["CsvFormOut"] | null;
+            /** Fields */
+            fields: components["schemas"]["StartFieldOut"][];
+            /** Version Id */
+            version_id: string;
+            /** Workflow Id */
+            workflow_id: string;
         };
         /** StartIn */
         StartIn: {
@@ -2482,6 +2788,38 @@ export interface components {
                 };
             };
         };
+        /**
+         * TriggersOut
+         * @description What starts a workflow besides a person (4c-3a ruling 3): by hand is always possible once it's published.
+         */
+        TriggersOut: {
+            /** Csv */
+            csv: boolean;
+            /** Schedules */
+            schedules: number;
+            /** Schedules Enabled */
+            schedules_enabled: number;
+            /** Webhook Bindings */
+            webhook_bindings: number;
+        };
+        /**
+         * UncountedOut
+         * @description A span of a schedule's life whose missed firings aren't counted (D3f): possibly missed, unknown, or pending
+         *     until its count is read. `from` and `class` are Python keywords, so the fields are aliased to them.
+         */
+        UncountedOut: {
+            /**
+             * Class
+             * @enum {string}
+             */
+            class: "possibly_missed" | "unknown" | "pending";
+            /** From */
+            from: string;
+            /** Reason */
+            reason: string;
+            /** To */
+            to: string | null;
+        };
         /** UserIn */
         UserIn: {
             /** Email */
@@ -2516,6 +2854,8 @@ export interface components {
             draft_revision: number;
             /** Expressions */
             expressions: components["schemas"]["ExpressionOut"][];
+            /** Schedule Breaks */
+            schedule_breaks: components["schemas"]["ScheduleBreakOut"][];
             taint: components["schemas"]["TaintOut"];
             /** Valid */
             valid: boolean;
@@ -2598,6 +2938,43 @@ export interface components {
             /** Version Hash */
             version_hash: string;
         };
+        /** WebhookBindingOut */
+        WebhookBindingOut: {
+            /** Enabled */
+            enabled: boolean;
+            /** Endpoint Id */
+            endpoint_id: string;
+            /** Filter */
+            filter: components["schemas"]["FilterClauseOut"][];
+            /** Id */
+            id: string;
+            /** Workflow Id */
+            workflow_id: string;
+        };
+        /** WebhookBindingsOut */
+        WebhookBindingsOut: {
+            /** Bindings */
+            bindings: components["schemas"]["WebhookBindingOut"][];
+        };
+        /** WorkflowBindingOut */
+        WorkflowBindingOut: {
+            /** Enabled */
+            enabled: boolean;
+            endpoint: components["schemas"]["BindingEndpointOut"];
+            /** Endpoint Id */
+            endpoint_id: string;
+            /** Filter */
+            filter: components["schemas"]["FilterClauseOut"][];
+            /** Id */
+            id: string;
+            /** Workflow Id */
+            workflow_id: string;
+        };
+        /** WorkflowBindingsOut */
+        WorkflowBindingsOut: {
+            /** Bindings */
+            bindings: components["schemas"]["WorkflowBindingOut"][];
+        };
         /** WorkflowCreateIn */
         WorkflowCreateIn: {
             /** Draft */
@@ -2633,8 +3010,9 @@ export interface components {
             /** Name */
             name: string;
             /** Needs Attention */
-            needs_attention: ("last_run_failed" | "not_executable")[];
+            needs_attention: ("last_run_failed" | "not_executable" | "schedule_sync_failed")[];
             runs_24h: components["schemas"]["RunCountOut"];
+            triggers: components["schemas"]["TriggersOut"];
             /** Unpublished Changes */
             unpublished_changes: boolean;
             /** Updated At */
@@ -2696,8 +3074,9 @@ export interface components {
             /** Name */
             name: string;
             /** Needs Attention */
-            needs_attention: ("last_run_failed" | "not_executable")[];
+            needs_attention: ("last_run_failed" | "not_executable" | "schedule_sync_failed")[];
             runs_24h: components["schemas"]["RunCountOut"];
+            triggers: components["schemas"]["TriggersOut"];
             /** Unpublished Changes */
             unpublished_changes: boolean;
             /** Updated At */
@@ -2735,8 +3114,9 @@ export interface components {
             /** Name */
             name: string;
             /** Needs Attention */
-            needs_attention: ("last_run_failed" | "not_executable")[];
+            needs_attention: ("last_run_failed" | "not_executable" | "schedule_sync_failed")[];
             runs_24h: components["schemas"]["RunCountOut"];
+            triggers: components["schemas"]["TriggersOut"];
             /** Unpublished Changes */
             unpublished_changes: boolean;
             /** Updated At */
@@ -4272,9 +4652,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ScheduleOut"];
                 };
             };
             /** @description Validation Error */
@@ -4340,9 +4718,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ScheduleOut"];
                 };
             };
             /** @description Validation Error */
@@ -4408,9 +4784,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["WebhookBindingOut"];
                 };
             };
             /** @description Validation Error */
@@ -4441,9 +4815,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["EndpointsOut"];
                 };
             };
             /** @description Validation Error */
@@ -4478,9 +4850,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["EndpointCreatedOut"];
                 };
             };
             /** @description Validation Error */
@@ -4512,9 +4882,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["EndpointOut"];
                 };
             };
             /** @description Validation Error */
@@ -4550,9 +4918,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["EndpointOut"];
                 };
             };
             /** @description Validation Error */
@@ -4584,9 +4950,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["WebhookBindingsOut"];
                 };
             };
             /** @description Validation Error */
@@ -4622,9 +4986,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["WebhookBindingOut"];
                 };
             };
             /** @description Validation Error */
@@ -4726,9 +5088,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["SecretOut"];
                 };
             };
             /** @description Validation Error */
@@ -5294,9 +5654,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["SchedulesOut"];
                 };
             };
             /** @description Validation Error */
@@ -5332,9 +5690,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ScheduleOut"];
                 };
             };
             /** @description Validation Error */
@@ -5366,9 +5722,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["StartFormOut"];
                 };
             };
             /** @description Validation Error */
@@ -5466,6 +5820,38 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["VersionDetailOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    workflow_bindings_api_v1_t__tenant_id__workflows__workflow_id__webhook_bindings_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workflow_id: string;
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkflowBindingsOut"];
                 };
             };
             /** @description Validation Error */
