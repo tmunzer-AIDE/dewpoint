@@ -328,6 +328,43 @@ async def test_every_field_a_patch_supports_and_a_rotation_are_written_as_the_ap
     assert {k: after[k] for k in ids} == ids and after["dedupe_key"] == before["dedupe_key"]
 
 
+async def test_a_workflows_webhooks_are_listed_with_their_endpoints(
+    keyed_app, tenant, demo, owner_sessionmaker, api_settings, api_sessionmaker, admin_sessionmaker
+) -> None:
+    """B13 (4c-3a ruling 2): the webhooks that start a workflow, read with `workflow.view`, each with what the Triggers
+    panel shows of its endpoint, by the endpoint's name; another workflow's aren't among them. A workflow the caller's
+    tenant doesn't have, unknown or another tenant's, is 404."""
+    ctx, wf = tenant
+    mist = await made(keyed_app, owner_sessionmaker, api_settings, ctx, name="Mist prod", trigger="demo.webhook")
+    ticketing = await made(keyed_app, owner_sessionmaker, api_settings, ctx, name="Ticketing", auth="hmac")
+    other = uuid.uuid4()
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text("insert into workflows (id, tenant_id, name, enabled, draft) values (:w, :t, 'Other', "
+                             "true, '{}')"), {"w": other, "t": ctx.tenant_id})  # fmt: skip
+    editor = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "editor")
+    for endpoint, workflow, body in ((ticketing, wf, {"enabled": False}), (mist, other, {}),
+                                     (mist, wf, {"filter": [{"pointer": "/topic", "value": "a"}]})):  # fmt: skip
+        bound = await editor.post(url(ctx, f"/webhook-endpoints/{endpoint['id']}/bindings"),
+                                  json={"workflow_id": str(workflow)} | body)  # fmt: skip
+        assert bound.status_code == 201, bound.text
+    viewer = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "viewer")
+    answer = await viewer.get(url(ctx, f"/workflows/{wf}/webhook-bindings"))
+    assert answer.status_code == 200, answer.text
+    bindings = answer.json()["bindings"]
+    assert [(b["endpoint"]["name"], b["enabled"], b["filter"]) for b in bindings] == [
+        ("Mist prod", True, [{"pointer": "/topic", "value": "a"}]), ("Ticketing", False, []),
+    ]  # fmt: skip
+    assert bindings[0]["endpoint"] == {"id": mist["id"], "name": "Mist prod", "enabled": True, "auth": "bearer",
+                                       "path": f"/hooks/{mist['id']}", "trigger": "demo.webhook"}  # fmt: skip
+    assert (bindings[1]["endpoint"]["auth"], bindings[1]["endpoint"]["trigger"]) == ("hmac", None)
+    assert {(b["workflow_id"], b["endpoint_id"]) for b in bindings} == {(str(wf), mist["id"]),
+                                                                       (str(wf), ticketing["id"])}  # fmt: skip
+    _, theirs = await published(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, OPEN_GRAPH)
+    for unknown in (uuid.uuid4(), theirs):
+        missing = await viewer.get(url(ctx, f"/workflows/{unknown}/webhook-bindings"))
+        assert (missing.status_code, missing.json()) == (404, {"error": "not_found"})
+
+
 async def test_bindings_are_checked_capped_and_unique(keyed_app, tenant, owner_sessionmaker, api_settings,
                                                       api_sessionmaker, admin_sessionmaker) -> None:  # fmt: skip
     ctx, wf = tenant

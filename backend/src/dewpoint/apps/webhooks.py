@@ -387,6 +387,12 @@ def endpoint_body(endpoint: WebhookEndpoint) -> dict[str, object]:
     }  # fmt: skip
 
 
+def endpoint_summary(endpoint: WebhookEndpoint) -> dict[str, object]:
+    """What a workflow's Triggers panel shows of a binding's endpoint (B13; 4c-3a ruling 2)."""
+    return {"id": str(endpoint.id), "name": endpoint.name, "enabled": endpoint.enabled, "auth": endpoint.auth_kind,
+            "path": f"/hooks/{endpoint.id}", "trigger": endpoint.trigger_key}  # fmt: skip
+
+
 def binding_body(binding: TriggerBinding) -> dict[str, object]:
     return {"id": str(binding.id), "endpoint_id": str(binding.endpoint_id), "workflow_id": str(binding.workflow_id),
             "filter": binding.filter, "enabled": binding.enabled}  # fmt: skip

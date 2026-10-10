@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps import webhooks
@@ -20,6 +20,7 @@ from dewpoint.core.crypto.ingress import IngressKey
 from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.http import TenantContext, get_db, require
 from dewpoint.core.models.ingress import TriggerBinding, WebhookEndpoint
+from dewpoint.core.models.workflows import Workflow
 from dewpoint.core.retention import cutoff as retention
 
 router = APIRouter(prefix="/api/v1", tags=["webhooks"])
@@ -181,6 +182,26 @@ async def list_bindings(
     found = await db.execute(select(TriggerBinding).where(TriggerBinding.endpoint_id == endpoint_id)
                              .order_by(TriggerBinding.workflow_id))  # fmt: skip
     return {"bindings": [webhooks.binding_body(b) for b in found.scalars()]}
+
+
+@router.get("/t/{tenant_id}/workflows/{workflow_id}/webhook-bindings")
+async def workflow_bindings(
+    workflow_id: uuid.UUID,
+    ctx: TenantContext = Depends(require(P.WORKFLOW_VIEW)),
+    db: AsyncSession = Depends(get_db, scope="function"),
+) -> dict[str, object]:
+    """The webhooks that start a workflow (B13; 4c-3a ruling 2), each with what its Triggers panel shows of the
+    endpoint, by the endpoint's name."""
+    if await db.get(Workflow, workflow_id) is None:  # row-level security: the caller's tenant's only
+        raise HTTPException(404, detail={"error": "not_found"})
+    found = await db.execute(
+        select(TriggerBinding, WebhookEndpoint)
+        .join(WebhookEndpoint, and_(WebhookEndpoint.id == TriggerBinding.endpoint_id,
+                                    WebhookEndpoint.tenant_id == TriggerBinding.tenant_id))
+        .where(TriggerBinding.workflow_id == workflow_id)
+        .order_by(WebhookEndpoint.name, WebhookEndpoint.id)
+    )  # fmt: skip
+    return {"bindings": [webhooks.binding_body(b) | {"endpoint": webhooks.endpoint_summary(e)} for b, e in found.all()]}
 
 
 @router.patch("/t/{tenant_id}/webhook-bindings/{binding_id}")
