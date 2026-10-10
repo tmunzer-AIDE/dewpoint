@@ -51,6 +51,7 @@ type Opened = { workflow: WorkflowDetail; types: NodeType[]; role: string | null
 /** The editor's right column: a step's panel, the problems, or the versions (Task 15). */
 type Side = { kind: "step"; node: string; field?: { pointer: string; kind?: UnappliedKind; n: number } } | { kind: "problems" } | { kind: "versions" } | { kind: "unapplied" } | { kind: "declassify" } | null;
 const NO_DIAGNOSTICS: Diagnostic[] = []; // one empty list, so a memo over it holds
+const NO_STEPS: ReadonlySet<string> = new Set();
 
 /** Whether a request's outcome is unknown: no answer reached the editor (the network), or a 5xx came in the API's
  * place or after its commit. Such an outcome is read back, never assumed (4b ruling 25). */
@@ -432,6 +433,8 @@ function Editor({
     }
     return counts;
   }, [trusted]);
+  // The steps that may not run, from the current check: a badge on each (ledger rulings 70, 116).
+  const conditional = useMemo(() => new Set((trusted?.conditional_steps ?? []).map(idKey)), [trusted]);
   const count = (last?.diagnostics.length ?? 0) + published.length; // a stale publish finding never counts
   // Declassify: shown once there's a decision to make or one listed (4c-2b).
   const listed = doc.settings?.declassify ?? [];
@@ -1179,6 +1182,7 @@ function Editor({
           types={typeMap}
           problems={viewing ? new Map() : problems}
           separate={viewing ? new Map() : separate}
+          conditional={viewing ? NO_STEPS : conditional}
           editable={editable}
           current={panel}
           focusId={shown}

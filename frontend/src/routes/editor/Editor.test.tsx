@@ -5,6 +5,7 @@ import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { GraphDoc } from "../../lib/workflows";
+import { idKey } from "../../lib/graph";
 import { onAnnounce } from "../../lib/announce";
 import { cancelLeaving, mayLeave } from "../../lib/leaving";
 import type { CanvasProps } from "./Canvas";
@@ -37,6 +38,7 @@ vi.mock("./Canvas", async () => {
           data-editable={String(props.editable)}
           data-problems={String(props.problems.size)}
           data-problem-steps={[...props.problems.keys()].join(",")}
+          data-conditional={[...props.conditional].join(",")}
         >
           <button data-item="start" onClick={() => props.onItem({ kind: "after", from: null })}>Start</button>
           {(props.doc.nodes ?? []).map((n) => (
@@ -1898,6 +1900,15 @@ it("keeps a formula past the limit out of the draft, held and counted, never cut
 });
 
 // 4c-2b: the steps a check says may not run (ledger ruling 116), and declassifying a decision from the toolbar.
+it("tells the canvas the steps the current check says may not run", async () => {
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: draftWith("a", "b") }));
+  answers.set(`POST ${BASE}/validate`, () =>
+    json({ draft_revision: 1, valid: true, diagnostics: [], expressions: [], conditional_steps: ["id-b"], taint: { sites: [], declassified: [] } }));
+  await show();
+  const canvas = await screen.findByRole("group", { name: "Workflow steps" });
+  await vi.waitFor(() => expect(canvas.dataset.conditional).toBe(idKey("id-b")));
+});
+
 it("declassifies a decision from the toolbar's Declassify, and the draft saves the entry", async () => {
   answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: draftWith("a") }));
   answers.set(`POST ${BASE}/validate`, () =>
