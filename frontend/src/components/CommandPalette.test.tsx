@@ -48,9 +48,25 @@ it("opens with ⌘K or Ctrl+K, its search field focused", async () => {
   fireEvent.keyDown(document, { key: "k", metaKey: true });
   expect(dialog().hasAttribute("open")).toBe(true);
   expect(document.activeElement).toBe(screen.getByRole("combobox"));
-  act(() => dialog().close()); // Escape, in a browser: its close event is handled before the next key
+  act(() => dialog().close()); // closed, its close event handled before the next key
   fireEvent.keyDown(document, { key: "K", ctrlKey: true });
   expect(dialog().hasAttribute("open")).toBe(true);
+});
+
+it("reopens with ⌘K pressed between Escape and the dialog's close event", async () => {
+  // A browser's Escape fires `cancel`, closes the dialog, and fires `close` a task later, so a ⌘K can come in between
+  // (a CI run of #82 lost a reopening there). jsdom's stand-in fires `close` at once: this test takes the browser's steps.
+  await renderAt("/t/t1/connections");
+  fireEvent.keyDown(document, { key: "k", metaKey: true });
+  expect(dialog().hasAttribute("open")).toBe(true);
+  fireEvent(dialog(), new Event("cancel", { cancelable: true }));
+  act(() => dialog().removeAttribute("open")); // closed, its close event still to come
+  fireEvent.keyDown(document, { key: "k", metaKey: true });
+  act(() => {
+    dialog().dispatchEvent(new Event("close")); // the close event, late
+  });
+  expect(dialog().hasAttribute("open")).toBe(true);
+  expect(document.activeElement).toBe(screen.getByRole("combobox"));
 });
 
 it("names its trigger and its shortcut", async () => {
