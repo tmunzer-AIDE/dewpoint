@@ -573,3 +573,22 @@ async def test_an_endpoints_event_list_shows_dead_events_to_admins_only(
     admin = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "admin")
     assert sorted(e["id"] for e in (await admin.get(events)).json()["events"]) == sorted([str(dead), str(alive)])
     assert [e["id"] for e in (await admin.get(f"{events}?status=dead")).json()["events"]] == [str(dead)]
+
+
+async def test_a_filters_values_keep_their_types_through_the_typed_answers(
+    keyed_app, tenant, owner_sessionmaker, api_settings
+) -> None:
+    """A clause's value is typed (`1`, `true`, `"1"` and null are four values): the named answers (4c-3a ruling 5)
+    give each back as it was written, never coerced to another member of the union."""
+    ctx, wf = tenant
+    endpoint = await made(keyed_app, owner_sessionmaker, api_settings, ctx)
+    editor = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "editor")
+    clauses = [{"pointer": "/a", "value": 1}, {"pointer": "/b", "value": True}, {"pointer": "/c", "value": "1"},
+               {"pointer": "/d", "value": None}]  # fmt: skip
+    made_binding = await editor.post(url(ctx, f"/webhook-endpoints/{endpoint['id']}/bindings"),
+                                     json={"workflow_id": str(wf), "filter": clauses})  # fmt: skip
+    assert made_binding.status_code == 201, made_binding.text
+    listed = (await editor.get(url(ctx, f"/webhook-endpoints/{endpoint['id']}/bindings"))).json()["bindings"]
+    by_workflow = (await editor.get(url(ctx, f"/workflows/{wf}/webhook-bindings"))).json()["bindings"]
+    for answer in (made_binding.json()["filter"], listed[0]["filter"], by_workflow[0]["filter"]):
+        assert answer == clauses and [type(c["value"]) for c in answer] == [int, bool, str, type(None)]

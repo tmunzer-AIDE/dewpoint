@@ -450,3 +450,160 @@ class TriggerTypeOut(_Answer):
     endpoint: TriggerEndpointOut
     topic_pointer: str
     topics: dict[str, dict[str, Any]]
+
+
+class UncountedOut(_Answer):
+    """A span of a schedule's life whose missed firings aren't counted (D3f): possibly missed, unknown, or pending
+    until its count is read. `from` and `class` are Python keywords, so the fields are aliased to them."""
+
+    from_: str = Field(alias="from")
+    to: str | None  # null while it's open
+    class_: Literal["possibly_missed", "unknown", "pending"] = Field(alias="class")
+    reason: str
+
+
+class ScheduleOut(_Answer):
+    """A schedule (engine 2b spec §8.2), never its input; its sync's state and its missed-firing accounting (D3f)."""
+
+    id: str
+    workflow_id: str
+    cron: str | None  # a cron, or
+    every_s: int | None  # an interval, with its offset
+    offset_s: int
+    time_zone: str  # a cron's; an interval has none
+    catchup_window_s: int
+    mode: Literal["live", "simulate"]
+    enabled: bool
+    generation: int  # raised by every change
+    synced_generation: int  # the last the sync confirmed; 0 before its first
+    misses: int
+    missed_while_created: int
+    misses_read_at: str | None
+    accounting_complete: bool
+    uncounted_intervals: list[UncountedOut]
+    sync_error: str | None  # `temporal_refused` or `sync_failed`: its last sync failed, retried after a minute
+    sync_error_at: str | None  # when (4c-3a ruling 6)
+    never_unpaused: bool  # nothing ever unpaused it: it never fired (4c-3a ruling 6)
+    created_at: str
+    updated_at: str
+
+
+class SchedulesOut(_Answer):
+    schedules: list[ScheduleOut]
+
+
+class EndpointOut(_Answer):
+    """A webhook endpoint (engine 2b spec §8.3), never its secret, its digest or its dedupe key. `path` is relative:
+    its URL is this path on the deployment's webhook address."""
+
+    id: str
+    name: str
+    enabled: bool
+    auth: Literal["bearer", "hmac"]
+    signature_header: str | None
+    timestamp_header: str | None
+    tolerance_s: int
+    allowlist: list[str]
+    body_limit: int
+    id_source: Literal["pointer", "header", "none"]
+    id_pointer: str | None
+    id_header: str | None
+    events_pointer: str | None
+    trigger: str | None  # the trigger type it was made for; null: another sender (4c-3a ruling 1)
+    path: str
+    pending_events: int
+    pending_bytes: int
+    retained_events: int
+    retained_bytes: int
+    created_at: str | None
+
+
+class EndpointCreatedOut(EndpointOut):
+    secret: str  # shown this once
+
+
+class EndpointsOut(_Answer):
+    endpoints: list[EndpointOut]
+
+
+class SecretOut(_Answer):
+    id: str
+    secret: str  # shown this once
+
+
+class FilterClauseOut(_Answer):
+    pointer: str
+    value: str | int | bool | None  # typed: `1`, `true` and `"1"` are three values
+
+
+class WebhookBindingOut(_Answer):
+    id: str
+    endpoint_id: str
+    workflow_id: str
+    filter: list[FilterClauseOut]  # all must hold; none: every event
+    enabled: bool
+
+
+class WebhookBindingsOut(_Answer):
+    bindings: list[WebhookBindingOut]
+
+
+class BindingEndpointOut(_Answer):
+    """What a workflow's Triggers panel shows of a binding's endpoint (B13; 4c-3a ruling 2)."""
+
+    id: str
+    name: str
+    enabled: bool
+    auth: Literal["bearer", "hmac"]
+    path: str
+    trigger: str | None
+
+
+class WorkflowBindingOut(WebhookBindingOut):
+    endpoint: BindingEndpointOut
+
+
+class WorkflowBindingsOut(_Answer):
+    bindings: list[WorkflowBindingOut]
+
+
+class StartFieldOut(_Answer):
+    """A start form's field (engine 2b spec §7.7). A key it doesn't have is left out of the answer (the route excludes
+    what's unset): a sensitive field's default and enum are masked, never sent."""
+
+    name: str
+    type: Any  # its schema's `type`: a name, a list of names, or none
+    required: bool
+    sensitive: bool
+    title: str | None = None
+    description: str | None = None
+    enum: list[Any] | None = None
+    default: Any = None
+    default_masked: bool | None = None
+    enum_masked: bool | None = None
+    picker: dict[str, Any] | None = None
+
+
+class CsvColumnFormOut(_Answer):
+    header: str
+    name: str
+    type: str
+    required: bool
+    sensitive: bool
+    default: Any = None  # left out unless declared
+    values: list[str] | None = None  # a choice's; left out otherwise
+
+
+class CsvFormOut(_Answer):
+    max_rows: int
+    max_bytes: int
+    columns: list[CsvColumnFormOut]
+
+
+class StartFormOut(_Answer):
+    """The active version's input, as a form: what a schedule's input is entered on (4c-3a ruling 5)."""
+
+    workflow_id: str
+    version_id: str
+    fields: list[StartFieldOut]
+    csv: CsvFormOut | None

@@ -162,3 +162,36 @@ def test_slice_4c_routes_name_their_answer(method: str, path: str) -> None:
     ok = next(code for code in responses if code.startswith("2"))
     body = responses[ok]["content"]["application/json"]["schema"]
     assert "$ref" in body or "$ref" in body.get("items", {}), body
+
+
+# What the web client calls in slice 4c-3, trigger setup (4c-3a ruling 5): each answers a named model.
+SLICE_4C3 = [
+    ("post", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/schedules"),
+    ("get", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/schedules"),
+    ("get", "/api/v1/t/{tenant_id}/schedules/{schedule_id}"),
+    ("patch", "/api/v1/t/{tenant_id}/schedules/{schedule_id}"),
+    ("post", "/api/v1/t/{tenant_id}/webhook-endpoints"),
+    ("get", "/api/v1/t/{tenant_id}/webhook-endpoints"),
+    ("get", "/api/v1/t/{tenant_id}/webhook-endpoints/{endpoint_id}"),
+    ("patch", "/api/v1/t/{tenant_id}/webhook-endpoints/{endpoint_id}"),
+    ("post", "/api/v1/t/{tenant_id}/webhook-endpoints/{endpoint_id}/secret"),
+    ("post", "/api/v1/t/{tenant_id}/webhook-endpoints/{endpoint_id}/bindings"),
+    ("get", "/api/v1/t/{tenant_id}/webhook-endpoints/{endpoint_id}/bindings"),
+    ("patch", "/api/v1/t/{tenant_id}/webhook-bindings/{binding_id}"),
+    ("get", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/webhook-bindings"),
+    ("get", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/start-form"),
+]
+
+
+@pytest.mark.parametrize("method,path", SLICE_4C3)
+def test_slice_4c3_routes_name_their_answer(method: str, path: str) -> None:
+    responses = schema()["paths"][path][method]["responses"]
+    ok = next(code for code in responses if code.startswith("2"))
+    body = responses[ok]["content"]["application/json"]["schema"]
+    assert "$ref" in body or "$ref" in body.get("items", {}), body
+
+
+def test_a_schedules_uncounted_span_keeps_its_wire_names() -> None:
+    """`from` and `class` are Python keywords: the model aliases them, and the schema says the names on the wire."""
+    span = schema()["components"]["schemas"]["UncountedOut"]
+    assert sorted(span["properties"]) == ["class", "from", "reason", "to"]

@@ -14,6 +14,15 @@ from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps import webhooks
+from dewpoint.apps.api.responses import (
+    EndpointCreatedOut,
+    EndpointOut,
+    EndpointsOut,
+    SecretOut,
+    WebhookBindingOut,
+    WebhookBindingsOut,
+    WorkflowBindingsOut,
+)
 from dewpoint.apps.api.routes.run_requests import key_unusable
 from dewpoint.core.authz.permissions import ROLE_PERMISSIONS, P
 from dewpoint.core.crypto.ingress import IngressKey
@@ -86,7 +95,7 @@ def _refused(e: webhooks.WebhookRefusedError) -> HTTPException:
     return HTTPException(e.status, detail=e.detail)
 
 
-@router.post("/t/{tenant_id}/webhook-endpoints", status_code=201)
+@router.post("/t/{tenant_id}/webhook-endpoints", status_code=201, response_model=EndpointCreatedOut)
 async def create_endpoint(
     given: EndpointIn,
     ctx: TenantContext = Depends(require(P.TRIGGER_MANAGE)),
@@ -105,7 +114,7 @@ async def create_endpoint(
     return webhooks.endpoint_body(endpoint) | {"secret": secret}  # shown this once
 
 
-@router.get("/t/{tenant_id}/webhook-endpoints")
+@router.get("/t/{tenant_id}/webhook-endpoints", response_model=EndpointsOut)
 async def list_endpoints(
     ctx: TenantContext = Depends(require(P.WORKFLOW_VIEW)),
     db: AsyncSession = Depends(get_db, scope="function"),
@@ -114,7 +123,7 @@ async def list_endpoints(
     return {"endpoints": [webhooks.endpoint_body(e) for e in found.scalars()]}
 
 
-@router.get("/t/{tenant_id}/webhook-endpoints/{endpoint_id}")
+@router.get("/t/{tenant_id}/webhook-endpoints/{endpoint_id}", response_model=EndpointOut)
 async def get_endpoint(
     endpoint_id: uuid.UUID,
     ctx: TenantContext = Depends(require(P.WORKFLOW_VIEW)),
@@ -126,7 +135,7 @@ async def get_endpoint(
         raise _refused(e) from None
 
 
-@router.patch("/t/{tenant_id}/webhook-endpoints/{endpoint_id}")
+@router.patch("/t/{tenant_id}/webhook-endpoints/{endpoint_id}", response_model=EndpointOut)
 async def update_endpoint(
     endpoint_id: uuid.UUID,
     given: EndpointPatch,
@@ -142,7 +151,7 @@ async def update_endpoint(
     return webhooks.endpoint_body(updated)
 
 
-@router.post("/t/{tenant_id}/webhook-endpoints/{endpoint_id}/secret")
+@router.post("/t/{tenant_id}/webhook-endpoints/{endpoint_id}/secret", response_model=SecretOut)
 async def rotate_secret(
     endpoint_id: uuid.UUID,
     ctx: TenantContext = Depends(require(P.TRIGGER_MANAGE)),
@@ -157,7 +166,9 @@ async def rotate_secret(
     return {"id": str(endpoint.id), "secret": secret}  # shown this once
 
 
-@router.post("/t/{tenant_id}/webhook-endpoints/{endpoint_id}/bindings", status_code=201)
+@router.post(
+    "/t/{tenant_id}/webhook-endpoints/{endpoint_id}/bindings", status_code=201, response_model=WebhookBindingOut
+)
 async def create_binding(
     endpoint_id: uuid.UUID,
     given: BindingIn,
@@ -173,7 +184,7 @@ async def create_binding(
     return webhooks.binding_body(binding)
 
 
-@router.get("/t/{tenant_id}/webhook-endpoints/{endpoint_id}/bindings")
+@router.get("/t/{tenant_id}/webhook-endpoints/{endpoint_id}/bindings", response_model=WebhookBindingsOut)
 async def list_bindings(
     endpoint_id: uuid.UUID,
     ctx: TenantContext = Depends(require(P.WORKFLOW_VIEW)),
@@ -184,7 +195,7 @@ async def list_bindings(
     return {"bindings": [webhooks.binding_body(b) for b in found.scalars()]}
 
 
-@router.get("/t/{tenant_id}/workflows/{workflow_id}/webhook-bindings")
+@router.get("/t/{tenant_id}/workflows/{workflow_id}/webhook-bindings", response_model=WorkflowBindingsOut)
 async def workflow_bindings(
     workflow_id: uuid.UUID,
     ctx: TenantContext = Depends(require(P.WORKFLOW_VIEW)),
@@ -204,7 +215,7 @@ async def workflow_bindings(
     return {"bindings": [webhooks.binding_body(b) | {"endpoint": webhooks.endpoint_summary(e)} for b, e in found.all()]}
 
 
-@router.patch("/t/{tenant_id}/webhook-bindings/{binding_id}")
+@router.patch("/t/{tenant_id}/webhook-bindings/{binding_id}", response_model=WebhookBindingOut)
 async def update_binding(
     binding_id: uuid.UUID,
     given: BindingPatch,
