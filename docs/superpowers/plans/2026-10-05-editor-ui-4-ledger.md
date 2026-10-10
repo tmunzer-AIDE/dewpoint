@@ -2286,3 +2286,20 @@ Built inline on `feat/editor-4c3a` (worktree `scratchpad/ui4c3/build`, from orig
   API tests 34 passed.
 
 ruff, mypy and the formatter clean after each. No mid-slice ruling: the code is the plan's, as written.
+
+### 4c-3a, milestone 2 (2026-10-10)
+
+- Task 5 (4d3a0cf1): a schedule's `sync_error_at` and `never_unpaused`; 4 failed (`KeyError`), then the schedule
+  tests 62 passed.
+- Task 6 (e39a2119): the list's `triggers` and `schedule_sync_failed`; 3 failed, then the summary and workflow tests
+  40 passed; the list's reads stay fixed, 7 at most.
+- Task 7 (2ce370c4): validate and publish say which live schedules a draft would break (ruling 145): the shape check,
+  bounded in work units (2 MiB of input fetched, 50,000 steps, 100 errors and 5 reasons an input), off the event loop;
+  2 collection errors (the module missing), then the check's and the workflow routes' tests 106 passed.
+
+Then the tests of every directory the milestone touched (`tests/apps/api`, `tests/core/ingress`, the migration chain
+and model schema, the schedule, summary, check and sync tests): 711 passed. ruff, mypy, the formatter and the import
+contracts (11 kept) clean. No mid-slice ruling: the code is the plan's, as written.
+
+Paused for the owner's review, as the plan says: Task 7 decides what validate may reveal of a schedule's sealed input.
+Milestone 3 (the named answers, the client's types, every check and the final review) starts on the owner's word.
