@@ -133,6 +133,51 @@ describe("text with data pills", () => {
     expect(f.config()).toEqual({ message: template({ ref: "steps.get_site.output.timezone", default: "UTC" }) });
   });
 
+  it("gives focus back to the text when the tree ＋ Data opened closes, the text never focused before (the final review)", async () => {
+    showFields(NOTE, { steps, config: { message: template({ text: "AP " }, { ref: "run.now" }, { text: " down" }) } });
+    await userEvent.click(screen.getByRole("button", { name: "＋ Data" }));
+    await screen.findByRole("tree");
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Message, text after run › now" })));
+  });
+
+  it("puts focus on the default once added, and on Add a default… once it's removed (the final review)", async () => {
+    showFields(NOTE, { steps, config: { message: template({ ref: "steps.get_site.output.timezone" }) } });
+    const pill = await screen.findByRole("button", { name: /^get_site › timezone \?/ });
+    pill.focus();
+    await userEvent.keyboard("{Enter}");
+    const details = await screen.findByRole("dialog", { name: "steps.get_site.output.timezone" });
+    await userEvent.click(within(details).getByRole("button", { name: "Add a default…" }));
+    await waitFor(() => expect(document.activeElement).toBe(within(details).getByLabelText("If it's missing or null")));
+    await userEvent.click(within(details).getByRole("button", { name: "Remove the default" }));
+    await waitFor(() => expect(document.activeElement).toBe(within(details).getByRole("button", { name: "Add a default…" })));
+  });
+
+  it("keeps a pill dashed while the next saved revision's answer comes (the final review)", async () => {
+    let revision = 1;
+    let pending = false;
+    let release = () => {};
+    fakeApi({
+      "GET /api/v1/t/t1/workflows/w1/draft/scope": (q) => {
+        const answer = json({ draft_revision: revision, node: NODE_ID, field: q.get("field"), state: "ok", reason: null, entries: ENTRIES.filter((e) => e.path === q.get("at")), more: false, problem: null });
+        if (revision === 1) return answer;
+        pending = true;
+        return new Promise<Response>((done) => (release = () => done(answer)));
+      },
+    });
+    const options = { steps, config: { message: template({ ref: "steps.get_site.output.timezone" }) }, revision: 1 };
+    const f = showFields(NOTE, options);
+    const dashed = () => screen.getByRole("button", { name: /^get_site › timezone \?, steps\.get_site\.output\.timezone, may be missing/ });
+    await waitFor(() => expect(dashed().className).toContain("border-dashed"));
+    revision = 2;
+    options.revision = 2; // saved again: the next revision asks again
+    f.replace(options.config);
+    await waitFor(() => expect(pending).toBe(true));
+    expect(dashed().className).toContain("border-dashed"); // the previous answer stands in, never "always there"
+    release();
+    await waitFor(() => expect(dashed().className).toContain("border-dashed"));
+  });
+
   it("holds text and pills a write refused, whole, said in braces, and shows them still", async () => {
     const f = showFields(NOTE, { steps, config: { message: template({ text: "AP " }, { ref: "run.now" }) } });
     f.refuse("Not written: the draft can't be changed now.");

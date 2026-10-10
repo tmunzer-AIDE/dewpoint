@@ -53,9 +53,11 @@ export function TextPills({ spec, value, literal, id, describedBy, invalid, disa
     panel.focus.current = null;
     if ("pill" in want) pills.current[want.pill]?.focus();
     else {
-      const input = inputs.current[want.segment];
+      // "＋ Data" pressed before the text was ever focused asks for the end: the last text's (the final review).
+      const input = inputs.current[Math.min(want.segment, inputs.current.length - 1)];
+      const offset = Math.min(want.offset, input?.value.length ?? 0);
       input?.focus();
-      input?.setSelectionRange(want.offset, want.offset);
+      input?.setSelectionRange(offset, offset);
     }
   });
 

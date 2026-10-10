@@ -1930,3 +1930,19 @@ it("declassifies a decision from the toolbar's Declassify, and the draft saves t
   // Checked again after the save: the server still names the decision (the fake does), listed now: none to make.
   expect(await within(panel).findByText("Needs your decision · 0")).toBeTruthy();
 });
+
+it("lands on Versions when Declassify closes after its last entry is removed (the final review)", async () => {
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: { ...draftWith("a"), settings: { declassify: [{ node: "id-a", field: "/x" }] } } }));
+  answers.set(`POST ${BASE}/validate`, () =>
+    json({
+      draft_revision: sent.some((r) => r.method === "PUT") ? 2 : 1,
+      valid: true, expressions: [], conditional_steps: [], taint: { sites: [], declassified: [] },
+      diagnostics: [{ code: "taint.stale_declassify", severity: "warning", node: null, field: "/settings/declassify/0", message: "This entry declassifies nothing: it isn't a decision that reads sensitive data.", fix: "Remove it." }],
+    }));  // prettier-ignore
+  await show();
+  await userEvent.click(await screen.findByRole("button", { name: "Declassify" }));
+  const panel = screen.getByRole("complementary", { name: "Declassify" });
+  await userEvent.click(within(panel).getByRole("button", { name: /^Remove / }));
+  await userEvent.click(within(panel).getByRole("button", { name: "Close" }));
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Versions" })));
+});

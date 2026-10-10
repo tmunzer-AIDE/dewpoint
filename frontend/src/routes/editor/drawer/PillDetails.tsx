@@ -143,6 +143,15 @@ export function PillDetails({ field, pill, defaults, onDefault, onReplace, onRem
   const defaultId = useId();
   const box = useRef<HTMLDivElement>(null);
   useEffect(() => box.current?.querySelector<HTMLElement>("h3")?.focus(), []);
+  // Adding a default focuses it, removing one focuses "Add a default…": the pressed button goes (the final review).
+  const want = useRef<"default" | "add" | null>(null);
+  const addButton = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (want.current === "default" && "default" in pill) document.getElementById(defaultId)?.focus();
+    else if (want.current === "add" && !("default" in pill)) (addButton.current ?? box.current?.querySelector<HTMLElement>("h3"))?.focus();
+    else return;
+    want.current = null;
+  });
   const parts = parsePath(pill.ref) ?? [];
   const head = headOf(pill.ref).head;
   const isStep = parts.length >= 3 && "field" in parts[0]! && parts[0].field === "steps" && "field" in parts[2]! && parts[2].field === "output";
@@ -183,7 +192,9 @@ export function PillDetails({ field, pill, defaults, onDefault, onReplace, onRem
           </dd>
         </dl>
       )}
-      {defaults && entry && (entry.missing || entry.nullable) && (
+      {/* A default written shows whatever the value is now, and in a version's view (the final review); one is
+          offered only for a value that may be missing or null. */}
+      {defaults && ("default" in pill || (entry && (entry.missing || entry.nullable))) && (
         <div className="flex flex-col gap-1.5">
           {"default" in pill ? (
             <>
@@ -196,10 +207,17 @@ export function PillDetails({ field, pill, defaults, onDefault, onReplace, onRem
                 Used when the value is missing or null. Empty text, 0, false and empty lists are values, so they&apos;re kept. A
                 default doesn&apos;t change what&apos;s sensitive: if the value is, the result still is.
               </p>
-              {editable && <div><Button size="sm" onClick={() => onDefault(undefined)}>Remove the default</Button></div>}
+              {entry && !entry.missing && !entry.nullable && (
+                <p className="text-small text-muted">It&apos;s always there now, so this default isn&apos;t used.</p>
+              )}
+              {editable && (
+                <div>
+                  <Button size="sm" onClick={() => { want.current = "add"; onDefault(undefined); }}>Remove the default</Button>
+                </div>
+              )}
             </>
           ) : editable ? (
-            <div><Button size="sm" onClick={() => onDefault("")}>Add a default…</Button></div>
+            <div><Button ref={addButton} size="sm" onClick={() => { want.current = "default"; onDefault(""); }}>Add a default…</Button></div>
           ) : (
             <p className="text-small text-muted">No default: when it&apos;s missing, the text has nothing there.</p>
           )}
@@ -211,6 +229,9 @@ export function PillDetails({ field, pill, defaults, onDefault, onReplace, onRem
           {drawer.revision === null ? (
             // A version's view asks nothing (ruling 130): its query never runs, so it's never "looking".
             <p className="text-small text-muted">A version&apos;s data isn&apos;t shown: open the draft to see a past run&apos;s sample.</p>
+          ) : step === undefined ? (
+            // Its step was deleted or renamed: no sample is asked for, so it's never "looking" (the final review).
+            <p className="text-small text-muted">{head} isn&apos;t a step of this draft, so it has no sample.</p>
           ) : samples.isPending ? (
             <p className="text-small text-muted">Looking for a sample…</p>
           ) : samples.isError ? (

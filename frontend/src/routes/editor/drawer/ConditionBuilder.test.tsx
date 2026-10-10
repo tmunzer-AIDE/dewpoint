@@ -128,6 +128,33 @@ describe("the condition builder", () => {
     expect(f.config()).toEqual({ condition: formula(`(type(${LABELS}) == type([]) && size(${LABELS}) > 0 && ${LABELS}[0] == "alpha")`) });
   });
 
+  it("gives focus back to ＋ Condition when the tree closes with Escape (the final review)", async () => {
+    showFields(IF, { steps });
+    await userEvent.click(screen.getByRole("button", { name: "＋ Condition" }));
+    await screen.findByRole("tree");
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "＋ Condition" })));
+  });
+
+  it("puts focus on a picked comparison's operator, and on ＋ Condition once it's removed (the final review)", async () => {
+    showFields(IF, { steps });
+    await userEvent.click(screen.getByRole("button", { name: "＋ Condition" }));
+    await pick("name");
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("combobox", { name: "Comparison, Condition 1" })));
+    await userEvent.click(screen.getByRole("button", { name: "Remove condition 1" }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "＋ Condition" })));
+  });
+
+  it("describes a comparison's value by its problem (the final review)", async () => {
+    showFields(IF, { steps });
+    await userEvent.click(screen.getByRole("button", { name: "＋ Condition" }));
+    await pick("count");
+    const value = await screen.findByRole("textbox", { name: "Value, Condition 1" });
+    await userEvent.type(value, "abc");
+    const by = value.getAttribute("aria-describedby");
+    expect(by && document.getElementById(by)?.textContent).toBe("Write a number, like 3, -2 or 0.5.");
+  });
+
   it("groups comparisons one level deep, each group matching all or any", async () => {
     const f = showFields(IF, { steps });
     await userEvent.click(screen.getByRole("button", { name: "＋ Condition" }));

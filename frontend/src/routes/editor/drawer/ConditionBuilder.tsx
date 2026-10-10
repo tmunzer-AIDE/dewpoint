@@ -4,7 +4,7 @@
 // formula (lib/builder.ts) and opens only one it wrote. Comparisons are picked from the data tree; each offers the
 // operators its value's type takes. What can't be written yet (a number half typed, a write refused) is held whole,
 // with why (ruling 18).
-import { useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Button } from "../../../components/Button";
 import { controlClass } from "../../../components/Field";
 import {
@@ -62,6 +62,7 @@ function RowView({ row, label, field, disabled, onChange, onRemove }: {
   const ops = entry ? opsFor(entry.types, entry.format, entry.missing || entry.nullable || row.guards.length > 0) : [row.op];
   const problem = rowProblem(row);
   const note = noteOf(row);
+  const problemId = useId();
   return (
     <div role="group" aria-label={label} className="flex flex-col gap-1.5 border-t border-line py-2.5">
       <div><PillButton pill={{ ref: row.path }} entry={entry} index={0} onOpen={() => undefined} /></div>
@@ -81,13 +82,14 @@ function RowView({ row, label, field, disabled, onChange, onRemove }: {
         {row.value !== null && (
           <input
             type="text" aria-label={`Value, ${label}`} value={row.value.text} disabled={disabled} spellCheck={false}
-            aria-invalid={problem !== null} onChange={(e) => onChange({ ...row, value: { kind: row.value!.kind, text: e.target.value } })}
+            aria-invalid={problem !== null} aria-describedby={problem ? problemId : undefined}
+            onChange={(e) => onChange({ ...row, value: { kind: row.value!.kind, text: e.target.value } })}
             className={`${controlClass(problem !== null)} w-auto min-w-0 flex-1`}
           />
         )}
         {!disabled && <Button size="sm" aria-label={`Remove ${label.toLowerCase()}`} onClick={onRemove}>×</Button>}
       </div>
-      {problem && <p className="text-small text-danger">{problem}</p>}
+      {problem && <p id={problemId} className="text-small text-danger">{problem}</p>}
       {note && <p className="text-meta text-muted">{note}</p>}
     </div>
   );  // prettier-ignore
@@ -111,6 +113,20 @@ export function ConditionBuilder({ spec, value, disabled, onChange }: {
   // Where a picked comparison goes: the top, a new group (whose first it is: an empty group writes nothing), a group.
   const [adding, setAdding] = useState<number | "top" | "group" | null>(null);
   const fixed = typeof value === "boolean" ? value : null;
+  // Where focus goes once the change is drawn, never to <body> (the final review): the button that opened the tree,
+  // after Escape; a picked comparison's operator; "＋ Condition" after a removal. Tried twice, then dropped, so a
+  // request never moves focus later, as one types (M66).
+  const box = useRef<HTMLDivElement>(null);
+  const focusAfter = useRef<{ selector: string; tries: number } | null>(null);
+  const focusOn = (selector: string) => void (focusAfter.current = { selector, tries: 2 });
+  useEffect(() => {
+    const want = focusAfter.current;
+    if (!want) return;
+    const el = box.current?.querySelector<HTMLElement>(want.selector);
+    if (el || --want.tries === 0) focusAfter.current = null;
+    el?.focus();
+  });
+  const comparison = (label: string) => `select[aria-label="Comparison, ${label}"]`;
 
   /** Writes the condition when every comparison can be; else holds it whole, with why. */
   const put = (next: Condition, typed: boolean) => {
@@ -122,11 +138,14 @@ export function ConditionBuilder({ spec, value, disabled, onChange }: {
   };  // prettier-ignore
   const setItem = (i: number, item: Row | Group, typed = false) =>
     put({ ...c, items: c.items.map((x, j) => (j === i ? item : x)) }, typed);
-  const removeItem = (i: number) => put({ ...c, items: c.items.filter((_, j) => j !== i) }, false);
+  const removeItem = (i: number) => {
+    focusOn('[data-add="top"]');
+    put({ ...c, items: c.items.filter((_, j) => j !== i) }, false);
+  };
   const text = write(c);
 
   return (
-    <div className="flex flex-col gap-2">
+    <div ref={box} className="flex flex-col gap-2">
       {fixed !== null && c.items.length === 0 && (
         <p className="text-small text-muted">{fixed ? "Always true." : "Always false."} Add a condition to decide on data instead.</p>
       )}
@@ -147,10 +166,13 @@ export function ConditionBuilder({ spec, value, disabled, onChange }: {
                 <RowView
                   key={k} row={r} label={`Condition ${i + 1}.${k + 1}`} field={spec.pointer} disabled={disabled}
                   onChange={(next) => setItem(i, { ...x, rows: x.rows.map((y, m) => (m === k ? next : y)) }, true)}
-                  onRemove={() => setItem(i, { ...x, rows: x.rows.filter((_, m) => m !== k) })}
+                  onRemove={() => {
+                    focusOn(`[data-add="${i}"]`);
+                    setItem(i, { ...x, rows: x.rows.filter((_, m) => m !== k) });
+                  }}
                 />
               ))}
-              {!disabled && <div><Button size="sm" onClick={() => setAdding(i)}>＋ Condition</Button></div>}
+              {!disabled && <div><Button size="sm" data-add={i} onClick={() => setAdding(i)}>＋ Condition</Button></div>}
             </div>
           ) : (
             <RowView
@@ -162,22 +184,33 @@ export function ConditionBuilder({ spec, value, disabled, onChange }: {
       </div>
       {!disabled && (
         <div className="flex flex-wrap gap-2">
-          <Button size="sm" aria-haspopup="dialog" onClick={() => setAdding("top")}>＋ Condition</Button>
-          <Button size="sm" aria-haspopup="dialog" onClick={() => setAdding("group")}>＋ Group</Button>
+          <Button size="sm" aria-haspopup="dialog" data-add="top" onClick={() => setAdding("top")}>＋ Condition</Button>
+          <Button size="sm" aria-haspopup="dialog" data-add="group" onClick={() => setAdding("group")}>＋ Group</Button>
         </div>
       )}
       {adding !== null && (
         <DataTree
-          field={spec.pointer} purpose="condition" onClose={() => setAdding(null)}
+          field={spec.pointer} purpose="condition"
+          onClose={() => {
+            focusOn(`[data-add="${adding}"]`);
+            setAdding(null);
+          }}
           onPick={(entry) => {
             const row = rowFor(entry);
             const at = adding;
             setAdding(null);
-            if (at === "top") put({ ...c, items: [...c.items, row] }, false);
-            else if (at === "group") put({ ...c, items: [...c.items, { match: "any", rows: [row] }] }, false);
-            else {
+            if (at === "top") {
+              focusOn(comparison(`Condition ${c.items.length + 1}`));
+              put({ ...c, items: [...c.items, row] }, false);
+            } else if (at === "group") {
+              focusOn(comparison(`Condition ${c.items.length + 1}.1`));
+              put({ ...c, items: [...c.items, { match: "any", rows: [row] }] }, false);
+            } else {
               const g = c.items[at];
-              if (g && isGroup(g)) setItem(at, { ...g, rows: [...g.rows, row] });
+              if (g && isGroup(g)) {
+                focusOn(comparison(`Condition ${at + 1}.${g.rows.length + 1}`));
+                setItem(at, { ...g, rows: [...g.rows, row] });
+              }
             }
           }}
         />

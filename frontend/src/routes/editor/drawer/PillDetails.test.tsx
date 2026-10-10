@@ -74,6 +74,37 @@ describe("a pill's details", () => {
     expect(sent).toEqual([]);
   });
 
+  it("says a pill to a step no longer in the draft has no sample, never that it's looking (the final review)", async () => {
+    const sent = fakeApi({
+      "GET /api/v1/t/t1/workflows/w1/draft/scope": () =>
+        json({ draft_revision: 1, node: NODE_ID, field: "/message", state: "ok", reason: null, entries: [], more: false, problem: null }),
+    });
+    showFields(NOTE, { steps }, <PillDetails field="/message" pill={{ ref: "steps.gone.output.x" }} defaults onDefault={vi.fn()} onReplace={vi.fn()} onRemove={vi.fn()} onClose={vi.fn()} />);
+    expect(await screen.findByText("gone isn't a step of this draft, so it has no sample.")).toBeTruthy();
+    expect(screen.queryByText("Looking for a sample…")).toBeNull();
+    expect(sent.some((r) => r.path.endsWith("/samples"))).toBe(false);
+  });
+
+  it("shows a default already written though the value is always there now, and removable (the final review)", async () => {
+    const always: ScopeEntry = { ...ENTRY, missing: false, formula: { guards: [], null_test: false, sensitive: false } };
+    fakeApi({
+      "GET /api/v1/t/t1/workflows/w1/draft/scope": () =>
+        json({ draft_revision: 1, node: NODE_ID, field: "/message", state: "ok", reason: null, entries: [always], more: false, problem: null }),
+      "GET /api/v1/t/t1/workflows/w1/draft/samples": () => json({ draft_revision: 1, node: SITE, sample: null, searched_runs: 0, search_limit: 200 }),
+    });
+    showFields(NOTE, { steps }, <PillDetails field="/message" pill={{ ref: PATH, default: "UTC" }} defaults onDefault={vi.fn()} onReplace={vi.fn()} onRemove={vi.fn()} onClose={vi.fn()} />);
+    expect((await screen.findByLabelText<HTMLInputElement>("If it's missing or null")).value).toBe("UTC");
+    expect(screen.getByRole("button", { name: "Remove the default" })).toBeTruthy();
+  });
+
+  it("shows a default in a version's view, read only (the final review)", () => {
+    fakeApi({});
+    showFields(NOTE, { steps, revision: null, editable: false }, <PillDetails field="/message" pill={{ ref: PATH, default: "UTC" }} defaults onDefault={vi.fn()} onReplace={vi.fn()} onRemove={vi.fn()} onClose={vi.fn()} />);
+    const input = screen.getByLabelText<HTMLInputElement>("If it's missing or null");
+    expect([input.value, input.disabled]).toEqual(["UTC", true]);
+    expect(screen.queryByRole("button", { name: "Remove the default" })).toBeNull();
+  });
+
   it("shows a redacted value as a chip, never the value", async () => {
     show({ sample: sample({ output: { timezone: "Bearer [redacted]" } }) });
     const chip = await screen.findByText("redacted");

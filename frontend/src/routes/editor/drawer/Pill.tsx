@@ -2,23 +2,33 @@
 // A data pill (4c-2b; 1c's pill grammar, the 4c-2 mockups): what a reference reads, as a round mono button, dashed when
 // its value may be missing (ruling 115), and what the saved draft's scope says of it (B6). Text with pills, a pill's
 // details and the condition builder draw it.
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, type QueryKey } from "@tanstack/react-query";
 import type { KeyboardEvent } from "react";
 import { DraftMoved, scopeQuery, type ScopeEntry } from "../../../lib/data";
 import { pillText, type Pill } from "../../../lib/pills";
 import { useDrawer } from "./context";
 
+/** Whether two scope questions ask of the same value in the same field, whatever the revision (the key's fourth part). */
+const samePlace = (a: QueryKey, b: QueryKey): boolean =>
+  a.length === b.length && a.every((x, i) => i === 3 || JSON.stringify(x) === JSON.stringify(b[i]));
+
 /** What a pill knows of its value from the saved draft's scope: nothing yet, an entry, or the problem reading it. */
 export function usePillEntry(path: string, field: string): { entry: ScopeEntry | null; problem: string | null } {
   const drawer = useDrawer();
   const live = drawer.revision !== null;
+  const query = scopeQuery(
+    { tenantId: drawer.tenantId, workflowId: drawer.workflowId, revision: drawer.revision ?? -1, node: drawer.node.id, field },
+    { kind: "at", path },
+  );  // prettier-ignore
   const answer = useQuery({
-    ...scopeQuery(
-      { tenantId: drawer.tenantId, workflowId: drawer.workflowId, revision: drawer.revision ?? -1, node: drawer.node.id, field },
-      { kind: "at", path },
-    ),
+    ...query,
     enabled: live,
-  });  // prettier-ignore
+    // While the next saved revision's answer comes, the previous one stands in, for this same value only: the pill
+    // never turns solid ("always there") for want of an answer (the final review). The next answer replaces it, and an
+    // answer about another revision is still refused (DraftMoved). A version's view asks nothing, and shows nothing.
+    placeholderData: (previous, previousQuery) =>
+      live && previousQuery && samePlace(previousQuery.queryKey, query.queryKey) ? previous : undefined,
+  });
   const data = answer.data;
   if (answer.error instanceof DraftMoved) return { entry: null, problem: answer.error.message };
   if (!data || data.state !== "ok") return { entry: null, problem: data?.reason ?? null };

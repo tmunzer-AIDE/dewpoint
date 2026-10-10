@@ -375,7 +375,8 @@ function Editor({
         "versions-panel": () => document.getElementById("versions-title") ?? usable(versionsButton.current),
         unapplied: () => usable(unappliedButton.current),
         "unapplied-panel": () => document.getElementById("unapplied-title") ?? usable(unappliedButton.current),
-        declassify: () => usable(declassifyButton.current),
+        // The toolbar's Declassify goes once nothing is left to decide or listed: Versions, beside it, then.
+        declassify: () => usable(declassifyButton.current) ?? usable(versionsButton.current),
         "declassify-panel": () => document.getElementById("declassify-title") ?? usable(declassifyButton.current),
       }[landing.on]();
       target?.focus();
