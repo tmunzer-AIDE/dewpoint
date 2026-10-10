@@ -30,6 +30,7 @@ from dewpoint.engine.graph.schemas import (
     allowed_kinds,
     compatible,
     contains_literal,
+    declared_non_object,
     declared_nullable,
     declared_optional,
     describe,
@@ -140,6 +141,7 @@ class ValidationResult:
     connections: tuple[tuple[str, str, uuid.UUID, str], ...] = ()
     # (input field, node ref, options field, connection id, the types it may be) of every start-form picker (D19)
     pickers: tuple[tuple[str, str, str, uuid.UUID, tuple[str, ...]], ...] = ()
+    conditional_steps: tuple[str, ...] = ()  # the steps that may not run (ruling 70's badge), by id, sorted
 
     @property
     def ok(self) -> bool:
@@ -169,6 +171,18 @@ class _Site:
     item_node: uuid.UUID | None = None  # whose `item` and `index` are in scope: the innermost loop, or a filter
 
 
+def site_of(s: Structure, node: uuid.UUID, field: str) -> _Site:
+    """Where a value at `field` (a JSON pointer) of `node`'s config is evaluated: its scope, and whose `item` it sees.
+    A filter's predicate sees the filter's; a loop's `collect` is evaluated as each body ends; anything else sees the
+    innermost loop's, if any."""
+    first = field.split("/")[1] if field.startswith("/") else ""
+    ref = s.specs[node].ref
+    if ref == C.LOOP and first == "collect":
+        return _Site(node, field, node, at_exit=True, item_node=node)
+    region = s.region_of[node]
+    return _Site(node, field, region, item_node=node if ref == C.FILTER and first == "predicate" else region)
+
+
 def _descendants(s: Structure) -> dict[uuid.UUID, frozenset[uuid.UUID]]:
     desc: dict[uuid.UUID, frozenset[uuid.UUID]] = {}
     for n in reversed(s.topo):
@@ -178,6 +192,21 @@ def _descendants(s: Structure) -> dict[uuid.UUID, frozenset[uuid.UUID]]:
             acc |= desc[e.to.node]
         desc[n] = frozenset(acc)
     return desc
+
+
+def conditional_steps(s: Structure, live: Mapping[uuid.UUID | None, lv.RegionLiveness]) -> tuple[uuid.UUID, ...]:
+    """The steps that may not run (4c-2a ruling 3): their liveness in their region isn't "always", or can't be
+    analysed; or the loop whose body holds them may not run."""
+    memo: dict[uuid.UUID, bool] = {}
+
+    def may_skip(n: uuid.UUID) -> bool:
+        if n not in memo:
+            region = s.region_of[n]
+            cond = live[region].live[n]
+            memo[n] = cond is None or frozenset() not in cond or (region is not None and may_skip(region))
+        return memo[n]
+
+    return tuple(n for n in s.topo if may_skip(n))
 
 
 def _static_delay(node: GraphNode, spec: NodeTypeSpec) -> float:
@@ -637,7 +666,6 @@ class _Validator:
         spec = self.s.specs[n.id]
         self._check_literals(n, spec)
         resolved: dict[Pointer, Resolved | None] = {}
-        region = self.s.region_of[n.id]
         values = list(iter_values(n.config))
         if spec.ref in (C.LOOP, C.FILTER):  # `items` first: the predicate and `collect` read its element type
             values.sort(key=lambda pv: pv[0][:1] != ("items",))
@@ -648,11 +676,10 @@ class _Validator:
                 self.err("value.literal_only", _LITERAL_ONLY, node=n.id, fld=where)
                 continue
             if spec.ref == C.LOOP and pointer[0] == "collect":
-                self.deferred.append((_Site(n.id, where, n.id, at_exit=True, item_node=n.id), value))
+                self.deferred.append((site_of(self.s, n.id, where), value))
                 continue
-            item_node = n.id if spec.ref == C.FILTER and pointer[0] == "predicate" else region
             root, inner = self._value_root(n, spec, pointer)
-            resolved[pointer] = self._value(_Site(n.id, where, region, item_node=item_node), value, root, inner)
+            resolved[pointer] = self._value(site_of(self.s, n.id, where), value, root, inner)
             if spec.ref in (C.LOOP, C.FILTER) and pointer == ("items",):
                 items = resolved[pointer]
                 self.item_schema[n.id] = element_schema(items.schema) if items is not None else None
@@ -1068,7 +1095,7 @@ class _Validator:
             return Resolved({"type": "integer"}, False)
         item = self.item_schema.get(loop)
         if item is None:
-            return Resolved(None, bool(p.rest))
+            return Resolved(None, bool(p.rest), missing=bool(p.rest))
         return navigate(item, p.rest)
 
     def _resolve_step(self, site: _Site, p: RefPath) -> Resolved | None:
@@ -1114,15 +1141,17 @@ class _Validator:
                 return None
             available = on_error == "port" and self._implies(home, consumer_key, consumer, producer, "err", region)
             r = navigate(ERROR_SCHEMA, p.rest)
-            return Resolved(r.schema, r.conditional or not available)
+            return dataclasses.replace(
+                r, conditional=r.conditional or not available, missing=r.missing or not available
+            )
         available = on_error != "continue" and self._implies(home, consumer_key, consumer, producer, "ok", region)
         if site.at_exit and site.region is None and self.has_stop:
             available = False  # `stop` may end the run while this step is still pending
         schema = self.out_schema.get(producer)
         if schema is None:  # only when the producer is already reported (unknown sub-flow): don't add noise
-            return Resolved(None, not available)
+            return Resolved(None, not available, missing=not available)
         r = navigate(schema, p.rest)
-        return Resolved(r.schema, r.conditional or not available)
+        return dataclasses.replace(r, conditional=r.conditional or not available, missing=r.missing or not available)
 
     def _consumer(
         self, site: _Site, home: uuid.UUID | None, producer: uuid.UUID
@@ -1156,6 +1185,10 @@ class _Validator:
     def _declared_optional(self, site: _Site, p: RefPath) -> tuple[int, ...]:
         """Positions in `p.rest` the schema declares optional (spec §4.3): CEL guards them, references default them."""
         return self._declared(site, p, declared_optional)
+
+    def _declared_non_object(self, site: _Site, p: RefPath) -> tuple[int, ...]:
+        """Positions in `p.rest` the schema declares may not be objects: CEL guards reads below them (4c-2a)."""
+        return self._declared(site, p, declared_non_object)
 
     def _declared_nullable(self, site: _Site, p: RefPath) -> tuple[int, ...]:
         """Positions in `p.rest` the schema declares may be null (spec §4.3): CEL guards reads below them."""
@@ -1312,6 +1345,9 @@ class _CelSite:
     def nullable_fields(self, path: RefPath) -> tuple[int, ...]:
         return self.v._declared_nullable(self.site, path)
 
+    def non_object_fields(self, path: RefPath) -> tuple[int, ...]:
+        return self.v._declared_non_object(self.site, path)
+
     def error(self, code: str, message: str, *, fix: str | None = None, severity: Severity = "error") -> None:
         self.v.err(code, message, node=self.site.node, fld=self.site.field, fix=fix, severity=severity)
 
@@ -1381,7 +1417,19 @@ def picker_problems(diagnostics: Sequence[Diagnostic]) -> bool:
     return any(d.code.startswith("picker.") for d in diagnostics)
 
 
-def validate(graph: Graph, ctx: ValidationContext) -> ValidationResult:
+@dataclass(frozen=True)
+class Analysis:
+    """The validator's converged analysis (the taint fixpoint's last pass), for the questions validation itself
+    doesn't ask: what a field can read (B6, `scope.py`). `validator` is None when the graph's structure stops it."""
+
+    settings: tuple[Diagnostic, ...]
+    pickers: tuple[tuple[str, str, str, uuid.UUID, tuple[str, ...]], ...]
+    structural: tuple[Diagnostic, ...]
+    structure: Structure | None
+    validator: _Validator | None
+
+
+def analyze(graph: Graph, ctx: ValidationContext) -> Analysis:
     settings = _settings(graph)
     if not any((d.field or "").startswith("/settings/input_schema") for d in settings):
         picker_diags, pickers = _pickers(graph, ctx.catalog)
@@ -1389,9 +1437,8 @@ def validate(graph: Graph, ctx: ValidationContext) -> ValidationResult:
     else:
         pickers = []
     structure, structural = analyze_structure(graph, ctx.catalog)
-    node_refs = tuple(sorted({n.type for n in graph.nodes}))
     if structure is None:
-        return ValidationResult(tuple([*settings, *structural]), node_refs)
+        return Analysis(tuple(settings), tuple(pickers), tuple(structural), None, None)
     unusable = ("settings.invalid_schema", "settings.unresolvable_ref", "settings.unsupported_keyword")
     settings_ok = not any(d.code in unusable for d in settings)
     facts = NO_FACTS
@@ -1402,9 +1449,18 @@ def validate(graph: Graph, ctx: ValidationContext) -> ValidationResult:
         if learned == facts:
             break
         facts = learned
-    declassify, declassified = _declassify(graph, structure, v.site_taint)
+    return Analysis(tuple(settings), tuple(pickers), tuple(structural), structure, v)
+
+
+def validate(graph: Graph, ctx: ValidationContext) -> ValidationResult:
+    a = analyze(graph, ctx)
+    node_refs = tuple(sorted({n.type for n in graph.nodes}))
+    if a.structure is None or a.validator is None:
+        return ValidationResult(tuple([*a.settings, *a.structural]), node_refs)
+    v = a.validator
+    declassify, declassified = _declassify(graph, a.structure, v.site_taint)
     return ValidationResult(
-        diagnostics=tuple([*settings, *structural, *v.diags, *declassify]),
+        diagnostics=tuple([*a.settings, *a.structural, *v.diags, *declassify]),
         node_refs=node_refs,
         subflow_pins=dict(v.pins),
         failure_handler_version_id=v.failure_handler_version_id,
@@ -1419,5 +1475,6 @@ def validate(graph: Graph, ctx: ValidationContext) -> ValidationResult:
         output_taint=dict(v.output_taint),
         declassified=declassified,
         connections=tuple(sorted(v.connections, key=lambda c: (c[0], c[1]))),
-        pickers=tuple(pickers) if not picker_problems(settings) else (),
+        pickers=a.pickers if not picker_problems(list(a.settings)) else (),
+        conditional_steps=tuple(sorted(str(n) for n in conditional_steps(a.structure, v.live))),
     )

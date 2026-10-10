@@ -89,8 +89,12 @@ async def tree(owner: Any, ctx: dict[str, Any], ago: timedelta | None, *, reques
     await run(owner, ctx, ago, run_id=root)
     sub = await run(owner, ctx, ago if sub_ago == "same" else sub_ago, parent=root)  # type: ignore[arg-type]
     for r in (root, sub):
+        step = uuid.uuid4()
         await sql(owner, "insert into run_steps (tenant_id, run_id, step_id, iteration_key, attempt, node_key, status) "
-                  "values (:t, :r, :s, '', 1, 'n', 'succeeded')", t=ctx["t"], r=r, s=uuid.uuid4())  # fmt: skip
+                  "values (:t, :r, :s, '', 1, 'n', 'succeeded')", t=ctx["t"], r=r, s=step)  # fmt: skip
+        await sql(owner, "insert into run_step_connections (tenant_id, run_id, step_id, iteration_key, attempt, "
+                  "connection_id, type, name, revision) values (:t, :r, :s, '', 1, :c, 'http', 'c', 1)",
+                  t=ctx["t"], r=r, s=step, c=uuid.uuid4())  # fmt: skip
     output = await _claim(owner, "step_outputs", ctx, sub, root)
     await sql(owner, "insert into claim_grants (claim_id, run_id, tenant_id, granted_by, root_run_id) "
               "values (:c, :s, :t, :r, :r)", c=output, s=sub, t=ctx["t"], r=root)  # fmt: skip
@@ -103,6 +107,7 @@ TREE_ROWS = (
     "select (select count(*) from runs where root_run_id = :r) + (select count(*) from run_steps s join runs r on "
     "r.id = s.run_id where r.root_run_id = :r) + (select count(*) from step_outputs where root_run_id = :r) + "
     "(select count(*) from run_inputs where root_run_id = :r) + (select count(*) from claim_grants where root_run_id "
-    "= :r) + (select count(*) from run_secret_index where root_run_id = :r) + (select count(*) from run_requests "
-    "where id = :r)"
+    "= :r) + (select count(*) from run_secret_index where root_run_id = :r) + "
+    "(select count(*) from run_step_connections c join runs r on r.id = c.run_id where r.root_run_id = :r) + "
+    "(select count(*) from run_requests where id = :r)"
 )

@@ -5,6 +5,7 @@ import { checkLabel, checkState } from "./check";
 
 const answer = (revision: number): Validation => ({
   draft_revision: revision, valid: true, diagnostics: [], expressions: [], taint: { sites: [], declassified: [] },
+  conditional_steps: [],
 });  // prettier-ignore
 const sync = (revision: number, generation = 0, savedGeneration = generation) => ({ revision, generation, savedGeneration });
 

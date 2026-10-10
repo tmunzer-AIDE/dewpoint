@@ -11,6 +11,7 @@ import uuid
 from typing import Any
 
 import pytest
+from sqlalchemy import text
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
@@ -21,6 +22,7 @@ from dewpoint.core.egress.addresses import AllowEntry
 from dewpoint.engine.runtime.activities import MAPPED, OUTCOME_UNKNOWN, StepInput
 from dewpoint.engine.runtime.ids import run_workflow_id
 from dewpoint.sdk import HandshakeRejected, StreamLost
+from dewpoint.sdk.net import SimulationSendsNothing
 from tests.support.connections import add_connection, seed_step, types_for_testkit
 from tests.support.keys import FixtureKeys
 from tests.support.netfakes import Request, guard, respond, serve, tls
@@ -190,3 +192,98 @@ def test_a_streams_failure_is_classified_by_what_may_have_been_sent(
     """A stream's failures escaping a node (plugins-3 D26), each with its own fixed code."""
     failed = _transport_failed(error, node)  # type: ignore[arg-type]
     assert (failed.code, failed.retryable, failed.outcome) == (type(error).code, retryable, outcome)
+
+
+# What an attempt opened, as it was (B7; 4c-2a ruling 8).
+async def _records(owner: Any) -> list[dict[str, Any]]:
+    async with owner() as s:
+        rows = await s.execute(
+            text("select iteration_key, attempt, type, name, revision, context from run_step_connections")
+        )
+        return [dict(r._mapping) for r in rows]
+
+
+async def test_an_attempt_records_the_connection_it_opened(owner_sessionmaker, worker_sessionmaker) -> None:
+    async with serve(respond(201, b"made"), tls_names=NAMES) as server:
+        await _run(worker_sessionmaker, owner_sessionmaker, server.port, HttpCall)
+        base_url = f"https://dewpoint.test:{server.port}"
+    [row] = await _records(owner_sessionmaker)
+    assert (row["iteration_key"], row["attempt"], row["type"], row["revision"]) == ("", 1, "testkit", 1)
+    assert row["name"].startswith("c-") and row["context"] == {"base_url": base_url}
+
+
+async def test_an_attempt_that_fails_still_records_what_it_opened(owner_sessionmaker, worker_sessionmaker) -> None:
+    async with serve(_hang_up(), tls_names=NAMES) as server:  # opened, then the server hangs up
+        await _failure(worker_sessionmaker, owner_sessionmaker, server.port, HttpCall)
+    assert len(await _records(owner_sessionmaker)) == 1
+
+
+async def test_opening_a_connection_twice_records_it_once(owner_sessionmaker, worker_sessionmaker) -> None:
+    tenant = uuid.uuid4()
+    await seed_step(owner_sessionmaker, named=[None], tenant=tenant)
+    cid = await add_connection(owner_sessionmaker, tenant, config={"base_url": "https://dewpoint.test:1"})
+    seeded = await seed_step(owner_sessionmaker, named=[cid], tenant=tenant, node_type="testkit.http_call@1")
+    network = Network(guard=guard({}, []), connections=DbConnections(worker_sessionmaker),
+                      sessionmaker=worker_sessionmaker, keys=FixtureKeys(), types=types_for_testkit())  # fmt: skip
+
+    async def remember(*_: Any) -> None:
+        return None
+
+    attempt = network.attempt(
+        tenant_id=tenant, run_id=seeded.run, step_id=seeded.step, root_run_id=seeded.run, node=HttpCall,
+        simulated=False, remember=remember, beat=lambda: None, iteration_key="l:2", attempt=3,
+    )  # fmt: skip
+    try:
+        await attempt.connection(cid)
+        await attempt.connection(cid)
+    finally:
+        await attempt.aclose()
+    assert [(r["iteration_key"], r["attempt"]) for r in await _records(owner_sessionmaker)] == [("l:2", 3)]
+
+
+async def test_a_simulated_attempt_records_nothing(owner_sessionmaker, worker_sessionmaker) -> None:
+    """A simulation opens no connection (`SimulationSendsNothing`): there's nothing it used."""
+    tenant = uuid.uuid4()
+    await seed_step(owner_sessionmaker, named=[None], tenant=tenant)
+    cid = await add_connection(owner_sessionmaker, tenant, config={"base_url": "https://dewpoint.test:1"})
+    seeded = await seed_step(owner_sessionmaker, named=[cid], tenant=tenant, node_type="testkit.http_call@1")
+    network = Network(guard=guard({}, []), connections=DbConnections(worker_sessionmaker),
+                      sessionmaker=worker_sessionmaker, keys=FixtureKeys(), types=types_for_testkit())  # fmt: skip
+
+    async def remember(*_: Any) -> None:
+        return None
+
+    attempt = network.attempt(
+        tenant_id=tenant, run_id=seeded.run, step_id=seeded.step, root_run_id=seeded.run, node=HttpCall,
+        simulated=True, remember=remember, beat=lambda: None,
+    )  # fmt: skip
+    with pytest.raises(SimulationSendsNothing):
+        await attempt.connection(cid)
+    await attempt.aclose()
+    assert await _records(owner_sessionmaker) == []
+
+
+async def test_records_each_revision_an_attempt_opens(owner_sessionmaker, worker_sessionmaker) -> None:
+    """A connection changed between two opens in one attempt: the attempt used both revisions, and says so."""
+    tenant = uuid.uuid4()
+    await seed_step(owner_sessionmaker, named=[None], tenant=tenant)
+    cid = await add_connection(owner_sessionmaker, tenant, config={"base_url": "https://dewpoint.test:1"})
+    seeded = await seed_step(owner_sessionmaker, named=[cid], tenant=tenant, node_type="testkit.http_call@1")
+    network = Network(guard=guard({}, []), connections=DbConnections(worker_sessionmaker),
+                      sessionmaker=worker_sessionmaker, keys=FixtureKeys(), types=types_for_testkit())  # fmt: skip
+
+    async def remember(*_: Any) -> None:
+        return None
+
+    attempt = network.attempt(
+        tenant_id=tenant, run_id=seeded.run, step_id=seeded.step, root_run_id=seeded.run, node=HttpCall,
+        simulated=False, remember=remember, beat=lambda: None,
+    )  # fmt: skip
+    try:
+        await attempt.connection(cid)
+        async with owner_sessionmaker() as s, s.begin():
+            await s.execute(text("update connections set revision = 2 where id = :c"), {"c": cid})
+        await attempt.connection(cid)
+    finally:
+        await attempt.aclose()
+    assert sorted(r["revision"] for r in await _records(owner_sessionmaker)) == [1, 2]

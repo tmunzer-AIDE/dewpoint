@@ -92,6 +92,9 @@ async def test_permission_matrix(app, owner_sessionmaker, api_settings) -> None:
             assert (await c.post(f"/api/v1/t/{tid}/workflows", json={"name": role})).status_code == 403
             assert (await c.put(f"{base}/draft", json=GRAPH, headers={"If-Match": "1"})).status_code == 403
             assert (await c.post(f"{base}/validate")).status_code == 403
+            scope = await c.get(f"{base}/draft/scope", params={"node": str(nid("a")), "field": "/value"})
+            assert scope.status_code == 200  # workflow.view: a read-only drawer shows a pill's details too
+            assert (await c.get(f"{base}/draft/samples", params={"node": str(nid("a"))})).status_code == 200  # run.view
             assert (await c.post(f"{base}/publish", headers={"If-Match": "1"})).status_code == 403
             assert (await c.patch(base, json={"enabled": False})).status_code == 403
     stranger, other_tenant = await session_client(app, owner_sessionmaker, api_settings, "owner")
@@ -280,3 +283,20 @@ async def test_a_tainted_workflow_output_is_a_site_with_no_step(app, owner_sessi
         ],
         "declassified": [],
     }
+
+
+async def test_validate_says_which_steps_may_not_run(app, owner_sessionmaker, api_settings) -> None:
+    """4c-2a ruling 3: a branch's steps may not run; the step after the join does."""
+    draft = (
+        G().node("c", "flow.if@1", {"condition": True})
+        .node("t", "testkit.echo@1", {"value": 1}).node("f", "testkit.echo@1", {"value": 2})
+        .node("j", "testkit.echo@1", {"value": 3})
+        .edge("c", "t", port="true").edge("c", "f", port="false").edge("t", "j").edge("f", "j")
+        .data()
+    )  # fmt: skip
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    async with c:
+        wf = (await c.post(f"/api/v1/t/{tid}/workflows", json={"name": "Branches", "draft": draft})).json()
+        r = await c.post(f"/api/v1/t/{tid}/workflows/{wf['id']}/validate")
+    assert r.status_code == 200, r.text
+    assert r.json()["conditional_steps"] == sorted([str(nid("t")), str(nid("f"))])

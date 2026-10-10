@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Facts from guards (spec §4.3, §5.10 `cel.conditional_ref`): paths known to exist (`has()`), or known not to be
-null (`!= null`).
+"""Facts from guards (spec §4.3, §5.10 `cel.conditional_ref`): paths known to exist (`has()`), known not to be null
+(`!= null`), or known to be objects (`type(x) == map`).
 
 `facts_at` maps every node to the paths a kind of guard proves whenever that node's value can affect the result.
 CEL's `&&` and `||` absorb an error when the other side decides the result, so each side is guarded by the other:
@@ -46,6 +46,32 @@ def non_null(e: ast.Expr, scope: frozenset[str], truth: bool) -> Facts:
         if holds and (args := _args(e, function, 2)) is not None:
             for value, other in (args, args[::-1]):
                 if _is_null(other) and (path := ast.chain_path(value, scope)) is not None:
+                    return _prefixes(path)
+    return _NONE
+
+
+def _type_operand(e: ast.Expr) -> ast.Expr | None:
+    """x, for `type(x)`."""
+    return args[0] if (args := _args(e, "type", 1)) is not None else None
+
+
+def _is_map_type(e: ast.Expr, scope: frozenset[str]) -> bool:
+    """The built-in type `map`, never a comprehension's variable of that name (`[string].all(map, …)`)."""
+    return e.WhichOneof("expr_kind") == "ident_expr" and e.ident_expr.name == "map" and "map" not in scope
+
+
+def shape(e: ast.Expr, scope: frozenset[str], truth: bool) -> Facts:
+    """`type(x) == map` when true, `type(x) != map` when false: x is an object, and so is everything it's read from
+    (4c-2a: a value its schema says may not be an object is guarded so before its fields are read)."""
+    for function, holds in (("_==_", truth), ("_!=_", not truth)):
+        if holds and (args := _args(e, function, 2)) is not None:
+            for value, other in (args, args[::-1]):
+                operand = _type_operand(value)
+                if (
+                    _is_map_type(other, scope)
+                    and operand is not None
+                    and (path := ast.chain_path(operand, scope)) is not None
+                ):
                     return _prefixes(path)
     return _NONE
 

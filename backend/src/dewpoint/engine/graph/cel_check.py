@@ -34,6 +34,10 @@ class CelContext(Protocol):
         """Positions in `path.rest` of fields its schema declares may be null."""
         ...
 
+    def non_object_fields(self, path: RefPath) -> tuple[int, ...]:
+        """Positions in `path.rest` of fields its schema declares may be something other than an object."""
+        ...
+
     def error(self, code: str, message: str, *, fix: str | None = None, severity: Severity = "error") -> None: ...
 
 
@@ -153,6 +157,13 @@ def _nullable_prefixes(chain: ast.Chain, ref: RefPath, ctx: CelContext) -> list[
     return [chain.path[: offset + i + 1] for i in ctx.nullable_fields(ref) if offset + i + 1 < len(chain.path)]
 
 
+def _non_object_prefixes(chain: ast.Chain, ref: RefPath, ctx: CelContext) -> list[ast.Path]:
+    """Every prefix ending at a field its schema says may be something other than an object, with something read
+    below it: a field, or a presence test on one, which fails on a scalar too (the review of 4c-2a's revision 3)."""
+    offset = len(chain.path) - len(ref.rest)
+    return [chain.path[: offset + i + 1] for i in ctx.non_object_fields(ref) if offset + i + 1 < len(chain.path)]
+
+
 def _wrapped_reads(checked: Any, ctx: CelContext) -> bool:
     """A reference hidden in a list, a map, a condition, dyn() or a comprehension, then read, would skip the checks
     and guards its path gets (review finding: `[steps][0]["b"]`, `[trigger][0].opt`)."""
@@ -171,8 +182,10 @@ def _references(checked: Any, ctx: CelContext) -> bool:
     ok = _wrapped_reads(checked, ctx)
     ok = _structural_keys(checked, ctx) and ok
     facts = guards.facts_at(checked.expr)
+    shapes = guards.facts_at(checked.expr, guards.shape)  # `type(x) == map`: an object, so not null either
     non_null = guards.facts_at(checked.expr, guards.non_null)
     unguarded_null: set[ast.Path] = set()
+    unguarded_shape: set[ast.Path] = set()
     reported: set[ast.Path] = set()
     for chain in ast.chains(checked.expr):
         text = _diagnostic_path(chain.path)
@@ -212,8 +225,18 @@ def _references(checked: Any, ctx: CelContext) -> bool:
                 f"`{'.'.join(optional)}` is optional in its schema, so it may be missing.",
                 fix=f"Guard it with `has({'.'.join(optional)})`.",
             )
+        for shaped in _non_object_prefixes(chain, ref, ctx):
+            if shaped in shapes[chain.expr_id] or shaped in unguarded_shape:
+                continue
+            unguarded_shape.add(shaped)
+            ok = False
+            ctx.error(
+                "cel.conditional_ref",
+                f"`{'.'.join(shaped)}` may not be an object in its schema, so reading its fields fails when it isn't.",
+                fix=f"Guard it with `type({'.'.join(shaped)}) == map`.",
+            )
         for nullable in _nullable_prefixes(chain, ref, ctx):
-            if nullable in non_null[chain.expr_id] or nullable in unguarded_null:
+            if nullable in non_null[chain.expr_id] or nullable in shapes[chain.expr_id] or nullable in unguarded_null:
                 continue
             unguarded_null.add(nullable)
             ok = False

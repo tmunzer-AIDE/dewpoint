@@ -4,9 +4,10 @@
 Schemas returned by `navigate`, `target_schema` and `element_schema` are *standalone*: they carry the root's
 `$defs`, so they can be navigated again on their own."""
 
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
@@ -37,6 +38,8 @@ class Resolved:
     schema: Schema | None  # None: unknown, any value
     conditional: bool  # may be missing or null at run time
     taint: Shape = CLEAN  # which parts are tainted (engine 2b spec §4.1)
+    missing: bool = False  # may be absent: `navigate` and the resolver say; elsewhere `conditional` says it all
+    nullable: bool = False  # the value itself may be null
 
 
 def literal_type(value: Any) -> str:
@@ -107,7 +110,23 @@ def json_types(schema: Any) -> frozenset[str] | None:
                     return None
                 out |= types
             return frozenset(out)
+    members = s.get("allOf")
+    if isinstance(members, list):  # every member applies: what they all allow (4c-2a ruling 1)
+        common: frozenset[str] | None = None
+        for member in members:
+            types = json_types(standalone(schema, member)) if isinstance(member, Mapping) else None
+            if types is not None:
+                common = types if common is None else meet(common, types)
+        return common
     return None
+
+
+def meet(a: frozenset[str], b: frozenset[str]) -> frozenset[str]:
+    """The JSON types both allow. An integer is a number: `number` and `integer` meet in `integer`."""
+    out = set(a & b)
+    if ("integer" in a and "number" in b) or ("number" in a and "integer" in b):
+        out.add("integer")
+    return frozenset(out)
 
 
 def compatible(source: Any, target: Any) -> bool:
@@ -123,103 +142,277 @@ def describe(schema: Any) -> str:
     return "any value" if types is None else " or ".join(sorted(types))
 
 
-def navigate(root: Any, path: Sequence[str | int], start: Any = None) -> Resolved:
-    """Follow a reference path through an output schema. Raises PathError for fields a closed schema lacks."""
-    if not isinstance(root, Mapping):
-        return Resolved(None, bool(path))
-    current: Any = root if start is None else start
-    conditional = False
-    for seg in path:
-        schema = _deref(root, current)
-        if schema is None:
-            return Resolved(None, True)
-        schema, nullable = _strip_null(schema)
-        schema = _deref(root, schema)
-        if schema is None:
-            return Resolved(None, True)
-        conditional |= nullable
+MAX_ALTERNATIVES = 64  # ways a value may match at one position, duplicates merged; past it, any value
+MAX_UNION_DEPTH = 8  # unions and `allOf` nested in one another, unfolded
+MAX_STEPS = 4096  # schemas one read unfolds in all, every position counted; past it, any value
+Way = tuple[Schema, ...]  # one way a value may match: schemas that all apply to it (a branch, and what surrounds it)
+
+
+class _Budget:
+    """The work one read may do (4c-2a ruling 1): shared by every position it unfolds."""
+
+    def __init__(self) -> None:
+        self.left = MAX_STEPS
+
+    def spend(self, n: int = 1) -> bool:
+        self.left -= n
+        return self.left >= 0
+
+
+def _key(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, default=str)
+
+
+def _merged(ways: list[Way]) -> list[Way]:
+    return list({_key(w): w for w in ways}.values())
+
+
+def _product(left: list[Way], right: list[Way], budget: _Budget) -> list[Way] | None:
+    """Every way of both: what one allows and the other allows too (a conjunction)."""
+    if not budget.spend(len(left) * len(right)):
+        return None
+    out = _merged([a + b for a in left for b in right])
+    return out if len(out) <= MAX_ALTERNATIVES else None
+
+
+def _ways(root: Schema, schema: Any, depth: int, budget: _Budget) -> list[Way] | None:
+    """The ways a value may match `schema`, each a conjunction of schemas with no union or `allOf` left on top. The
+    schema around a union or an `allOf` is kept beside each branch, never overwritten by it."""
+    if not budget.spend():
+        return None
+    s = _deref(root, schema)
+    if s is None or depth > MAX_UNION_DEPTH:
+        return None
+    key = next((k for k in ("allOf", "anyOf", "oneOf") if k in s), None)
+    if key is None:
+        return [(s,)]
+    options = s[key]
+    if not isinstance(options, list) or not options:
+        return None
+    ways = _ways(root, {k: v for k, v in s.items() if k != key}, depth + 1, budget)
+    if ways is None:
+        return None
+    if key == "allOf":  # every member applies
+        for option in options:
+            member = _ways(root, option, depth + 1, budget)
+            ways = None if member is None else _product(ways, member, budget)
+            if ways is None:
+                return None
+        return ways
+    branches: list[Way] = []  # one of them applies
+    for option in options:
+        branch = _ways(root, option, depth + 1, budget)
+        if branch is None:
+            return None
+        branches += branch
+    return _product(ways, _merged(branches), budget)
+
+
+def _types(root: Schema, way: Way) -> frozenset[str] | None:
+    """The JSON types a value matching every schema of `way` may have; None: any."""
+    out: frozenset[str] | None = None
+    for schema in way:
         types = json_types(standalone(root, schema))
+        if types is not None:
+            out = types if out is None else meet(out, types)
+    return out
+
+
+def alternatives(root: Schema, schemas: Any, budget: _Budget | None = None) -> tuple[list[Way], bool] | None:
+    """The ways a value matching every schema of `schemas` (one schema, or a conjunction) may match, and whether it may
+    also be null. A way only null is dropped and counted as "may be null"; one no value matches (its types
+    contradict) is dropped. A position that is only null gives no way and "may be null": its reader decides. None:
+    unknown (a `$ref` that doesn't resolve, an alternative that isn't a schema, an empty union, past the bounds)."""
+    budget = budget or _Budget()
+    ways: list[Way] = [()]
+    for schema in schemas if isinstance(schemas, tuple) else (schemas,):
+        found = _ways(root, schema, 0, budget)
+        ways = None if found is None else _product(ways, found, budget)  # type: ignore[assignment]
+        if ways is None:
+            return None
+    out: list[Way] = []
+    nulls = False
+    for way in ways:
+        types = _types(root, way)
+        if types is not None and not types:
+            continue
+        if types is not None and "null" in types:
+            nulls = True
+            if types == {"null"}:
+                continue
+            way = (*way, {"type": sorted(types - {"null"})})
+        out.append(way)
+    return out, nulls
+
+
+def _step(root: Schema, way: Way, seg: str | int) -> tuple[Way, bool] | PathError | None:
+    """One way, one segment: the schemas there (all apply) and whether it may be absent; a PathError when this way
+    can't hold it; None when it says nothing about it (any value). Object keywords (`properties`, `required`) speak only
+    of objects, and `items` only of lists: a field is sure to be there only when the value is sure to be an object."""
+    types = _types(root, way)
+    if isinstance(seg, int):
+        if types is not None and "array" not in types:
+            return PathError(f"[{seg}] indexes a value that isn't a list")
+        items = tuple(s["items"] for s in way if isinstance(s.get("items"), Mapping) and s["items"])
+        return (items, True) if items else None  # the list may be shorter, or the value not a list
+    if types is not None and "object" not in types:
+        return PathError(f"`{seg}` reads a field of a value that isn't an object")
+    surely_object = types == frozenset({"object"})
+    declared = tuple(
+        s["properties"][seg] for s in way if isinstance(s.get("properties"), Mapping) and seg in s["properties"]
+    )
+    if declared:
+        required = any(isinstance(s.get("required"), list) and seg in s["required"] for s in way)
+        return declared, not (required and surely_object)
+    extra = tuple(
+        s["additionalProperties"]
+        for s in way
+        if isinstance(s.get("additionalProperties"), Mapping) and s["additionalProperties"]
+    )
+    if extra:
+        return extra, True
+    if any(s.get("additionalProperties") is False for s in way):  # only a closed object rules the field out
+        return PathError(f"there is no field `{seg}`")
+    return None
+
+
+def navigate(root: Any, path: Sequence[str | int], start: Any = None) -> Resolved:
+    """Follow a reference path through an output schema. Raises PathError for a field no alternative can hold.
+
+    Alternatives are followed together, on the safe side (engine-core spec §4.3; 4c-2a ruling 1): the value may be
+    anything one of them allows there; it may be missing when one of them may lack it; it is any value when one of them
+    says nothing about it. What surrounds a union, and every member of an `allOf`, applies to each of its branches."""
+    if not isinstance(root, Mapping):
+        return Resolved(None, bool(path), missing=bool(path))
+    budget = _Budget()
+    frontier: list[Way] = [(root if start is None else start,)]
+    missing = False
+    for seg in path:
+        found: list[Way] = []
+        refused: PathError | None = None
+        for position in frontier:
+            unfolded = alternatives(root, position, budget)
+            if unfolded is None:
+                return Resolved(None, True, missing=True)
+            ways, nullable = unfolded
+            missing |= nullable  # a null value has no fields and no items
+            for way in ways or [({"type": "null"},)]:  # only null: it refuses the read, as before
+                step = _step(root, way, seg)
+                if step is None:
+                    return Resolved(None, True, missing=True)
+                if isinstance(step, PathError):
+                    missing, refused = True, refused or step  # when the value is this way, it's missing
+                    continue
+                found.append(step[0])
+                missing |= step[1]
+        if not found:
+            raise refused or PathError(f"there is no field `{seg}`")
+        frontier = _merged(found)
+        if len(frontier) > MAX_ALTERNATIVES:
+            return Resolved(None, True, missing=True)
+    return _end(root, frontier, missing, budget)
+
+
+def _end(root: Schema, frontier: list[Way], missing: bool, budget: _Budget) -> Resolved:
+    schemas: list[Schema] = []
+    nullable = False
+    for position in frontier:
+        known = tuple(s for s in position if _deref(root, s) is not None)
+        if not known:  # a boolean schema, or one that doesn't resolve: any value, as before
+            return Resolved(None, missing, missing=missing)
+        unfolded = alternatives(root, known, budget)
+        if unfolded is None:
+            return Resolved(None, True, missing=True)
+        ways, maybe_null = unfolded
+        nullable |= maybe_null
+        schemas += [way[0] if len(way) == 1 else {"allOf": list(way)} for way in ways]
+    if not schemas:  # only null: null is its value, as before
+        return Resolved(standalone(root, {"type": "null"}), missing, missing=missing)
+    unique = list({_key(s): s for s in schemas}.values())
+    merged = unique[0] if len(unique) == 1 else {"anyOf": unique}
+    return Resolved(standalone(root, merged), missing or nullable, missing=missing, nullable=nullable)
+
+
+Obligation = Literal["optional", "nullable", "non_object"]
+
+
+def _declared(root: Any, path: Sequence[str | int], start: Any, mode: Obligation) -> tuple[int, ...]:
+    """Positions in `path` of declared fields a read can fail at: one that may be absent (`optional`), null
+    (`nullable`), or something other than an object (`non_object`: a scalar or a list beside an object, which has no
+    fields to read).
+
+    Every way of the value is followed (4c-2a ruling 1). A way that can't be an object, or a closed one without the
+    field, lacks it. It stops where the schema stops describing the data: an open way that doesn't declare the field, a
+    type it doesn't say, a list index, past the bounds. Data the schema doesn't declare carries no such promise, and
+    needs no guard (spec §4.3)."""
+    if not isinstance(root, Mapping):
+        return ()
+    budget = _Budget()
+    frontier: list[Way] = [(root if start is None else start,)]
+    out: list[int] = []
+    for i, seg in enumerate(path):
         if isinstance(seg, int):
-            if types is not None and "array" not in types:
-                raise PathError(f"[{seg}] indexes a value that isn't a list")
-            items = schema.get("items")
-            if not isinstance(items, Mapping) or not items:
-                return Resolved(None, True)
-            current, conditional = items, True  # the list may be shorter
-            continue
-        props = schema.get("properties")
-        if isinstance(props, Mapping) and seg in props:
-            required = schema.get("required")
-            if not (isinstance(required, list) and seg in required):
-                conditional = True
-            current = props[seg]
-            continue
-        if types is not None and "object" not in types:
-            raise PathError(f"`{seg}` reads a field of a value that isn't an object")
-        extra = schema.get("additionalProperties")
-        if isinstance(extra, Mapping) and extra:
-            current, conditional = extra, True
-            continue
-        if extra is False:  # only a closed object rules the field out; otherwise it may exist
-            raise PathError(f"there is no field `{seg}`")
-        return Resolved(None, True)
-    final = _deref(root, current)
-    if final is None:
-        return Resolved(None, conditional)
-    final, nullable = _strip_null(final)
-    resolved = _deref(root, final)
-    if resolved is None:
-        return Resolved(None, True)
-    return Resolved(standalone(root, resolved), conditional or nullable)
+            break
+        ways: list[Way] = []
+        for position in frontier:
+            unfolded = alternatives(root, position, budget)
+            if unfolded is None:
+                return tuple(out)
+            ways += unfolded[0]
+        fields: list[Way] = []
+        absent = False
+        for way in ways:
+            types = _types(root, way)
+            if types is not None and "object" not in types:
+                absent = True  # a scalar or a list here: no fields
+                continue
+            declared = tuple(
+                s["properties"][seg] for s in way if isinstance(s.get("properties"), Mapping) and seg in s["properties"]
+            )
+            if not declared:
+                if any(s.get("additionalProperties") is False for s in way):
+                    absent = True  # closed without it
+                    continue
+                return tuple(out)  # open: undeclared from here
+            fields.append(declared)
+            required = any(isinstance(s.get("required"), list) and seg in s["required"] for s in way)
+            absent |= not (required and types == frozenset({"object"}))
+        if not fields:
+            return tuple(out)
+        if mode == "optional":
+            flagged = absent
+        else:
+            flagged = False
+            for field in fields:
+                found = alternatives(root, field, budget)
+                if found is None:
+                    continue
+                if mode == "nullable":
+                    flagged |= found[1]
+                else:
+                    flagged |= any((t := _types(root, w)) is not None and bool(t - {"object"}) for w in found[0])
+        if flagged:
+            out.append(i)
+        frontier = _merged(fields)
+        if len(frontier) > MAX_ALTERNATIVES:
+            return tuple(out)
+    return tuple(out)
 
 
 def declared_optional(root: Any, path: Sequence[str | int], start: Any = None) -> tuple[int, ...]:
-    """Positions in `path` of fields the schema declares but doesn't require: the value may be absent there. It stops
-    where the schema stops describing the data (a field it doesn't declare, a union, an unknown schema, a list index):
-    open data carries no such promise, so nothing past that point is reported."""
-    if not isinstance(root, Mapping):
-        return ()
-    current: Any = root if start is None else start
-    out: list[int] = []
-    for i, seg in enumerate(path):
-        schema = _deref(root, current)
-        if schema is None or isinstance(seg, int):
-            break
-        schema, _ = _strip_null(schema)
-        schema = _deref(root, schema)
-        props = schema.get("properties") if schema is not None else None
-        if not isinstance(props, Mapping) or seg not in props or schema is None:
-            break
-        required = schema.get("required")
-        if not (isinstance(required, list) and seg in required):
-            out.append(i)
-        current = props[seg]
-    return tuple(out)
+    """Positions in `path` of fields the schema declares but that may be absent: CEL guards them with `has()`."""
+    return _declared(root, path, start, "optional")
 
 
 def declared_nullable(root: Any, path: Sequence[str | int], start: Any = None) -> tuple[int, ...]:
-    """Positions in `path` of fields the schema declares may be null (a `null` type, or a union with null). Like
-    declared_optional, it stops where the schema stops describing the data."""
-    if not isinstance(root, Mapping):
-        return ()
-    current: Any = root if start is None else start
-    out: list[int] = []
-    for i, seg in enumerate(path):
-        schema = _deref(root, current)
-        if schema is None or isinstance(seg, int):
-            break
-        schema, _ = _strip_null(schema)
-        schema = _deref(root, schema)
-        props = schema.get("properties") if schema is not None else None
-        if not isinstance(props, Mapping) or seg not in props:
-            break
-        field = _deref(root, props[seg])
-        if field is None:
-            break
-        if _strip_null(field)[1]:
-            out.append(i)
-        current = props[seg]
-    return tuple(out)
+    """Positions in `path` of fields the schema declares may be null: CEL guards reads below them with `!= null`."""
+    return _declared(root, path, start, "nullable")
+
+
+def declared_non_object(root: Any, path: Sequence[str | int], start: Any = None) -> tuple[int, ...]:
+    """Positions in `path` of fields the schema declares may be something other than an object (a scalar or a list,
+    beside an object): CEL guards reads below them, `has()` included, with `type(x) == map`."""
+    return _declared(root, path, start, "non_object")
 
 
 def element_schema(schema: Schema | None) -> Schema | None:

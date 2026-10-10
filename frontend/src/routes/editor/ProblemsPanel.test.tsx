@@ -8,7 +8,7 @@ import { ProblemsPanel } from "./ProblemsPanel";
 const d = (code: string, node: string | null, severity: "error" | "warning", message = code) =>
   ({ code, message, node, field: node ? "/fields" : null, fix: `fix ${code}`, severity });
 const VALIDATION = {
-  draft_revision: 4, valid: false, taint: { sites: [], declassified: [] },
+  draft_revision: 4, valid: false, taint: { sites: [], declassified: [] }, conditional_steps: [],
   diagnostics: [d("config.invalid", "n1", "error", "fields needs at least one entry"), d("vars.unassigned", null, "warning")],
   expressions: [
     { node: "n1", field: "/fields/a", mode: "activity" as const, reason: "builds a message" },

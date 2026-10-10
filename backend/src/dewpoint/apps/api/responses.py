@@ -243,6 +243,98 @@ class ValidationOut(_Answer):
     diagnostics: list[DiagnosticOut]
     expressions: list[ExpressionOut]
     taint: TaintOut
+    conditional_steps: list[str]  # the steps that may not run, by id (4c-2a ruling 3; ledger ruling 70's badge)
+
+
+class GuardOut(_Answer):
+    """A test a formula makes before it reads a path (4c-2a ruling 6). `size`, for `min_size`: the list's size must
+    exceed it."""
+
+    kind: Literal["present", "not_null", "is_map", "is_list", "min_size"]
+    path: str
+    size: int | None
+
+
+class FormulaUseOut(_Answer):
+    guards: list[GuardOut]
+    sensitive: bool  # a formula reading it, with its guards, reads sensitive data (4c-2a ruling 7)
+    null_test: bool  # "is there" also tests `!= null`: it may be null, is untyped, or is only null (ruling 6)
+
+
+class ScopeEntryOut(_Answer):
+    path: str
+    parent: str | None
+    name: str
+    root: Literal["trigger", "steps", "vars", "item", "index", "loops", "run"]
+    step: str | None
+    types: list[Literal["string", "integer", "number", "boolean", "array", "object", "null"]]  # none: any value
+    format: str | None
+    missing: bool
+    nullable: bool
+    sensitive: bool
+    nameable: bool  # false: a key a reference can't name, shown disabled
+    children: bool
+    formula: FormulaUseOut | None  # null: CEL can't select one of its fields, or `problem` refuses the read
+    problem: DiagnosticOut | None  # why reading it here is refused, as validation says it (`vars.unassigned`)
+
+
+class ScopeOut(_Answer):
+    """What one field of the saved draft's step can read (B6), at the revision it was computed for: an editor drops an
+    answer for an older revision (D17)."""
+
+    draft_revision: int
+    node: str
+    field: str
+    state: Literal["ok", "unavailable"]
+    reason: str | None
+    entries: list[ScopeEntryOut]
+    more: bool
+    problem: DiagnosticOut | None
+
+
+class SampleConnectionOut(_Answer):
+    connection_id: str
+    type: str
+    name: str  # its name now, or as recorded when it's gone
+    revision: int  # as the attempt used it
+    current_revision: int | None
+    state: Literal["unchanged", "changed", "deleted"]
+    context: dict[str, Any]  # its non-secret config, as it was
+
+
+class SampleConnectionsOut(_Answer):
+    """What the sample's attempt used: `recorded` (each one, as it was and as it is now), `none` (the step names
+    none), `simulated` (a simulation opens none) or `unknown` (it names one, but the run predates records)."""
+
+    state: Literal["recorded", "none", "simulated", "unknown"]
+    items: list[SampleConnectionOut]
+
+
+class SampleOut(_Answer):
+    run_id: str
+    run_kind: Literal["run", "subflow", "failure_handler"]
+    mode: Literal["live", "simulate"]
+    version_id: str
+    version_number: int
+    iteration_key: str
+    attempt: int
+    captured_at: str | None
+    type: str | None  # the step's type@version in that version
+    same_type: bool
+    same_config: bool
+    output: Any  # the stored preview, `[redacted]` and `[truncated]` where they were (D20)
+    connections: SampleConnectionsOut
+    stale: bool  # its type, config or a connection differs from the draft's now
+
+
+class SamplesOut(_Answer):
+    """A step's newest sample (B7), against the saved draft at this revision."""
+
+    draft_revision: int
+    node: str
+    sample: SampleOut | None
+    searched_runs: int  # the ended runs looked in: no sample means none there, not "never" (4c-2a ruling 9)
+    search_limit: int
 
 
 class PublishedOut(_Answer):

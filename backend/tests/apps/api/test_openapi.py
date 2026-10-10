@@ -147,3 +147,18 @@ def test_options_answer_a_named_model() -> None:
     ):
         answer = paths[path]["post"]["responses"]["200"]["content"]["application/json"]["schema"]
         assert answer == {"$ref": "#/components/schemas/OptionsOut"}
+
+
+# What the web client calls in slice 4c-2: each answers a named model.
+SLICE_4C = [
+    ("get", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/scope"),
+    ("get", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/samples"),
+]
+
+
+@pytest.mark.parametrize("method,path", SLICE_4C)
+def test_slice_4c_routes_name_their_answer(method: str, path: str) -> None:
+    responses = schema()["paths"][path][method]["responses"]
+    ok = next(code for code in responses if code.startswith("2"))
+    body = responses[ok]["content"]["application/json"]["schema"]
+    assert "$ref" in body or "$ref" in body.get("items", {}), body

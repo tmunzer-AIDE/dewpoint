@@ -95,6 +95,28 @@ class RunStep(Base):
     cel_mode: Mapped[str | None] = mapped_column(String(16))
 
 
+class RunStepConnection(Base):
+    """A connection one step attempt opened, as it was (B7; 4c-2a ruling 8): what a sample says it ran with."""
+
+    __tablename__ = "run_step_connections"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["run_id", "tenant_id"], ["runs.id", "runs.tenant_id"], name="run_step_connections_run", ondelete="CASCADE"
+        ),
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"))
+    run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    step_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    iteration_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    attempt: Mapped[int] = mapped_column(Integer, primary_key=True)
+    connection_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)  # no key: may be deleted
+    type: Mapped[str] = mapped_column(String(64))
+    name: Mapped[str] = mapped_column(String(100))
+    revision: Mapped[int] = mapped_column(Integer, primary_key=True)  # each revision an attempt opened
+    context: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))  # its non-secret config
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class ExecutionEvidence(Base):
     """What Temporal may still hold of a run execution (the owner's M3 rulings), kept until Temporal shows it gone,
     whatever retention deletes from `runs`. A root's is written with each start attempt, before Temporal is asked

@@ -93,3 +93,42 @@ def test_non_null_guarded(expr: str) -> None:
 )
 def test_non_null_unguarded(expr: str) -> None:
     assert not _not_null(expr)
+
+
+VARIANT = ("trigger", "variant")
+
+
+def _shaped(expr: str) -> bool:
+    """Whether every chain reading below trigger.variant knows it's an object (`type(...) == map`)."""
+    checked = runtime.compile_checked(expr, {"trigger": T.MAP}).checked
+    facts = guards.facts_at(checked.expr, guards.shape)
+    uses = [c for c in ast.chains(checked.expr) if c.path[:2] == VARIANT and len(c.path) > 2]
+    assert uses, "the expression must read below trigger.variant"
+    return all(VARIANT in facts[c.expr_id] for c in uses)
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        "type(trigger.variant) == map && trigger.variant.n > 0",
+        "map == type(trigger.variant) && has(trigger.variant.n)",
+        "!(type(trigger.variant) != map) && trigger.variant.n > 0",
+        "type(trigger.variant) != map || trigger.variant.n > 0",
+    ],
+)
+def test_an_object_test_guards_reads_below_it(expr: str) -> None:
+    assert _shaped(expr)
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        "has(trigger.variant.n) && trigger.variant.n > 0",  # has() itself fails on a scalar
+        "trigger.variant != null && trigger.variant.n > 0",  # not null isn't an object
+        "type(trigger.variant) == list || trigger.variant.n > 0",
+        # a comprehension's own `map`, here the string type: not the built-in (the review of revision 4)
+        "[string].all(map, type(trigger.variant) == map && trigger.variant.n > 0)",
+    ],
+)
+def test_other_tests_dont_say_its_an_object(expr: str) -> None:
+    assert not _shaped(expr)

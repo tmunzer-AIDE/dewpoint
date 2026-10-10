@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+import re
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -15,6 +16,8 @@ from dewpoint.apps.api.responses import (
     DraftSavedOut,
     OptionsOut,
     PublishedOut,
+    SamplesOut,
+    ScopeOut,
     ValidationOut,
     VersionDetailOut,
     VersionOut,
@@ -32,6 +35,8 @@ from dewpoint.core.http import TenantContext, get_db, get_settings_dep, require
 from dewpoint.core.models.connections import Connection
 from dewpoint.core.models.workflows import Workflow, WorkflowVersion
 from dewpoint.core.plugins import calls, registry
+from dewpoint.core.retention.cutoff import cutoff
+from dewpoint.core.runs import samples
 from dewpoint.core.workflows import portable, service
 from dewpoint.engine.graph.model import GraphFormatError, parse_graph
 from dewpoint.engine.graph.validate import PICKER
@@ -243,6 +248,8 @@ async def validate_draft(
         "diagnostics": [d.to_json() for d in checked.diagnostics],
         # How each CEL value runs, for the editor (spec §5.10): "local" runs inline, "activity" as a separate step.
         "expressions": [{"node": r.node, "field": r.field, "mode": r.mode, "reason": r.reason} for r in expressions],
+        # The steps that may not run on every path: the canvas's "conditional" badge (ledger ruling 70).
+        "conditional_steps": list(result.conditional_steps) if result is not None else [],
         # Which values read sensitive data, and what each declassified site reveals (engine 2b spec §4.1, §4.3).
         "taint": {
             "sites": [{"node": n, "field": f} for n, f in (result.tainted_sites if result is not None else ())],
@@ -250,6 +257,61 @@ async def validate_draft(
                 {"node": n, "field": f, "reveals": r} for n, f, r in (result.declassified if result is not None else ())
             ],
         },
+    }
+
+
+POINTER = re.compile(r"(/[^/]*)*")  # a JSON pointer inside a step's config ("" is the whole config)
+
+
+@router.get("/t/{tenant_id}/workflows/{workflow_id}/draft/scope", response_model=ScopeOut)
+async def draft_scope(
+    workflow_id: uuid.UUID,
+    node: uuid.UUID,
+    field: str = Query(max_length=200),
+    under: str | None = Query(default=None, max_length=512),
+    at: str | None = Query(default=None, max_length=512),
+    find: str | None = Query(default=None, min_length=1, max_length=100),
+    ctx: TenantContext = Depends(require(P.WORKFLOW_VIEW)),
+    db: AsyncSession = Depends(get_db, scope="function"),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, object]:
+    """What one field of the saved draft's step can read (B6; 4c-2a rulings 4–7): the top of each root, the children
+    of one path (`under`), one path (`at`), or fields by name (`find`)."""
+    if not POINTER.fullmatch(field):
+        raise HTTPException(422, detail={"error": "invalid_field"})
+    if sum(q is not None for q in (under, at, find)) > 1:
+        raise HTTPException(422, detail={"error": "one_question"})
+    wf = await _get(db, ctx, workflow_id)
+    found = await workflow_ops.draft_scope(
+        db, ctx.tenant_id, wf.draft, settings, node, field, under=under, at=at, find=find
+    )
+    return {"draft_revision": wf.draft_revision, "node": str(node), "field": field, **workflow_ops.scope_answer(found)}
+
+
+@router.get("/t/{tenant_id}/workflows/{workflow_id}/draft/samples", response_model=SamplesOut)
+async def draft_samples(
+    workflow_id: uuid.UUID,
+    node: uuid.UUID,
+    iteration: str | None = Query(default=None, max_length=2000),
+    ctx: TenantContext = Depends(require(P.RUN_VIEW)),
+    db: AsyncSession = Depends(get_db, scope="function"),
+) -> dict[str, object]:
+    """A step's newest sample against the saved draft (B7; 4c-2a rulings 9, 10). Run data: `run.view`, and the
+    tenant's retention."""
+    wf = await _get(db, ctx, workflow_id)
+    drafted = workflow_ops.draft_node(wf.draft, node)
+    search = samples.Search(None, 0)
+    if drafted is not None:
+        search = await samples.newest(
+            db, ctx.tenant_id, workflow_id, node, iteration_key=iteration, at=await cutoff(db, ctx.tenant_id)
+        )
+    found = search.sample
+    return {
+        "draft_revision": wf.draft_revision,
+        "node": str(node),
+        "sample": workflow_ops.sample_answer(found, drafted) if found is not None and drafted is not None else None,
+        "searched_runs": search.searched,
+        "search_limit": samples.SCAN_RUNS,
     }
 
 

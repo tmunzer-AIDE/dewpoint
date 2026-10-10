@@ -1045,6 +1045,48 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/samples": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Draft Samples
+         * @description A step's newest sample against the saved draft (B7; 4c-2a rulings 9, 10). Run data: `run.view`, and the
+         *     tenant's retention.
+         */
+        get: operations["draft_samples_api_v1_t__tenant_id__workflows__workflow_id__draft_samples_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/scope": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Draft Scope
+         * @description What one field of the saved draft's step can read (B6; 4c-2a rulings 4–7): the top of each root, the children
+         *     of one path (`under`), one path (`at`), or fields by name (`find`).
+         */
+        get: operations["draft_scope_api_v1_t__tenant_id__workflows__workflow_id__draft_scope_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/t/{tenant_id}/workflows/{workflow_id}/export": {
         parameters: {
             query?: never;
@@ -1733,6 +1775,15 @@ export interface components {
             /** Reason */
             reason: string | null;
         };
+        /** FormulaUseOut */
+        FormulaUseOut: {
+            /** Guards */
+            guards: components["schemas"]["GuardOut"][];
+            /** Null Test */
+            null_test: boolean;
+            /** Sensitive */
+            sensitive: boolean;
+        };
         /** Graph */
         Graph: {
             /**
@@ -1794,6 +1845,22 @@ export interface components {
             vars_schema?: {
                 [key: string]: unknown;
             };
+        };
+        /**
+         * GuardOut
+         * @description A test a formula makes before it reads a path (4c-2a ruling 6). `size`, for `min_size`: the list's size must
+         *     exceed it.
+         */
+        GuardOut: {
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "present" | "not_null" | "is_map" | "is_list" | "min_size";
+            /** Path */
+            path: string;
+            /** Size */
+            size: number | null;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -2080,6 +2147,93 @@ export interface components {
             /** Simulate */
             simulate: number;
         };
+        /** SampleConnectionOut */
+        SampleConnectionOut: {
+            /** Connection Id */
+            connection_id: string;
+            /** Context */
+            context: {
+                [key: string]: unknown;
+            };
+            /** Current Revision */
+            current_revision: number | null;
+            /** Name */
+            name: string;
+            /** Revision */
+            revision: number;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "unchanged" | "changed" | "deleted";
+            /** Type */
+            type: string;
+        };
+        /**
+         * SampleConnectionsOut
+         * @description What the sample's attempt used: `recorded` (each one, as it was and as it is now), `none` (the step names
+         *     none), `simulated` (a simulation opens none) or `unknown` (it names one, but the run predates records).
+         */
+        SampleConnectionsOut: {
+            /** Items */
+            items: components["schemas"]["SampleConnectionOut"][];
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "recorded" | "none" | "simulated" | "unknown";
+        };
+        /** SampleOut */
+        SampleOut: {
+            /** Attempt */
+            attempt: number;
+            /** Captured At */
+            captured_at: string | null;
+            connections: components["schemas"]["SampleConnectionsOut"];
+            /** Iteration Key */
+            iteration_key: string;
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "live" | "simulate";
+            /** Output */
+            output: unknown;
+            /** Run Id */
+            run_id: string;
+            /**
+             * Run Kind
+             * @enum {string}
+             */
+            run_kind: "run" | "subflow" | "failure_handler";
+            /** Same Config */
+            same_config: boolean;
+            /** Same Type */
+            same_type: boolean;
+            /** Stale */
+            stale: boolean;
+            /** Type */
+            type: string | null;
+            /** Version Id */
+            version_id: string;
+            /** Version Number */
+            version_number: number;
+        };
+        /**
+         * SamplesOut
+         * @description A step's newest sample (B7), against the saved draft at this revision.
+         */
+        SamplesOut: {
+            /** Draft Revision */
+            draft_revision: number;
+            /** Node */
+            node: string;
+            sample: components["schemas"]["SampleOut"] | null;
+            /** Search Limit */
+            search_limit: number;
+            /** Searched Runs */
+            searched_runs: number;
+        };
         /** ScheduleIn */
         ScheduleIn: {
             /**
@@ -2141,6 +2295,63 @@ export interface components {
             offset_s?: number | null;
             /** Time Zone */
             time_zone?: string | null;
+        };
+        /** ScopeEntryOut */
+        ScopeEntryOut: {
+            /** Children */
+            children: boolean;
+            /** Format */
+            format: string | null;
+            formula: components["schemas"]["FormulaUseOut"] | null;
+            /** Missing */
+            missing: boolean;
+            /** Name */
+            name: string;
+            /** Nameable */
+            nameable: boolean;
+            /** Nullable */
+            nullable: boolean;
+            /** Parent */
+            parent: string | null;
+            /** Path */
+            path: string;
+            problem: components["schemas"]["DiagnosticOut"] | null;
+            /**
+             * Root
+             * @enum {string}
+             */
+            root: "trigger" | "steps" | "vars" | "item" | "index" | "loops" | "run";
+            /** Sensitive */
+            sensitive: boolean;
+            /** Step */
+            step: string | null;
+            /** Types */
+            types: ("string" | "integer" | "number" | "boolean" | "array" | "object" | "null")[];
+        };
+        /**
+         * ScopeOut
+         * @description What one field of the saved draft's step can read (B6), at the revision it was computed for: an editor drops an
+         *     answer for an older revision (D17).
+         */
+        ScopeOut: {
+            /** Draft Revision */
+            draft_revision: number;
+            /** Entries */
+            entries: components["schemas"]["ScopeEntryOut"][];
+            /** Field */
+            field: string;
+            /** More */
+            more: boolean;
+            /** Node */
+            node: string;
+            problem: components["schemas"]["DiagnosticOut"] | null;
+            /** Reason */
+            reason: string | null;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "ok" | "unavailable";
         };
         /** SessionOut */
         SessionOut: {
@@ -2297,6 +2508,8 @@ export interface components {
          *     revision as stale, never as current (D17; 4b ruling 24).
          */
         ValidationOut: {
+            /** Conditional Steps */
+            conditional_steps: string[];
             /** Diagnostics */
             diagnostics: components["schemas"]["DiagnosticOut"][];
             /** Draft Revision */
@@ -4831,6 +5044,79 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DraftSavedOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    draft_samples_api_v1_t__tenant_id__workflows__workflow_id__draft_samples_get: {
+        parameters: {
+            query: {
+                node: string;
+                iteration?: string | null;
+            };
+            header?: never;
+            path: {
+                workflow_id: string;
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SamplesOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    draft_scope_api_v1_t__tenant_id__workflows__workflow_id__draft_scope_get: {
+        parameters: {
+            query: {
+                node: string;
+                field: string;
+                under?: string | null;
+                at?: string | null;
+                find?: string | null;
+            };
+            header?: never;
+            path: {
+                workflow_id: string;
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScopeOut"];
                 };
             };
             /** @description Validation Error */
