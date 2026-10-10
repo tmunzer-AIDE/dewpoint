@@ -2101,3 +2101,25 @@ latest edits aren't saved` and `stops placing a step, and says so`, each asserti
 change. Not reproduced since; the owner's word: watch for them.
 
 Paused at the final checkpoint. Nothing is pushed: a push and a PR wait for the owner's word.
+
+### The final checkpoint reviewed (2026-10-10, pasted)
+
+A pasted review held the final checkpoint at 6b1b8aaf for two residual defects in the final review's fixes, both
+reproduced; it found M66's and M67's counterexamples passing, and the other fixes' controls too. It authorizes no push
+or PR.
+
+### 4c-2b, after the final checkpoint's review (2026-10-10)
+
+M76. **Removing a group's only comparison puts focus on "＋ Condition".** M68 sent it to the group's own "＋ Condition",
+    but an empty group writes nothing, so the group went with its last comparison, and focus with it. Test: "puts focus
+    on ＋ Condition when a group's only comparison is removed, the group gone with it" (focus was on the body first).
+M77. **A previous revision's scope answer draws a pill, and says nothing as current** (amends M70). While the next saved
+    revision's answer comes, the pill keeps its look (`shown`), but the details and the builder use this revision's
+    answer only (`entry`): the details say "Checking the saved draft's data…" in place of the previous facts, and a
+    comparison offers no operator but its own until the answer comes. Tests: "never says the previous revision's facts
+    as this one's while its answer comes" (it said "It's always there now…" first), "offers a comparison's operators
+    from this revision's answer only, never the previous one's".
+    Fixed in 4da86fdb. Checks, as run on it: the unit suite 828 passed (62 files); typecheck, lint, `check:api` and
+    build clean; the browser gate 37 passed; local CodeQL no finding in either language; no backend change.
+
+Paused at the final checkpoint again. Nothing is pushed: a push and a PR wait for the owner's word.
