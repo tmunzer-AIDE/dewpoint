@@ -6,7 +6,8 @@
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { Button } from "../../../components/Button";
 import { fixedOf, formula, isPlainRef, kindOf, literal, referenceText, valueAt } from "../../../lib/config";
-import { canFixed, canFormula, emptyOf, startsAsFormula, type FieldSpec, type Widget } from "../../../lib/schemaForm";
+import { segmentsOf, type Caret } from "../../../lib/pills";
+import { canFixed, canFormula, emptyOf, startsAsFormula, takesPills, type FieldSpec, type Widget } from "../../../lib/schemaForm";
 import { STALE, type UnappliedKind } from "../../../lib/unapplied";
 import { problemsAt, useDrawer, useSession } from "./context";
 import { FieldFrame, GroupFrame, type Described } from "./FieldFrame";
@@ -18,10 +19,12 @@ import {
   type ControlProps,
 } from "./scalars";  // prettier-ignore
 import { ContainerParts, PortControl, isContainer, partNames } from "./structured";
+import { TextPills, type Opened } from "./TextPills";
 
 type Control = (props: ControlProps) => ReactNode;
-const OWN: UnappliedKind[] = ["text", "json", "number", "formula", "port"]; // what a field's own control may hold
+const OWN: UnappliedKind[] = ["text", "template", "json", "number", "formula", "port"]; // what a field's own control may hold
 const NEITHER = "This field takes only references or text with references, which can't be set in this drawer.";
+export const PILLS_NOTE = "Press / or ＋ Data to insert data from earlier steps. A dashed pill may be missing when this runs: give it a default.";
 
 /** The control for what's held, of this kind: it shows first, whatever the value under it has become (ruling 18). A
  * field with live choices keeps its own control, so its choices stay a click away. */
@@ -76,6 +79,7 @@ const keepFocus = (e: MouseEvent) => e.preventDefault();
 
 const startMode = (spec: FieldSpec, value: unknown): Mode =>
   kindOf(value) === "cel" ? "formula"
+  : takesPills(spec) && segmentsOf(value) !== null && value !== undefined && value !== null ? "fixed"
   : value !== undefined && value !== null ? "fixed"
   : startsAsFormula(spec) ? "formula" : "fixed";  // prettier-ignore
 
@@ -114,7 +118,13 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
     });
   const held = OWN.map((k) => drawer.held(k, spec.pointer)).find((u) => u !== undefined);
   const disabled = !drawer.editable;
-  const fixedOk = canFixed(spec);
+  // Text with data pills: its fixed mode where the engine takes a template (4c-2b), whatever its kinds say of literals.
+  const pills = takesPills(spec);
+  const asText = pills && segmentsOf(value) !== null;
+  const [opened, setOpened] = useState<Opened | null>(null);
+  const caret = useRef<Caret | null>(null);
+  const focusNext = useRef<{ segment: number; offset: number } | { pill: number } | null>(null);
+  const fixedOk = canFixed(spec) || pills;
   const formulaOk = canFormula(spec);
   // What's held decides how the field shows, so a remount, an undo or a closed drawer never hides it (ruling 18).
   const heldMode: Mode | null = held === undefined || held.kind === "port" ? null : held.kind === "formula" ? "formula" : "fixed";
@@ -141,7 +151,7 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
     setLocal(why);
     if (why === null) then();
   };
-  const computed = kind === "ref" || kind === "template";
+  const computed = (kind === "ref" || kind === "template") && !asText;
   // A fixed value in a sensitive field: never shown (M25). A reference or a template there is how a secret is passed,
   // and shows as one (the final review).
   const hidden = spec.sensitive && !empty && kind !== "cel" && !computed;
@@ -157,6 +167,10 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
     reshape(
       (current) => {
         if (next === "fixed") return kindOf(current) === "cel" ? emptyOf(spec) : current;
+        // A lone reference becomes its path; text with pills starts an empty formula (Undo brings it back): text
+        // around references isn't a formula (4c-2b).
+        if (isPlainRef(current)) return formula(referenceText(current));
+        if (kindOf(current) === "ref" || kindOf(current) === "template") return emptyOf(spec);
         const was = fixedOf(current);
         // A fixed value becomes the formula that gives it, unless it holds a sensitive part: never copied into visible
         // text (M25), the formula starts empty.
@@ -181,7 +195,15 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
   const actions = (
     <>
       {fixedOk && formulaOk && !computed && !hidden && (
-        <ModeSwitch label={spec.label} mode={mode} disabled={disabled} onChange={switchTo} />
+        <ModeSwitch label={spec.label} mode={mode} disabled={disabled} onChange={switchTo} fixedName={pills ? "Text" : "Fixed"} />
+      )}
+      {pills && mode === "fixed" && !disabled && drawer.revision !== null && (
+        <Button
+          size="sm" aria-haspopup="dialog" aria-expanded={opened?.kind === "tree"}
+          onClick={() => setOpened(opened?.kind === "tree" ? null : { kind: "tree", at: caret.current ?? { segment: Infinity, offset: Infinity }, slash: false })}
+        >
+          ＋ Data
+        </Button>
       )}
       {mode === "fixed" && fixedOk && !computed && !hidden && kind === null && isContainer(spec.base) && !spec.holdsSensitive && (
         // Pressed as Segmented's options are, by weight and fill from its tokens, while it's on (the owner's ruling O1).
@@ -235,10 +257,20 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
     : spec.port
       ? PortControl
       : (controlFor(spec.widget === "formula" ? spec.base : spec.widget) ?? controlFor(spec.base) ?? JsonControl);
-  const Held = held ? heldControl(held.kind, spec) : null;
+  const Held = held && held.kind !== "template" ? heldControl(held.kind, spec) : null;
+  const panel = { opened, open: setOpened, caret, focus: focusNext };
+  const textPills = (c: Described) => (
+    <TextPills
+      key={generation} {...c} spec={spec} value={hidden ? undefined : fixed} literal={held?.literal ?? kind === "literal"}
+      disabled={disabled} onChange={write} panel={panel} // it writes a literal back as one itself, never a template as data
+    />
+  );  // prettier-ignore
   let body: ReactNode;
   let says = false; // how its formula runs, said under it
-  if (held && Held) {
+  if (held?.kind === "template" || (mode === "fixed" && asText && !hidden && !(held && Held))) {
+    // Text with data pills: what's held, or the value, as text and pills (4c-2b).
+    body = frame(textPills, joined(spec.hint, (held?.literal ?? kind === "literal") ? LITERAL_NOTE : null, PILLS_NOTE));
+  } else if (held && Held) {
     // What's held shows first, before what the value under it has become (a reference, a hidden secret, another
     // mode): it stays visible, and recoverable, until it's applied or discarded (the review of revision 3).
     body = frame(

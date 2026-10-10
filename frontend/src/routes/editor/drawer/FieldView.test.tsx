@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { formula, literal } from "../../../lib/config";
 import { FILTER, IF, REMOTE, RUN_WORKFLOW, SWITCH, TRANSFORM, typeWith } from "../../../test/nodeTypes";
 import { STALE } from "../../../lib/unapplied";
+import { PILLS_NOTE } from "./FieldView";
 import { NODE_ID, fakeApi, problem, showFields } from "./harness";
 
 beforeEach(() => {
@@ -45,7 +46,7 @@ it("labels a field by its title, its hint and the server's problems described by
   showFields(PLAIN, { problems: [problem("/name", "Too short.")] });
   const name = screen.getByLabelText("Name");
   const described = name.getAttribute("aria-describedby")!.split(" ").map((id) => document.getElementById(id)!.textContent);
-  expect(described).toEqual(["Shown to people.", "Too short."]);
+  expect(described).toEqual([`Shown to people. ${PILLS_NOTE}`, "Too short."]); // a text field takes data pills (4c-2b)
   expect(name.getAttribute("aria-invalid")).toBe("true");
   expect(name.getAttribute("aria-required")).toBe("true");
 });
@@ -196,7 +197,7 @@ it("keeps what a refused write turned away, with its reason", async () => {
   expect(screen.getByLabelText<HTMLInputElement>("Name").value).toBe("ab");
   expect(screen.getByLabelText<HTMLInputElement>("Count").value).toBe("7");
   expect(config()).toEqual({ count: 5 });
-  expect(held().map((u) => [u.kind, u.text])).toEqual([["text", "ab"], ["number", "7"]]);
+  expect(held().map((u) => [u.kind, u.text])).toEqual([["template", "ab"], ["number", "7"]]); // text and pills (4c-2b)
   expect(screen.getAllByText("Not written: the draft can't be changed now.")).toHaveLength(2);
 });
 
@@ -291,12 +292,21 @@ it("offers neither a fixed value nor a formula where the engine takes only refer
   expect(screen.queryByRole("textbox")).toBeNull();
 });
 
-it("shows a reference read only, and keeps it until it's replaced", async () => {
-  const ref = { $value: { kind: "ref", path: "steps.fetch.output.name" } };
-  const { config, edits } = showFields(PLAIN, { config: { name: ref } });
-  expect(screen.getByLabelText("Name").textContent).toBe("steps.fetch.output.name");
+it("shows a reference read only where it isn't text, and keeps it until it's replaced", async () => {
+  const ref = { $value: { kind: "ref", path: "steps.fetch.output.n" } };
+  const { config, edits } = showFields(PLAIN, { config: { count: ref } });
+  expect(screen.getByLabelText("Count").textContent).toBe("steps.fetch.output.n");
   expect(edits).toEqual([]);
   await userEvent.click(screen.getByRole("button", { name: "Replace with a formula" }));
+  expect(config()).toEqual({ count: formula("steps.fetch.output.n") });
+});
+
+it("shows a reference in a text field as a pill, and switches it to the formula that reads it", async () => {
+  const ref = { $value: { kind: "ref", path: "steps.fetch.output.name" } };
+  const { config, edits } = showFields(PLAIN, { config: { name: ref } });
+  expect(screen.getByRole("button", { name: /^fetch › name, steps\.fetch\.output\.name/ })).toBeTruthy();
+  expect(edits).toEqual([]); // shown, never rewritten
+  await userEvent.click(within(screen.getByRole("group", { name: "How Name is set" })).getByRole("button", { name: "Formula" }));
   expect(config()).toEqual({ name: formula("steps.fetch.output.name") });
 });
 
@@ -498,9 +508,9 @@ it("keeps focus at the field after Apply here", async () => {
 });
 
 it("gives focus to the new control after a reference is replaced", async () => {
-  showFields(PLAIN, { config: { name: { $value: { kind: "ref", path: "steps.fetch.output.name" } } } });
+  showFields(PLAIN, { config: { count: { $value: { kind: "ref", path: "steps.fetch.output.n" } } } });
   await userEvent.click(screen.getByRole("button", { name: "Replace with a formula" }));
-  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Name")));
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Count")));
   expect(document.activeElement?.tagName).toBe("TEXTAREA");
 });
 
