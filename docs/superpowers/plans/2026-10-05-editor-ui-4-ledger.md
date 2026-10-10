@@ -2017,3 +2017,21 @@ M67. **A version's pill details say they show no sample.** The sample query neve
     isn't shown: open the draft to see a past run's sample." Test: "says a version's details show no sample, and never
     asks for one" (it found "Looking…" first; no request is made).
     Fixed in 7776d7cc: the unit suite 800 passed (60 files); typecheck, lint and build clean.
+
+### 4c-2b, milestone 3 (2026-10-10)
+
+The owner, in chat, after M66 and M67: start Milestone 3, then on to Task 12 and the final checkpoint. Tasks 9–11 at
+76d61417: the condition builder (a9cf560e), Declassify (a324ce7b), a step that may not run (76d61417). Each task's tests
+failed first as its plan says, then passed; each run over `src/routes/editor` counted the plan's tests plus M66's and
+M67's two (298, 302, 304 passed). Typecheck and lint clean after each. Mid-slice rulings: none.
+
+### 4c-2b, milestone 4 (2026-10-10)
+
+Task 12: the four browser flows (a pill from the tree and its details, kept through a reload; a condition built,
+checked clean and opened again; a decision on sensitive data declassified from its field once confirmed; a step a
+branch may skip saying so) and the outline's rows (§2's pills line: in the drawer's flow, ruling 126; §5's B6 and B7:
+their screens in 4c-2b). Checks, as run on the isolated stack and in the worktree:
+- the browser gate: 37 passed (main's 33 and the four new flows), under the CSP and the console check, axe clean;
+- the unit suite: 815 passed (62 files); typecheck, lint, `check:api` and build clean;
+- no backend change (`git diff origin/main -- backend` is empty), so its suite doesn't run.
+Local CodeQL, the screenshots and the fresh review follow at the final checkpoint.
