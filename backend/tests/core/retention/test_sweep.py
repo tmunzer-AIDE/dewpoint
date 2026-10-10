@@ -24,7 +24,7 @@ async def test_a_tree_past_its_cutoff_goes_whole_with_its_request(owner_sessionm
     old, recent = await tree(owner_sessionmaker, ctx, OLD), await tree(owner_sessionmaker, ctx, RECENT)
     before = await count(owner_sessionmaker, TREE_ROWS, r=old["root"])
     swept = await sweep.sweep_tenant(retention_sessionmaker, ctx["t"])
-    assert swept.runs == 1 and before == 2 + 2 + 1 + 2 + 1 + 1 + 1  # runs, steps, output, envelope+claim, grant, ...
+    assert swept.runs == 1 and before == 2 + 2 + 2 + 1 + 2 + 1 + 1 + 1  # runs, steps, their connections, output, …
     assert await count(owner_sessionmaker, TREE_ROWS, r=old["root"]) == 0
     assert await count(owner_sessionmaker, TREE_ROWS, r=recent["root"]) == before
 
