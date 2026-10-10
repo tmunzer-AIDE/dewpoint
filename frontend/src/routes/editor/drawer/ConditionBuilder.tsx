@@ -58,14 +58,14 @@ function Match({ label, match, disabled, onChange }: {
 function RowView({ row, label, field, disabled, onChange, onRemove }: {
   row: Row; label: string; field: string; disabled: boolean; onChange: (r: Row) => void; onRemove: () => void;
 }) {  // prettier-ignore
-  const { entry } = usePillEntry(row.path, field);
+  const { entry, shown } = usePillEntry(row.path, field);
   const ops = entry ? opsFor(entry.types, entry.format, entry.missing || entry.nullable || row.guards.length > 0) : [row.op];
   const problem = rowProblem(row);
   const note = noteOf(row);
   const problemId = useId();
   return (
     <div role="group" aria-label={label} className="flex flex-col gap-1.5 border-t border-line py-2.5">
-      <div><PillButton pill={{ ref: row.path }} entry={entry} index={0} onOpen={() => undefined} /></div>
+      <div><PillButton pill={{ ref: row.path }} entry={shown} index={0} onOpen={() => undefined} /></div>
       <div className="flex flex-wrap items-center gap-2">
         <select
           aria-label={`Comparison, ${label}`} value={row.op} disabled={disabled}
@@ -167,7 +167,8 @@ export function ConditionBuilder({ spec, value, disabled, onChange }: {
                   key={k} row={r} label={`Condition ${i + 1}.${k + 1}`} field={spec.pointer} disabled={disabled}
                   onChange={(next) => setItem(i, { ...x, rows: x.rows.map((y, m) => (m === k ? next : y)) }, true)}
                   onRemove={() => {
-                    focusOn(`[data-add="${i}"]`);
+                    // Its only comparison gone, the group goes too (an empty group writes nothing): "＋ Condition" below.
+                    focusOn(x.rows.length > 1 ? `[data-add="${i}"]` : '[data-add="top"]');
                     setItem(i, { ...x, rows: x.rows.filter((_, m) => m !== k) });
                   }}
                 />

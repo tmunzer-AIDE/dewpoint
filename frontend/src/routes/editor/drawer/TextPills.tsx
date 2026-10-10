@@ -18,8 +18,8 @@ function Pills({ pill, field, index, onKeyDown, onOpen, buttonRef }: {
   pill: Pill; field: string; index: number; onKeyDown: (e: KeyboardEvent<HTMLButtonElement>) => void; onOpen: () => void;
   buttonRef: (el: HTMLButtonElement | null) => void;
 }) {  // prettier-ignore
-  const { entry } = usePillEntry(pill.ref, field);
-  return <PillButton pill={pill} entry={entry} index={index} onKeyDown={onKeyDown} onOpen={onOpen} buttonRef={buttonRef} />;
+  const { shown } = usePillEntry(pill.ref, field);
+  return <PillButton pill={pill} entry={shown} index={index} onKeyDown={onKeyDown} onOpen={onOpen} buttonRef={buttonRef} />;
 }
 
 /** Whether a "/" typed at this place asks for data: at a text's start or after a space, so a URL's or a path's own

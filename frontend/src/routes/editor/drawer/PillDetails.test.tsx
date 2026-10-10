@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { screen } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Sample, ScopeEntry } from "../../../lib/data";
 import { typeWith } from "../../../test/nodeTypes";
@@ -103,6 +103,36 @@ describe("a pill's details", () => {
     const input = screen.getByLabelText<HTMLInputElement>("If it's missing or null");
     expect([input.value, input.disabled]).toEqual(["UTC", true]);
     expect(screen.queryByRole("button", { name: "Remove the default" })).toBeNull();
+  });
+
+  it("never says the previous revision's facts as this one's while its answer comes (the review of the final checkpoint)", async () => {
+    let revision = 1;
+    let pending = false;
+    let release = () => {};
+    const before: ScopeEntry = { ...ENTRY, missing: false, sensitive: false, formula: { guards: [], null_test: false, sensitive: false } };
+    const after: ScopeEntry = { ...ENTRY, sensitive: true };
+    fakeApi({
+      "GET /api/v1/t/t1/workflows/w1/draft/scope": () => {
+        const answer = json({ draft_revision: revision, node: NODE_ID, field: "/message", state: "ok", reason: null, entries: [revision === 1 ? before : after], more: false, problem: null });
+        if (revision === 1) return answer;
+        pending = true;
+        return new Promise<Response>((done) => (release = () => done(answer)));
+      },
+      "GET /api/v1/t/t1/workflows/w1/draft/samples": () => json({ draft_revision: revision, node: SITE, sample: null, searched_runs: 0, search_limit: 200 }),
+    });
+    const options = { steps, revision: 1 };
+    const f = showFields(NOTE, options, <PillDetails field="/message" pill={{ ref: PATH, default: "UTC" }} defaults onDefault={vi.fn()} onReplace={vi.fn()} onRemove={vi.fn()} onClose={vi.fn()} />);
+    expect(await screen.findByText("It's always there now, so this default isn't used.")).toBeTruthy();
+    revision = 2;
+    options.revision = 2;
+    f.replace({});
+    await waitFor(() => expect(pending).toBe(true));
+    expect(screen.queryByText("It's always there now, so this default isn't used.")).toBeNull();
+    expect(screen.queryByText("always there")).toBeNull();
+    expect(screen.getByText("Checking the saved draft's data…")).toBeTruthy();
+    release();
+    expect(await screen.findByText("sensitive")).toBeTruthy();
+    expect(screen.queryByText("Checking the saved draft's data…")).toBeNull();
   });
 
   it("shows a redacted value as a chip, never the value", async () => {

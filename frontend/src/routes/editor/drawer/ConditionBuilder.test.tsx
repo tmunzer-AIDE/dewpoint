@@ -145,6 +145,40 @@ describe("the condition builder", () => {
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "＋ Condition" })));
   });
 
+  it("puts focus on ＋ Condition when a group's only comparison is removed, the group gone with it (the review of the final checkpoint)", async () => {
+    showFields(IF, { steps });
+    await userEvent.click(screen.getByRole("button", { name: "＋ Group" }));
+    await pick("name");
+    await userEvent.click(await screen.findByRole("button", { name: "Remove condition 1.1" }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "＋ Condition" })));
+  });
+
+  it("offers a comparison's operators from this revision's answer only, never the previous one's (the review of the final checkpoint)", async () => {
+    let revision = 1;
+    let pending = false;
+    let release = () => {};
+    fakeApi({
+      "GET /api/v1/t/t1/workflows/w1/draft/scope": (q) => {
+        const at = q.get("at");
+        const answer = json({ draft_revision: revision, node: NODE_ID, field: "/condition", state: "ok", reason: null, entries: ENTRIES.filter((e) => at === null || e.path === at), more: false, problem: null });
+        if (revision === 1) return answer;
+        pending = true;
+        return new Promise<Response>((done) => (release = () => done(answer)));
+      },
+    });
+    const options = { steps, config: { condition: formula(`(${OUT}.name == "HQ")`) }, revision: 1 };
+    const f = showFields(IF, options);
+    const op = await screen.findByRole("combobox", { name: "Comparison, Condition 1" });
+    await waitFor(() => expect(within(op).getAllByRole("option")).toHaveLength(5));
+    revision = 2;
+    options.revision = 2;
+    f.replace(options.config);
+    await waitFor(() => expect(pending).toBe(true));
+    expect(within(op).getAllByRole("option").map((o) => o.textContent)).toEqual(["is"]); // the comparison as it is, no more
+    release();
+    await waitFor(() => expect(within(op).getAllByRole("option")).toHaveLength(5));
+  });
+
   it("describes a comparison's value by its problem (the final review)", async () => {
     showFields(IF, { steps });
     await userEvent.click(screen.getByRole("button", { name: "＋ Condition" }));

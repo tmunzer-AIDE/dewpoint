@@ -12,8 +12,13 @@ import { useDrawer } from "./context";
 const samePlace = (a: QueryKey, b: QueryKey): boolean =>
   a.length === b.length && a.every((x, i) => i === 3 || JSON.stringify(x) === JSON.stringify(b[i]));
 
-/** What a pill knows of its value from the saved draft's scope: nothing yet, an entry, or the problem reading it. */
-export function usePillEntry(path: string, field: string): { entry: ScopeEntry | null; problem: string | null } {
+/** What a pill knows of its value from the saved draft's scope: nothing yet, an entry, or the problem reading it.
+ * `entry` is this revision's answer, the facts the details and the builder say and use; `shown` draws the pill, and
+ * keeps the previous revision's answer while the next is asked (`stale`), so the pill doesn't change at each save while
+ * nothing says those facts are current (the review of the final checkpoint). */
+export function usePillEntry(path: string, field: string): {
+  entry: ScopeEntry | null; shown: ScopeEntry | null; stale: boolean; problem: string | null;
+} {  // prettier-ignore
   const drawer = useDrawer();
   const live = drawer.revision !== null;
   const query = scopeQuery(
@@ -30,9 +35,11 @@ export function usePillEntry(path: string, field: string): { entry: ScopeEntry |
       live && previousQuery && samePlace(previousQuery.queryKey, query.queryKey) ? previous : undefined,
   });
   const data = answer.data;
-  if (answer.error instanceof DraftMoved) return { entry: null, problem: answer.error.message };
-  if (!data || data.state !== "ok") return { entry: null, problem: data?.reason ?? null };
-  return { entry: data.entries[0] ?? null, problem: data.problem?.message ?? null };
+  if (answer.error instanceof DraftMoved) return { entry: null, shown: null, stale: false, problem: answer.error.message };
+  if (!data || data.state !== "ok") return { entry: null, shown: null, stale: false, problem: data?.reason ?? null };
+  const found = data.entries[0] ?? null;
+  if (answer.isPlaceholderData) return { entry: null, shown: found, stale: true, problem: null };
+  return { entry: found, shown: found, stale: false, problem: data.problem?.message ?? null };
 }
 
 /** A pill: its visible text first in its name (WCAG 2.5.3), then its path and what may happen to its value. */

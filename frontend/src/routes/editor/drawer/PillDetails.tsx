@@ -138,7 +138,7 @@ export function PillDetails({ field, pill, defaults, onDefault, onReplace, onRem
   onReplace: () => void; onRemove: () => void; onClose: () => void;
 }) {  // prettier-ignore
   const drawer = useDrawer();
-  const { entry, problem } = usePillEntry(pill.ref, field);
+  const { entry, stale, problem } = usePillEntry(pill.ref, field);
   const heading = useId();
   const defaultId = useId();
   const box = useRef<HTMLDivElement>(null);
@@ -179,6 +179,8 @@ export function PillDetails({ field, pill, defaults, onDefault, onReplace, onRem
         <Button size="sm" onClick={onClose}>Close</Button>
       </div>
       {problem && <p className="text-small text-danger">{problem}</p>}
+      {/* Saved again: its facts are this revision's only once its answer comes (the review of the final checkpoint). */}
+      {stale && <p className="text-small text-muted">Checking the saved draft&apos;s data…</p>}
       {entry && (
         <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-small">
           <dt className="text-muted">Type</dt>
