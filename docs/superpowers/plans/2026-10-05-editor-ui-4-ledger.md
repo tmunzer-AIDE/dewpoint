@@ -35,6 +35,7 @@ cover local work only: anything outward-facing (push, PR, issues) is confirmed i
 | 0047 | 4b: `runs_workflow_last` (ruling 72; merged in #60, chained after 0044: M36) |
 | 0048 | B4b: `skipped` and `not_started` projection statuses (the owner, 2026-10-08) |
 | 0049 | B8: draft and single-step simulation (the owner, 2026-10-08) |
+| 0054 | 4c-3a: `webhook_endpoints.trigger_key`, an endpoint's sender (the owner, 2026-10-10; 0050–0053 are 2b-4b's) |
 
 - One Alembic chain: before merging, the first unmerged migration's `down_revision` is reconciled with the actual head.
 - Deployed migrations are never rewritten; 0035–0042 are never altered.
@@ -2123,3 +2124,152 @@ M77. **A previous revision's scope answer draws a pill, and says nothing as curr
     build clean; the browser gate 37 passed; local CodeQL no finding in either language; no backend change.
 
 Paused at the final checkpoint again. Nothing is pushed: a push and a PR wait for the owner's word.
+
+### Owner, 4c-3 design and mockups (2026-10-10, in chat)
+
+Asked with the research for 4c-3 (ruling 96's triggers), the owner chose:
+- the start card opens a Triggers side panel (Input, Schedules, Webhooks); the card's "+" keeps adding the first step;
+- the input as a field list (name, label, type, required, sensitive, description, default), "Use a Mist event…"
+  copying a topic's shape from `/trigger-types` (read only, replaceable), an optional CSV file of typed columns, and
+  an opt-in "Edit as JSON";
+- schedules and webhooks are live and said so, outside undo; before the first publish "＋ Schedule" is disabled, with
+  why;
+- a schedule's timing, time zone, mode and on/off are editable; its input is replaced whole ("Replace the input…", on
+  the published version's form), never shown back;
+- an endpoint records its sender (a migration), set from `/trigger-types` when it's made, and fixed;
+- 1b's "What starts it?" seeds the draft (a Mist topic's shape, or an empty CSV section), creates a Mist binding at
+  once, offers a schedule after the first publish, and opens the new workflow on its Triggers panel;
+- the backend, 4c-3a, all six: the endpoint's sender, B13, the list's trigger counts, `schedule_sync_failed`, named
+  answers for the trigger routes, and validation that warns, server-side, when a draft would break live schedules;
+- the UI, 4c-3b: one plan with milestones, after 4c-3a merges. The run form and CSV upload stay 4e's; the webhook
+  events inbox is out of scope.
+
+The open points, answered:
+- a binding whose events don't fit the input is warned of at the binding, in the editor: a Mist binding compares its
+  topic's shape with the published version's input and offers the topic's shape; another sender's says the input
+  must fit its events;
+- 1b with "Import from file": the file's input wins; the binding is still created, and Triggers warns;
+- Settings → Webhook endpoints shows and copies the relative path now; "This deployment doesn't receive webhooks yet"
+  shows only outside a development deployment; a public address setting comes later, with 2b-4b.
+
+D8: pasted reviews held the canvas twice. Version 16: a failed sync isn't "not running", and boards were missing
+(another sender's endpoint, CSV columns and JSON, the schedule variants, read-only and 320 px views). Version 19:
+"never synced" isn't "not running" either, and the endpoint form's summary contradicted its pointer. Version 21
+answered both, and a pasted review-side sign-off followed. The owner then:
+- signed off D8 on the "4c-3 Trigger Mockups" canvas, version 21 (18 boards);
+- assigned migration slot 0054 to the endpoint's sender;
+- added a read-only "never unpaused" flag to the schedule answer, so a schedule nothing ever unpaused can say "not
+  running yet".
+
+### 4c-3a plan accepted (2026-10-10, in chat)
+
+`docs/superpowers/plans/2026-10-10-editor-ui-4c3a-triggers-backend.md`. Reviews pasted in chat held revision 1 for two
+P2 defects in Task 7's draft check and two minor ones, revision 2 for one P2, revision 3 for two and revision 4 for
+one; revision 5 answered them, each with a test that fails on the previous revision's code, and a pasted review signed
+it off on the review side (no rulings accepted by it). The owner, asked in chat, accepted revision 5 and adopted its
+rulings 1–8, which join this ledger as 139–146, copied as ruled; chose inline execution with the milestone pauses
+(after Milestone 2, the draft check; a fresh review at the end); the branch `feat/editor-4c3a` from origin/main
+(aed887f8), the plan's docs branch merged in; `uv sync --frozen` in the build worktree. The owner then gave the go to
+commit as the plan says ("You may commit as the plan says; start the build"). Push and a PR stay the owner's decisions.
+
+139. **Accepted. An endpoint records the trigger it's for** (Tasks 2–3; migration 0054).
+     - `POST …/webhook-endpoints` takes `trigger`: the key of a trigger type a synced plugin declares
+       (`mist.webhook`), or null for another sender.
+     - Named, the endpoint takes that trigger's endpoint settings: how it proves its sender (`auth`), where its events
+       are (`events_pointer`), and no ids (`id_source: none`).
+     - Refusals are `422 endpoint_invalid` with `fields`: a key no synced plugin declares is `["trigger"]`; a setting
+       the request writes that the trigger decides otherwise is named (writing the same is no clash).
+     - Stored as `webhook_endpoints.trigger_key`, never changed: PATCH refuses it, and the API's role has no grant to
+       update it. Every endpoint answer says `trigger`; the create audit records it.
+     - Endpoints made before 0054 have none: they read as another sender's.
+     - Why: the editor offers Mist's topics and shapes only for a Mist endpoint, and an endpoint's settings decide how
+       its deliveries are read, so they never change. Cost: an existing Mist endpoint shows as another sender's until
+       it's remade.
+140. **Accepted. B13: a workflow's webhook bindings** (Task 4). `GET …/workflows/{workflow_id}/webhook-bindings`, read
+     with `workflow.view`.
+     - Each binding comes with what the Triggers panel shows of its endpoint: id, name, enabled, auth, path, trigger.
+     - Ordered by the endpoint's name, then its id. One statement; `trigger_bindings_one`'s tenant prefix serves it, so
+       no new index.
+     - A workflow the caller's tenant doesn't have, unknown or another tenant's, is `404 not_found`.
+     - Why: until now bindings are listed per endpoint only. Cost: none known.
+141. **Accepted. The list says what starts each workflow** (Task 6). Each row (and a workflow's own answer) carries
+     `triggers: {schedules, schedules_enabled, webhook_bindings, csv}`.
+     - Schedules are the live ones: a deleted one's tombstone is left out.
+     - Bindings are counted on or off.
+     - `csv` is whether the active version declares a CSV file, never the draft; false when nothing is published.
+     - One more batched statement: the list's reads are still fixed, whatever its number of workflows (7 at most).
+     - Why: 1a's Trigger column (ruling 68). Cost: one statement per list read.
+142. **Accepted. A schedule that failed to sync needs attention** (Task 6). `needs_attention` gains
+     `schedule_sync_failed`.
+     - Raised when a live schedule of the workflow, on or off, has `sync_error` set; a tombstone's never raises it.
+     - It clears when the sync next succeeds (the sync clears `sync_error` when it records a generation).
+     - Why: ruling 74's "schedules' sync errors join with 4c". Cost: a disabled schedule's failed sync raises
+       attention though its firings are refused at admission. The failure is real, and it's retried every minute.
+143. **Accepted. Named answers for the trigger routes** (Task 8). Every trigger route the editor will call answers a
+     named model, and so does the start form:
+     - schedules: create, list, read, update;
+     - endpoints: create (its secret shown once), list, read, update, rotate;
+     - bindings: create, an endpoint's list, update, a workflow's list (B13);
+     - the start form, whose omitted keys stay omitted (`response_model_exclude_unset`).
+
+     A schedule's uncounted span keeps its wire names `from` and `class` (aliases). `sync_error` is a string, its codes
+     in a comment: a new code would otherwise fail every answer that holds it. Why: the client is generated from the
+     schema (B1). Cost: none known.
+144. **Accepted. A schedule says what its sync proves** (Task 5). Its answer adds:
+     - `sync_error_at`: an edit doesn't clear a failure, so the editor can tell an earlier one from the latest edit's;
+     - `never_unpaused`: true only when no incarnation of it was sent an unpause, none was seen unpaused, and none is
+       from before 2b-4a (whose unpauses nobody recorded). A schedule is created paused and only the sync unpauses it,
+       recording that first, so with none recorded it has never fired, and the editor may say "not running yet".
+
+     Why: the owner's ruling (2026-10-10), after the D8 review found "never synced" proves nothing. Cost: none known.
+145. **Accepted. A draft that would break live schedules is said so** (Task 7). Validate and publish check the
+     workflow's live schedules' stored input against the draft's (or the new version's) input, server-side:
+     - **Shape only.** JSON Schema's own validator (its own types: `2.0` is an integer), extended for the check,
+       checks the stored input against the draft's input as written. It evaluates only structure: `type`,
+       `properties`, `required`, `additionalProperties`, `items`, `prefixItems`, references, `allOf`, `anyOf`,
+       `dependentRequired` and `dependentSchemas`, at any depth. So it finds a field the draft requires that isn't
+       there, a value whose JSON type isn't the one the draft declares, a field the draft no longer allows, an extra
+       item.
+     - **Never a value's content.** Every keyword that tests one holds for every value (`const`, `enum`, `maximum`,
+       `minimum`, `multipleOf`, `maxLength`, `minLength`, `pattern`, `format`, `minItems`, `maxItems`, `uniqueItems`,
+       `minProperties`, `maxProperties`). Checking one against a stored value would let whoever can validate a draft
+       learn a sensitive value a bit at a time. What the check can tell is presence, a value's JSON type, and a list's
+       length against the items the draft declares.
+     - **Structure a shape can't keep holds, and is said.** `oneOf` is evaluated as `anyOf` (its one-only rule
+       dropped). `not`, `if`/`then`/`else`, `propertyNames`, `patternProperties`, `unevaluatedProperties`,
+       `unevaluatedItems` and `contains` hold for every value: evaluating any of them without its value keywords could
+       refuse what the draft accepts. So the check accepts every value the draft does: a stored input it refuses, the
+       draft refuses too, and no warning is false. When the draft uses one of them and a live schedule was read, a
+       `schedule.partly_checked` warning names them.
+     - **The check never leaves its own validator.** The draft's document is kept as written, so references resolve as
+       they do for the draft, but for `$schema`. jsonschema validates a schema it descends into with the validator its
+       `$schema` names, which has no budget. So `$schema` naming 2020-12, the check's own dialect, is removed wherever a
+       schema stands. Another dialect is read by its own rules: a draft naming one isn't checked, and the warning names
+       `$schema`.
+     - **The reasons are the draft's own words.** A place is named as far as the draft declares it (a key the data
+       supplied shows as `*`), a field by the draft's name; never a value, never a stored field's name. A draft that
+       takes a CSV file fits no schedule: its rows come from an upload only.
+     - **A warning, never a refusal.** `schedule.input_refused` at `/settings/input_schema`, or `/settings/csv` for a
+       CSV file. Validate's answer lists the schedules (`schedule_breaks`: id, reasons, and `more` when a bound cut them
+       short; the oldest first).
+     - **Bounded in work units, never time.**
+       - A check fetches the oldest live schedules whose sealed inputs fit 2 MiB together, 100 at most. They are picked
+         by their stored length in the statement that also counts them, so no other input is fetched.
+       - Every keyword it evaluates, at any depth, spends one of its 50,000 steps, for all its inputs together. Its
+         `anyOf` tries a branch only up to its first error and keeps none.
+       - From one stored input it reads at most 100 errors, lazily, and keeps at most 5 distinct reasons, each of 300
+         characters at most.
+       - The rest are said: schedules past a bound, the one the steps ran out in, and any whose stored input can't be
+         read (the tenant's key unreadable), in a `schedule.unchecked` warning; reasons past a bound as `more`.
+       - Decoding and checking run in a worker thread, off the event loop.
+     - **Skipped** when the draft's input schema or CSV declaration has an error.
+     - Webhook bindings aren't checked here: the editor warns at the binding (the owner's ruling).
+
+     Why: nobody can see a schedule's stored input, and a draft that no longer fits makes it fail at every firing.
+     Costs:
+     - a stored input that breaks only a value rule (a new `maximum`, a narrower `enum`) isn't reported: it fails at
+       its first firing, as today, and the run says why;
+     - one that breaks only the structure listed above as dropped is reported as checked in part, not as broken;
+     - a schedule past the bounds isn't checked: it's counted, so the editor can say so.
+146. **Accepted. Migration slot 0054** (Task 2), the owner's (2026-10-10), chained after main's head, 0045.
+     0050–0053 are 2b-4b's.
