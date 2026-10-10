@@ -1854,3 +1854,11 @@ M64. **Ids are read as UUIDs, as the engine and the worker read them.** A draft'
     functions of one route and the sample query); the OpenAPI is unchanged.
 
 Paused at the final checkpoint again. Nothing is pushed: a push and a PR wait for the owner's word.
+
+### Review sign-off of the final checkpoint at 96cca1a6 (2026-10-10, pasted)
+
+A pasted review signed off the final checkpoint on the review side at 96cca1a6 (fix 8ec43351): both P2 findings
+closed, no new blocker. Its 56 focused checks passed, including the uppercase connection-id case, which agrees with the
+worker and answers "unknown" when records are absent; the five new regression cases fail on the held head's source
+and M62's baseline still passes. It didn't rerun the whole suite or CodeQL. The five deferred minors stay the owner's
+decisions. It authorizes no push, PR or issue: those stay the owner's.
