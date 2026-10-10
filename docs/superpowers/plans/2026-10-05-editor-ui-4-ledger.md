@@ -1771,3 +1771,10 @@ M61. **A search tracks what it left unsearched at every bound**, without raising
     "… when it stopped at its depth" (each failed first), and "a complete search says so".
     Engine tests 1,262 passed, 1 skipped; ruff, mypy, import contracts clean. The whole backend suite wasn't rerun:
     nothing outside the engine's tests uses `scope.py` yet.
+
+### Review sign-off of milestone 1 at 5a0ce3da (2026-10-10, pasted)
+
+A pasted review signed off milestone 1 on the review side at 5a0ce3da (ledger 21dab57c): both P2 findings closed, no
+remaining blockers. Its 55 focused checks passed, the four corrective tests fail on the old scope code while the
+complete-search baseline passes; it didn't rerun the whole engine or backend suites. It authorizes neither milestone 2
+nor a push: those stay the owner's.
