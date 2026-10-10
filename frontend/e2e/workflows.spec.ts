@@ -549,6 +549,8 @@ test("a step is set up in its drawer: a formula, error handling, one undo step p
   await page.getByRole("button", { name: /^if, If/ }).click();
   const drawer = page.getByRole("complementary", { name: "if" });
   await expect(drawer.getByRole("tab", { name: "Setup" })).toHaveAttribute("aria-selected", "true");
+  // A condition opens in the builder (4c-2b): a formula is written in Formula mode, and choosing it changes nothing.
+  await drawer.getByRole("group", { name: "How Condition is set" }).getByRole("button", { name: "Formula" }).click();
   await drawer.getByRole("textbox", { name: "Condition" }).fill("trigger.count > 2");
   await expect(page.getByText("Saved · not published")).toBeVisible({ timeout: 10_000 });
   await expectAccessible(page, "editor: drawer, setup");
@@ -571,6 +573,7 @@ test("a switch's case keeps its edges when its port is renamed, and removing it 
   const drawer = page.getByRole("complementary", { name: "switch" });
   await drawer.getByRole("button", { name: "Add to Cases" }).click();
   const first = drawer.getByRole("group", { name: "Cases, item 1" });
+  await first.getByRole("group", { name: "How Condition is set" }).getByRole("button", { name: "Formula" }).click(); // 4c-2b
   await first.getByRole("textbox", { name: "Condition" }).fill("true");
   await drawer.getByRole("button", { name: "Add a step after switch (case_1)" }).click(); // the drawer's twin of the canvas's "+"
   await page.getByRole("option", { name: /flow\.transform@1/ }).click();
@@ -655,3 +658,4 @@ test("a Mist step's connection is chosen from the tenant's, and its choices neve
   await expectAccessible(page, "editor: drawer, a connection");
   expect(options).toEqual([]);
 });
+

@@ -19,10 +19,11 @@ import {
   type ControlProps,
 } from "./scalars";  // prettier-ignore
 import { ContainerParts, PortControl, isContainer, partNames } from "./structured";
+import { ConditionBuilder, conditionOf } from "./ConditionBuilder";
 import { TextPills, type Opened } from "./TextPills";
 
 type Control = (props: ControlProps) => ReactNode;
-const OWN: UnappliedKind[] = ["text", "template", "json", "number", "formula", "port"]; // what a field's own control may hold
+const OWN: UnappliedKind[] = ["text", "template", "condition", "json", "number", "formula", "port"]; // what a field's own control may hold
 const NEITHER = "This field takes only references or text with references, which can't be set in this drawer.";
 export const PILLS_NOTE = "Press / or ＋ Data to insert data from earlier steps. A dashed pill may be missing when this runs: give it a default.";
 
@@ -77,8 +78,12 @@ const joined = (...parts: (string | null)[]): string | null => parts.filter((p) 
  * cause before it's discarded (some browsers never focus a clicked button at all). */
 const keepFocus = (e: MouseEvent) => e.preventDefault();
 
+/** A condition the builder writes (4c-2b): a formula field that gives true or false. */
+const builds = (spec: FieldSpec): boolean => spec.widget === "formula" && spec.base === "boolean" && canFormula(spec);
+
 const startMode = (spec: FieldSpec, value: unknown): Mode =>
-  kindOf(value) === "cel" ? "formula"
+  builds(spec) ? (conditionOf(value) !== null || typeof value === "boolean" ? "fixed" : "formula")
+  : kindOf(value) === "cel" ? "formula"
   : takesPills(spec) && segmentsOf(value) !== null && value !== undefined && value !== null ? "fixed"
   : value !== undefined && value !== null ? "fixed"
   : startsAsFormula(spec) ? "formula" : "fixed";  // prettier-ignore
@@ -98,7 +103,9 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
     // Set elsewhere (an undo, a replace): a formula or a fixed value decides the mode; emptied, the field keeps its own.
     setSeen(value);
     setLocal(null);
-    if (kind === "cel") setChosen("formula");
+    // A condition the builder can show stays in the builder: what it writes is a formula too (4c-2b).
+    if (builds(spec)) setChosen((m) => (m === "fixed" && conditionOf(value) === null && typeof value !== "boolean" ? "formula" : m));
+    else if (kind === "cel") setChosen("formula");
     else if (!empty) setChosen("fixed");
   }
   const { mark, onFocus } = useSession(`${drawer.node.id}${spec.pointer}`);
@@ -124,10 +131,14 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
   const [opened, setOpened] = useState<Opened | null>(null);
   const caret = useRef<Caret | null>(null);
   const focusNext = useRef<{ segment: number; offset: number } | { pill: number } | null>(null);
-  const fixedOk = canFixed(spec) || pills;
+  const builder = builds(spec);
+  const buildable = builder && (conditionOf(value) !== null || typeof value === "boolean");
+  const whyNotId = `${spec.pointer}-why-not-builder`;
+  const fixedOk = canFixed(spec) || pills || builder;
   const formulaOk = canFormula(spec);
   // What's held decides how the field shows, so a remount, an undo or a closed drawer never hides it (ruling 18).
   const heldMode: Mode | null = held === undefined || held.kind === "port" ? null : held.kind === "formula" ? "formula" : "fixed";
+  // A formula the builder didn't write stays a formula (the mockups' formula board).
   const mode: Mode = fixedOk && formulaOk ? (heldMode ?? chosen) : fixedOk ? "fixed" : "formula"; // the engine decides
   const stale = held !== undefined && drawer.stale(held.kind, spec.pointer);
   const write = (next: unknown, typed: boolean): string | null => {
@@ -164,7 +175,9 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
   // A list's item or a map's entry, emptied, keeps its place, blank: never missing on its own (the final review).
   const missing = spec.required && !spec.entry && touched && (empty || value === "") ? "Required" : null;
   const switchTo = (next: Mode) =>
-    reshape(
+    builder
+      ? reshape((current) => current, () => setChosen(next)) // the same formula, shown the other way
+      : reshape(
       (current) => {
         if (next === "fixed") return kindOf(current) === "cel" ? emptyOf(spec) : current;
         // A lone reference becomes its path; text with pills starts an empty formula (Undo brings it back): text
@@ -195,7 +208,16 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
   const actions = (
     <>
       {fixedOk && formulaOk && !computed && !hidden && (
-        <ModeSwitch label={spec.label} mode={mode} disabled={disabled} onChange={switchTo} fixedName={pills ? "Text" : "Fixed"} />
+        <ModeSwitch
+          label={spec.label} mode={mode} disabled={disabled} onChange={switchTo} fixedName={pills ? "Text" : builder ? "Builder" : "Fixed"}
+          fixedWhyNot={builder && !buildable && held?.kind !== "condition" ? { id: whyNotId } : null}
+        />
+      )}
+      {builder && !buildable && mode === "formula" && (
+        <p id={whyNotId} className="w-full text-small text-muted">
+          This formula wasn&apos;t made with the builder, so it stays a formula: the builder opens only what it wrote. Clear it to
+          start one in the builder.
+        </p>
       )}
       {pills && mode === "fixed" && !disabled && drawer.revision !== null && (
         <Button
@@ -267,7 +289,19 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
   );  // prettier-ignore
   let body: ReactNode;
   let says = false; // how its formula runs, said under it
-  if (held?.kind === "template" || (mode === "fixed" && asText && !hidden && !(held && Held))) {
+  if (held?.kind === "condition" || (builder && mode === "fixed" && buildable && !(held && Held))) {
+    // The condition builder (4c-2b): what's held, or the value, as comparisons.
+    const runs = runsText(drawer.expressions.find((x) => x.field === spec.pointer));
+    says = runs !== null;
+    body = (
+      <GroupFrame
+        label={spec.label} required={required} hint={spec.hint} local={held?.why ?? local ?? missing} problems={problems} actions={actions}
+        below={runs && <p className="text-small text-muted">{runs}</p>}
+      >
+        <ConditionBuilder key={generation} spec={spec} value={value} disabled={disabled} onChange={write} />
+      </GroupFrame>
+    );  // prettier-ignore
+  } else if (held?.kind === "template" || (mode === "fixed" && asText && !hidden && !(held && Held))) {
     // Text with data pills: what's held, or the value, as text and pills (4c-2b).
     body = frame(textPills, joined(spec.hint, (held?.literal ?? kind === "literal") ? LITERAL_NOTE : null, PILLS_NOTE));
   } else if (held && Held) {

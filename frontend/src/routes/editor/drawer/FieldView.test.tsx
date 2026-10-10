@@ -263,24 +263,25 @@ it("edits a literal as its payload, and keeps it a literal", async () => {
   });
 });
 
-it("keeps a formula, says how it runs, and turns a fixed value into the formula that gives it", async () => {
-  const { config } = showFields(IF, {
+it("keeps a formula, and says how it runs", () => {
+  showFields(IF, {
     config: { condition: formula("trigger.n > 1") },
     expressions: [{ node: NODE_ID, field: "/condition", mode: "activity", reason: "it reads a large value" }],
   });
   expect(screen.getByLabelText<HTMLTextAreaElement>("Condition").value).toBe("trigger.n > 1");
   expect(screen.getByText("Runs as a separate step: it reads a large value")).toBeTruthy();
-  await userEvent.click(screen.getByRole("button", { name: "Fixed" }));
-  expect(config()).toEqual({});
-  await userEvent.click(screen.getByLabelText("Condition")); // a checkbox now
-  await userEvent.click(screen.getByRole("button", { name: "Formula" }));
-  expect(config()).toEqual({ condition: formula("true") });
 });
 
-it("offers no fixed value where the engine takes only a formula", () => {
+it("turns a fixed value into the formula that gives it", async () => {
+  const { config } = showFields(PLAIN, { config: { count: 5 } });
+  await userEvent.click(within(screen.getByRole("group", { name: "How Count is set" })).getByRole("button", { name: "Formula" }));
+  expect(config()).toEqual({ count: formula("5") });
+});
+
+it("offers the builder and a formula, never a fixed value, where the engine takes only a formula", () => {
   showFields(FILTER);
-  expect(screen.queryByRole("group", { name: "How Keep an item when is set" })).toBeNull();
-  expect(screen.getByLabelText("Keep an item when").tagName).toBe("TEXTAREA");
+  const how = screen.getByRole("group", { name: "How Keep an item when is set" });
+  expect(within(how).getAllByRole("button").map((b) => b.textContent)).toEqual(["Builder", "Formula"]); // 4c-2b
 });
 
 it("offers neither a fixed value nor a formula where the engine takes only references", () => {
@@ -384,7 +385,7 @@ it("adds a case with the first free port name", async () => {
   expect(config()).toEqual({ cases: [{ port: "case_1" }] });
   const item = screen.getByRole("group", { name: "Cases, item 1" });
   expect(within(item).getByLabelText<HTMLInputElement>("Port name").value).toBe("case_1");
-  expect(within(item).getByLabelText("Condition").tagName).toBe("TEXTAREA");
+  expect(within(item).getByRole("group", { name: "Condition" }).tagName).toBe("FIELDSET"); // the builder (4c-2b)
 });
 
 it("sets a map's entries, renamed in place, never as $value", async () => {
