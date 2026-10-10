@@ -65,7 +65,10 @@ export function FieldFrame({ label, required, hint, local, problems, actions, be
   );
 }
 
-export function GroupFrame({ label, required, hint, local, problems, actions, children }: Frame & { children: ReactNode }) {
+export function GroupFrame({ label, required, hint, local, problems, actions, below, children }: Frame & {
+  below?: ReactNode;
+  children: ReactNode;
+}) {  // prettier-ignore
   const id = useId();
   return (
     <fieldset aria-describedby={describing(id, { hint, local, problems })} className="flex min-w-0 flex-col gap-3">
@@ -74,6 +77,7 @@ export function GroupFrame({ label, required, hint, local, problems, actions, ch
       {actions && <div className="flex flex-wrap gap-2">{actions}</div>}
       <Notes id={id} hint={hint} local={local} problems={problems} />
       <div className="flex min-w-0 flex-col gap-4 pl-3">{children}</div>
+      {below}
     </fieldset>
   );
 }

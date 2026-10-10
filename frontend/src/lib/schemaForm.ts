@@ -201,6 +201,12 @@ export const tabsOf = (fields: FieldSpec[]) => ({
 /** Where the engine takes a fixed value: not in a sensitive field (sensitive.literal), and `literal` among its kinds. */
 export const canFixed = (f: FieldSpec): boolean => !f.sensitive && (f.kinds === null || f.kinds.includes("literal"));
 
+/** Where text with data pills is its fixed value (4c-2b): text the engine takes as a template, never a sensitive
+ * field's (a secret is never typed, M25), a port's name or one written only as a literal. */
+export const takesPills = (f: FieldSpec): boolean =>
+  (f.widget === "text" || f.widget === "datetime") && !f.sensitive && !f.port && !f.literalOnly &&
+  !f.holdsLiteral && (f.kinds === null || f.kinds.includes("template"));
+
 /** Where it takes a formula: no literal-only marker on the path or inside (value.literal_only), `cel` among its kinds. */
 export const canFormula = (f: FieldSpec): boolean =>
   !f.literalOnly && !f.holdsLiteral && (f.kinds === null || f.kinds.includes("cel"));
@@ -212,3 +218,24 @@ export const startsAsFormula = (f: FieldSpec): boolean =>
 /** What emptying a field writes: nothing (it's removed, so its default applies), or, for a list's item or a map's
  * entry, a blank that keeps its place. */
 export const emptyOf = (f: FieldSpec): unknown => (f.entry ? (BLANK_IS_TEXT.has(f.widget) ? "" : null) : undefined);
+
+/** A field's label by its pointer in the type's config, its parts' labels joined: "Cases, item 2 › Condition". The
+ * pointer itself when the schema doesn't hold it. */
+export function fieldLabel(type: NodeType, pointer: string): string {
+  const parts = pointer.split("/").slice(1).map((s) => s.replace(/~1/g, "/").replace(/~0/g, "~"));
+  let fields = fieldsOf(type);
+  let spec: FieldSpec | undefined;
+  const labels: string[] = [];
+  for (const name of parts) {
+    if (spec?.base === "list" && /^(0|[1-9][0-9]*)$/.test(name)) {
+      spec = itemOf(spec, Number(name));
+      labels[labels.length - 1] = spec.label; // "Cases, item 2"
+    } else {
+      spec = fields.find((f) => f.name === name) ?? (spec?.base === "map" ? entryOf(spec, name) : undefined);
+      if (!spec) return pointer;
+      labels.push(spec.label);
+    }
+    fields = propertiesOf(spec);
+  }
+  return labels.length > 0 ? labels.join(" › ") : pointer;
+}

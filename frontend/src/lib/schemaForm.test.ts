@@ -2,7 +2,8 @@
 import { describe, expect, it } from "vitest";
 import { DELAY, FILTER, IF, LOOP, REMOTE, RUN_WORKFLOW, SWITCH, TRANSFORM, typeWith } from "../test/nodeTypes";
 import {
-  canFixed, canFormula, emptyOf, entryOf, fieldsOf, itemOf, pointerOf, propertiesOf, startsAsFormula, tabsOf,
+  canFixed, canFormula, emptyOf, entryOf, fieldLabel, fieldsOf, itemOf, pointerOf, propertiesOf, startsAsFormula, tabsOf,
+  takesPills,
 } from "./schemaForm";  // prettier-ignore
 
 const field = (type: Parameters<typeof fieldsOf>[0], name: string) => fieldsOf(type).find((f) => f.name === name)!;
@@ -143,4 +144,24 @@ it("finds a sensitive part under patternProperties or propertyNames, as the engi
   expect(marked({ patternProperties: { "^x-": { type: "string", "x-sensitive": true } } }).holdsSensitive).toBe(true);
   expect(marked({ propertyNames: { type: "string", "x-sensitive": true } }).holdsSensitive).toBe(true);
   expect(marked({ patternProperties: { "^x-": { type: "string" } } }).holdsSensitive).toBe(false);
+});
+
+describe("4c-2b's field kinds", () => {
+  const fields = (schema: Record<string, unknown>) => fieldsOf(typeWith({ type: "object", properties: schema }));
+  it("takes text with data pills in a text field the engine lets template, never a secret, a choice or a formula", () => {
+    const [text, secret, choice, cel, refs, plain] = fields({
+      text: { type: "string" },
+      secret: { type: "string", "x-sensitive": true },
+      choice: { type: "string", enum: ["a", "b"] },
+      cel: { type: "boolean", "x-widget": "cel" },
+      refs: { type: "string", "x-dewpoint-kinds": ["ref", "template"] },
+      plain: { type: "string", "x-dewpoint-kinds": ["literal"] },
+    });
+    expect([text, secret, choice, cel, refs, plain].map((f) => takesPills(f!))).toEqual([true, false, false, false, true, false]);
+  });
+  it("labels a field by its parts' labels", () => {
+    expect(fieldLabel(SWITCH, "/cases/1/when")).toBe("Cases, item 2 › Condition");
+    expect(fieldLabel(IF, "/condition")).toBe("Condition");
+    expect(fieldLabel(IF, "/nope")).toBe("/nope");
+  });
 });

@@ -549,6 +549,8 @@ test("a step is set up in its drawer: a formula, error handling, one undo step p
   await page.getByRole("button", { name: /^if, If/ }).click();
   const drawer = page.getByRole("complementary", { name: "if" });
   await expect(drawer.getByRole("tab", { name: "Setup" })).toHaveAttribute("aria-selected", "true");
+  // A condition opens in the builder (4c-2b): a formula is written in Formula mode, and choosing it changes nothing.
+  await drawer.getByRole("group", { name: "How Condition is set" }).getByRole("button", { name: "Formula" }).click();
   await drawer.getByRole("textbox", { name: "Condition" }).fill("trigger.count > 2");
   await expect(page.getByText("Saved · not published")).toBeVisible({ timeout: 10_000 });
   await expectAccessible(page, "editor: drawer, setup");
@@ -571,6 +573,7 @@ test("a switch's case keeps its edges when its port is renamed, and removing it 
   const drawer = page.getByRole("complementary", { name: "switch" });
   await drawer.getByRole("button", { name: "Add to Cases" }).click();
   const first = drawer.getByRole("group", { name: "Cases, item 1" });
+  await first.getByRole("group", { name: "How Condition is set" }).getByRole("button", { name: "Formula" }).click(); // 4c-2b
   await first.getByRole("textbox", { name: "Condition" }).fill("true");
   await drawer.getByRole("button", { name: "Add a step after switch (case_1)" }).click(); // the drawer's twin of the canvas's "+"
   await page.getByRole("option", { name: /flow\.transform@1/ }).click();
@@ -654,4 +657,72 @@ test("a Mist step's connection is chosen from the tenant's, and its choices neve
   await expect(page.getByText("Saved · not published")).toBeVisible({ timeout: 10_000 });
   await expectAccessible(page, "editor: drawer, a connection");
   expect(options).toEqual([]);
+});
+
+// 4c-2b: data pills, the data tree, a pill's details, the condition builder, Declassify, a step that may not run.
+test("a text field takes a data pill from the tree, and the pill's details say what it reads", async ({ page }) => {
+  await importFile(page, "Pills", "e2e/fixtures/data.dewpoint.json");
+  await page.getByRole("button", { name: /^stop_it, Fail/ }).click();
+  await expect(page.getByRole("group", { name: "How Message is set" }).getByRole("button", { name: "Text" })).toHaveAttribute("aria-pressed", "true");
+  const text = page.getByLabel("Message", { exact: true });
+  await text.click();
+  await text.press("End");
+  await text.pressSequentially(" at ");
+  await page.getByRole("button", { name: "＋ Data" }).click();
+  const tree = page.getByRole("tree", { name: "Data available here" });
+  await expect(tree.getByText("site", { exact: true })).toBeVisible({ timeout: 10_000 });
+  await expectAccessible(page, "drawer: the data tree");
+  await tree.getByText("site", { exact: true }).click();
+  const pill = page.getByRole("button", { name: /^trigger › site, trigger\.site/ });
+  await expect(pill).toBeVisible();
+  await pill.focus();
+  await page.keyboard.press("Enter");
+  const details = page.getByRole("dialog", { name: "trigger.site" });
+  await expect(details.getByText("always there")).toBeVisible({ timeout: 10_000 });
+  await expectAccessible(page, "drawer: a pill's details");
+  await page.keyboard.press("Escape");
+  await expect(details).toBeHidden();
+  await expect(page.getByText("Saved · not published")).toBeVisible({ timeout: 10_000 });
+  await page.reload();
+  await page.getByRole("button", { name: /^stop_it, Fail/ }).click();
+  await expect(page.getByRole("button", { name: /^trigger › site, trigger\.site/ })).toBeVisible();
+});
+
+test("the builder writes a condition the server checks clean, and opens it again", async ({ page }) => {
+  await importFile(page, "Builder", "e2e/fixtures/data.dewpoint.json");
+  await page.getByRole("button", { name: /^check, If/ }).click();
+  await expect(page.getByRole("group", { name: "How Condition is set" }).getByRole("button", { name: "Builder" })).toHaveAttribute("aria-pressed", "true");
+  await page.getByRole("button", { name: "＋ Condition" }).click();
+  await page.getByRole("tree", { name: "Data available here" }).getByText("site", { exact: true }).click();
+  await page.getByRole("textbox", { name: "Value, Condition 1" }).fill("HQ");
+  await expectAccessible(page, "drawer: the condition builder");
+  // The server's own check of what the builder wrote: no problem left on the step.
+  await expect(page.getByRole("button", { name: "check, If", exact: true })).toBeVisible({ timeout: 10_000 });
+  await page.keyboard.press("Escape"); // closes the drawer
+  await page.getByRole("button", { name: "check, If", exact: true }).click();
+  await expect(page.getByRole("textbox", { name: "Value, Condition 1" })).toHaveValue("HQ");
+});
+
+test("a decision on sensitive data is declassified from its field, once confirmed", async ({ page }) => {
+  await importFile(page, "Declassify", "e2e/fixtures/data.dewpoint.json");
+  await page.getByRole("button", { name: /^check, If/ }).click();
+  await page.getByRole("button", { name: "＋ Condition" }).click();
+  await page.getByRole("tree", { name: "Data available here" }).getByText("token", { exact: true }).click();
+  await page.getByRole("textbox", { name: "Value, Condition 1" }).fill("x");
+  await page.getByRole("button", { name: "Review in Declassify…" }).click({ timeout: 10_000 });
+  const panel = page.getByRole("complementary", { name: "Declassify" });
+  const site = panel.getByRole("group", { name: "check · Condition" });
+  await expect(site.getByText("This decision reads sensitive data, so the branch taken becomes visible.")).toBeVisible();
+  await expectAccessible(page, "editor: Declassify");
+  await site.getByLabel(/may be visible in run history/).check();
+  await site.getByRole("button", { name: "Declassify this decision" }).click();
+  await expect(panel.getByText("Declassified · 1")).toBeVisible();
+  // Checked again: a decision on sensitive data runs as a separate step, and has no problem left.
+  await expect(page.getByRole("button", { name: "check, If, 1 expression runs as a separate step", exact: true })).toBeVisible({ timeout: 10_000 });
+});
+
+test("a step a branch may skip says it may not run", async ({ page }) => {
+  await importFile(page, "Branches", "e2e/fixtures/data.dewpoint.json");
+  await expect(page.getByRole("button", { name: /^stop_it, Fail, may not run$/ })).toBeVisible({ timeout: 10_000 });
+  await expectAccessible(page, "editor: a step that may not run");
 });

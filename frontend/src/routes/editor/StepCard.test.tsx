@@ -48,3 +48,10 @@ it("draws a card at the layout's size in px, as the canvas's other units are (th
   expect(card.className).toContain(`h-[${CARD.height}px]`);
   expect(card.className).toContain(`w-[${CARD.width}px]`);
 });
+
+it("says a step that may not run, in words and dashed, beside its problems (4c-2b)", () => {
+  render(<StepCardBody node={node} type={TRANSFORM} problems={{ errors: 0, warnings: 0 }} separate={0} conditional current={false} tabIndex={0} onOpen={vi.fn()} />);
+  const card = screen.getByRole("button", { name: "get_device, Transform, may not run" });
+  const badge = Array.from(card.querySelectorAll("span")).find((s) => s.textContent?.trim() === "may not run")!;
+  expect(badge.className).toContain("border-dashed");
+});

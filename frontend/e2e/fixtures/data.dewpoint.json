@@ -1,0 +1,36 @@
+{
+  "format": "dewpoint.workflow",
+  "format_version": 1,
+  "name": "Data",
+  "graph": {
+    "graph_format": 1,
+    "nodes": [
+      {
+        "id": "4c2b0001-0000-4000-8000-000000000001",
+        "key": "check",
+        "type": "flow.if@1",
+        "config": {},
+        "position": { "x": 0, "y": 140 }
+      },
+      {
+        "id": "4c2b0001-0000-4000-8000-000000000002",
+        "key": "stop_it",
+        "type": "flow.fail@1",
+        "config": { "message": "Stopped" },
+        "position": { "x": 0, "y": 280 }
+      }
+    ],
+    "edges": [
+      { "from": { "node": "4c2b0001-0000-4000-8000-000000000001", "port": "true" }, "to": { "node": "4c2b0001-0000-4000-8000-000000000002" } }
+    ],
+    "settings": {
+      "input_schema": {
+        "type": "object",
+        "properties": { "site": { "type": "string" }, "token": { "type": "string", "x-sensitive": true } },
+        "required": ["site", "token"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "bindings": []
+}
