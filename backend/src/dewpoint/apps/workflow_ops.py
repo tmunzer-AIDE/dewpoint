@@ -18,6 +18,7 @@ from dewpoint.core.connections import service as connections
 from dewpoint.core.http import TenantContext
 from dewpoint.core.models.workflows import Workflow, WorkflowVersion
 from dewpoint.core.plugins import lifecycle, registry
+from dewpoint.core.runs import samples
 from dewpoint.core.workflows import service
 from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
@@ -119,6 +120,43 @@ def scope_answer(found: scopes.Scope) -> dict[str, object]:
         "more": found.more,
         "problem": found.problem.to_json() if found.problem is not None else None,
     }
+
+
+def draft_node(draft: Any, node: uuid.UUID) -> Mapping[str, Any] | None:
+    """The step as the saved draft writes it, read without parsing: a draft that doesn't parse still has steps."""
+    nodes = draft.get("nodes") if isinstance(draft, Mapping) else None
+    found = (n for n in nodes or () if isinstance(n, Mapping) and n.get("id") == str(node))
+    return next(found, None)
+
+
+def sample_answer(found: samples.Sample, drafted: Mapping[str, Any]) -> dict[str, object]:
+    """B7's answer (4c-2a ruling 10): the sample, and whether it still represents the draft's step."""
+    ran = found.node or {}
+    same_type, same_config = ran.get("type") == drafted.get("type"), ran.get("config") == drafted.get("config")
+    if found.connections:
+        state = "recorded"
+    elif found.mode == "simulate":
+        state = "simulated"
+    elif found.names_connection:
+        state = "unknown"
+    else:
+        state = "none"
+    return {
+        "run_id": str(found.run_id), "run_kind": found.run_kind, "mode": found.mode,
+        "version_id": str(found.version_id), "version_number": found.version_number,
+        "iteration_key": found.iteration_key, "attempt": found.attempt,
+        "captured_at": found.captured_at.isoformat() if found.captured_at is not None else None,
+        "type": ran.get("type"), "same_type": same_type, "same_config": same_config, "output": found.output,
+        "connections": {
+            "state": state,
+            "items": [
+                {"connection_id": str(c.connection_id), "type": c.type, "name": c.name, "revision": c.revision,
+                 "current_revision": c.current_revision, "state": c.state, "context": dict(c.context)}
+                for c in found.connections
+            ],
+        },
+        "stale": not same_type or not same_config or any(c.state != "unchanged" for c in found.connections),
+    }  # fmt: skip
 
 
 @dataclass(frozen=True)

@@ -16,6 +16,7 @@ from dewpoint.apps.api.responses import (
     DraftSavedOut,
     OptionsOut,
     PublishedOut,
+    SamplesOut,
     ScopeOut,
     ValidationOut,
     VersionDetailOut,
@@ -34,6 +35,8 @@ from dewpoint.core.http import TenantContext, get_db, get_settings_dep, require
 from dewpoint.core.models.connections import Connection
 from dewpoint.core.models.workflows import Workflow, WorkflowVersion
 from dewpoint.core.plugins import calls, registry
+from dewpoint.core.retention.cutoff import cutoff
+from dewpoint.core.runs import samples
 from dewpoint.core.workflows import portable, service
 from dewpoint.engine.graph.model import GraphFormatError, parse_graph
 from dewpoint.engine.graph.validate import PICKER
@@ -283,6 +286,33 @@ async def draft_scope(
         db, ctx.tenant_id, wf.draft, settings, node, field, under=under, at=at, find=find
     )
     return {"draft_revision": wf.draft_revision, "node": str(node), "field": field, **workflow_ops.scope_answer(found)}
+
+
+@router.get("/t/{tenant_id}/workflows/{workflow_id}/draft/samples", response_model=SamplesOut)
+async def draft_samples(
+    workflow_id: uuid.UUID,
+    node: uuid.UUID,
+    iteration: str | None = Query(default=None, max_length=2000),
+    ctx: TenantContext = Depends(require(P.RUN_VIEW)),
+    db: AsyncSession = Depends(get_db, scope="function"),
+) -> dict[str, object]:
+    """A step's newest sample against the saved draft (B7; 4c-2a rulings 9, 10). Run data: `run.view`, and the
+    tenant's retention."""
+    wf = await _get(db, ctx, workflow_id)
+    drafted = workflow_ops.draft_node(wf.draft, node)
+    search = samples.Search(None, 0)
+    if drafted is not None:
+        search = await samples.newest(
+            db, ctx.tenant_id, workflow_id, node, iteration_key=iteration, at=await cutoff(db, ctx.tenant_id)
+        )
+    found = search.sample
+    return {
+        "draft_revision": wf.draft_revision,
+        "node": str(node),
+        "sample": workflow_ops.sample_answer(found, drafted) if found is not None and drafted is not None else None,
+        "searched_runs": search.searched,
+        "search_limit": samples.SCAN_RUNS,
+    }
 
 
 @router.post("/t/{tenant_id}/workflows/{workflow_id}/publish", status_code=201, response_model=PublishedOut)

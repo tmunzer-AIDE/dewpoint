@@ -2137,6 +2137,233 @@
         "title": "RunCountOut",
         "type": "object"
       },
+      "SampleConnectionOut": {
+        "additionalProperties": false,
+        "properties": {
+          "connection_id": {
+            "title": "Connection Id",
+            "type": "string"
+          },
+          "context": {
+            "additionalProperties": true,
+            "title": "Context",
+            "type": "object"
+          },
+          "current_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Revision"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "unchanged",
+              "changed",
+              "deleted"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "connection_id",
+          "type",
+          "name",
+          "revision",
+          "current_revision",
+          "state",
+          "context"
+        ],
+        "title": "SampleConnectionOut",
+        "type": "object"
+      },
+      "SampleConnectionsOut": {
+        "additionalProperties": false,
+        "description": "What the sample's attempt used: `recorded` (each one, as it was and as it is now), `none` (the step names\nnone), `simulated` (a simulation opens none) or `unknown` (it names one, but the run predates records).",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SampleConnectionOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "state": {
+            "enum": [
+              "recorded",
+              "none",
+              "simulated",
+              "unknown"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state",
+          "items"
+        ],
+        "title": "SampleConnectionsOut",
+        "type": "object"
+      },
+      "SampleOut": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt": {
+            "title": "Attempt",
+            "type": "integer"
+          },
+          "captured_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Captured At"
+          },
+          "connections": {
+            "$ref": "#/components/schemas/SampleConnectionsOut"
+          },
+          "iteration_key": {
+            "title": "Iteration Key",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "live",
+              "simulate"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "output": {
+            "title": "Output"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "run_kind": {
+            "enum": [
+              "run",
+              "subflow",
+              "failure_handler"
+            ],
+            "title": "Run Kind",
+            "type": "string"
+          },
+          "same_config": {
+            "title": "Same Config",
+            "type": "boolean"
+          },
+          "same_type": {
+            "title": "Same Type",
+            "type": "boolean"
+          },
+          "stale": {
+            "title": "Stale",
+            "type": "boolean"
+          },
+          "type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Type"
+          },
+          "version_id": {
+            "title": "Version Id",
+            "type": "string"
+          },
+          "version_number": {
+            "title": "Version Number",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "run_id",
+          "run_kind",
+          "mode",
+          "version_id",
+          "version_number",
+          "iteration_key",
+          "attempt",
+          "captured_at",
+          "type",
+          "same_type",
+          "same_config",
+          "output",
+          "connections",
+          "stale"
+        ],
+        "title": "SampleOut",
+        "type": "object"
+      },
+      "SamplesOut": {
+        "additionalProperties": false,
+        "description": "A step's newest sample (B7), against the saved draft at this revision.",
+        "properties": {
+          "draft_revision": {
+            "title": "Draft Revision",
+            "type": "integer"
+          },
+          "node": {
+            "title": "Node",
+            "type": "string"
+          },
+          "sample": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SampleOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "search_limit": {
+            "title": "Search Limit",
+            "type": "integer"
+          },
+          "searched_runs": {
+            "title": "Searched Runs",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "draft_revision",
+          "node",
+          "sample",
+          "searched_runs",
+          "search_limit"
+        ],
+        "title": "SamplesOut",
+        "type": "object"
+      },
       "ScheduleIn": {
         "additionalProperties": false,
         "properties": {
@@ -7253,6 +7480,87 @@
           }
         },
         "summary": "Put Draft",
+        "tags": [
+          "workflows"
+        ]
+      }
+    },
+    "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/samples": {
+      "get": {
+        "description": "A step's newest sample against the saved draft (B7; 4c-2a rulings 9, 10). Run data: `run.view`, and the\ntenant's retention.",
+        "operationId": "draft_samples_api_v1_t__tenant_id__workflows__workflow_id__draft_samples_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "node",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Node",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "iteration",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 2000,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Iteration"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SamplesOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Draft Samples",
         "tags": [
           "workflows"
         ]

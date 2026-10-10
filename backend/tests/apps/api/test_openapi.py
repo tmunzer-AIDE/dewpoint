@@ -152,6 +152,7 @@ def test_options_answer_a_named_model() -> None:
 # What the web client calls in slice 4c-2: each answers a named model.
 SLICE_4C = [
     ("get", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/scope"),
+    ("get", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/samples"),
 ]
 
 
