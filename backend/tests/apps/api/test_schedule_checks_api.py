@@ -363,3 +363,56 @@ async def test_a_dialect_declared_inside_is_budgeted_through_validate(
     assert [d["message"] for d in body["diagnostics"] if d["code"] == "schedule.unchecked"] == [
         schedule_checks.UNCHECKED.format(n=1, s="")
     ]
+
+
+def unchecked(diagnostics: list[dict[str, Any]]) -> list[str]:
+    return [d["message"] for d in diagnostics if d["code"] == "schedule.unchecked"]
+
+
+async def test_a_stored_input_nested_deeper_than_the_check_follows_never_fails_publishing(
+    keyed_app, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+) -> None:
+    """The final review: under a draft whose input recurses through a reference, a stored input nested 300 deep
+    raised `RecursionError` out of the check, so validate answered 500, and publish too, its version undone. The
+    schedule is counted unchecked, and the version is published."""
+    ctx, wf = await published(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings,
+                              TOKEN_GRAPH | {"settings": {"input_schema": SCHEMA | {
+                                  "properties": SCHEMA["properties"] | {"n": {"type": "object"}}}}})  # fmt: skip
+    editor = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "editor")
+    deep: dict[str, Any] = {}
+    for _ in range(300):
+        deep = {"n": deep}
+    await scheduled(editor, ctx, wf, BODY | {"input": {"token": TOKEN, "n": deep}})
+    recursive = SCHEMA | {
+        "properties": SCHEMA["properties"] | {"n": {"$ref": "#/$defs/n"}},
+        "$defs": {"n": {"type": "object", "properties": {"n": {"$ref": "#/$defs/n"}}}},
+    }
+    await drafted(editor, ctx, wf, {"input_schema": recursive})
+    checked = await editor.post(url(ctx, f"/workflows/{wf}/validate"))
+    assert checked.status_code == 200, checked.text
+    assert checked.json()["schedule_breaks"] == []
+    assert unchecked(checked.json()["diagnostics"]) == [schedule_checks.UNCHECKED.format(n=1, s="")]
+    revision = (await editor.get(url(ctx, f"/workflows/{wf}"))).json()["draft_revision"]
+    answer = await editor.post(url(ctx, f"/workflows/{wf}/publish"), headers={"If-Match": str(revision)})
+    assert answer.status_code == 201, answer.text
+    assert unchecked(answer.json()["warnings"]) == [schedule_checks.UNCHECKED.format(n=1, s="")]
+
+
+async def test_a_stored_input_that_doesnt_open_is_counted_unchecked(
+    keyed_app, workflow, owner_sessionmaker, api_settings
+) -> None:
+    """The final review: a sealed input that doesn't open under its tenant and id (a damaged row, or a tenant's data
+    keys made again) raised `ClaimUnreadableError` out of the check, and validate and publish answered 500. Like one
+    whose key can't be read, it's counted unchecked."""
+    ctx, wf = workflow
+    editor = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "editor")
+    sid = await scheduled(editor, ctx, wf)
+    async with owner_sessionmaker() as s, s.begin():
+        sealed = (await s.execute(text("select input from schedules where id = :i"), {"i": sid})).scalar_one()
+        await s.execute(text("update schedules set input = :b where id = :i"),
+                        {"b": sealed[:-1] + bytes([sealed[-1] ^ 1]), "i": sid})  # fmt: skip
+    await drafted(editor, ctx, wf, {"input_schema": BREAKING})
+    answer = await editor.post(url(ctx, f"/workflows/{wf}/validate"))
+    assert answer.status_code == 200, answer.text
+    assert answer.json()["schedule_breaks"] == []
+    assert unchecked(answer.json()["diagnostics"]) == [schedule_checks.UNCHECKED.format(n=1, s="")]

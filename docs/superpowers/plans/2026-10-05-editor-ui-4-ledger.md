@@ -2329,3 +2329,49 @@ Milestone 1's Task 4 and milestone 2's Task 7 now read a6fce0ac and 2ce370cb: th
 
 Next, a fresh reviewer reviews the whole branch; its findings and their fixes follow in a section of their own.
 Nothing is pushed: a push and a PR wait for the owner's word.
+
+### 4c-3a, after the final review (2026-10-11)
+
+A fresh reviewer (the most capable model) reviewed aed887f8..495ff0f0 against the plan, its Review Focus, the outline's
+4c rows and rulings 68, 71, 74, 96 and 139–146: no critical finding, one important, five minor; "ready to merge: with
+fixes". It found the code to be the plan's blocks as written and each Review Focus test checking what its line says.
+It checked that the shape check replaces all 36 keywords of the installed jsonschema (4.26.0), and that FastAPI's own
+serialization keeps the start form's omitted keys omitted. Re-graded by what a person gets, one of its minors is
+important too (a stored input that doesn't open answered 500, as the important one did), and both were fixed in one
+pass, each test failing first:
+
+M78. **A stored input nested deeper than the check can follow is counted unchecked.** The steps bound the check's work,
+    not its depth: under a draft whose input recurses through a reference, a stored input nested 300 deep raised
+    `RecursionError` out of the check (about 250 levels), so validate answered 500, and publish too, its version
+    undone: ruling 145's "a warning, never a refusal" broken. That input is now counted unchecked, and the next ones
+    are still checked; the warning's text names the case ("nested deeper than it can follow"). Tests:
+    `test_a_stored_input_nested_deeper_than_the_check_follows_is_counted_unchecked`, and through validate and publish
+    `test_a_stored_input_nested_deeper_than_the_check_follows_never_fails_publishing`.
+M79. **A stored input that doesn't open under its tenant and id is counted unchecked**, as one whose key can't be read
+    is (ruling 145: "any whose stored input can't be read"). `ClaimCipher.open` raises `ClaimUnreadableError` there,
+    which isn't a key's failure, so a damaged row, or a tenant's data keys made again, made validate and publish answer
+    500 until the schedule was deleted. Test: `test_a_stored_input_that_doesnt_open_is_counted_unchecked`.
+    Checks, as run on the fix: the three tests failed (`RecursionError`, `ClaimUnreadableError`), then passed; the
+    tests of everything the fix touches (the check, its API tests, the workflow, version, portable, commit-before-
+    response and schedule API tests) 133 passed; ruff, mypy (285 files) and the import contracts (11 kept) clean. No
+    schema change. The whole suite wasn't run again: the owner decides.
+
+Deferred minors, for the owner: a `oneOf` whose branches all fail gives the generic reason ("doesn't have the shape
+this input declares"), not "fits none of the shapes"; a `false` property schema is placed one level up; comments say
+the reasons are kept in the order found, and they're sorted; the worker thread is started when no input was opened.
+
+What the reviewer set aside, ruled:
+- the firing-time check (`apps/inputs.py`, jsonschema's own validator) recursing on the same deep input under a
+  recursive version: main's admission path, unchanged here; with M78, publishing such a version goes ahead as on main,
+  and the schedule is said unchecked. Proposed as a follow-up, with the next line;
+- no nesting limit on any input at write, which makes M78's case reachable: platform-wide, not this slice's;
+- up to 100 schedules read and opened at each validate: ruling 145's cost, accepted;
+- 101 errors read to learn there are more: the design, tested;
+- `EndpointIn.trigger`'s 64 characters: the SDK's own bound on a trigger key (`TYPE_KEY_RE`, 1–64), so it never refuses
+  a declared key;
+- a `(root)` place for a stored input that isn't an object: unreachable, a schedule's input is an object;
+- disabled schedules checked: they're live (ruling 145);
+- the commits' co-author line: the plan's and the session's attribution;
+- no frontend use yet of the new fields and routes: 4c-3b's.
+
+Paused at the final checkpoint. Nothing is pushed: a push and a PR wait for the owner's word.

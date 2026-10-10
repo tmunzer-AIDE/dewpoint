@@ -22,7 +22,9 @@ Its work is bounded in units, never time:
   length in the same statement that counts them, so no other input is fetched;
 - every keyword it evaluates, at any depth, spends one of the check's 50,000 steps, and its `anyOf` tries a branch only
   up to its first error, keeping none (JSON Schema's own builds every error of every failing branch first);
-- from one stored input it reads 100 errors, lazily, and keeps 5 distinct reasons, each of 300 characters at most.
+- from one stored input it reads 100 errors, lazily, and keeps 5 distinct reasons, each of 300 characters at most;
+- the steps bound its work, not its depth: a stored input nested deeper than the check's descent can follow (about
+  250 objects, under a draft that recurses through a reference) isn't checked.
 What a bound leaves out is said: a schedule as unchecked, a reason list as having more. Decoding and checking run in a
 worker thread."""
 
@@ -41,7 +43,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from dewpoint.apps.schedules import INPUT_PURPOSE
-from dewpoint.core.claims.cipher import ClaimCipher
+from dewpoint.core.claims.cipher import ClaimCipher, ClaimUnreadableError
 from dewpoint.core.crypto.keys import KeySource, key_unreadable
 from dewpoint.core.models.schedules import Schedule
 from dewpoint.engine.graph.diagnostics import Diagnostic
@@ -65,8 +67,8 @@ PARTLY = (
     "schedule it would refuse may not be listed."
 )
 UNCHECKED = (
-    "Not checked against this input: {n} live schedule{s}, either past what one check reads (the oldest 100, 2 MiB of "
-    "stored input, 50,000 checking steps) or with a stored input that couldn't be read."
+    "Not checked against this input: {n} live schedule{s}: past what one check reads (the oldest 100, 2 MiB of stored "
+    "input, 50,000 checking steps), nested deeper than it can follow, or with a stored input that couldn't be read."
 )
 _TYPES = {"string": "text", "integer": "a whole number", "number": "a number", "boolean": "yes or no",
           "array": "a list", "object": "an object", "null": "null"}  # fmt: skip
@@ -242,18 +244,23 @@ def checked_all(
     input_schema: Mapping[str, Any], takes_csv: bool, opened: list[tuple[uuid.UUID, bytes]]
 ) -> tuple[frozenset[str], list[tuple[uuid.UUID, Checked]], int]:
     """The stored inputs `opened` checked against `input_schema`'s shape, the oldest first: CPU work, run in a worker
-    thread. The structure the shape couldn't keep, each input that wouldn't fit, and how many weren't checked: the one
-    the steps ran out in, and the rest."""
+    thread. The structure the shape couldn't keep, each input that wouldn't fit, and how many weren't checked: each
+    nested deeper than the check can follow, the one the steps ran out in, and the rest."""
     drafted = shape(input_schema, takes_csv=takes_csv)
     refused: list[tuple[uuid.UUID, Checked]] = []
+    too_deep = 0
     for n, (schedule_id, plaintext) in enumerate(opened):
         try:
             checked = drafted.check(json.loads(plaintext))
         except Exhausted:
-            return drafted.partial, refused, len(opened) - n
+            return drafted.partial, refused, too_deep + len(opened) - n
+        except RecursionError as e:  # the steps bound the work, not its depth (the final review)
+            log.warning("schedule_input_unchecked", error=type(e).__name__)
+            too_deep += 1
+            continue
         if checked.reasons:
             refused.append((schedule_id, checked))
-    return drafted.partial, refused, 0
+    return drafted.partial, refused, too_deep
 
 
 @dataclass(frozen=True)
@@ -297,8 +304,9 @@ async def breaks(
     input_schema: Mapping[str, Any], takes_csv: bool,
 ) -> Breaks:  # fmt: skip
     """The workflow's live schedules (a deleted one's tombstone left out) whose stored input `input_schema` wouldn't
-    fit, by its shape (`read_schedules` says which are read). One past what a check reads, or whose key can't be
-    read, is counted unchecked; anything else raises. The checking runs in a worker thread."""
+    fit, by its shape (`read_schedules` says which are read). One past what a check reads, or whose stored input
+    doesn't open (its key can't be read, or it doesn't open under its tenant and id), is counted unchecked;
+    anything else raises. The checking runs in a worker thread."""
     read = await read_schedules(s, workflow_id)
     unchecked = read.live - sum(1 for _, sealed in read.rows if sealed is not None)
     cipher = ClaimCipher(keys, purpose=INPUT_PURPOSE)
@@ -309,7 +317,7 @@ async def breaks(
         try:
             opened.append((schedule_id, await cipher.open(str(tenant_id), str(schedule_id), sealed)))
         except Exception as e:
-            if not key_unreadable(e):
+            if not (key_unreadable(e) or isinstance(e, ClaimUnreadableError)):
                 raise
             log.warning("schedule_input_unread", error=type(e).__name__)
             unchecked += 1

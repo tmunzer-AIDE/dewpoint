@@ -229,3 +229,25 @@ def test_a_reason_is_bounded_in_length() -> None:
     long = "f" * 2_000
     (reason,) = shape(schema({}, required=[long]), takes_csv=False).check({}).reasons
     assert len(reason) == schedule_checks.MAX_REASON_CHARS and reason.endswith("…")
+
+
+DEEP = 300  # objects deep: past what the check's descent can follow (about 250 levels, the final review bisected)
+RECURSIVE = schema({"n": {"$ref": "#/$defs/n"}, "site": {"type": "integer"}}) | {
+    "$defs": {"n": {"type": "object", "properties": {"n": {"$ref": "#/$defs/n"}}}}
+}
+
+
+def nested(depth: int) -> bytes:
+    """An input `depth` objects deep, written out: `json.dumps` would recurse as deep itself."""
+    return ('{"n": ' * depth + "{}" + "}" * depth).encode()
+
+
+def test_a_stored_input_nested_deeper_than_the_check_follows_is_counted_unchecked() -> None:
+    """The final review: the steps bound the check's work, not its depth. Under a draft whose input recurses through
+    a reference, a stored input nested 300 deep raised `RecursionError` out of the check, and validate and publish
+    answered 500. It's counted unchecked, and the next input is still checked."""
+    with pytest.raises(RecursionError):  # the input goes deeper than the check can follow
+        shape(RECURSIVE, takes_csv=False).check(json.loads(nested(DEEP)))
+    deep, other = uuid.uuid4(), uuid.uuid4()
+    partial, refused, unchecked = checked_all(RECURSIVE, False, [(deep, nested(DEEP)), (other, b'{"site": "a"}')])
+    assert (partial, [i for i, _ in refused], unchecked) == (frozenset(), [other], 1)
