@@ -21,6 +21,7 @@ from dewpoint.core.plugins import lifecycle, registry
 from dewpoint.core.runs import samples
 from dewpoint.core.workflows import service
 from dewpoint.engine import ENGINE_ABI
+from dewpoint.engine.canonical import canonical_json
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.engine.graph import scope as scopes
 from dewpoint.engine.graph.diagnostics import Diagnostic
@@ -123,9 +124,10 @@ def scope_answer(found: scopes.Scope) -> dict[str, object]:
 
 
 def draft_node(draft: Any, node: uuid.UUID) -> Mapping[str, Any] | None:
-    """The step as the saved draft writes it, read without parsing: a draft that doesn't parse still has steps."""
+    """The step as the saved draft writes it, read without parsing: a draft that doesn't parse still has steps. Its id
+    is read as a UUID, as the engine reads it: written in capitals, it's the same step."""
     nodes = draft.get("nodes") if isinstance(draft, Mapping) else None
-    found = (n for n in nodes or () if isinstance(n, Mapping) and n.get("id") == str(node))
+    found = (n for n in nodes or () if isinstance(n, Mapping) and samples.as_uuid(n.get("id")) == node)
     return next(found, None)
 
 
@@ -133,8 +135,9 @@ def sample_answer(found: samples.Sample, drafted: Mapping[str, Any]) -> dict[str
     """B7's answer (4c-2a ruling 10): the sample, and whether it still represents the draft's step."""
     ran = found.node or {}
     same_type = ran.get("type") == drafted.get("type")
-    # A step left without a config has an empty one, as a version writes it (`GraphNode.config`)
-    same_config = ran.get("config", {}) == drafted.get("config", {})
+    # Compared as JSON, as the graph hash compares them (`true` isn't `1`); a step left without a config has an empty
+    # one, as a version writes it (`GraphNode.config`)
+    same_config = canonical_json(ran.get("config", {})) == canonical_json(drafted.get("config", {}))
     if found.connections:
         state = "recorded"
     elif found.mode == "simulate":

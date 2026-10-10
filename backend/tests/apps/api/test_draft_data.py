@@ -198,3 +198,41 @@ def test_a_step_written_without_a_config_has_the_same_config_as_an_empty_one() -
                     names_connection=False)  # fmt: skip
     answer = sample_answer(sample, {"id": "x", "key": "a", "type": "testkit.echo@1"})
     assert answer["same_config"] and not answer["stale"]
+
+
+@pytest.mark.parametrize(
+    ("before", "after"), [(True, 1), (False, 0), ({"x": [True]}, {"x": [1]})], ids=["true-1", "false-0", "nested"]
+)
+async def test_marks_a_sample_stale_when_a_value_changes_its_json_type(
+    app, owner_sessionmaker, api_settings, before: Any, after: Any
+) -> None:
+    """`true` and `1` are equal in Python, not in JSON: the engine hashes them apart, and a sample tells them apart too
+    (the review of 6cc2a4f3)."""
+    first = (
+        G().node("a", "testkit.echo@1", {"value": before}).node("c", "flow.if@1", {"condition": True}).edge("a", "c")
+    )
+    then = G().node("a", "testkit.echo@1", {"value": after}).node("c", "flow.if@1", {"condition": True}).edge("a", "c")
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    async with c:
+        base = await _create(c, tid, first.data())
+        await _sampled(owner_sessionmaker, base, nid("a"))
+        assert (await c.put(f"{base}/draft", json=then.data(), headers={"If-Match": "1"})).status_code == 200
+        sample = (await c.get(f"{base}/draft/samples", params={"node": str(nid("a"))})).json()["sample"]
+    assert not sample["same_config"] and sample["stale"]
+
+
+async def test_finds_a_sample_whatever_the_case_of_the_steps_id(app, owner_sessionmaker, api_settings) -> None:
+    """A step's id is a UUID: written in capitals it's the same step, as the engine reads it (the graph hash doesn't
+    change), so its samples stay (the review of 6cc2a4f3)."""
+    shouted = json.loads(json.dumps(DRAFT))
+    for n in shouted["nodes"]:
+        if n["id"] == str(nid("a")):
+            n["id"] = n["id"].upper()
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    async with c:
+        base = await _create(c, tid)
+        run = await _sampled(owner_sessionmaker, base, nid("a"))
+        assert (await c.put(f"{base}/draft", json=shouted, headers={"If-Match": "1"})).status_code == 200
+        body = (await c.get(f"{base}/draft/samples", params={"node": str(nid("a"))})).json()
+    assert body["sample"] is not None and (body["sample"]["run_id"], body["searched_runs"]) == (run, 1)
+    assert body["sample"]["same_config"] and not body["sample"]["stale"]

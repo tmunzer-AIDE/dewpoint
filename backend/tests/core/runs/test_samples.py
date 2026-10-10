@@ -256,3 +256,31 @@ async def test_counts_the_search_in_the_same_statement_as_its_answer(owner_sessi
     reading = [st for st in statements if "candidates" in st]
     assert len(reading) == 1 and "count(" in reading[0].lower()
     assert search.sample is not None and search.searched == 1
+
+
+async def test_names_a_connection_whatever_the_case_of_its_id(owner_sessionmaker, api_sessionmaker) -> None:
+    """The worker reads a connection field's value as a UUID (`DbConnections.named_by`): an id written in capitals
+    names the connection, and the sample says so too (the review of 6cc2a4f3)."""
+    seeded = await seed_step(owner_sessionmaker, named=[None])
+    cid = await add_connection(owner_sessionmaker, seeded.tenant)
+    named = await seed_step(owner_sessionmaker, named=[cid], tenant=seeded.tenant)
+    version, run = uuid.uuid4(), uuid.uuid4()
+    async with owner_sessionmaker() as s, s.begin():  # a version is immutable: a second one names it in capitals
+        await s.execute(
+            text(
+                "insert into workflow_versions (id, tenant_id, workflow_id, number, graph, node_refs, engine_abi, "
+                "cel_profile, input_schema, output_schema, vars_schema, closure_version_ids, closure_workflow_ids, "
+                "closure_node_refs, closure_cel_profiles, closure_depth, graph_hash, version_hash, connection_ids) "
+                "select :v, tenant_id, workflow_id, 2, jsonb_set(graph, '{nodes,0,config,connection}', "
+                "to_jsonb(cast(:c as text))), node_refs, engine_abi, cel_profile, input_schema, output_schema, "
+                "vars_schema, array[cast(:v as uuid)], closure_workflow_ids, closure_node_refs, closure_cel_profiles, "
+                "closure_depth, 'h2', 'h2', connection_ids from workflow_versions where id = :old"
+            ),
+            {"v": version, "c": str(cid).upper(), "old": named.version},
+        )  # fmt: skip
+        await s.execute(text("insert into runs (id, tenant_id, workflow_id, workflow_version_id, mode, status, "
+                             "ended_at) select :r, tenant_id, workflow_id, :v, 'live', 'succeeded', now() "
+                             "from workflow_versions where id = :v"), {"r": run, "v": version})  # fmt: skip
+    await _row(owner_sessionmaker, named, run)
+    found = await _newest(api_sessionmaker, named)
+    assert found is not None and found.version_id == version and found.names_connection

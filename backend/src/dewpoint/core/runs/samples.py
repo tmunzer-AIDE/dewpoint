@@ -27,6 +27,16 @@ from dewpoint.sdk.fields import CONNECTION
 SCAN_RUNS = 200  # the newest ended runs of a workflow a sample is looked for in (ruling 9)
 
 
+def as_uuid(value: Any) -> uuid.UUID | None:
+    """A graph's text read as a UUID, as the engine and the worker read ids: `ABC…` and `abc…` are the same one."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return uuid.UUID(value)
+    except ValueError:
+        return None
+
+
 @dataclass(frozen=True)
 class UsedConnection:
     connection_id: uuid.UUID
@@ -175,13 +185,13 @@ async def newest(
                 )  # fmt: skip
                 for r in used
             ),
-            names_connection=await _names_connection(s, node, {str(c) for c in version.connection_ids or ()}),
+            names_connection=await _names_connection(s, node, set(version.connection_ids or ())),
         ),
         row.searched,
     )
 
 
-async def _names_connection(s: AsyncSession, node: Mapping[str, Any] | None, recorded: set[str]) -> bool:
+async def _names_connection(s: AsyncSession, node: Mapping[str, Any] | None, recorded: set[uuid.UUID]) -> bool:
     """Whether the step names one of its version's connections in a field its type marks for one: the worker's own
     rule (`DbConnections.named_by`), never a value that merely looks like a connection's id."""
     ref = node.get("type") if node is not None else None
@@ -191,6 +201,6 @@ async def _names_connection(s: AsyncSession, node: Mapping[str, Any] | None, rec
     for row in await registry.load_node_types(s, {ref}):
         props = row.manifest.get("config_schema", {}).get("properties", {})
         fields = [name for name, prop in props.items() if isinstance(prop, dict) and prop.get(CONNECTION)]
-        if any(isinstance(written.get(f), str) and written[f] in recorded for f in fields):
+        if any(as_uuid(written.get(f)) in recorded for f in fields):
             return True
     return False
