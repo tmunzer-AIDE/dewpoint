@@ -1787,3 +1787,50 @@ field of the saved draft can read (5329bd58, `workflow.view`, one question at a 
 (test_draft_data, test_openapi, test_workflows, test_workflow_ops). The regenerated client schema passes `check:api`;
 typecheck, lint and the frontend's 731 tests pass with no fixture change for the route. Ruff, mypy and the 11 import
 contracts are clean. No plan deviation.
+
+### 4c-2a, milestone 3 and the final checkpoint (2026-10-10)
+
+Milestone 3 followed milestone 2 without a pause, as the owner said. Tasks 8–10:
+- 46d543f3: migration 0045, `run_step_connections` (forced row-level security, the worker inserts, the API reads, the
+  fence trigger, gone with its run) and `runs_workflow_ended`, chained after 0047. The database's guards (chain,
+  fence, tenancy, retention, erasure, model/schema): 142 passed.
+- 5f2d8899: each step attempt records each connection, and each revision, it opens, before the node can use it; an
+  outage while recording is `NotSent`. Worker tests and golden replays: 527 passed. The simulated-attempt test passed
+  before the record existed: it guards a negative (a simulation raises before any record).
+- c8b6d35f: `core/runs/samples.py` and `GET …/draft/samples` (`run.view`, within retention). API and core tests: 132
+  passed.
+
+Every check at c8b6d35f, as run (the owner OK'd the whole suite in chat):
+- the backend suite with `-n auto` and CI's ignore list: 4,732 passed (8.5 min); the CEL gate tests serially: 415
+  passed, 8 skipped;
+- ruff format and check, mypy (284 files), the 11 import contracts: clean; the backend's OpenAPI matches
+  `frontend/src/api/openapi.json`;
+- the frontend's `check:api`, `lint`, `typecheck`, 731 tests and `build`: pass (no screen changed, so no browser gate);
+- local CodeQL: no finding in Python or JavaScript/TypeScript.
+
+The final review (a fresh reviewer, most capable model, 532ab6c6..c8b6d35f, the plan's Review Focus first) found no
+critical or important issue and seven minor ones; its verdict: ready to merge.
+
+M62. **A step left without a config has the same config as an empty one.** The review's first minor, re-graded
+    important by effect: the draft is stored as written, so a step may leave `config` out, while a version always writes
+    it (`{}`, `GraphNode.config`); the sample marked such a step stale for good. Only a missing key defaults to `{}`.
+    Test: "a step written without a config has the same config as an empty one" (failed first). Fixed in 782e6401; the
+    API, `workflow_ops` and core run tests: 451 passed (the whole suite wasn't rerun: one function, one route).
+
+Deferred (minor, the owner's call):
+- a non-outage failure of the connection record on an ambiguous node ends the step "outcome unknown" though nothing
+  was sent (only the erasure fence or a bug can cause it);
+- the scope's `under` with an unparsable or unresolvable path answers "ok" with no entries, where `at` answers the
+  problem (ruling 117 as written);
+- a sample says its step names no connection when the node type is no longer installed or the version predates
+  `connection_ids`, where "unknown" is truer;
+- each `attempt.connection()` call writes a record (the key keeps one row); a per-attempt memory would skip repeats;
+- no test of an outage, or of another error, while recording a connection.
+
+What the review set aside, ruled to stand: `runs_workflow_ended` without CONCURRENTLY (project practice for `runs`
+indexes); a deleted connection's non-secret config kept with its runs (ruling 121); `same_config` ignores a step's
+options (ruling 123); no `conditional_steps` in a version's detail (ruling 116); the existing "unknown outcome" rule for
+ambiguous nodes; `analyze()` per scope request (ruling 117); no sample past the newest 200 ended runs, said by
+`searched_runs` (ruling 122); the engine's own redaction in previews (engine-core §8).
+
+Paused at the final checkpoint. Nothing is pushed: a push and a PR wait for the owner's word.
