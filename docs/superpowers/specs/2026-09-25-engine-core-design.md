@@ -341,9 +341,13 @@ Tenant-scoped tables use FORCE RLS with the foundations policy pattern.
     Types meet as JSON Schema says (an integer is a number), and object keywords speak only of objects. CEL's guards
     follow every alternative that declares the field; an open one that doesn't makes the data undeclared from there.
   - In CEL, a field the schema says may be something other than an object (a scalar or a list, beside an object,
-    however spelt) is guarded with `type(x) == map` before anything below it is read, a `has()` test included:
+    however spelt) is guarded with `type(x) == type({})` before anything below it is read, a `has()` test included:
     `has()` on a scalar fails too. Data whose type the schema doesn't say, and an element read by index, keep the
     rules below.
+  - A formula names no type (`map`, `list`, `string`, `int`, …): a run binds every name a formula reads as one of its
+    roots (§5.3), and a type's name is none, so it would fail every run. Publish refuses it (`cel.type_name`); a type
+    test compares with a value's type instead: `type(x) == type({})`, `type([])`, `type("")`, `type(0)`, `type(0.0)`,
+    `type(true)`, `type(null)`.
   - In CEL:
     - a step that may not have run is guarded with `has(steps.<key>.output)` (or `has(steps.<key>.error)`);
     - a field the schema declares but doesn't require, and every such ancestor, is guarded with `has()` on that field,
@@ -898,6 +902,7 @@ library, the classifier or the estimator:
 | `cel.unknown_name` | "`x` isn't defined here. Expressions start with trigger, steps, vars, item, index, loops or run." |
 | `cel.bad_path` | "`steps.a.outputs`: after `steps.<key>` comes `output` or `error`." (the reference grammar's message) Or: "`steps[…]` chooses a step at run time, so publish can't check it. Name it: `steps.<key>.output`." Or: "This reads a reference through a list, a map, a condition or `dyn()`, so publish can't check the path or its guards." |
 | `cel.has_on_typed_path` | "`p` always exists here, and `has()` on it gives the list, not true. Remove the `has()` test." |
+| `cel.type_name` | "`map` names a type, which a formula can't read when it runs. Compare with a value's type instead: `type({})`." |
 | `cel.type_mismatch` | "This expression gives integer, but this field expects boolean." |
 | `cel.non_json_result` | "This expression gives a value JSON can't hold (bytes or a type)." |
 | `graph.reserved_key` | "`in` can't be a step key: expressions couldn't refer to it." |

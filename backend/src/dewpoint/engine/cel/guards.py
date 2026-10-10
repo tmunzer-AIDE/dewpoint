@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Facts from guards (spec §4.3, §5.10 `cel.conditional_ref`): paths known to exist (`has()`), known not to be null
-(`!= null`), or known to be objects (`type(x) == map`).
+(`!= null`), or known to be objects (`type(x) == type({})`).
 
 `facts_at` maps every node to the paths a kind of guard proves whenever that node's value can affect the result.
 CEL's `&&` and `||` absorb an error when the other side decides the result, so each side is guarded by the other:
@@ -56,13 +56,23 @@ def _type_operand(e: ast.Expr) -> ast.Expr | None:
 
 
 def _is_map_type(e: ast.Expr, scope: frozenset[str]) -> bool:
-    """The built-in type `map`, never a comprehension's variable of that name (`[string].all(map, …)`)."""
-    return e.WhichOneof("expr_kind") == "ident_expr" and e.ident_expr.name == "map" and "map" not in scope
+    """A map's type: `type({})`, spelled as a run can bind it; or the built-in `map`, never a comprehension's variable
+    of that name (`[type("")].all(map, …)`), which validation refuses as a type's name (cel.type_name) but which still
+    proves the shape, so a formula using it is told one thing."""
+    if e.WhichOneof("expr_kind") == "ident_expr":
+        return e.ident_expr.name == "map" and "map" not in scope
+    operand = _type_operand(e)
+    return (
+        operand is not None
+        and operand.WhichOneof("expr_kind") == "struct_expr"
+        and not operand.struct_expr.message_name
+        and len(operand.struct_expr.entries) == 0
+    )
 
 
 def shape(e: ast.Expr, scope: frozenset[str], truth: bool) -> Facts:
-    """`type(x) == map` when true, `type(x) != map` when false: x is an object, and so is everything it's read from
-    (4c-2a: a value its schema says may not be an object is guarded so before its fields are read)."""
+    """`type(x) == type({})` when true, `type(x) != type({})` when false: x is an object, and so is everything it's
+    read from (4c-2a: a value its schema says may not be an object is guarded so before its fields are read)."""
     for function, holds in (("_==_", truth), ("_!=_", not truth)):
         if holds and (args := _args(e, function, 2)) is not None:
             for value, other in (args, args[::-1]):

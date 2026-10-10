@@ -114,6 +114,10 @@ def _shaped(expr: str) -> bool:
         "map == type(trigger.variant) && has(trigger.variant.n)",
         "!(type(trigger.variant) != map) && trigger.variant.n > 0",
         "type(trigger.variant) != map || trigger.variant.n > 0",
+        # the spelling that runs: a type name isn't bound (the fix found while planning 4c-2b)
+        "type(trigger.variant) == type({}) && trigger.variant.n > 0",
+        "type({}) == type(trigger.variant) && has(trigger.variant.n)",
+        "!(type(trigger.variant) != type({})) && trigger.variant.n > 0",
     ],
 )
 def test_an_object_test_guards_reads_below_it(expr: str) -> None:
@@ -126,6 +130,7 @@ def test_an_object_test_guards_reads_below_it(expr: str) -> None:
         "has(trigger.variant.n) && trigger.variant.n > 0",  # has() itself fails on a scalar
         "trigger.variant != null && trigger.variant.n > 0",  # not null isn't an object
         "type(trigger.variant) == list || trigger.variant.n > 0",
+        "type(trigger.variant) == type([]) && trigger.variant.n > 0",
         # a comprehension's own `map`, here the string type: not the built-in (the review of revision 4)
         "[string].all(map, type(trigger.variant) == map && trigger.variant.n > 0)",
     ],

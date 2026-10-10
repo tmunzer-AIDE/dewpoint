@@ -411,7 +411,7 @@ def declared_nullable(root: Any, path: Sequence[str | int], start: Any = None) -
 
 def declared_non_object(root: Any, path: Sequence[str | int], start: Any = None) -> tuple[int, ...]:
     """Positions in `path` of fields the schema declares may be something other than an object (a scalar or a list,
-    beside an object): CEL guards reads below them, `has()` included, with `type(x) == map`."""
+    beside an object): CEL guards reads below them, `has()` included, with `type(x) == type({})`."""
     return _declared(root, path, start, "non_object")
 
 

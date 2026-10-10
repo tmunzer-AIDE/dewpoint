@@ -192,7 +192,7 @@ def test_guards_a_value_that_may_not_be_an_object_whatever_its_spelling(spelling
     g.settings = {"input_schema": holder(SPELLINGS[spelling])}
     n = by_path(scope(g.build(), CTX, nid("c"), "/condition", under="trigger.variant"))["trigger.variant.n"]
     assert n.formula is not None and [x.cel() for x in n.formula.guards] == [
-        "type(trigger.variant) == map",
+        "type(trigger.variant) == type({})",
         "has(trigger.variant.n)",
     ]
 

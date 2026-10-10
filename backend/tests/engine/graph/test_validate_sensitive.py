@@ -56,14 +56,25 @@ def test_a_literal_at_a_sensitive_config_position_is_refused(token: Any) -> None
         cel('""'),
         cel('["tok-1234"].map(t, t)[0]'),  # its own variables aren't run data
         cel('["tok-1234"].map(trigger, trigger)[0]'),  # even named as a root
-        cel('string == string ? "tok-1234" : ""'),  # nor are CEL's built-in types
-        cel('type("") == .string ? "tok-1234" : ""'),
-        cel('[int, uint, double, bool, bytes, list, map, null_type, type, dyn].size() > 0 ? "tok-1234" : ""'),
     ],
 )
 def test_a_template_or_formula_that_writes_a_fixed_value_is_refused(token: Any) -> None:
     g = G().node("s", SEND, {"token": token})
     assert diagnostics(g) == [("sensitive.literal", "/token")]
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        cel('string == string ? "tok-1234" : ""'),  # nor are CEL's built-in types
+        cel('type("") == .string ? "tok-1234" : ""'),
+        cel('[int, uint, double, bool, bytes, list, map, null_type, type, dyn].size() > 0 ? "tok-1234" : ""'),
+    ],
+)
+def test_a_formula_naming_types_writes_a_fixed_value_and_is_refused_for_both(token: Any) -> None:
+    """A type's name isn't run data: the value is fixed, and refused as one; and a formula naming a type can't run."""
+    g = G().node("s", SEND, {"token": token})
+    assert sorted(set(diagnostics(g))) == [("cel.type_name", "/token"), ("sensitive.literal", "/token")]  # each name
 
 
 @pytest.mark.parametrize(
