@@ -8,10 +8,13 @@ import {
   setConfig, setOptions, valueAt, type Changed,
 } from "./config";  // prettier-ignore
 import { findNode, idKey, portOf, sameId } from "./graph";
+import { isGroup, valueProblem, write, type Condition } from "./builder";
+import { valueOf, type Segments } from "./pills";
 import { isObject, type Path } from "./schemaForm";
 import type { GraphDoc, GraphEdge, GraphNode, NodeType } from "./workflows";
 
-export type UnappliedKind = "text" | "json" | "number" | "formula" | "port" | "name" | "key" | "limit";
+export type UnappliedKind =
+  | "text" | "template" | "condition" | "json" | "number" | "formula" | "port" | "name" | "key" | "limit";  // prettier-ignore
 
 export interface Unapplied {
   id: string; // unappliedId(node, kind, pointer)
@@ -26,8 +29,11 @@ export interface Unapplied {
   lineage: unknown[]; // the roots of the lists and items on its path (lineageOf): the same ones, not equal ones
   entry?: boolean; // emptied, a list's item or a map's entry blanks to null rather than going
   literal?: boolean; // its value is a `literal` envelope's payload, written back as one (ruling 15)
+  literalOk?: boolean; // false: text alone is a template of one text part, where the field takes no fixed value (4c-2b)
   whole?: boolean; // a number: whole
   from?: string; // a map entry's name in the draft
+  segments?: Segments; // text and pills as typed: `text` says them in braces (4c-2b)
+  condition?: Condition; // a condition as built: `text` is the formula it writes so far (4c-2b)
 }
 
 /** What a control supplies; the editor adds its step, its kind, where it goes and what it was typed over. */
@@ -123,6 +129,17 @@ function attempt(doc: GraphDoc, node: GraphNode, u: Unapplied, type: NodeType | 
   switch (u.kind) {
     case "text": // emptied, a property goes, and a list's or a map's text blanks to ""
       return quiet(setConfig(doc, u.node, u.path, u.text === "" ? (u.entry ? "" : undefined) : written(u.text, u), type));
+    case "template": // text and pills, as typed: a literal's text written back as one
+      return quiet(setConfig(doc, u.node, u.path, u.segments ? (valueOf(u.segments, u.literal ?? false, u.literalOk ?? true) ?? (u.entry ? "" : undefined)) : undefined, type));
+    case "condition": {
+      // Written only once each comparison can be: a number half typed stays held, with why.
+      if (!u.condition) return { problem: "Nothing was built." };
+      const rows = u.condition.items.flatMap((x) => (isGroup(x) ? x.rows : [x]));
+      const problem = rows.map((r) => (r.value === null ? null : valueProblem(r.value, r.path))).find((p) => p !== null);
+      if (problem) return { problem };
+      const text = write(u.condition);
+      return quiet(setConfig(doc, u.node, u.path, text === undefined ? written(undefined, u) : formula(text), type));
+    }
     case "json": {
       const parsed = parseJson(u.text);
       return "problem" in parsed ? parsed : quiet(setConfig(doc, u.node, u.path, written(parsed.value, u), type));
@@ -224,11 +241,16 @@ export function applyAll(
   return { doc: next, applied, left, note };
 }
 
-/** Edits not applied, as a recovery file of their own (ruling 18): what was typed, and where. Never written into the
- * graph to keep it: the graph is what runs. */
+/** Edits not applied, as a recovery file of their own (ruling 18): what was typed, and where, whole: text and pills
+ * with their defaults, and a condition as built, beside the text that says them (the review of revision 1). Never
+ * written into the graph to keep it: the graph is what runs. */
 export function unappliedFile(edits: Unapplied[], keyOf: (node: string) => string) {
   return {
     format: "dewpoint.unapplied-edits",
-    edits: edits.map((u) => ({ step: keyOf(u.node), field: u.label, at: u.pointer, text: u.text, why: u.why })),
-  };
+    edits: edits.map((u) => ({
+      step: keyOf(u.node), field: u.label, at: u.pointer, text: u.text, why: u.why,
+      ...(u.segments ? { segments: u.segments } : {}),
+      ...(u.condition ? { condition: u.condition } : {}),
+    })),
+  };  // prettier-ignore
 }

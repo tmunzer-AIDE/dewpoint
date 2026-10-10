@@ -28,6 +28,8 @@ interface Options {
   expressions?: Expression[];
   editable?: boolean;
   routed?: boolean; // inside a router: a link to another page needs one
+  revision?: number | null; // the saved draft's revision: data is asked of it
+  steps?: { id: string; key: string; title: string | null }[]; // the draft's steps, for the data tree's groups
 }
 
 interface State {
@@ -83,6 +85,8 @@ function Harness({ type, options, edits, state, children }: {
     workflowId: "w1",
     problems: options.problems ?? [],
     expressions: options.expressions ?? [],
+    revision: options.revision === undefined ? 1 : options.revision,
+    steps: options.steps ?? [{ id: NODE_ID, key: "step", title: type.title }],
     set: (path, value, mark) => {
       edits.push({ path, value, mark });
       return write(setConfig(state.doc, NODE_ID, path, value, type));
@@ -182,7 +186,7 @@ export const json = (body: unknown, status = 200) => new Response(JSON.stringify
 
 /** The API's answers, by "METHOD /path" (the path decoded); anything else is a 404, never the network. An answer may
  * be a promise the test settles. Each request is kept. */
-export function fakeApi(answers: Record<string, () => Response | Promise<Response>>) {
+export function fakeApi(answers: Record<string, (query: URLSearchParams) => Response | Promise<Response>>) {
   const sent: { method: string; path: string; body: unknown }[] = [];
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const request = input as Request;
@@ -190,7 +194,7 @@ export function fakeApi(answers: Record<string, () => Response | Promise<Respons
     const text = await request.text();
     sent.push({ method: request.method, path, body: text ? (JSON.parse(text) as unknown) : null });
     const answer = answers[`${request.method} ${path}`];
-    return answer ? answer() : json({ error: "not_found" }, 404);
+    return answer ? answer(new URL(request.url).searchParams) : json({ error: "not_found" }, 404);
   });
   return sent;
 }

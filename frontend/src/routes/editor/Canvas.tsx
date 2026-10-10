@@ -34,6 +34,7 @@ export interface CanvasProps {
   types: Map<string, NodeType>;
   problems: Map<string, Problems>; // by step id's identity (`idKey`): the server's canonical ids
   separate: Map<string, number>; // by step id's identity
+  conditional: ReadonlySet<string>; // the steps that may not run, by identity (ledger ruling 116)
   editable: boolean;
   current: string | null; // the step whose panel is open
   focusId: string; // the roving tab stop's item
@@ -63,7 +64,7 @@ function build(p: CanvasProps): { nodes: Node[]; edges: Edge[] } {
       const type = p.types.get(n.type);
       const data: StepData = {
         node: n, type, ports: portsOf(n, type), connected: used.get(idKey(n.id)) ?? [], problems: p.problems.get(idKey(n.id)) ?? NONE,
-        separate: p.separate.get(idKey(n.id)) ?? 0, current: p.current !== null && sameId(p.current, n.id), focusId: p.focusId,
+        separate: p.separate.get(idKey(n.id)) ?? 0, conditional: p.conditional.has(idKey(n.id)), current: p.current !== null && sameId(p.current, n.id), focusId: p.focusId,
         editable: p.editable,
         onItem: p.onItem,
       };  // prettier-ignore

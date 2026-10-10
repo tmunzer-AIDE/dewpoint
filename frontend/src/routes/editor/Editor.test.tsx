@@ -5,6 +5,7 @@ import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { GraphDoc } from "../../lib/workflows";
+import { idKey } from "../../lib/graph";
 import { onAnnounce } from "../../lib/announce";
 import { cancelLeaving, mayLeave } from "../../lib/leaving";
 import type { CanvasProps } from "./Canvas";
@@ -37,6 +38,7 @@ vi.mock("./Canvas", async () => {
           data-editable={String(props.editable)}
           data-problems={String(props.problems.size)}
           data-problem-steps={[...props.problems.keys()].join(",")}
+          data-conditional={[...props.conditional].join(",")}
         >
           <button data-item="start" onClick={() => props.onItem({ kind: "after", from: null })}>Start</button>
           {(props.doc.nodes ?? []).map((n) => (
@@ -1895,4 +1897,52 @@ it("keeps a formula past the limit out of the draft, held and counted, never cut
   await userEvent.paste(`true${" ".repeat(16_380)}&& false`); // over the whole formula: cut, it would read `true`
   expect(stepConfig("check")).toEqual({ condition: formula("false") });
   expect(screen.getByRole("button", { name: "1 edit not applied" })).toBeTruthy();
+});
+
+// 4c-2b: the steps a check says may not run (ledger ruling 116), and declassifying a decision from the toolbar.
+it("tells the canvas the steps the current check says may not run", async () => {
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: draftWith("a", "b") }));
+  answers.set(`POST ${BASE}/validate`, () =>
+    json({ draft_revision: 1, valid: true, diagnostics: [], expressions: [], conditional_steps: ["id-b"], taint: { sites: [], declassified: [] } }));
+  await show();
+  const canvas = await screen.findByRole("group", { name: "Workflow steps" });
+  await vi.waitFor(() => expect(canvas.dataset.conditional).toBe(idKey("id-b")));
+});
+
+it("declassifies a decision from the toolbar's Declassify, and the draft saves the entry", async () => {
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: draftWith("a") }));
+  answers.set(`POST ${BASE}/validate`, () =>
+    json({
+      // The revision checked: the saved one, 2 once the entry is saved (the PUT's answer).
+      draft_revision: sent.some((r) => r.method === "PUT") ? 2 : 1,
+      valid: false, expressions: [], conditional_steps: [], taint: { sites: [{ node: "id-a", field: "/x" }], declassified: [] },
+      diagnostics: [{ code: "taint.undeclassified", severity: "error", node: "id-a", field: "/x", message: "This decision reads sensitive data, so the branch taken becomes visible.", fix: null }],
+    }));  // prettier-ignore
+  await show();
+  await userEvent.click(await screen.findByRole("button", { name: "Declassify" }));
+  const panel = screen.getByRole("complementary", { name: "Declassify" });
+  await userEvent.click(within(panel).getByLabelText(/may be visible in run history/));
+  await userEvent.click(within(panel).getByRole("button", { name: "Declassify this decision" }));
+  await vi.waitFor(() => expect(sent.find((r) => r.method === "PUT")).toBeTruthy(), { timeout: 3000 });
+  const put = sent.find((r) => r.method === "PUT")!;
+  expect((put.body as GraphDoc).settings?.declassify).toEqual([{ node: "id-a", field: "/x" }]);
+  expect(within(panel).getByText("Declassified · 1")).toBeTruthy();
+  // Checked again after the save: the server still names the decision (the fake does), listed now: none to make.
+  expect(await within(panel).findByText("Needs your decision · 0")).toBeTruthy();
+});
+
+it("lands on Versions when Declassify closes after its last entry is removed (the final review)", async () => {
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: { ...draftWith("a"), settings: { declassify: [{ node: "id-a", field: "/x" }] } } }));
+  answers.set(`POST ${BASE}/validate`, () =>
+    json({
+      draft_revision: sent.some((r) => r.method === "PUT") ? 2 : 1,
+      valid: true, expressions: [], conditional_steps: [], taint: { sites: [], declassified: [] },
+      diagnostics: [{ code: "taint.stale_declassify", severity: "warning", node: null, field: "/settings/declassify/0", message: "This entry declassifies nothing: it isn't a decision that reads sensitive data.", fix: "Remove it." }],
+    }));  // prettier-ignore
+  await show();
+  await userEvent.click(await screen.findByRole("button", { name: "Declassify" }));
+  const panel = screen.getByRole("complementary", { name: "Declassify" });
+  await userEvent.click(within(panel).getByRole("button", { name: /^Remove / }));
+  await userEvent.click(within(panel).getByRole("button", { name: "Close" }));
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Versions" })));
 });

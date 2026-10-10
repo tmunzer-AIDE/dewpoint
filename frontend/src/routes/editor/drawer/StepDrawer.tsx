@@ -79,10 +79,11 @@ function locate(root: HTMLElement, { pointer, kind }: FocusRequest): HTMLElement
 }
 
 export function StepDrawer({
-  node, type, tenantId, workflowId, ports, problems, expressions, editable, adds, actions, note, focusField,
+  node, type, tenantId, workflowId, revision, steps, openDeclassify, ports, problems, expressions, editable, adds, actions, note, focusField,
   onAdd, onDelete, onConnectPort, onPlace, onNudge, onClose,
 }: {
-  node: GraphNode; type: NodeType | undefined; tenantId: string; workflowId: string; ports: string[];
+  node: GraphNode; type: NodeType | undefined; tenantId: string; workflowId: string; revision: number | null;
+  steps: { id: string; key: string; title: string | null }[]; openDeclassify?: () => void; ports: string[];
   problems: Diagnostic[] | null; expressions: Expression[]; editable: boolean; adds: { label: string; action: ItemAction }[];
   actions: DrawerActions; note: string | null; focusField: { pointer: string; kind?: UnappliedKind; n: number } | null; onAdd: (action: ItemAction) => void; onDelete: () => void; onConnectPort: (port: string) => void;
   onPlace: () => void; onNudge: (key: Nudge) => void; onClose: () => void;
@@ -160,7 +161,7 @@ export function StepDrawer({
       });
   }, []);
   const unexplained = expressions.filter((x) => !explained.has(x.field));
-  const drawer = { ...actions, node, type, editable, tenantId, workflowId, problems: mine, expressions, explains };
+  const drawer = { ...actions, node, type, editable, tenantId, workflowId, revision, steps, openDeclassify, problems: mine, expressions, explains };
   return (
     <DrawerContext.Provider value={drawer}>
       <aside

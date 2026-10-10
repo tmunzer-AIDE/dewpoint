@@ -23,9 +23,9 @@ export type Problems = { errors: number; warnings: number };
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
 export function StepCardBody({
-  node, type, problems, separate, current, tabIndex, onOpen,
+  node, type, problems, separate, conditional = false, current, tabIndex, onOpen,
 }: {
-  node: GraphNode; type: NodeType | undefined; problems: Problems; separate: number; current: boolean; tabIndex: number;
+  node: GraphNode; type: NodeType | undefined; problems: Problems; separate: number; conditional?: boolean; current: boolean; tabIndex: number;
   onOpen: () => void;
 }) {  // prettier-ignore
   const title = type ? type.title : `Unknown step type ${node.type}`;
@@ -35,6 +35,7 @@ export function StepCardBody({
     problems.errors ? plural(problems.errors, "problem", "problems") : null,
     !problems.errors && problems.warnings ? plural(problems.warnings, "warning", "warnings") : null,
     separate ? `${plural(separate, "expression runs", "expressions run")} as a separate step` : null,
+    conditional ? "may not run" : null,
   ].filter(Boolean);
   // The open step wears a 2 px accent border all round (1c), its padding a pixel less so nothing moves; the focus ring
   // stays the one 2 px outline (theme.css), so an open step never looks focused when it isn't.
@@ -53,6 +54,12 @@ export function StepCardBody({
         <span className="block truncate text-body font-semibold">{node.key}</span>
         <span className={`block truncate text-small ${type ? "text-muted" : "text-warn-ink"}`}>{title}</span>
       </span>
+      {conditional && (
+        // A step a branch or a loop may skip (ledger ruling 116): said in words, dashed as data that may be missing is.
+        <span aria-hidden="true" className="shrink-0 rounded-sm border border-dashed border-warn-line px-1.5 font-mono text-meta text-warn-ink">
+          may not run
+        </span>
+      )}
       {(problems.errors > 0 || problems.warnings > 0) && (
         <span
           aria-hidden="true"
@@ -72,6 +79,7 @@ export type StepData = {
   connected: string[];
   problems: Problems;
   separate: number;
+  conditional: boolean;
   current: boolean;
   focusId: string;
   editable: boolean;
@@ -98,6 +106,7 @@ export function StepNode({ data }: NodeProps<Node<StepData, "step">>) {
         type={data.type}
         problems={data.problems}
         separate={data.separate}
+        conditional={data.conditional}
         current={data.current}
         tabIndex={data.focusId === item.node(node.id) ? 0 : -1}
         onOpen={() => data.onItem({ kind: "open", node: node.id })}

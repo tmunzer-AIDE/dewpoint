@@ -1884,3 +1884,242 @@ M65. **A formula names no type.**
     - The cost: a draft whose formula names a type meets the new error at its next validation (it failed every run
       already). A version published with one still fails at run time, as before; published again, it's refused with
       how to fix it.
+
+### 4c-2b plan accepted (2026-10-10, in chat)
+
+`docs/superpowers/plans/2026-10-10-editor-ui-4c2b-data-ui.md`. Reviews pasted in chat held revision 1 (f8e2fa80) for six
+defects in its code and revision 2 (7ee93fe9) for two; revision 3 (b6fced02) answered them, each with a test that fails
+on the previous revision's code, and a pasted review signed it off on the review side (no rulings accepted by it). The
+owner, asked in chat, accepted revision 3 and adopted its rulings 1–14, which join this ledger as 125–138, copied as
+ruled; chose inline execution with the milestone pauses (the screens of text, pills, the tree and a pill's details after
+Milestone 2; a fresh review at the end); and the branch `feat/editor-4c2b` from origin/main (6f4ddec7, with #84), the
+plan's docs branch merged in. Push and a PR stay the owner's decisions. On a 4b test that failed intermittently while
+revision 2 was checked (`says when the latest edits aren't saved`), the owner: leave it, and raise it if it fails again.
+
+The builder's formulas, checked on that base (`builder_check.py`, the plan's Task 1): 23 formulas validate clean as an
+If's condition and, bound and evaluated as a run would, give true or false, never an error, over 20 shapes of trigger
+data; the scope's guards for a declared field that may be a string, and for an item's field in an optional and a
+required list, are the ones the builder spells.
+125. **Accepted. One editor of inputs and pills.** Text with pills is a row of text inputs with a pill button between
+     each two, in one box: text is typed as in any text field, and a pill is a whole that's moved past, opened or
+     removed. No `contenteditable`, no rich-text library, no new dependency. Each input sizes to its text
+     (`field-sizing: content`, with `size` as the fallback), 24 px at least. Why: a contenteditable can't be tested in
+     jsdom and fights React and the editor's undo; inputs keep 4c-1's typing, held edits and undo as they are. The cost:
+     a text longer than the box scrolls within its line, as a text field does today, and a newline isn't typed (4c-1's
+     text field takes none either).
+126. **Accepted. The tree and a pill's details open in the drawer's flow, under their field**, at every width (the
+     mockups' panels are full width in the flow; the 320 px board: "under its field, never over the canvas"). No
+     popover, no portal: the outline's pre-approved `@radix-ui/react-popover` stays unused. Why: a portal would sit
+     outside the field's focus region (its blur applies held edits, its undo session starts on focus) and its Escape
+     would reach the drawer. The cost: the drawer scrolls to show them.
+127. **Accepted. Where pills are written.** A text field (`string`, a date and time too) whose kinds take a template, or
+     any value, gets "Text" as its fixed mode, with "＋ Data" beside the switch (`takesPills`). Not a sensitive field, a
+     choice (`enum`), live options, a port's name or a literal-only field. A reference in any other field shows read
+     only, as in 4c-1, with Replace. "＋ Data" is offered in Text mode and in the builder, not in Formula mode. Why: the
+     owner's ruling (one text and pill editor as a text field's fixed mode); a template is text only
+     (`template.not_string`).
+128. **Accepted. A lone pill is a template.** Inserting a pill writes a template, a lone one too (the owner's ruling),
+     so the field gets text whatever the value's type. A plain reference already in the draft is shown as a pill and
+     kept as it is until the text changes. Text where the field takes no fixed value is written as a template of one
+     text part. Switching to Formula turns a lone plain reference into its path, and text with pills into an empty
+     formula (Undo brings it back): text around references isn't a formula. Text held because a write was refused is
+     applied later as the write would have been (a template of one text part where the field takes no fixed value), and
+     the recovery file keeps it whole: its text and pills, each default included, beside the text in braces.
+129. **Accepted. "/" asks for data at a text's start or after a space**, never inside a word or a URL. The "/" stays as
+     typed until a pick replaces it; Escape keeps it. Why: the mockup's "/" without eating the slashes of a path or a
+     URL.
+130. **Accepted. A pill knows its value from the saved draft's scope**, one `at` question per pill and per saved
+     revision, kept while the revision is (D17): dashed and "?" when it may be missing. The API answers for the saved
+     draft as it is, so an answer about another revision than the one asked of is never shown as it: the drawer says the
+     draft was saved again, and the next revision asks again. A version's view asks nothing: its pills show as written,
+     with no tree and no data in their details. Why: B6 answers per field and path; the cost is one analysis per pill
+     per revision on the server, cached in the client.
+131. **Accepted. A pill's accessible name starts with its visible text** (WCAG 2.5.3), then its path, and what may
+     happen to its value and its default: "get_site › timezone ?, steps.get_site.output.timezone, may be missing, no
+     default". The mockups' names gave the path alone.
+132. **Accepted. The tree.** An ARIA tree: each source (the trigger, a step, the run…) a top-level item holding its
+     values, a value with children opened by → and loaded then (`under`). A root's own name is the last part of its
+     path. The search asks the server (`find`). What can't be inserted shows, disabled, with why: a key a reference
+     can't name, a value validation refuses here, in text an object or a list (`template.part_not_scalar`), in a
+     condition a value a formula can't read or an object that's always there (it has nothing to compare: it opens, to
+     pick one of its values). A trigger whose input isn't declared offers the typed path, which the server checks (`at`)
+     before it's inserted (the owner's ruling). Opened, focus goes to its search; Escape closes it and gives focus back.
+133. **Accepted. A pill's details.** Its type, and why it may be missing, in words from its guards (a step that may not
+     run, an optional field, a shorter list, a null). A default only for a pill in text: text, which replaces a missing
+     or null value ("Add a default…" starts one, empty text a value too). A sample only for a step's output (B7), with
+     its run, attempt, connection and whether it still matches; `[redacted]` and `[truncated]` as chips; a value kept
+     apart from the run's history said so. A sample is asked for each time the details open: runs end, connections
+     change and history expires whatever the draft's revision. The run's id is text: there's no run page before 4e.
+134. **Accepted. The builder's formulas.** Each comparison is "(guards && null test && type test && comparison)": the
+     scope's guards as data, spelled with a value's type (`type(x) == type({})`, never a type's name: ledger M65); the
+     null test where the scope says; a type test before an operator that would fail on another type. "is there" is the
+     guards and the null test, ending with a test of the value itself (`has()` of a field, the size that holds an item,
+     or its null test), so the formula names the value even where only an ancestor's guards decide it, and "is not
+     empty" is written `size(x) != 0`, so no comparison reads back as another; "is missing" its negation. Operators by
+     type; a date and time is compared as written, never ordered; "is there" only where something may be missing. A
+     number is written as typed, JSON's way. Why: R6 §4: false on any data, never an error, and every form validates
+     clean; checked through the run's own binding.
+135. **Accepted. The builder's own behaviour.** "Builder" replaces "Fixed" for a condition (the owner's ruling); a
+     formula it didn't write stays a formula, Builder disabled with why. It reads back only the text it would write, and
+     never fails on another: text CEL reads and JSON doesn't (`"\x41"`) isn't its own. "＋ Group" picks the group's first
+     comparison; all/any is chosen once there are two. A fixed true or false says "Always true." / "Always false.". What
+     can't be written yet (a number half typed, a write refused) is held whole as a `condition`.
+136. **Accepted. Declassify.** A side panel, opened from the toolbar (while there's a decision to make or an entry) and
+     from "Review in Declassify…" under a field the server says reads sensitive data. A decision to make shows the
+     server's own words for what it reveals (`taint.undeclassified`'s message: no table of reveals in the client, D18),
+     and is declassified only once the person ticks that it may be visible in run history. An entry shows what it
+     reveals (`taint.declassified`) or why it declassifies nothing (`taint.stale_declassify`), and can be removed. Each
+     change is one undo step. A viewer gets no button: validate is the editors'.
+137. **Accepted. The badge.** "may not run", dashed, on a card the current check lists in `conditional_steps` (ruling
+     116), and in its accessible name. None in a version's view, and none for a viewer, who has no check.
+138. **Accepted. 4c-1's tests that change on purpose**: a text field's hint gains the pills note; text a write refused
+     is held as a `template`; a reference in a text field is a pill (the read-only view tests move to a number field);
+     the If and the Filter conditions open in the builder; the browser flows that type a condition press Formula first.
+
+### 4c-2b, milestone 1 (2026-10-10)
+
+Tasks 1–5 at 0a19f515, on `feat/editor-4c2b` (from origin/main 6f4ddec7, the plan merged in fa69a2cf): the plan's
+acceptance and rulings (82c2cc6f), text and pills (0536d97f), the scope and samples client (1a816128), the builder's
+formulas (0f1ccf71), held text and conditions, Declassify's writers and the drawer's revision (0a19f515). Each task's
+tests failed first as its plan says, then passed. Checks, as run: the unit suite 768 passed (57 files); typecheck and
+lint clean. Task 1's engine check, at 6f4ddec7: 23 formulas clean, 20 shapes, no error. Mid-slice rulings: none.
+
+The base suite's first run, before any change, failed one 4b test on main's own code, `stops placing a step, and says
+so` (an announcement asserted after a screen change, like `says when the latest edits aren't saved`); it passed when
+run again, and in four runs of its file. Not reproduced; recorded, as the owner asked, and raised at Milestone 2.
+
+### 4c-2b, milestone 2 (2026-10-10)
+
+Tasks 6–8 at 51f047a3: the data tree (fdce9255), a pill and its details (1c93307a), text with data pills (51f047a3).
+Each task's tests failed first as its plan says, then passed. Checks, as run: the unit suite 798 passed (60 files);
+typecheck, lint and build clean; the browser gate on the isolated stack 33 passed (main's flows; this slice's four come
+with Task 12), no console error. Screenshots for the owner's review, light and dark at 1280 and 320 px, of a Fail step's
+message with three pills (one dashed, its value may be missing), the tree for a declared trigger input, and a pill's
+details (a trigger value that may be missing; a step's value with no run yet). The mockups' boards aren't rendered
+beside them, as the plan asks: they need the Design canvas's own runtime; each sheet names the boards it maps to on the
+canvas (version 10). Mid-slice rulings: none.
+
+### Milestone 2 reviewed (2026-10-10, pasted)
+
+A pasted review held milestone 2 at fcb0a1b0 for two defects in the accepted plan's own code (Task 8's and Task 7's),
+both reproduced through the field components; it found the screens readable in both themes and widths, noted the
+narrow canvas controls' overlap (Canvas.tsx unchanged from main), and couldn't judge visual fidelity without the
+mockups' images. It gives no go-ahead for milestone 3.
+
+### 4c-2b, after the milestone 2 review (2026-10-10)
+
+M66. **← from a pill moves to the text before it once, and typing stays there.** `onPillKey` focused the text and also
+    left a focus request, which the next render (after the first key typed) applied, moving the caret back: `AP ` and
+    a pill, ←, `abc` saved `AP bca`. ← now focuses at once and leaves none, as → did. Test: "types where the caret is
+    after ← from a pill, as after →" (it saved `AP bca` first).
+M67. **A version's pill details say they show no sample.** The sample query never runs in a version's view (ruling
+    130), so it stayed pending and the details said "Looking for a sample…" for good. They now say "A version's data
+    isn't shown: open the draft to see a past run's sample." Test: "says a version's details show no sample, and never
+    asks for one" (it found "Looking…" first; no request is made).
+    Fixed in 7776d7cc: the unit suite 800 passed (60 files); typecheck, lint and build clean.
+
+### 4c-2b, milestone 3 (2026-10-10)
+
+The owner, in chat, after M66 and M67: start Milestone 3, then on to Task 12 and the final checkpoint. Tasks 9–11 at
+76d61417: the condition builder (a9cf560e), Declassify (a324ce7b), a step that may not run (76d61417). Each task's tests
+failed first as its plan says, then passed; each run over `src/routes/editor` counted the plan's tests plus M66's and
+M67's two (298, 302, 304 passed). Typecheck and lint clean after each. Mid-slice rulings: none.
+
+### 4c-2b, milestone 4 (2026-10-10)
+
+Task 12: the four browser flows (a pill from the tree and its details, kept through a reload; a condition built,
+checked clean and opened again; a decision on sensitive data declassified from its field once confirmed; a step a
+branch may skip saying so) and the outline's rows (§2's pills line: in the drawer's flow, ruling 126; §5's B6 and B7:
+their screens in 4c-2b). Checks, as run on the isolated stack and in the worktree:
+- the browser gate: 37 passed (main's 33 and the four new flows), under the CSP and the console check, axe clean;
+- the unit suite: 815 passed (62 files); typecheck, lint, `check:api` and build clean;
+- no backend change (`git diff origin/main -- backend` is empty), so its suite doesn't run.
+Local CodeQL, the screenshots and the fresh review follow at the final checkpoint.
+
+### 4c-2b, the final checkpoint (2026-10-10)
+
+Screenshots, light and dark at 1280 and 320 px, on the isolated stack: text with pills, the tree, a pill's details (a
+trigger value that may be missing; a step's value with no run yet: a sample needs a finished run, which this slice
+starts none of, so the samples' other states rest on the details' unit tests), the builder with a comparison and a group
+(read back from the builder's own text), a formula the builder didn't write, Declassify with a decision and a stale
+entry, and two cards that may not run. Local CodeQL at d99c56d0: no finding in either language.
+
+A fresh reviewer (the most capable model) reviewed fa69a2cf..d99c56d0 against the plan, its Review Focus, the mockups
+and the screenshots, with a test for each claim: no critical finding; six important, nine minor; "ready to merge: with
+fixes". It found none of the Review Focus failure modes, and ran the engine's CEL runtime over the builder's number
+comparisons with an int against a double, and back: always a value, never an error. Re-graded by what a person gets,
+two of its minors are important (a control's errors describe it, a Global Constraint; focus lost on closing a panel),
+and were fixed with the six, in one pass, each test failing first:
+
+M68. **The builder keeps focus in the drawer.** Escape in its tree, a pick, and removing a comparison or a group left
+    focus on the page's body, out of the drawer: Escape now returns it to the button that opened the tree, a pick puts
+    it on the new comparison's operator, a removal on "＋ Condition" (ruling 132's "Escape closes it and gives focus
+    back"). Tests: "gives focus back to ＋ Condition when the tree closes with Escape", "puts focus on a picked
+    comparison's operator, and on ＋ Condition once it's removed".
+M69. **A pill to a step no longer in the draft says it has no sample.** Its sample query never runs, so it said
+    "Looking for a sample…" for good (as M67's version's view did). Test: "says a pill to a step no longer in the draft
+    has no sample, never that it's looking".
+M70. **A pill keeps its state while the next saved revision's answer comes.** The `at` answer is per revision (ruling
+    130), so at each save every pill turned solid, lost its "?" and "may be missing", until the server answered. The
+    previous answer now stands in while the next is asked, for the same value only, and only for the draft: the next
+    answer replaces it, an answer about another revision is still refused (`DraftMoved`), a version's view still shows
+    nothing. Test: "keeps a pill dashed while the next saved revision's answer comes".
+M71. **A default written on a pill always shows.** It showed only while the value may be missing, so one written then
+    couldn't be seen or removed once the value was always there, nor seen in a version's view. It shows whenever it's
+    there (read only in a version; "It's always there now, so this default isn't used." when so); "Add a default…" is
+    offered only where something may be missing. Tests: "shows a default already written though the value is always
+    there now, and removable", "shows a default in a version's view, read only".
+M72. **"＋ Data" pressed before the text was ever focused gives focus back to the text.** Escape asked for a place past
+    the last text, and focus went to the body; it now goes to the end of the last text. Test: "gives focus back to the
+    text when the tree ＋ Data opened closes, the text never focused before".
+M73. **Adding a default focuses it; removing one focuses "Add a default…".** The pressed button went, and focus with it.
+    Test: "puts focus on the default once added, and on Add a default… once it's removed".
+M74. **A comparison's value is described by its problem** (`aria-describedby`): the Global Constraints' "its hint and
+    errors describe it". Test: "describes a comparison's value by its problem".
+M75. **Closing Declassify after its last entry is removed lands on Versions**, its toolbar button gone with the last
+    entry. Test: "lands on Versions when Declassify closes after its last entry is removed".
+    Fixed in e7b660a6. Checks, as run on it: the unit suite 825 passed (62 files); typecheck, lint, `check:api` and
+    build clean; the browser gate 37 passed; local CodeQL no finding in either language; no backend change.
+
+Deferred minors, for the owner: the builder's pill is a button that opens nothing (`aria-haspopup`, no details);
+Declassify alone of the side panels doesn't close on Escape; the pills note shows in a version's view and for a viewer,
+where "＋ Data" and "/" aren't offered; "is" and "is not" on a value of no declared type compare with text only, so
+`trigger.count is 3` writes `== "3"` and never matches the number 3 (a choice of kind needs a design); ← on a value
+shown directly under its group doesn't move to the group (↑ does); the tree's search asks on every keystroke (cached per
+revision); "/" is tested in unit tests only, not in the browser.
+
+What the reviewer set aside, ruled to stand: the typed path for an undeclared trigger in text fields only (the plan's
+code, accepted; a condition on it is a formula); the builder's operator and value without a visible label of their own
+(the row's pill names them, as the signed-off board shows); one `at` question per pill per revision (ruling 130); a
+sensitive value insertable as a pill (the server's taint check decides, the tree tags it); the badge from the last
+check until the next (ruling 137); a boolean literal in a condition shown as not the builder's (never written so); the
+panels without the boards' shadow (ruling 126, outline §6); a value typed both text and object refused in text
+(`template.part_not_scalar`).
+
+Twice before this slice's code, 4b tests failed once on main's own code and passed when run again: `says when the
+latest edits aren't saved` and `stops placing a step, and says so`, each asserting an announcement right after a screen
+change. Not reproduced since; the owner's word: watch for them.
+
+Paused at the final checkpoint. Nothing is pushed: a push and a PR wait for the owner's word.
+
+### The final checkpoint reviewed (2026-10-10, pasted)
+
+A pasted review held the final checkpoint at 6b1b8aaf for two residual defects in the final review's fixes, both
+reproduced; it found M66's and M67's counterexamples passing, and the other fixes' controls too. It authorizes no push
+or PR.
+
+### 4c-2b, after the final checkpoint's review (2026-10-10)
+
+M76. **Removing a group's only comparison puts focus on "＋ Condition".** M68 sent it to the group's own "＋ Condition",
+    but an empty group writes nothing, so the group went with its last comparison, and focus with it. Test: "puts focus
+    on ＋ Condition when a group's only comparison is removed, the group gone with it" (focus was on the body first).
+M77. **A previous revision's scope answer draws a pill, and says nothing as current** (amends M70). While the next saved
+    revision's answer comes, the pill keeps its look (`shown`), but the details and the builder use this revision's
+    answer only (`entry`): the details say "Checking the saved draft's data…" in place of the previous facts, and a
+    comparison offers no operator but its own until the answer comes. Tests: "never says the previous revision's facts
+    as this one's while its answer comes" (it said "It's always there now…" first), "offers a comparison's operators
+    from this revision's answer only, never the previous one's".
+    Fixed in 4da86fdb. Checks, as run on it: the unit suite 828 passed (62 files); typecheck, lint, `check:api` and
+    build clean; the browser gate 37 passed; local CodeQL no finding in either language; no backend change.
+
+Paused at the final checkpoint again. Nothing is pushed: a push and a PR wait for the owner's word.
