@@ -67,7 +67,12 @@ export function CommandPalette() {
       <dialog
         ref={dialog}
         aria-label="Search or jump to"
-        onClose={() => setOpen(false)}
+        // Escape fires `cancel` at once and `close` a task later: the palette is closed from `cancel` on, so a ⌘K in
+        // between reopens it, and a late `close` leaves it open once it has reopened.
+        onCancel={() => setOpen(false)}
+        onClose={() => {
+          if (!dialog.current?.open) setOpen(false);
+        }}
         className="mx-auto mt-20 w-[640px] max-w-[calc(100vw-32px)] rounded-dialog border border-line bg-surface p-0 text-ink shadow-dialog backdrop:bg-overlay"
       >
         {open && (

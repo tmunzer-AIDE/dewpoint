@@ -104,6 +104,12 @@ test.describe.serial("foundations", () => {
     const search = palette.getByRole("combobox");
     await expect(search).toBeVisible();
     await expect(search).toBeFocused();
+    // Escape then ⌘K at once reopens it: the dialog's close event comes a task after Escape, and a ⌘K in between was
+    // lost (a CI run of #82).
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("ControlOrMeta+k");
+    await expect(search).toBeVisible();
+    await expect(search).toBeFocused();
     await page.keyboard.type("secur");
     await expect(search).toHaveValue("secur");
     await expect(palette.getByRole("option", { name: "Security", selected: true })).toBeVisible();
