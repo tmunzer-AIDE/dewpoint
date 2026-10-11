@@ -104,6 +104,8 @@ const bound = (chosen: Chosen): Record<string, string> =>
   Object.fromEntries(Object.entries(chosen).filter(([, value]) => value !== UNBOUND));
 
 const CHOICE = "flex cursor-pointer flex-col gap-1 rounded-lg border border-line-strong bg-surface p-4 has-[:checked]:border-accent has-[:checked]:bg-accent-soft has-[:disabled]:cursor-not-allowed";
+/** A choice with controls of its own: the box around them, the label naming the radio alone (the final review). */
+const CHOICE_BOX = "flex flex-col gap-1 rounded-lg border border-line-strong bg-surface p-4 has-[:checked]:border-accent has-[:checked]:bg-accent-soft";
 
 /** A workflow made, and what of its triggers wasn't: the dialog stays to say so, with the way to open it. */
 type Partly = { wf: WorkflowDetail; missed: string };
@@ -254,15 +256,23 @@ export function NewWorkflow({ tenantId, onClose }: { tenantId: string; onClose: 
       : trigger === "schedule" ? "It opens on its Triggers: a schedule can be added once a first version is published."
       : "It opens on its Triggers: by hand, its input is the run's form.";  // prettier-ignore
 
-  const radio = (value: Trigger, label: string, hint: string, disabled = false, extra?: ReactNode) => (
-    <label className={CHOICE}>
+  const named = (value: Trigger, label: string, hint: string, disabled: boolean, className: string) => (
+    <label className={className}>
       <span className="flex items-center gap-2">
         <input type="radio" name="trigger" value={value} checked={trigger === value} disabled={disabled} onChange={() => setTrigger(value)} />
         <span className="font-semibold">{label}</span>
       </span>
       <span className="text-small text-muted">{hint}</span>
-      {extra}
     </label>
+  );  // prettier-ignore
+  const radio = (value: Trigger, label: string, hint: string, disabled = false) => named(value, label, hint, disabled, CHOICE);
+  /** A choice whose controls sit beside its label, never inside it: a label names its radio alone, and the box is the
+   * same whether they show or not, so the radio keeps its focus (the final review). */
+  const boxed = (value: Trigger, label: string, hint: string, disabled: boolean, extra: ReactNode) => (
+    <div className={CHOICE_BOX}>
+      {named(value, label, hint, disabled, `flex flex-col gap-1 ${disabled ? "cursor-not-allowed" : "cursor-pointer"}`)}
+      {extra}
+    </div>
   );  // prettier-ignore
 
   return (
@@ -282,7 +292,7 @@ export function NewWorkflow({ tenantId, onClose }: { tenantId: string; onClose: 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             {radio("hand", "By hand", "Someone starts it, filling in a form.")}
             {radio("schedule", "On a schedule", "Set once a first version is published.")}
-            {radio(
+            {boxed(
               "webhook", sender ? `A ${sender} webhook` : "A webhook",
               senders.length > 0 ? `Runs for each event of a topic ${sender ?? "it"} sends.` : "No endpoint for it yet: Settings › Webhook endpoints makes one.",
               senders.length === 0,

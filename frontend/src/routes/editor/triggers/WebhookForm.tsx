@@ -114,8 +114,10 @@ export function WebhookForm({ binding, onDone }: { binding: WorkflowBinding | nu
   }
 
   const senderOf = (trigger: string | null) => {
-    const x = (types.data ?? []).find((y) => y.key === trigger);
-    return x ? senderName(x) : trigger ? "an unknown sender" : "another sender";
+    if (trigger === null) return "another sender";
+    if (!types.data) return trigger; // not known yet, or couldn't be read: its key, never "unknown" (the final review)
+    const x = types.data.find((y) => y.key === trigger);
+    return x ? senderName(x) : "an unknown sender";
   };
   return (
     <form
@@ -172,18 +174,20 @@ export function WebhookForm({ binding, onDone }: { binding: WorkflowBinding | nu
               <div className="flex flex-wrap items-center gap-2">
                 <input
                   aria-label={`Field ${i + 1}`} value={c.pointer} placeholder="/type" spellCheck={false} aria-invalid={!!errors[i]}
+                  aria-describedby={errors[i] ? `${id}-why-${i}` : undefined}
                   onChange={(e) => setClauses((x) => x.map((y, j) => (j === i ? { ...y, pointer: e.target.value } : y)))}
                   className={`${controlClass(!!errors[i])} w-auto min-w-0 flex-1 basis-32`}
                 />
                 <span className="text-small">is</span>
                 <input
                   aria-label={`Value ${i + 1}`} value={c.value} spellCheck={false} aria-invalid={!!errors[i]}
+                  aria-describedby={errors[i] ? `${id}-why-${i}` : undefined}
                   onChange={(e) => setClauses((x) => x.map((y, j) => (j === i ? { ...y, value: e.target.value } : y)))}
                   className={`${controlClass(!!errors[i])} w-auto min-w-0 flex-1 basis-32`}
                 />
                 <Button size="sm" aria-label={`Remove condition ${i + 1}`} onClick={() => setClauses((x) => x.filter((_, j) => j !== i))}>×</Button>
               </div>
-              {errors[i] && <p className="text-small text-danger">{errors[i]}</p>}
+              {errors[i] && <p id={`${id}-why-${i}`} className="text-small text-danger">{errors[i]}</p>}
             </div>
           ))}
           <Button size="sm" className="self-start" disabled={clauses.length >= MAX_CLAUSES} onClick={() => setClauses((x) => [...x, { pointer: "", value: "" }])}>

@@ -43,6 +43,8 @@ describe("an endpoint in words", () => {
   it("names its sender, a trigger's or another's, and one no plugin declares any more", () => {
     expect(senderWords("mist.webhook", [MIST])).toBe("Mist");
     expect(senderWords(null, [MIST])).toBe("Another sender");
+    expect(senderWords("mist.webhook", undefined)).toBe("mist.webhook"); // not known yet: its key, never "unknown"
+    expect(senderWords("gone.webhook", [MIST])).toBe("An unknown sender (gone.webhook)");
     expect(senderWords("old.hook", [MIST])).toBe("An unknown sender (old.hook)");
   });
 

@@ -38,11 +38,12 @@ function Limits({ form, set, errors }: { form: Pick<Form, "allowlist" | "bodyLim
       <div className="flex flex-col gap-1.5">
         <label htmlFor={id} className="text-small font-semibold">Allowed networks</label>
         <textarea
-          id={id} rows={3} value={form.allowlist} spellCheck={false} aria-describedby={`${id}-hint`} aria-invalid={!!errors.allowlist}
+          id={id} rows={3} value={form.allowlist} spellCheck={false} aria-invalid={!!errors.allowlist}
+          aria-describedby={errors.allowlist ? `${id}-hint ${id}-why` : `${id}-hint`}
           onChange={(e) => set({ allowlist: e.target.value })} className={`${controlClass(!!errors.allowlist)} py-2 font-mono text-small`}
         />
         <p id={`${id}-hint`} className="text-small text-muted">One a line, up to 32. Empty: any address.</p>
-        {errors.allowlist && <p className="text-small text-danger">{errors.allowlist}</p>}
+        {errors.allowlist && <p id={`${id}-why`} className="text-small text-danger">{errors.allowlist}</p>}
       </div>
       <Select label="Largest delivery" value={String(form.bodyLimit)} onChange={(e) => set({ bodyLimit: Number(e.target.value) })}>
         {BODY_LIMITS.map((b) => <option key={b.value} value={b.value}>{b.label}</option>)}
@@ -182,7 +183,7 @@ export function NewEndpoint({ tenantId, types, onCreated, onCancel }: {
 }
 
 export function EditEndpoint({ tenantId, endpoint, types, onSaved, onCancel }: {
-  tenantId: string; endpoint: Endpoint; types: TriggerType[]; onSaved: () => void; onCancel: () => void;
+  tenantId: string; endpoint: Endpoint; types: TriggerType[] | undefined; onSaved: () => void; onCancel: () => void;
 }) {  // prettier-ignore
   const id = useId();
   const [form, setForm] = useState(() => ({

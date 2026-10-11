@@ -100,8 +100,9 @@ export function idsWords(e: Pick<Endpoint, "id_source" | "id_pointer" | "id_head
 }
 
 /** Who sends to an endpoint: its trigger's sender, another sender, or one no plugin declares any more. */
-export function senderWords(trigger: string | null, types: TriggerType[]): string {
+export function senderWords(trigger: string | null, types: TriggerType[] | undefined): string {
   if (trigger === null) return "Another sender";
+  if (types === undefined) return trigger; // what senders there are isn't known yet, or couldn't be read: never "unknown"
   const type = types.find((t) => t.key === trigger);
   return type ? senderName(type) : `An unknown sender (${trigger})`;
 }

@@ -104,7 +104,7 @@ export function WebhooksSection() {
                     )}
                   </span>
                 </div>
-                <span className="text-small text-muted">{bindingLine(b, types.data ?? [])}</span>
+                <span className="text-small text-muted">{bindingLine(b, types.data)}</span>
                 {!b.endpoint.enabled && <span className="text-small text-warn-ink">Its endpoint is off: events sent to it are refused.</span>}
                 {fit(b)}
               </>

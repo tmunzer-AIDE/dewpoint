@@ -15,6 +15,7 @@ import {
 import { setSettings } from "../../../lib/input";
 import { parseNumber } from "../../../lib/unapplied";
 import type { Diagnostic, GraphDoc } from "../../../lib/workflows";
+import { useText } from "../drawer/scalars";
 import type { FocusAt } from "./InputSection";
 import { useTriggers } from "./context";
 import { Check, Problems, StaleEdit, Values, heldWhy, problemsAt, writeTyped } from "./parts";
@@ -53,8 +54,6 @@ function ColumnText({ i, column, k, label }: { i: number; column: CsvColumn; k: 
 
 function ColumnDefault({ i, column, set }: { i: number; column: CsvColumn; set: (patch: Partial<CsvColumn>, key: string) => void }) {
   const t = useTriggers();
-  const at = `${columnAt(i)}/default`;
-  const held = t.actions.held("number", at);
   const label = "Default (an empty cell gets it)";
   if (column.sensitive) return <Field label={label} value="" disabled />;
   if (column.type === "boolean" || column.type === "enum") {
@@ -69,14 +68,35 @@ function ColumnDefault({ i, column, set }: { i: number; column: CsvColumn; set: 
       </Select>
     );  // prettier-ignore
   }
+  return <TypedDefault i={i} column={column} label={label} />;
+}
+
+const shownDefault = (v: unknown) => (typeof v === "string" || typeof v === "number" ? String(v) : "");
+
+/** A text or number column's default as typed: its own text kept while it still means the value ("2." while 2.5 is
+ * typed: the final review), written when a save takes it, held with why when it wouldn't. */
+function TypedDefault({ i, column, label }: { i: number; column: CsvColumn; label: string }) {
+  const t = useTriggers();
+  const at = `${columnAt(i)}/default`;
+  const held = t.actions.held("number", at);
   const numeric = column.type === "integer" || column.type === "number";
-  const shown = held?.text ?? (typeof column.default === "string" || typeof column.default === "number" ? String(column.default) : "");
+  const [typed, setTyped] = useText(
+    column.default,
+    shownDefault,
+    (text, v) => {
+      if (!numeric) return text === shownDefault(v);
+      const parsed = parseNumber(text, column.type === "integer");
+      return "value" in parsed && parsed.value === v;
+    },
+    held?.text,
+  );
   return (
     <div className="flex flex-col gap-1.5">
       <Field
-        label={label} value={shown} disabled={!t.editable} spellCheck={false} error={heldWhy(t.actions, "number", at) ?? undefined}
+        label={label} value={held?.text ?? typed} disabled={!t.editable} spellCheck={false} error={heldWhy(t.actions, "number", at) ?? undefined}
         onChange={(e) => {
           const text = e.target.value;
+          setTyped(text);
           const holding = { path: ["csv", "columns", i, "default"], label: `Column ${i + 1}'s default`, text, whole: column.type === "integer" };
           if (!numeric) {
             // Text is written as typed, unless an edit is held here: typed for another column, it's never written over
@@ -90,7 +110,7 @@ function ColumnDefault({ i, column, set }: { i: number; column: CsvColumn; set: 
           );
         }}
       />
-      <StaleEdit kind="number" at={at} />
+      <StaleEdit kind="number" at={at} onDiscard={() => setTyped(shownDefault(column.default))} />
     </div>
   );  // prettier-ignore
 }
@@ -173,22 +193,28 @@ function Limit({ k, label, csv }: { k: "max_rows" | "max_bytes"; label: string; 
   const t = useTriggers();
   const at = `${AT}/${k}`;
   const held = t.actions.held("limit", at);
-  const current = csv[k];
-  const shown = held?.text ?? (current === undefined ? "" : k === "max_bytes" ? mbOf(current) : String(current));
+  const readLimit = (text: string) => (k === "max_bytes" ? sizeLimit(text) : rowsLimit(text));
+  const show = (v: unknown) => (typeof v === "number" ? (k === "max_bytes" ? mbOf(v) : String(v)) : "");
+  // Its own text, kept while it still means the limit ("1." while 1.5 is typed: the final review).
+  const [typed, setTyped] = useText(csv[k], show, (text, v) => {
+    const read = readLimit(text);
+    return "value" in read && read.value === v;
+  }, held?.text);  // prettier-ignore
   return (
     <div className="flex flex-col gap-1.5">
       <Field
-        label={label} value={shown} disabled={!t.editable} inputMode="decimal" error={heldWhy(t.actions, "limit", at) ?? undefined}
+        label={label} value={held?.text ?? typed} disabled={!t.editable} inputMode="decimal" error={heldWhy(t.actions, "limit", at) ?? undefined}
         placeholder={k === "max_bytes" ? "5" : String(MAX_ROWS)}
         onChange={(e) => {
           const text = e.target.value;
-          const read = k === "max_bytes" ? sizeLimit(text) : rowsLimit(text);
+          setTyped(text);
+          const read = readLimit(text);
           writeTyped(t.actions, "limit", at, { path: ["csv", k], label, text }, "problem" in read ? read.problem : null, () =>
             "problem" in read ? null : t.actions.update(onCsv((csv) => setLimits(csv, { [k]: read.value })), null, at),
           );
         }}
       />
-      <StaleEdit kind="limit" at={at} />
+      <StaleEdit kind="limit" at={at} onDiscard={() => setTyped(show(csv[k]))} />
     </div>
   );  // prettier-ignore
 }

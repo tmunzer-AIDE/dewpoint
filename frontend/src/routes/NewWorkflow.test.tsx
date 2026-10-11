@@ -287,6 +287,17 @@ describe("what starts it (4c-3b)", () => {
     });
   }
 
+  it("names each choice by its own words, its endpoint and topic beside its label, not inside it", async () => {
+    // The final review: the Mist webhook's selects sat inside its radio's label, which named it by every option.
+    api();
+    await show();
+    const radio = await screen.findByRole("radio", { name: /^A Mist webhook/ });
+    await userEvent.click(radio);
+    expect(screen.getByRole("radio", { name: "A Mist webhook Runs for each event of a topic Mist sends." })).toBe(radio);
+    expect(radio.closest("label")?.querySelectorAll("label, select")).toHaveLength(0);
+    expect(screen.getByRole("combobox", { name: "Topic" })).toBeTruthy();
+  });
+
   it("seeds a Mist webhook's topic shape, binds its endpoint at once, and opens the workflow on its Triggers", async () => {
     const sent = api();
     const router = await show();

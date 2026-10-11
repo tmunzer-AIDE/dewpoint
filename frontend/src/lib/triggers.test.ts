@@ -118,6 +118,20 @@ describe("a webhook binding in words", () => {
     expect(filterWords([{ pointer: "/site", value: " HQ " }])).toBe('/site is " HQ "');
   });
 
+  it("shows text with a line break as JSON text: a one-line field would drop the break", () => {
+    // The final review: "a\nb" made through the API was shown raw, and saved back as "ab".
+    for (const v of ["a\nb", "a\rb", "a\r\nb"]) {
+      expect(valueText(v)).toBe(JSON.stringify(v));
+      expect(parseValue(valueText(v))).toEqual({ value: v });
+    }
+  });
+
+  it("names a binding's sender by its key while the trigger types aren't known, never as unknown", () => {
+    // The final review: "not loaded" read as "no plugin declares it any more".
+    expect(bindingLine({ endpoint: { trigger: "mist.webhook" }, filter: [{ pointer: "/topic", value: "alarms" }] }, undefined)).toBe("mist.webhook · /topic is alarms");
+    expect(bindingLine({ endpoint: { trigger: "gone.webhook" }, filter: [] }, [MIST])).toBe("An unknown sender (gone.webhook) · every event");
+  });
+
   it("reads text in quotes as JSON text, and says so when it isn't", () => {
     expect(parseValue('" HQ "')).toEqual({ value: " HQ " });
     expect(parseValue('"a\\"b"')).toEqual({ value: 'a"b' });

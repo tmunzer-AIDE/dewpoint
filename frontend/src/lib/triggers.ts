@@ -211,9 +211,11 @@ export function topicOf(filter: FilterClause[], type: TriggerType | undefined): 
 
 /** What a binding's endpoint sends and when the binding runs, in its row: "Mist · topic device-events", or "Another
  * sender · /type is incident". An endpoint made for a trigger no plugin declares any more says so. */
-export function bindingLine(b: { endpoint: { trigger: string | null }; filter: FilterClause[] }, types: TriggerType[]): string {
+export function bindingLine(b: { endpoint: { trigger: string | null }; filter: FilterClause[] }, types: TriggerType[] | undefined): string {
   const key = b.endpoint.trigger;
-  const type = key === null ? undefined : types.find((t) => t.key === key);
+  // What senders there are isn't known yet, or couldn't be read: the sender by its key, never "unknown" (the final review).
+  if (key !== null && types === undefined) return `${key} · ${filterWords(b.filter)}`;
+  const type = key === null ? undefined : types?.find((t) => t.key === key);
   if (key !== null && !type) return `An unknown sender (${key}) · ${filterWords(b.filter)}`;
   if (!type) return `Another sender · ${filterWords(b.filter)}`;
   const topic = topicOf(b.filter, type);
@@ -245,9 +247,10 @@ export function parseValue(text: string): { value: FilterClause["value"] } | { p
 }
 
 /** A filter value as the form shows it, so that reading it again gives it back exactly (the review of revision 1): text
- * as itself when that reads back as it, else as JSON text in quotes (" HQ ", "42", "" and a quote at each end). */
+ * as itself when that reads back as it, else as JSON text in quotes (" HQ ", "42", "" and a quote at each end), and so
+ * is text with a line break, which a one-line field would drop (the final review). */
 export function valueText(v: FilterClause["value"]): string {
   if (typeof v !== "string") return v === null ? "null" : String(v);
   const read = parseValue(v);
-  return v !== "" && "value" in read && read.value === v ? v : JSON.stringify(v);
+  return v !== "" && !/[\r\n]/.test(v) && "value" in read && read.value === v ? v : JSON.stringify(v);
 }

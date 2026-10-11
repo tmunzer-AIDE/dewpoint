@@ -15,7 +15,7 @@ import {
   type Schedule,
 } from "../../../lib/triggers";  // prettier-ignore
 import { useTriggers } from "./context";
-import { Section } from "./parts";
+import { Section, useFocusBack } from "./parts";
 import { ScheduleForm } from "./ScheduleForm";
 
 const LIVE =
@@ -38,6 +38,7 @@ export function SchedulesSection() {
   const [error, setError] = useState<string | null>(null);
   const adder = useRef<HTMLButtonElement>(null);
   const heading = useRef<HTMLHeadingElement | null>(null);
+  const { box, back } = useFocusBack<HTMLElement>(); // an edited schedule's Edit, once its form closes (the final review)
   const refresh = () => {
     void qc.invalidateQueries({ queryKey: ["workflows", t.tenantId] });
     return qc.invalidateQueries({ queryKey: ["schedules", t.tenantId, t.workflowId] });
@@ -76,7 +77,7 @@ export function SchedulesSection() {
     if (focusAdd) requestAnimationFrame(() => adder.current?.focus());
   };
   return (
-    <Section id="triggers-schedules" title="Schedules" heading={heading} note={published ? `Live · on version ${t.activeNumber}` : "Live"}>
+    <Section id="triggers-schedules" title="Schedules" heading={heading} box={box} note={published ? `Live · on version ${t.activeNumber}` : "Live"}>
       {list.length > 0 && <p className="text-small text-muted">{LIVE}</p>}
       {error && <p role="alert" className="text-small text-danger">{error}</p>}
       {schedules.isError && <LoadError what="The schedules" />}
@@ -94,6 +95,7 @@ export function SchedulesSection() {
                   schedule={s} form={form.data} activeNumber={t.activeNumber!}
                   onDone={(saved) => {
                     close(false);
+                    back(`schedule:${s.id}`);
                     if (saved) void refresh();
                   }}
                   onDelete={() => setDeleting(s)}
@@ -106,7 +108,7 @@ export function SchedulesSection() {
                       {t.manage ? (
                         <>
                           <Switch checked={s.enabled} label={title} disabled={toggle.isPending} onCheckedChange={(enabled) => toggle.mutate({ id: s.id, title, enabled })} />
-                          <Button size="sm" aria-label={`Edit ${title}`} disabled={!form.data} onClick={() => setOpen(s.id)}>Edit</Button>
+                          <Button size="sm" aria-label={`Edit ${title}`} data-back={`schedule:${s.id}`} disabled={!form.data} onClick={() => setOpen(s.id)}>Edit</Button>
                         </>
                       ) : (
                         <span className="text-small">{s.enabled ? "On" : "Off"}</span>

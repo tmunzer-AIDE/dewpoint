@@ -150,6 +150,52 @@ describe("Settings → Webhook endpoints", () => {
     await vi.waitFor(() => expect(sent.find((r) => r.method === "PATCH")?.body).toEqual({ name: "Tickets" }));
   });
 
+  it("gives focus to a made endpoint's token, and back to an edited one's details once its form closes", async () => {
+    // The final review: creating one, or saving or cancelling an edit, left focus on the page's body.
+    api("editor", "development", {
+      "POST /api/v1/t/t1/webhook-endpoints": () => json({ ...ENDPOINT, id: "e9", name: "Mist lab 2", secret: "tok-9" }, 201),
+      "PATCH /api/v1/t/t1/webhook-endpoints/e2": () => json(TICKETING),
+    });
+    await show();
+    await userEvent.click(await screen.findByRole("button", { name: "＋ Endpoint" }));
+    await userEvent.type(within(screen.getByRole("form", { name: "New endpoint" })).getByRole("textbox", { name: "Name" }), "Mist lab 2");
+    await userEvent.click(screen.getByRole("button", { name: "Create the endpoint" }));
+    const shown = await screen.findByRole("status");
+    await vi.waitFor(() => expect(document.activeElement).toBe(within(shown).getByRole("heading", { name: "Mist lab 2 is ready" })));
+    await userEvent.click(within(shown).getByRole("button", { name: "I've copied it" }));
+    const details = () => within(table()).getByRole("button", { name: "Ticketing, details" });
+    await userEvent.click(details());
+    await userEvent.click(within(table()).getByRole("button", { name: "Edit" }));
+    await userEvent.click(within(screen.getByRole("form", { name: "Editing Ticketing" })).getByRole("button", { name: "Cancel" }));
+    await vi.waitFor(() => expect(document.activeElement).toBe(details()));
+    await userEvent.click(within(table()).getByRole("button", { name: "Edit" }));
+    const form = screen.getByRole("form", { name: "Editing Ticketing" });
+    await userEvent.clear(within(form).getByRole("textbox", { name: "Name" }));
+    await userEvent.type(within(form).getByRole("textbox", { name: "Name" }), "Tickets");
+    await userEvent.click(within(form).getByRole("button", { name: "Save" }));
+    await vi.waitFor(() => expect(document.activeElement).toBe(details()));
+  });
+
+  it("names an endpoint's sender by its key while the senders there are can't be read, never as unknown", async () => {
+    // The final review: a pending or failed /trigger-types read as "An unknown sender (mist.webhook)".
+    api("editor", "development", { "GET /api/v1/trigger-types": () => json({ error: "unavailable" }, 503) });
+    await show();
+    await within(table()).findByRole("button", { name: "Mist prod, details" });
+    expect(table().textContent).not.toContain("An unknown sender");
+    expect(table().textContent).toContain("mist.webhook");
+  });
+
+  it("says a refused allowlist to whoever reads the allowlist", async () => {
+    // The final review: the refusal showed, but the control wasn't described by it.
+    api("editor", "development", { "POST /api/v1/t/t1/webhook-endpoints": () => json({ error: "endpoint_invalid", fields: ["allowlist"] }, 422) });
+    await show();
+    await userEvent.click(await screen.findByRole("button", { name: "＋ Endpoint" }));
+    const form = screen.getByRole("form", { name: "New endpoint" });
+    await userEvent.type(within(form).getByRole("textbox", { name: "Name" }), "Mist lab");
+    await userEvent.click(within(form).getByRole("button", { name: "Create the endpoint" }));
+    expect(await within(form).findByRole("textbox", { name: "Allowed networks", description: /One network a line, like 203\.0\.113\.0\/24/ })).toBeTruthy();
+  });
+
   it("turns an endpoint off at once", async () => {
     const sent = api("editor", "development", { "PATCH /api/v1/t/t1/webhook-endpoints/e1": () => json({ ...ENDPOINT, enabled: false }) });
     await show();

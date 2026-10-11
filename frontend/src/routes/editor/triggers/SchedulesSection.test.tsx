@@ -346,6 +346,23 @@ describe("a workflow's schedules", () => {
     await vi.waitFor(() => expect(sent.find((r) => r.method === "PATCH")?.body).toEqual({ input: { site: "Lab" } }));
   });
 
+  it("gives focus back to a schedule's Edit once its form closes, by Cancel, Escape or Save", async () => {
+    // The final review: an edited schedule's form left focus on the page's body.
+    api([SCHEDULE], { "PATCH /api/v1/t/t1/schedules/s1": () => json({ ...SCHEDULE, mode: "simulate" }) });
+    await showPanel();
+    const edit = () => within(section()).getByRole("button", { name: "Edit Every day at 07:00" });
+    await userEvent.click(await within(section()).findByRole("button", { name: "Edit Every day at 07:00" }));
+    await userEvent.click(within(section()).getByRole("button", { name: "Cancel" }));
+    await vi.waitFor(() => expect(document.activeElement).toBe(edit()));
+    await userEvent.click(edit());
+    await userEvent.keyboard("{Escape}");
+    await vi.waitFor(() => expect(document.activeElement).toBe(edit()));
+    await userEvent.click(edit());
+    await userEvent.click(within(section()).getByRole("radio", { name: "Simulate" }));
+    await userEvent.click(within(section()).getByRole("button", { name: "Save" }));
+    await vi.waitFor(() => expect(document.activeElement).toBe(edit()));
+  });
+
   it("turns one off at once, and deletes one after asking", async () => {
     const sent = api([SCHEDULE], {
       "PATCH /api/v1/t/t1/schedules/s1": () => json({ ...SCHEDULE, enabled: false }),

@@ -252,6 +252,24 @@ describe("the input's CSV file", () => {
     await vi.waitFor(() => expect(document.activeElement).toBe(within(input()).getByRole("button", { name: "＋ Column" })));
   });
 
+  it("keeps a decimal as it's typed, in a number column's default and in the largest file", async () => {
+    // The final review: "2." read back as 2, so "2.5" became 25 in the draft, and 1.5 MB couldn't be set.
+    const panel = await showPanel({ doc: draft({ csv: { columns: [{ header: "Price", name: "price", type: "number" as const }] } }) });
+    await userEvent.click(within(input()).getByRole("button", { name: "Edit Price" }));
+    const value = within(input()).getByRole<HTMLInputElement>("textbox", { name: "Default (an empty cell gets it)" });
+    await userEvent.type(value, "2.5");
+    expect(value.value).toBe("2.5");
+    expect(panel.settings()?.csv?.columns[0]?.default).toBe(2.5);
+    await userEvent.click(within(input()).getByRole("button", { name: "Done" }));
+    // Focus comes back to Edit Price a frame later: typed before it lands, a key would go there.
+    await vi.waitFor(() => expect(document.activeElement).toBe(within(input()).getByRole("button", { name: "Edit Price" })));
+    const mb = within(input()).getByRole<HTMLInputElement>("textbox", { name: "Largest file (MB)" });
+    await userEvent.type(mb, "1.5");
+    expect(mb.value).toBe("1.5");
+    expect(panel.held()).toEqual([]);
+    expect(panel.settings()?.csv?.max_bytes).toBe(1_572_864);
+  });
+
   it("holds most rows past the platform's, and writes a lower one", async () => {
     const panel = await showPanel({ doc: draft({ csv: { columns: [{ header: "A", name: "a", type: "string" }] } }) });
     const rows = within(input()).getByRole("textbox", { name: "Most rows" });

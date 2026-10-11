@@ -55,6 +55,15 @@ export function WebhookEndpointsPage({ tenantId }: { tenantId: string }) {
   const [rotating, setRotating] = useState<Endpoint | null>(null);
   const [error, setError] = useState<string | null>(null);
   const heading = useRef<HTMLHeadingElement>(null);
+  const shownHeading = useRef<HTMLHeadingElement>(null);
+  /** Focus where a person carries on once a form closes (WCAG 2.4.3; the final review): a token shown once, or the
+   * edited endpoint's Details, the one on screen (the table's, or its card's at narrow widths). */
+  const toShown = () => requestAnimationFrame(() => shownHeading.current?.focus());
+  const toDetails = (id: string) =>
+    requestAnimationFrame(() => {
+      const all = [...document.querySelectorAll<HTMLElement>("[data-back]")].filter((el) => el.dataset.back === `endpoint:${id}`);
+      (all.find((el) => el.getClientRects().length > 0) ?? all[0])?.focus();
+    });
   const refresh = () => qc.invalidateQueries({ queryKey: ["endpoints", tenantId] });
   const named = (id: string) => workflows.data?.find((w) => w.id === id)?.name ?? "a workflow";
   const typeOf = (e: Endpoint) => (types.data ?? []).find((t) => t.key === e.trigger);
@@ -71,6 +80,7 @@ export function WebhookEndpointsPage({ tenantId }: { tenantId: string }) {
     onSuccess: (out, e) => {
       setRotating(null);
       setShown({ name: e.name, secret: out.secret, endpoint: e, rotated: true });
+      toShown();
     },
     onError: (_, e) => {
       setRotating(null);
@@ -102,7 +112,7 @@ export function WebhookEndpointsPage({ tenantId }: { tenantId: string }) {
   }
 
   function details(e: Endpoint) {
-    const sender = senderWords(e.trigger, types.data ?? []);
+    const sender = senderWords(e.trigger, types.data);
     const rows = bound.get(e.id) ?? null;
     return (
       <div className="flex flex-col gap-2 text-small">
@@ -129,7 +139,7 @@ export function WebhookEndpointsPage({ tenantId }: { tenantId: string }) {
     );  // prettier-ignore
   const workflowsOf = (e: Endpoint) => (bound.get(e.id) ?? null)?.length ?? "–";
   const detailsButton = (e: Endpoint) => (
-    <Button size="sm" aria-label={`${e.name}, details`} aria-expanded={open === e.id} onClick={() => setOpen(open === e.id ? null : e.id)}>Details</Button>
+    <Button size="sm" aria-label={`${e.name}, details`} aria-expanded={open === e.id} data-back={`endpoint:${e.id}`} onClick={() => setOpen(open === e.id ? null : e.id)}>Details</Button>
   );
   const editingOne = list.find((e) => e.id === editing);
   return (
@@ -146,10 +156,10 @@ export function WebhookEndpointsPage({ tenantId }: { tenantId: string }) {
       {error && <p role="alert" className="text-body text-danger">{error}</p>}
       {shown && (
         <div role="status" className="flex max-w-2xl flex-col gap-2 rounded-lg border border-line-strong bg-surface p-4">
-          <h3 className="text-body-lg font-semibold">{shown.rotated ? `${shown.name}'s new ${shown.endpoint.auth === "hmac" ? "secret" : "token"}` : `${shown.name} is ready`}</h3>
+          <h3 ref={shownHeading} tabIndex={-1} className="text-body-lg font-semibold outline-none">{shown.rotated ? `${shown.name}'s new ${shown.endpoint.auth === "hmac" ? "secret" : "token"}` : `${shown.name} is ready`}</h3>
           <p className="text-small">{shown.endpoint.auth === "hmac" ? "Its signing secret" : "Its token"}, shown this once:</p>
           <code className="break-all rounded-lg border border-line px-3 py-2 font-mono text-small">{shown.secret}</code>
-          <p className="text-small text-muted">{secretWords(shown.endpoint, senderWords(shown.endpoint.trigger, types.data ?? []))}</p>
+          <p className="text-small text-muted">{secretWords(shown.endpoint, senderWords(shown.endpoint.trigger, types.data))}</p>
           <div className="flex flex-wrap gap-2">
             <Button
               size="sm"
@@ -181,6 +191,7 @@ export function WebhookEndpointsPage({ tenantId }: { tenantId: string }) {
             setAdding(false);
             setShown({ name: made.name, secret: made.secret, endpoint: made, rotated: false });
             announce(`Created ${made.name}`);
+            toShown();
             void refresh();
           }}
           onCancel={() => {
@@ -191,13 +202,17 @@ export function WebhookEndpointsPage({ tenantId }: { tenantId: string }) {
       )}
       {editingOne && (
         <EditEndpoint
-          tenantId={tenantId} endpoint={editingOne} types={types.data ?? []}
+          tenantId={tenantId} endpoint={editingOne} types={types.data}
           onSaved={() => {
             setEditing(null);
             announce(`Saved ${editingOne.name}`);
+            toDetails(editingOne.id);
             void refresh();
           }}
-          onCancel={() => setEditing(null)}
+          onCancel={() => {
+            setEditing(null);
+            toDetails(editingOne.id);
+          }}
         />
       )}
       {endpoints.isError ? (
@@ -218,7 +233,7 @@ export function WebhookEndpointsPage({ tenantId }: { tenantId: string }) {
                 <Fragment key={e.id}>
                   <tr>
                     <Td className="font-medium">{e.name}</Td>
-                    <Td>{senderWords(e.trigger, types.data ?? [])}</Td>
+                    <Td>{senderWords(e.trigger, types.data)}</Td>
                     <Td>{proofWords(e.auth)}</Td>
                     <Td className="font-mono text-small">{workflowsOf(e)}</Td>
                     <Td className="font-mono text-small">{e.pending_events}</Td>
@@ -243,7 +258,7 @@ export function WebhookEndpointsPage({ tenantId }: { tenantId: string }) {
                   {onSwitch(e)}
                 </div>
                 <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-small">
-                  <dt className="text-muted">Sender</dt><dd>{senderWords(e.trigger, types.data ?? [])}</dd>
+                  <dt className="text-muted">Sender</dt><dd>{senderWords(e.trigger, types.data)}</dd>
                   <dt className="text-muted">Signed with</dt><dd>{proofWords(e.auth)}</dd>
                   <dt className="text-muted">Workflows</dt><dd className="font-mono">{workflowsOf(e)}</dd>
                   <dt className="text-muted">Waiting</dt><dd className="font-mono">{e.pending_events}</dd>
@@ -269,7 +284,7 @@ export function WebhookEndpointsPage({ tenantId }: { tenantId: string }) {
         onCancel={() => setRotating(null)}
       >
         {rotating &&
-          `The old ${rotating.auth === "hmac" ? "secret" : "token"} stops working now: ${senderWords(rotating.trigger, types.data ?? []) === "Another sender" ? "the sender's" : `${senderWords(rotating.trigger, types.data ?? [])}'s`} events are refused until it sends the new one.`}
+          `The old ${rotating.auth === "hmac" ? "secret" : "token"} stops working now: ${senderWords(rotating.trigger, types.data) === "Another sender" ? "the sender's" : `${senderWords(rotating.trigger, types.data)}'s`} events are refused until it sends the new one.`}
       </ConfirmDialog>
     </div>
   );  // prettier-ignore

@@ -166,6 +166,44 @@ describe("a workflow's webhooks", () => {
     await vi.waitFor(() => expect(sent.find((r) => r.method === "POST")?.body).toEqual({ workflow_id: "w1", filter: [{ pointer: "/topic", value: "alarms" }] }));
   });
 
+  it("names a binding's sender by its key while the senders there are can't be read, never as unknown", async () => {
+    // The final review: a pending or failed /trigger-types read as "An unknown sender (mist.webhook)".
+    api([BINDING], { "GET /api/v1/trigger-types": () => json({ error: "unavailable" }, 503) });
+    await showPanel();
+    await within(section()).findByRole("button", { name: "Edit Mist prod" });
+    expect(section().textContent).not.toContain("An unknown sender");
+    expect(section().textContent).toContain("mist.webhook · /topic is device-events");
+  });
+
+  it("keeps a value with a line break as it was when a sibling condition is saved", async () => {
+    // The final review: a one-line field drops a line break, so "a\nb" (made through the API) was sent as "ab".
+    const broken: WorkflowBinding = { ...OTHER, filter: [{ pointer: "/type", value: "a\nb" }, { pointer: "/priority", value: 1 }] };
+    const sent = api([broken], { "PATCH /api/v1/t/t1/webhook-bindings/b2": () => json(broken) });
+    await showPanel();
+    await userEvent.click(await within(section()).findByRole("button", { name: "Edit Ticketing" }));
+    const form = within(section()).getByRole("form", { name: "The webhook from Ticketing" });
+    // Shown as JSON text, which a one-line field keeps (jsdom keeps a raw break; a browser drops it).
+    expect(within(form).getByRole<HTMLInputElement>("textbox", { name: "Value 1" }).value).toBe('"a\\nb"');
+    await userEvent.clear(within(form).getByRole("textbox", { name: "Value 2" }));
+    await userEvent.type(within(form).getByRole("textbox", { name: "Value 2" }), "2");
+    await userEvent.click(within(form).getByRole("button", { name: "Save" }));
+    await vi.waitFor(() => expect(sent.find((r) => r.method === "PATCH")?.body).toEqual({ filter: [{ pointer: "/type", value: "a\nb" }, { pointer: "/priority", value: 2 }] }));
+  });
+
+  it("says a condition's refusal to whoever reads its field and its value", async () => {
+    // The final review: the refusal showed under the condition, but neither control was described by it.
+    api([OTHER]);
+    await showPanel();
+    await userEvent.click(await within(section()).findByRole("button", { name: "Edit Ticketing" }));
+    const form = within(section()).getByRole("form", { name: "The webhook from Ticketing" });
+    await userEvent.clear(within(form).getByRole("textbox", { name: "Field 1" }));
+    await userEvent.type(within(form).getByRole("textbox", { name: "Field 1" }), "type");
+    await userEvent.click(within(form).getByRole("button", { name: "Save" }));
+    const why = "A field is a pointer into the event, starting with /, like /type.";
+    expect(within(form).getByRole("textbox", { name: "Field 1", description: why })).toBeTruthy();
+    expect(within(form).getByRole("textbox", { name: "Value 1", description: why })).toBeTruthy();
+  });
+
   it("changes one's conditions, turns one off at once, and removes one after asking", async () => {
     const sent = api([OTHER], {
       "PATCH /api/v1/t/t1/webhook-bindings/b2": () => json(OTHER),
