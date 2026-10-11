@@ -37,15 +37,17 @@ export function InputSection({ focusAt }: { focusAt: FocusAt }) {
   const [kept, setKept] = useState<{ name: string; key: string } | null>(null);
   const keyOf = (name: string) => (kept !== null && kept.name === name && editing === name ? kept.key : name);
   const { box, back } = useFocusBack<HTMLElement>();
-  const [onDefault, setOnDefault] = useState(false); // "Go to it" landed on a field's default: its editor opens there
+  // The field "Go to it" opened on its held default: its editor opens on Default, that once (any other opens on Name).
+  const [defaultOf, setDefaultOf] = useState<string | null>(null);
   useEffect(() => {
     if (!focusAt) return;
     if (focusAt.pointer === JSON_AT) return setMode("json");
     const m = /^\/settings\/input_schema\/properties\/([^/]+)(\/default)?/.exec(focusAt.pointer);
     if (m) {
       setMode("fields");
-      setOnDefault(m[2] !== undefined);
-      setEditing(m[1]!.replaceAll("~1", "/").replaceAll("~0", "~"));
+      const name = m[1]!.replaceAll("~1", "/").replaceAll("~0", "~");
+      setDefaultOf(m[2] !== undefined ? name : null);
+      setEditing(name);
     }
   }, [focusAt]);
   const rows = inputRows(schema);
@@ -90,13 +92,14 @@ export function InputSection({ focusAt }: { focusAt: FocusAt }) {
                 <li key={keyOf(name)} className="flex flex-col gap-2 border-t border-line py-2.5 first:border-t-0">
                   {r.kind === "field" && editing === name ? (
                     <FieldEditor
-                      field={r.field} focusDefault={onDefault}
+                      field={r.field} focusDefault={defaultOf === name}
                       onRenamed={(to) => {
                         setKept({ name: to, key: keyOf(name) });
                         setEditing(to);
                       }}
                       onClose={() => {
                         setEditing(null);
+                        setDefaultOf(null);
                         back(`field:${name}`, "add");
                       }}
                     />

@@ -126,6 +126,7 @@ export function pointerLines(text: string): Map<string, number> {
     if (i === scalar) broken(); // a stray ",", "]" or "}" where a value goes
   };
   try {
+    JSON.parse(text); // what isn't JSON (a value or a space JSON doesn't have) has no line, the scan never guessing
     value("");
     space();
     if (i < text.length) broken(); // something after the value

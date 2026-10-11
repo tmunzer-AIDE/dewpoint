@@ -132,6 +132,22 @@ describe("the input as form fields", () => {
     await vi.waitFor(() => expect(document.activeElement).toBe(within(input()).getByRole("textbox", { name: "Default" })));
   });
 
+  it("opens another field on its Name once Go to it's field is done", async () => {
+    // The review of the deferred minors: the Default focus stuck, so every field opened on its Default after.
+    const input_schema = { type: "object", properties: { floor: { type: "integer", title: "Floor" }, site: { type: "string" } } };
+    await showPanel({ doc: draft({ input_schema }), focusAt: { pointer: "/settings/input_schema/properties/floor/default", n: 1 } });
+    await vi.waitFor(() => expect(document.activeElement).toBe(within(input()).getByRole("textbox", { name: "Default" })));
+    await userEvent.click(within(input()).getByRole("button", { name: "Done" }));
+    // Focus comes back to the field's Edit a frame later: opened before it lands, an editor would lose it.
+    await vi.waitFor(() => expect(document.activeElement).toBe(within(input()).getByRole("button", { name: "Edit floor" })));
+    await userEvent.click(within(input()).getByRole("button", { name: "Edit site" }));
+    await vi.waitFor(() => expect(document.activeElement).toBe(within(input()).getByRole("textbox", { name: "Name" })));
+    await userEvent.click(within(input()).getByRole("button", { name: "Done" }));
+    await vi.waitFor(() => expect(document.activeElement).toBe(within(input()).getByRole("button", { name: "Edit site" })));
+    await userEvent.click(within(input()).getByRole("button", { name: "Edit floor" }));
+    await vi.waitFor(() => expect(document.activeElement).toBe(within(input()).getByRole("textbox", { name: "Name" })));
+  });
+
   it("shows the server's problems at their field", async () => {
     await showPanel({
       doc: draft({ input_schema: { type: "object", properties: { rows: { type: "string" } } } }),
