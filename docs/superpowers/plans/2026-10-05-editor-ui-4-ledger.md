@@ -2514,3 +2514,17 @@ Push and a PR stay the owner's decisions.
      "Not published" stays the Version column's. Why: the WorkflowsList board within ruling 71. Cost: none known.
 
 Mid-slice rulings, where the code base differs from a step: M80 onward.
+
+### 4c-3b, milestone 1 (2026-10-11)
+
+Built inline on `feat/editor-4c3b` (worktree `scratchpad/ui4c3b/build`, from origin/main b1183473 with the plan merged,
+5517bf80; the frontend's locked offline install), test-first, each test seen failing as the plan's step says before its
+code:
+- Task 1 (d9359e96): this ledger: the plan accepted (rulings 147–158).
+- Task 2 (eadf159e): a schedule's timing; `./timing` missing, then 11 passed.
+- Task 3 (ba83991c): the trigger routes and their words; `./triggers` missing, then 15 passed.
+- Task 4 (2da308e3): the input as fields, and the CSV file; `./csv`, `./input` missing, then 18 passed.
+- Task 5 (464cb1a8): the input as JSON, and the panel's held edits; 5 failed, then 30 passed.
+- Task 6 (adcab07f): webhook endpoints in words; `./endpoints` missing, then 8 passed.
+
+The unit suite 891 passed (68 files); typecheck and lint clean. No mid-slice ruling: the code is the plan's, as written.
