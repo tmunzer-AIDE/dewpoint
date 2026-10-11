@@ -2637,7 +2637,10 @@ table back at its start, the first header in view, and fits the table's box (a b
 topic picker cancels it, focus back to what opened it; "Go to it" gives a held CSV limit focus, and opens a field on its
 held Default; an interval schedule's edit sends no time zone; a schedule's disabled Edit is described by why; the
 endpoints' Workflows column says loading apart from couldn't be read; the JSON line finder ends on any text, what isn't
-JSON having no line. The unit suite 990 passed (72 files); typecheck, lint, check:api and build clean.
+JSON having no line. A review pasted in chat found three gaps, fixed with tests that failed first (b0c58975): "Go to
+it" opens only its own field on Default; the line finder maps only JSON (`tru`, `01`, `NaN`, a no-break space get no
+line); a failed refresh keeps an endpoint's known workflow count and says so. The unit suite 993 passed (72 files),
+three runs; typecheck, lint, check:api and build clean.
 
 Migration slots (the owner, 2026-10-11): B4b moves to 0071 and B8 to 0072, as the table above records: 2b-4b's work
 (#90) uses 0048–0065. #90's own chain is reconciled with main by its session when it lands.
