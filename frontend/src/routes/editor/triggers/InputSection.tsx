@@ -1,26 +1,35 @@
 // SPDX-License-Identifier: Apache-2.0
-// The input (4c-3b; the InputFields and InputEdit boards): what every trigger starts a run with, and, by hand, the
-// run's form. Saved with the draft, used once published. As form fields, or as JSON (Task 8 adds a Mist event's shape
-// and a CSV file). Focus goes back to what opened a part once it closes (WCAG 2.4.3).
+// The input (4c-3b; the InputFields, InputMist, InputCsv and InputEdit boards): what every trigger starts a run with,
+// and, by hand, the run's form. Saved with the draft, used once published. As form fields, as a Mist event's shape (read
+// only, replaceable), with a CSV file, or as JSON. Focus goes back to what opened a part once it closes (WCAG 2.4.3).
+import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Button } from "../../../components/Button";
-import { addField, fieldPointer, inputOf, inputRows, setSettings } from "../../../lib/input";
+import { csvOf, newCsv } from "../../../lib/csv";
+import { addField, fieldPointer, inputOf, inputRows, setSettings, topicShaped } from "../../../lib/input";
+import { senderName, triggerTypesQuery } from "../../../lib/triggers";
 import { useTriggers } from "./context";
+import { CsvSection } from "./CsvSection";
 import { FieldEditor } from "./FieldEditor";
 import { InputJson, JSON_AT } from "./InputJson";
+import { MistPicker, MistShape } from "./MistEvent";
 import { Problems, Section, problemsAt, useFocusBack } from "./parts";
 
 const TYPE_WORDS: Record<string, string> = { text: "Text", whole: "Whole number", number: "Number", yesno: "Yes or no", choice: "Choice", datetime: "Date and time" };
 
-type Mode = "fields" | "json";
+type Mode = "fields" | "json" | "mist";
 
-/** Where "Go to it" in the edits not applied lands: JSON, or a field. */
+/** Where "Go to it" in the edits not applied lands: JSON, a field, or the CSV file. */
 export type FocusAt = { pointer: string; n: number } | null;
 
 export function InputSection({ focusAt }: { focusAt: FocusAt }) {
   const t = useTriggers();
   const { actions, doc } = t;
+  const types = useQuery(triggerTypesQuery);
   const schema = inputOf(doc);
+  const csv = csvOf(doc);
+  const webhook = (types.data ?? []).find((x) => Object.keys(x.topics).length > 0);
+  const shaped = webhook ? topicShaped(schema, webhook.topics) : null;
   const [mode, setMode] = useState<Mode>(() => (actions.held("json", JSON_AT) ? "json" : "fields"));
   const [editing, setEditing] = useState<string | null>(null);
   // The field being edited keeps its row through a rename, so its editor stays as it is: focus where it went, a click in
@@ -38,13 +47,14 @@ export function InputSection({ focusAt }: { focusAt: FocusAt }) {
     }
   }, [focusAt]);
   const rows = inputRows(schema);
+  const fields = rows.length; // every field the input has, the list can show it or not
   const heldJson = actions.held("json", JSON_AT);
   const add = () => {
     const made = addField(inputOf(doc));
     if (actions.update((d) => setSettings(d, { input_schema: addField(inputOf(d)).schema }), `Added the field ${made.name}.`) === null) setEditing(made.name);
   };
   return (
-    <Section id="triggers-input" title="Input" note="Saved with the draft · used once published" box={box}>
+    <Section id="triggers-input" title={csv ? "Input · CSV file" : "Input"} note="Saved with the draft · used once published" box={box}>
       {mode !== "json" && <p className="text-small text-muted">Every trigger starts a run with this input. By hand, it&apos;s the run&apos;s form.</p>}
       <Problems problems={problemsAt(t.check, "/settings/input_schema", true)} />
       {heldJson && mode !== "json" && (
@@ -57,6 +67,16 @@ export function InputSection({ focusAt }: { focusAt: FocusAt }) {
             back("json");
           }}
         />
+      ) : mode === "mist" && webhook ? (
+        <MistPicker
+          type={webhook} fields={fields}
+          onDone={() => {
+            setMode("fields");
+            back("mist");
+          }}
+        />
+      ) : shaped && webhook ? (
+        <MistShape type={webhook} topic={shaped} onAnother={() => setMode("mist")} onJson={() => setMode("json")} onFields={() => back("add")} />
       ) : (
         <>
           {rows.length === 0 && <p className="text-small text-muted">No fields: a run starts with an empty input.</p>}
@@ -111,12 +131,24 @@ export function InputSection({ focusAt }: { focusAt: FocusAt }) {
           {t.editable && (
             <div className="flex flex-wrap gap-2">
               <Button size="sm" data-back="add" onClick={add}>＋ Field</Button>
+              {webhook && <Button size="sm" data-back="mist" onClick={() => setMode("mist")}>Use a {senderName(webhook)} event…</Button>}
+              {!csv && (
+                <Button
+                  size="sm" data-back="csv"
+                  onClick={() => {
+                    if (actions.update((d) => setSettings(d, { csv: newCsv() }), "Added a CSV file to the input.") === null) back("column:0");
+                  }}
+                >
+                  ＋ CSV file
+                </Button>
+              )}
               <Button size="sm" data-back="json" onClick={() => setMode("json")}>Edit as JSON</Button>
             </div>
           )}
           {!t.editable && <Button size="sm" className="self-start" data-back="json" onClick={() => setMode("json")}>Show as JSON</Button>}
         </>
       )}
+      {csv && mode !== "json" && <CsvSection csv={csv} focusAt={focusAt} back={back} />}
     </Section>
   );  // prettier-ignore
 }
