@@ -5,7 +5,7 @@
 import { Component, Suspense, lazy, useState, type ComponentType, type ReactNode } from "react";
 import { Button } from "../../components/Button";
 
-type Props = { tenantId: string; workflowId: string };
+type Props = { tenantId: string; workflowId: string; openTriggers?: boolean };
 export type EditorModule = { EditorPage: ComponentType<Props> };
 
 /** A failure to fetch the editor's code, told apart from an error inside the editor (the router's to show). */

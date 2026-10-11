@@ -102,7 +102,7 @@ const VERSION_ACTIONS: DrawerActions = {
   restructure: () => CANT,
 };
 
-export function EditorPage({ tenantId, workflowId }: { tenantId: string; workflowId: string }) {
+export function EditorPage({ tenantId, workflowId, openTriggers = false }: { tenantId: string; workflowId: string; openTriggers?: boolean }) {
   const qc = useQueryClient();
   // A draft cached from an earlier visit would conflict on the first edit (4b ruling 23): the editor waits for the read
   // made after this page mounted. Once open it owns its document and keeps what it opened with: a later read, a
@@ -145,16 +145,17 @@ export function EditorPage({ tenantId, workflowId }: { tenantId: string; workflo
       types={types.data ?? opened.types}
       role={opened.role}
       trouble={trouble}
+      openTriggers={openTriggers && loads === 0}
       onReload={() => void reload()}
     />
   );
 }
 
 function Editor({
-  tenantId, workflow, types, role, trouble, onReload,
+  tenantId, workflow, types, role, trouble, openTriggers, onReload,
 }: {
   tenantId: string; workflow: WorkflowDetail; types: NodeType[]; role: string | null; trouble: string | null;
-  onReload: () => void;
+  openTriggers: boolean; onReload: () => void;
 }) {  // prettier-ignore
   const typeMap = useMemo(() => new Map(types.map((t) => [t.ref, t])), [types]);
   const [history, setHistory] = useState<History<GraphDoc>>(() => begin(asGraph(workflow.draft)));
@@ -355,7 +356,7 @@ function Editor({
     return [rename, lost > 0 ? unlistedNote(lost) : null].filter((s) => s !== null).join(" ") || null;
   };
   const typeOf = (n: GraphNode) => typeMap.get(n.type);
-  const [side, setSide] = useState<Side>(null); // the right column's one panel
+  const [side, setSide] = useState<Side>(() => (openTriggers ? { kind: "triggers" } : null)); // the right column's one panel
   // Where focus lands when what held it goes: a panel's Close, or a confirmation whose button an action removed or
   // disabled (the final checkpoint's review, WCAG 2.4.3). A native dialog returns focus to its opener only while that
   // opener can take it, and a modal one keeps it from anything else until it closes: the editor places it, after.

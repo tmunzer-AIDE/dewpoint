@@ -1046,7 +1046,7 @@ describe("focus when editing stops under it", () => {
 describe("navigations that keep the editor", () => {
   it.each([
     { what: "a hash", to: { hash: "notes" } },
-    { what: "a query", to: { search: { panel: "versions" } } },
+    { what: "a query", to: { search: { triggers: true as const } } },
   ])("leave it editable when only $what changes", async ({ to }) => {
     const { router } = await show();
     await addTransform();

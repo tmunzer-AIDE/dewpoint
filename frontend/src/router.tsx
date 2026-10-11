@@ -58,7 +58,8 @@ function Workflows() {
 
 function Editor() {
   const { tenantId, workflowId } = useParams({ from: "/app/t/$tenantId/workflows/$workflowId" });
-  return <LazyEditor key={`${tenantId}:${workflowId}`} tenantId={tenantId} workflowId={workflowId} />;
+  const search = editorRoute.useSearch();
+  return <LazyEditor key={`${tenantId}:${workflowId}`} tenantId={tenantId} workflowId={workflowId} openTriggers={search.triggers === true} />;
 }
 
 function Connections() {
@@ -107,6 +108,9 @@ const editorRoute = createRoute({
   path: "/t/$tenantId/workflows/$workflowId",
   component: Editor,
   staticData: { compactRail: true },
+  // A new workflow opens on its Triggers (4c-3b, 1b's "What starts it?").
+  validateSearch: (search: Record<string, unknown>): { triggers?: true } =>
+    search.triggers === true || search.triggers === "true" ? { triggers: true } : {},
 });
 const connectionsRoute = createRoute({
   getParentRoute: () => appRoute,

@@ -3,8 +3,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { onAnnounce } from "../lib/announce";
+import { DEVICE_EVENTS, MIST } from "../test/triggers";
+import { fakeApi, json } from "./editor/drawer/harness";
 import { NewWorkflow, parseDocument } from "./NewWorkflow";
 
 const DOC = {
@@ -52,7 +54,7 @@ async function show(onClose = vi.fn()) {
 
 it("starts blank from a name, and opens the editor", async () => {
   const router = await show();
-  expect(document.activeElement).toBe(screen.getByLabelText("Name"));
+  expect(document.activeElement).toBe(screen.getByRole("radio", { name: /^By hand/ })); // what starts it comes first
   await userEvent.type(screen.getByLabelText("Name"), "Nightly report");
   await userEvent.click(screen.getByRole("button", { name: "Create and open" }));
   expect(sent.find((r) => r.method === "POST")).toEqual({ method: "POST", path: "/api/v1/t/t1/workflows", body: { name: "Nightly report" } });
@@ -266,4 +268,79 @@ it("never overwrites a name typed while the file was read", async () => {
   await act(() => a.settle());
   expect(await screen.findByLabelText("Acme Prod (mist connection)")).toBeTruthy();
   expect(screen.getByDisplayValue("My own name")).toBeTruthy();
+});
+
+describe("what starts it (4c-3b)", () => {
+  const ENDPOINT = { id: "e1", name: "Mist prod", enabled: true, auth: "bearer", trigger: "mist.webhook", path: "/hooks/e1" };
+  const CREATED = { id: "w9", name: "AP offline report", draft_revision: 1, draft: { graph_format: 1, nodes: [], edges: [] } };
+
+  function api(more: Record<string, () => Response | Promise<Response>> = {}) {
+    vi.restoreAllMocks();
+    return fakeApi({
+      "GET /api/v1/trigger-types": () => json([MIST]),
+      "GET /api/v1/t/t1/webhook-endpoints": () => json({ endpoints: [ENDPOINT] }),
+      "GET /api/v1/t/t1/connections": () => json([]),
+      "POST /api/v1/t/t1/workflows": () => json(CREATED, 201),
+      "PUT /api/v1/t/t1/workflows/w9/draft": () => json({ draft_revision: 2, unpublished_changes: true, graph_hash: "h", active_version_id: null, active_version_number: null }),
+      "POST /api/v1/t/t1/webhook-endpoints/e1/bindings": () => json({ id: "b1" }, 201),
+      ...more,
+    });
+  }
+
+  it("seeds a Mist webhook's topic shape, binds its endpoint at once, and opens the workflow on its Triggers", async () => {
+    const sent = api();
+    const router = await show();
+    await userEvent.click(await screen.findByRole("radio", { name: /^A Mist webhook/ }));
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Topic" }), "device-events");
+    await userEvent.type(screen.getByLabelText("Name"), "AP offline report");
+    expect(screen.getByRole("dialog").textContent).toContain("It opens on its Triggers: the input is device-events' shape, and the webhook is bound to Mist prod.");
+    await userEvent.click(screen.getByRole("button", { name: "Create and open" }));
+    await vi.waitFor(() => expect(router.state.location.pathname).toBe("/t/t1/workflows/w9"));
+    expect(router.state.location.search).toEqual({ triggers: true });
+    const put = sent.find((r) => r.method === "PUT");
+    expect((put?.body as { settings: unknown }).settings).toEqual({ input_schema: DEVICE_EVENTS });
+    expect(sent.find((r) => r.path.endsWith("/bindings"))?.body).toEqual({ workflow_id: "w9", filter: [{ pointer: "/topic", value: "device-events" }] });
+  });
+
+  it("seeds a CSV file of one column", async () => {
+    const sent = api();
+    await show();
+    await userEvent.click(screen.getByRole("radio", { name: /^A CSV file/ }));
+    await userEvent.type(screen.getByLabelText("Name"), "Bulk rename");
+    await userEvent.click(screen.getByRole("button", { name: "Create and open" }));
+    await vi.waitFor(() => expect(sent.find((r) => r.method === "PUT")).toBeTruthy());
+    expect((sent.find((r) => r.method === "PUT")?.body as { settings: unknown }).settings).toEqual({ csv: { columns: [{ header: "Column 1", name: "column_1", type: "string" }] } });
+  });
+
+  it("keeps an imported file's input, and still binds its webhook", async () => {
+    const sent = api({ "POST /api/v1/t/t1/workflows/import": () => json(CREATED, 201) });
+    await show();
+    await userEvent.click(await screen.findByRole("radio", { name: /^A Mist webhook/ }));
+    await userEvent.click(screen.getByRole("radio", { name: /^Import from file/ }));
+    expect(screen.getByRole("dialog").textContent).toContain("An imported workflow keeps its own input; its Triggers say if the webhook's events don't fit it.");
+    const file = new File([JSON.stringify({ ...DOC, bindings: [] })], "flow.dewpoint.json", { type: "application/json" });
+    await userEvent.upload(screen.getByLabelText("Workflow file"), file);
+    await userEvent.click(await screen.findByRole("button", { name: "Import and open" }));
+    await vi.waitFor(() => expect(sent.some((r) => r.path.endsWith("/bindings"))).toBe(true));
+    expect(sent.some((r) => r.method === "PUT")).toBe(false);
+  });
+
+  it("says what was made and what wasn't when its webhook isn't bound, with the way to open it", async () => {
+    api({ "POST /api/v1/t/t1/webhook-endpoints/e1/bindings": () => json({ error: "binding_cap" }, 409) });
+    const router = await show();
+    await userEvent.click(await screen.findByRole("radio", { name: /^A Mist webhook/ }));
+    await userEvent.type(screen.getByLabelText("Name"), "AP offline report");
+    await userEvent.click(screen.getByRole("button", { name: "Create and open" }));
+    const said = await screen.findByRole("alert");
+    expect(said.textContent).toContain("Created AP offline report, but its webhook from Mist prod wasn't added: open it, and add it in its Triggers.");
+    await userEvent.click(screen.getByRole("button", { name: "Open AP offline report" }));
+    await vi.waitFor(() => expect(router.state.location.pathname).toBe("/t/t1/workflows/w9"));
+  });
+
+  it("offers a Mist webhook only once there's an endpoint for it, and says where one is made", async () => {
+    api({ "GET /api/v1/t/t1/webhook-endpoints": () => json({ endpoints: [] }) });
+    await show();
+    await vi.waitFor(() => expect(screen.getByRole<HTMLInputElement>("radio", { name: /^A Mist webhook/ }).disabled).toBe(true));
+    expect(screen.getByRole("dialog").textContent).toContain("No endpoint for it yet: Settings › Webhook endpoints makes one.");
+  });
 });
