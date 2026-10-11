@@ -2613,3 +2613,17 @@ its held Default; an interval schedule's PATCH carries `time_zone: "UTC"` when t
 schedule's Edit is disabled without its reason when the published form can't be read; the endpoints table shows "–"
 both while bindings load and when their read failed; the 320 px CSV column editor's table scroll (P3, Milestone 2).
 The review's set-aside lines stand as ruled in the execution ledger.
+
+### 4c-3b, after the review of the final head (2026-10-11)
+
+A review pasted in chat held 9c25ef89 for three findings, each fixed with a test that failed first (2056acd8):
+
+M87. **A condition's field with a line break is shown as JSON text**, which a one-line field keeps, and read back
+     exactly; a pointer never starts with a quote, so nothing typed reads two ways. Its row says it so too.
+M88. **A refusal is never folded away**: a Mist endpoint's optional settings open when the server refuses one of them,
+     and the first refused control takes focus.
+M89. **The list's pointer, the id's pointer and the id's header are described by their refusals**
+     (`aria-describedby`), as the conditions and the allowlist are.
+
+The unit suite 983 passed (72 files), two runs; typecheck, lint, check:api and build clean; the browser gate 43 passed
+(1.7 min, 204 s); local CodeQL 0 findings in both languages, at 2056acd8.
