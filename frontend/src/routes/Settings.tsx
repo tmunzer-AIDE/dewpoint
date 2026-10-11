@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-// Settings, as in screen 1i: the tenant's name, then its tabs as links (each tab is its own page). In 4a: Members &
-// roles; Webhook endpoints arrives with 4c, Notification channels with sub-project 3, Service grants with 5 (D11).
+// Settings, as in screen 1i: the tenant's name, then its tabs as links (each tab is its own page): Members & roles (4a)
+// and Webhook endpoints (4c-3b); Notification channels arrive with sub-project 3, Service grants with 5 (D11).
 import { useQuery } from "@tanstack/react-query";
 import { Link, Outlet } from "@tanstack/react-router";
 import { client, ok } from "../lib/client";
@@ -24,6 +24,15 @@ export function SettingsLayout({ tenantId }: { tenantId: string }) {
           inactiveProps={{ className: "border-transparent text-muted hover:text-ink" }}
         >
           Members &amp; roles
+        </Link>
+        <Link
+          to="/t/$tenantId/settings/webhooks"
+          params={{ tenantId }}
+          className={TAB}
+          activeProps={{ className: "border-accent font-semibold text-ink" }}
+          inactiveProps={{ className: "border-transparent text-muted hover:text-ink" }}
+        >
+          Webhook endpoints
         </Link>
       </nav>
       <Outlet />

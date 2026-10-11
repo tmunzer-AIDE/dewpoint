@@ -13,6 +13,7 @@ import { MfaPage } from "./routes/Mfa";
 import { SecurityPage } from "./routes/Security";
 import { SettingsLayout } from "./routes/Settings";
 import { TenantsPage } from "./routes/Tenants";
+import { WebhookEndpointsPage } from "./routes/WebhookEndpoints";
 import { WorkflowsPage } from "./routes/Workflows";
 
 declare module "@tanstack/react-router" {
@@ -80,6 +81,11 @@ function Members() {
   return <MembersPage key={tenantId} tenantId={tenantId} />;
 }
 
+function WebhookEndpoints() {
+  const { tenantId } = useParams({ from: "/app/t/$tenantId/settings/webhooks" });
+  return <WebhookEndpointsPage key={tenantId} tenantId={tenantId} />;
+}
+
 const rootRoute = createRootRoute({ component: Outlet });
 const loginRoute = createRoute({ getParentRoute: () => rootRoute, path: "/login", component: Login });
 const mfaRoute = createRoute({ getParentRoute: () => rootRoute, path: "/mfa", component: MfaPage });
@@ -111,6 +117,7 @@ const connectionsRoute = createRoute({
 const settingsRoute = createRoute({ getParentRoute: () => appRoute, path: "/t/$tenantId/settings", component: Settings });
 const settingsIndexRoute = createRoute({ getParentRoute: () => settingsRoute, path: "/", component: SettingsIndex });
 const membersRoute = createRoute({ getParentRoute: () => settingsRoute, path: "members", component: Members });
+const webhooksRoute = createRoute({ getParentRoute: () => settingsRoute, path: "webhooks", component: WebhookEndpoints });
 
 /** The app's routes; the router below serves them from the browser's history (tests serve them from memory). */
 export const routeTree = rootRoute.addChildren([
@@ -125,7 +132,7 @@ export const routeTree = rootRoute.addChildren([
     workflowsRoute,
     editorRoute,
     connectionsRoute,
-    settingsRoute.addChildren([settingsIndexRoute, membersRoute]),
+    settingsRoute.addChildren([settingsIndexRoute, membersRoute, webhooksRoute]),
   ]),
 ]);
 

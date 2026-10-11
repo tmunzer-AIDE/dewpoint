@@ -46,6 +46,8 @@ beforeEach(() => {
     if (key === "GET /api/v1/connection-types") return json(TYPES);
     if (/^GET \/api\/v1\/t\/t[12]\/(?:connections|members)$/.test(key)) return json([]);
     if (/^GET \/api\/v1\/t\/t[12]\/workflows$/.test(key)) return json([]);
+    if (/^GET \/api\/v1\/t\/t[12]\/webhook-endpoints$/.test(key)) return json({ endpoints: [] });
+    if (key === "GET /api/v1/trigger-types") return json([]);
     if (key === "GET /api/v1/node-types") return json([]);
     const tenant = TENANTS.find((t) => key === `GET /api/v1/t/${t.id}`);
     if (tenant) return json(tenant);
@@ -168,4 +170,11 @@ it("goes to sign-in when the session ends with nothing unsaved", async () => {
   sessionGone = true;
   await act(() => client.invalidateQueries({ queryKey: ["session"] }));
   await vi.waitFor(() => expect(router.state.location.pathname).toBe("/login"));
+});
+
+it("opens Settings → Webhook endpoints from its tab (4c-3b)", async () => {
+  const router = showApp("/t/t1/settings/members");
+  await userEvent.click(await screen.findByRole("link", { name: "Webhook endpoints" }));
+  expect(await screen.findByRole("heading", { name: "Webhook endpoints" })).toBeTruthy();
+  expect(router.state.location.pathname).toBe("/t/t1/settings/webhooks");
 });

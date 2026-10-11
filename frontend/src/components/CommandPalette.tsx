@@ -127,6 +127,17 @@ export function CommandPalette() {
                     Members &amp; roles
                   </Command.Item>
                 )}
+                {params.tenantId && (
+                  <Command.Item
+                    value="Webhook endpoints"
+                    className={PALETTE_ITEM}
+                    onSelect={() =>
+                      go(() => navigate({ to: "/t/$tenantId/settings/webhooks", params: { tenantId: params.tenantId! } }))
+                    }
+                  >
+                    Webhook endpoints
+                  </Command.Item>
+                )}
                 <Command.Item value="Security" className={PALETTE_ITEM} onSelect={() => go(() => navigate({ to: "/account/security" }))}>
                   Security
                 </Command.Item>
