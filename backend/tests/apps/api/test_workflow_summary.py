@@ -14,11 +14,13 @@ from sqlalchemy.exc import IntegrityError
 
 from dewpoint.engine.graph.model import graph_hash, parse_graph
 from tests.apps.api.helpers import session_client
+from tests.apps.test_admission import CSV_GRAPH
 from tests.support.graphs import G
 from tests.support.registry import sync_test_plugins
 
 GRAPH = G().node("a", "testkit.echo@1", {"value": 1}).data()
-WORKFLOW_TABLES = ("workflows", "workflow_versions", "runs", "node_type_versions", "cel_profiles")
+WORKFLOW_TABLES = ("workflows", "workflow_versions", "runs", "node_type_versions", "cel_profiles", "schedules",
+                   "trigger_bindings")  # fmt: skip
 
 
 @pytest.fixture(autouse=True)
@@ -44,8 +46,39 @@ async def add_run(owner, tid, wid, vid, *, status, mode="live", hours_ago=1.0, p
     return rid
 
 
-async def published(c, tid) -> tuple[str, str]:
-    wf = (await c.post(f"/api/v1/t/{tid}/workflows", json={"name": f"W {uuid.uuid4().hex[:6]}", "draft": GRAPH})).json()
+async def add_schedule(owner, tid, wid, **columns) -> uuid.UUID:
+    """A schedule row as the API writes one: a live one's input sealed (the list never reads it), a tombstone's
+    cleared."""
+    sid = uuid.uuid4()
+    values = {"id": sid, "tenant_id": tid, "workflow_id": wid, "cron": "0 9 * * *", "mode": "live",
+              "input": None if columns.get("deleted_at") else b"sealed"} | columns  # fmt: skip
+    async with owner() as s, s.begin():
+        values["created_by"] = (await s.execute(text("select user_id from memberships where tenant_id = :t"),
+                                                {"t": tid})).scalar_one()  # fmt: skip
+        await s.execute(text(f"insert into schedules ({', '.join(values)}) "  # noqa: S608
+                             f"values ({', '.join(':' + k for k in values)})"), values)  # fmt: skip
+    return sid
+
+
+async def add_binding(owner, tid, wid, *, enabled=True) -> None:
+    """A webhook binding of the workflow, on an endpoint of its own."""
+    eid = uuid.uuid4()
+    async with owner() as s, s.begin():
+        user = (await s.execute(text("select user_id from memberships where tenant_id = :t"), {"t": tid})).scalar_one()
+        await s.execute(
+            text("insert into webhook_endpoints (id, tenant_id, name, created_by, auth_kind, bearer_digest, dedupe_key)"
+                 " values (:e, :t, 'hooks', :u, 'bearer', 'digest', 'sealed')"),
+            {"e": eid, "t": tid, "u": user},
+        )  # fmt: skip
+        await s.execute(
+            text("insert into trigger_bindings (id, tenant_id, endpoint_id, workflow_id, enabled, created_by) "
+                 "values (:i, :t, :e, :w, :on, :u)"),
+            {"i": uuid.uuid4(), "t": tid, "e": eid, "w": wid, "on": enabled, "u": user},
+        )  # fmt: skip
+
+
+async def published(c, tid, graph=GRAPH) -> tuple[str, str]:
+    wf = (await c.post(f"/api/v1/t/{tid}/workflows", json={"name": f"W {uuid.uuid4().hex[:6]}", "draft": graph})).json()
     v = (await c.post(f"/api/v1/t/{tid}/workflows/{wf['id']}/publish", headers={"If-Match": "1"})).json()
     return wf["id"], v["version_id"]
 
@@ -100,9 +133,9 @@ async def test_another_tenants_runs_never_count(app, owner_sessionmaker, api_set
 
 
 async def test_the_statements_filter_by_tenant_themselves(app, owner_sessionmaker, api_settings) -> None:
-    """Row-level security keeps another tenant's runs from the API's role; the statements also filter by tenant
-    themselves. With row-level security out of the way (the owner's session), asked for this tenant about another
-    tenant's workflow, they find no run of it, while the row is there for its own tenant."""
+    """Row-level security keeps another tenant's runs and triggers from the API's role; the statements also filter by
+    tenant themselves. With row-level security out of the way (the owner's session), asked for this tenant about
+    another tenant's workflow, they find no run or trigger of it, while the rows are there for its own tenant."""
     from dewpoint.apps import workflow_summary
 
     c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
@@ -110,14 +143,20 @@ async def test_the_statements_filter_by_tenant_themselves(app, owner_sessionmake
     async with c, other:
         owid, ovid = await published(other, otid)
         await add_run(owner_sessionmaker, otid, owid, ovid, status="failed")
+        await add_schedule(owner_sessionmaker, otid, owid, sync_error="sync_failed")
+        await add_binding(owner_sessionmaker, otid, owid)
         assert (await c.get(f"/api/v1/t/{tid}/workflows")).json() == []
     theirs = uuid.UUID(owid)
     async with owner_sessionmaker() as s:
         mine = (await workflow_summary.run_stats(s, tid, [theirs]))[theirs]
         found = (await workflow_summary.run_stats(s, otid, [theirs]))[theirs]
+        my_triggers = (await workflow_summary.trigger_stats(s, tid, [theirs]))[theirs]
+        their_triggers = (await workflow_summary.trigger_stats(s, otid, [theirs]))[theirs]
     assert (mine.last_live, mine.live_24h) == (None, 0)
-    # The row is there: the tenant filter alone kept it out.
+    assert my_triggers == workflow_summary.TriggerStats(0, 0, False, 0)
+    # The rows are there: the tenant filter alone kept them out.
     assert found.last_live is not None and found.last_live.status == "failed"
+    assert their_triggers == workflow_summary.TriggerStats(1, 1, True, 1)
 
 
 async def test_a_moved_step_is_an_unpublished_change(app, owner_sessionmaker, api_settings) -> None:
@@ -203,6 +242,52 @@ async def statements_listing(c, tid) -> int:
     return len([s for s in seen if any(t in s for t in WORKFLOW_TABLES)])
 
 
+async def test_the_list_says_what_starts_each_workflow(app, owner_sessionmaker, api_settings) -> None:
+    """4c-3a ruling 3: each row counts its live schedules (a deleted one's tombstone left out) and how many are on, and
+    its webhook bindings, and says whether its active version takes a CSV file (never its draft); a workflow never
+    published has none."""
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    async with c:
+        busy, _ = await published(c, tid)
+        await add_schedule(owner_sessionmaker, tid, busy)
+        await add_schedule(owner_sessionmaker, tid, busy, enabled=False)
+        await add_schedule(owner_sessionmaker, tid, busy, deleted_at=datetime.now(UTC))
+        await add_binding(owner_sessionmaker, tid, busy)
+        await add_binding(owner_sessionmaker, tid, busy, enabled=False)
+        upload, _ = await published(c, tid, CSV_GRAPH)
+        draft = (await c.post(f"/api/v1/t/{tid}/workflows", json={"name": "Draft", "draft": GRAPH})).json()["id"]
+        # A draft that would take a CSV file: the column says what the active version does, until it's published.
+        saved = await c.put(f"/api/v1/t/{tid}/workflows/{busy}/draft", json=CSV_GRAPH, headers={"If-Match": "1"})
+        assert saved.status_code == 200, saved.text
+        rows = {w["id"]: w for w in (await c.get(f"/api/v1/t/{tid}/workflows")).json()}
+        one = (await c.get(f"/api/v1/t/{tid}/workflows/{busy}")).json()
+    assert rows[busy]["triggers"] == one["triggers"] == {
+        "schedules": 2, "schedules_enabled": 1, "webhook_bindings": 2, "csv": False,
+    }  # fmt: skip
+    assert rows[upload]["triggers"] == {"schedules": 0, "schedules_enabled": 0, "webhook_bindings": 0, "csv": True}
+    assert rows[draft]["triggers"] == {"schedules": 0, "schedules_enabled": 0, "webhook_bindings": 0, "csv": False}
+
+
+async def test_a_schedule_that_failed_to_sync_needs_attention(app, owner_sessionmaker, api_settings) -> None:
+    """4c-3a ruling 4 (ruling 74's "sync errors join with 4c"): a live schedule whose last sync failed, on or off,
+    raises `schedule_sync_failed`; a deleted one's tombstone doesn't, and a sync that succeeds since clears it."""
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    async with c:
+        failing, _ = await published(c, tid)
+        sid = await add_schedule(owner_sessionmaker, tid, failing, enabled=False, sync_error="temporal_refused",
+                                 sync_error_at=datetime.now(UTC))  # fmt: skip
+        gone, _ = await published(c, tid)
+        await add_schedule(owner_sessionmaker, tid, gone, sync_error="sync_failed", sync_error_at=datetime.now(UTC),
+                           deleted_at=datetime.now(UTC))  # fmt: skip
+        rows = {w["id"]: w for w in (await c.get(f"/api/v1/t/{tid}/workflows")).json()}
+        assert rows[failing]["needs_attention"] == ["schedule_sync_failed"]
+        assert rows[gone]["needs_attention"] == []
+        async with owner_sessionmaker() as s, s.begin():
+            await s.execute(text("update schedules set sync_error = null, sync_error_at = null where id = :i"),
+                            {"i": sid})  # fmt: skip
+        assert (await c.get(f"/api/v1/t/{tid}/workflows/{failing}")).json()["needs_attention"] == []
+
+
 async def test_the_lists_reads_dont_grow_with_its_workflows(app, owner_sessionmaker, api_settings) -> None:
     """Counted in statements, never time (the owner's review of 325fc14): two workflows or twelve, published or not,
     with runs or without, the list reads as often."""
@@ -219,7 +304,7 @@ async def test_the_lists_reads_dont_grow_with_its_workflows(app, owner_sessionma
                 wid, vid = await published(c, tid)
                 await add_run(owner_sessionmaker, tid, wid, vid, status="failed", mode="simulate")
         many = await statements_listing(c, tid)
-    assert few == many <= 6  # workflows, active versions, two lifecycle reads at most, last runs, counts
+    assert few == many <= 7  # workflows, active versions, two lifecycle reads at most, last runs, counts, triggers
 
 
 # The last-runs read (4b ruling 5, the owner's review of M1): one batched LATERAL statement over `runs_workflow_last`

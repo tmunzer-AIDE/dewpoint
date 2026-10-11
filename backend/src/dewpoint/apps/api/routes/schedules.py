@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps import schedules
+from dewpoint.apps.api.responses import ScheduleOut, SchedulesOut
 from dewpoint.apps.api.routes.run_requests import get_keys, key_unusable
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.crypto.keys import KeySource
@@ -61,7 +62,7 @@ def _refused(e: schedules.ScheduleRefusedError) -> HTTPException:
     return HTTPException(e.status, detail=e.detail)
 
 
-@router.post("/t/{tenant_id}/workflows/{workflow_id}/schedules", status_code=201)
+@router.post("/t/{tenant_id}/workflows/{workflow_id}/schedules", status_code=201, response_model=ScheduleOut)
 async def create_schedule(
     workflow_id: uuid.UUID,
     given: ScheduleIn,
@@ -82,7 +83,7 @@ async def create_schedule(
     return schedules.body(created, await schedules.accounting(db, created.id))
 
 
-@router.get("/t/{tenant_id}/workflows/{workflow_id}/schedules")
+@router.get("/t/{tenant_id}/workflows/{workflow_id}/schedules", response_model=SchedulesOut)
 async def list_schedules(
     workflow_id: uuid.UUID,
     ctx: TenantContext = Depends(require(P.WORKFLOW_VIEW)),
@@ -96,7 +97,7 @@ async def list_schedules(
     return {"schedules": [schedules.body(s, await schedules.accounting(db, s.id)) for s in found.scalars()]}
 
 
-@router.get("/t/{tenant_id}/schedules/{schedule_id}")
+@router.get("/t/{tenant_id}/schedules/{schedule_id}", response_model=ScheduleOut)
 async def get_schedule(
     schedule_id: uuid.UUID,
     ctx: TenantContext = Depends(require(P.WORKFLOW_VIEW)),
@@ -108,7 +109,7 @@ async def get_schedule(
     return schedules.body(schedule, await schedules.accounting(db, schedule.id))
 
 
-@router.patch("/t/{tenant_id}/schedules/{schedule_id}")
+@router.patch("/t/{tenant_id}/schedules/{schedule_id}", response_model=ScheduleOut)
 async def update_schedule(
     schedule_id: uuid.UUID,
     given: SchedulePatch,

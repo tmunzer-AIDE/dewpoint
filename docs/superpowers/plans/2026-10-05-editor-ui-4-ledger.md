@@ -35,6 +35,7 @@ cover local work only: anything outward-facing (push, PR, issues) is confirmed i
 | 0047 | 4b: `runs_workflow_last` (ruling 72; merged in #60, chained after 0044: M36) |
 | 0048 | B4b: `skipped` and `not_started` projection statuses (the owner, 2026-10-08) |
 | 0049 | B8: draft and single-step simulation (the owner, 2026-10-08) |
+| 0070 | 4c-3a: `webhook_endpoints.trigger_key`, an endpoint's sender (the owner; it was 0054 until 2026-10-11, which 2b-4b's work also names; 2b-4b's plan holds 0048–0063) |
 
 - One Alembic chain: before merging, the first unmerged migration's `down_revision` is reconciled with the actual head.
 - Deployed migrations are never rewritten; 0035–0042 are never altered.
@@ -2123,3 +2124,266 @@ M77. **A previous revision's scope answer draws a pill, and says nothing as curr
     build clean; the browser gate 37 passed; local CodeQL no finding in either language; no backend change.
 
 Paused at the final checkpoint again. Nothing is pushed: a push and a PR wait for the owner's word.
+
+### Owner, 4c-3 design and mockups (2026-10-10, in chat)
+
+Asked with the research for 4c-3 (ruling 96's triggers), the owner chose:
+- the start card opens a Triggers side panel (Input, Schedules, Webhooks); the card's "+" keeps adding the first step;
+- the input as a field list (name, label, type, required, sensitive, description, default), "Use a Mist event…"
+  copying a topic's shape from `/trigger-types` (read only, replaceable), an optional CSV file of typed columns, and
+  an opt-in "Edit as JSON";
+- schedules and webhooks are live and said so, outside undo; before the first publish "＋ Schedule" is disabled, with
+  why;
+- a schedule's timing, time zone, mode and on/off are editable; its input is replaced whole ("Replace the input…", on
+  the published version's form), never shown back;
+- an endpoint records its sender (a migration), set from `/trigger-types` when it's made, and fixed;
+- 1b's "What starts it?" seeds the draft (a Mist topic's shape, or an empty CSV section), creates a Mist binding at
+  once, offers a schedule after the first publish, and opens the new workflow on its Triggers panel;
+- the backend, 4c-3a, all six: the endpoint's sender, B13, the list's trigger counts, `schedule_sync_failed`, named
+  answers for the trigger routes, and validation that warns, server-side, when a draft would break live schedules;
+- the UI, 4c-3b: one plan with milestones, after 4c-3a merges. The run form and CSV upload stay 4e's; the webhook
+  events inbox is out of scope.
+
+The open points, answered:
+- a binding whose events don't fit the input is warned of at the binding, in the editor: a Mist binding compares its
+  topic's shape with the published version's input and offers the topic's shape; another sender's says the input
+  must fit its events;
+- 1b with "Import from file": the file's input wins; the binding is still created, and Triggers warns;
+- Settings → Webhook endpoints shows and copies the relative path now; "This deployment doesn't receive webhooks yet"
+  shows only outside a development deployment; a public address setting comes later, with 2b-4b.
+
+D8: pasted reviews held the canvas twice. Version 16: a failed sync isn't "not running", and boards were missing
+(another sender's endpoint, CSV columns and JSON, the schedule variants, read-only and 320 px views). Version 19:
+"never synced" isn't "not running" either, and the endpoint form's summary contradicted its pointer. Version 21
+answered both, and a pasted review-side sign-off followed. The owner then:
+- signed off D8 on the "4c-3 Trigger Mockups" canvas, version 21 (18 boards);
+- assigned migration slot 0054 to the endpoint's sender;
+- added a read-only "never unpaused" flag to the schedule answer, so a schedule nothing ever unpaused can say "not
+  running yet".
+
+### 4c-3a plan accepted (2026-10-10, in chat)
+
+`docs/superpowers/plans/2026-10-10-editor-ui-4c3a-triggers-backend.md`. Reviews pasted in chat held revision 1 for two
+P2 defects in Task 7's draft check and two minor ones, revision 2 for one P2, revision 3 for two and revision 4 for
+one; revision 5 answered them, each with a test that fails on the previous revision's code, and a pasted review signed
+it off on the review side (no rulings accepted by it). The owner, asked in chat, accepted revision 5 and adopted its
+rulings 1–8, which join this ledger as 139–146, copied as ruled; chose inline execution with the milestone pauses
+(after Milestone 2, the draft check; a fresh review at the end); the branch `feat/editor-4c3a` from origin/main
+(aed887f8), the plan's docs branch merged in; `uv sync --frozen` in the build worktree. The owner then gave the go to
+commit as the plan says ("You may commit as the plan says; start the build"). Push and a PR stay the owner's decisions.
+
+139. **Accepted. An endpoint records the trigger it's for** (Tasks 2–3; migration 0054).
+     - `POST …/webhook-endpoints` takes `trigger`: the key of a trigger type a synced plugin declares
+       (`mist.webhook`), or null for another sender.
+     - Named, the endpoint takes that trigger's endpoint settings: how it proves its sender (`auth`), where its events
+       are (`events_pointer`), and no ids (`id_source: none`).
+     - Refusals are `422 endpoint_invalid` with `fields`: a key no synced plugin declares is `["trigger"]`; a setting
+       the request writes that the trigger decides otherwise is named (writing the same is no clash).
+     - Stored as `webhook_endpoints.trigger_key`, never changed: PATCH refuses it, and the API's role has no grant to
+       update it. Every endpoint answer says `trigger`; the create audit records it.
+     - Endpoints made before 0054 have none: they read as another sender's.
+     - Why: the editor offers Mist's topics and shapes only for a Mist endpoint, and an endpoint's settings decide how
+       its deliveries are read, so they never change. Cost: an existing Mist endpoint shows as another sender's until
+       it's remade.
+140. **Accepted. B13: a workflow's webhook bindings** (Task 4). `GET …/workflows/{workflow_id}/webhook-bindings`, read
+     with `workflow.view`.
+     - Each binding comes with what the Triggers panel shows of its endpoint: id, name, enabled, auth, path, trigger.
+     - Ordered by the endpoint's name, then its id. One statement; `trigger_bindings_one`'s tenant prefix serves it, so
+       no new index.
+     - A workflow the caller's tenant doesn't have, unknown or another tenant's, is `404 not_found`.
+     - Why: until now bindings are listed per endpoint only. Cost: none known.
+141. **Accepted. The list says what starts each workflow** (Task 6). Each row (and a workflow's own answer) carries
+     `triggers: {schedules, schedules_enabled, webhook_bindings, csv}`.
+     - Schedules are the live ones: a deleted one's tombstone is left out.
+     - Bindings are counted on or off.
+     - `csv` is whether the active version declares a CSV file, never the draft; false when nothing is published.
+     - One more batched statement: the list's reads are still fixed, whatever its number of workflows (7 at most).
+     - Why: 1a's Trigger column (ruling 68). Cost: one statement per list read.
+142. **Accepted. A schedule that failed to sync needs attention** (Task 6). `needs_attention` gains
+     `schedule_sync_failed`.
+     - Raised when a live schedule of the workflow, on or off, has `sync_error` set; a tombstone's never raises it.
+     - It clears when the sync next succeeds (the sync clears `sync_error` when it records a generation).
+     - Why: ruling 74's "schedules' sync errors join with 4c". Cost: a disabled schedule's failed sync raises
+       attention though its firings are refused at admission. The failure is real, and it's retried every minute.
+143. **Accepted. Named answers for the trigger routes** (Task 8). Every trigger route the editor will call answers a
+     named model, and so does the start form:
+     - schedules: create, list, read, update;
+     - endpoints: create (its secret shown once), list, read, update, rotate;
+     - bindings: create, an endpoint's list, update, a workflow's list (B13);
+     - the start form, whose omitted keys stay omitted (`response_model_exclude_unset`).
+
+     A schedule's uncounted span keeps its wire names `from` and `class` (aliases). `sync_error` is a string, its codes
+     in a comment: a new code would otherwise fail every answer that holds it. Why: the client is generated from the
+     schema (B1). Cost: none known.
+144. **Accepted. A schedule says what its sync proves** (Task 5). Its answer adds:
+     - `sync_error_at`: an edit doesn't clear a failure, so the editor can tell an earlier one from the latest edit's;
+     - `never_unpaused`: true only when no incarnation of it was sent an unpause, none was seen unpaused, and none is
+       from before 2b-4a (whose unpauses nobody recorded). A schedule is created paused and only the sync unpauses it,
+       recording that first, so with none recorded it has never fired, and the editor may say "not running yet".
+
+     Why: the owner's ruling (2026-10-10), after the D8 review found "never synced" proves nothing. Cost: none known.
+145. **Accepted. A draft that would break live schedules is said so** (Task 7). Validate and publish check the
+     workflow's live schedules' stored input against the draft's (or the new version's) input, server-side:
+     - **Shape only.** JSON Schema's own validator (its own types: `2.0` is an integer), extended for the check,
+       checks the stored input against the draft's input as written. It evaluates only structure: `type`,
+       `properties`, `required`, `additionalProperties`, `items`, `prefixItems`, references, `allOf`, `anyOf`,
+       `dependentRequired` and `dependentSchemas`, at any depth. So it finds a field the draft requires that isn't
+       there, a value whose JSON type isn't the one the draft declares, a field the draft no longer allows, an extra
+       item.
+     - **Never a value's content.** Every keyword that tests one holds for every value (`const`, `enum`, `maximum`,
+       `minimum`, `multipleOf`, `maxLength`, `minLength`, `pattern`, `format`, `minItems`, `maxItems`, `uniqueItems`,
+       `minProperties`, `maxProperties`). Checking one against a stored value would let whoever can validate a draft
+       learn a sensitive value a bit at a time. What the check can tell is presence, a value's JSON type, and a list's
+       length against the items the draft declares.
+     - **Structure a shape can't keep holds, and is said.** `oneOf` is evaluated as `anyOf` (its one-only rule
+       dropped). `not`, `if`/`then`/`else`, `propertyNames`, `patternProperties`, `unevaluatedProperties`,
+       `unevaluatedItems` and `contains` hold for every value: evaluating any of them without its value keywords could
+       refuse what the draft accepts. So the check accepts every value the draft does: a stored input it refuses, the
+       draft refuses too, and no warning is false. When the draft uses one of them and a live schedule was read, a
+       `schedule.partly_checked` warning names them.
+     - **The check never leaves its own validator.** The draft's document is kept as written, so references resolve as
+       they do for the draft, but for `$schema`. jsonschema validates a schema it descends into with the validator its
+       `$schema` names, which has no budget. So `$schema` naming 2020-12, the check's own dialect, is removed wherever a
+       schema stands. Another dialect is read by its own rules: a draft naming one isn't checked, and the warning names
+       `$schema`.
+     - **The reasons are the draft's own words.** A place is named as far as the draft declares it (a key the data
+       supplied shows as `*`), a field by the draft's name; never a value, never a stored field's name. A draft that
+       takes a CSV file fits no schedule: its rows come from an upload only.
+     - **A warning, never a refusal.** `schedule.input_refused` at `/settings/input_schema`, or `/settings/csv` for a
+       CSV file. Validate's answer lists the schedules (`schedule_breaks`: id, reasons, and `more` when a bound cut them
+       short; the oldest first).
+     - **Bounded in work units, never time.**
+       - A check fetches the oldest live schedules whose sealed inputs fit 2 MiB together, 100 at most. They are picked
+         by their stored length in the statement that also counts them, so no other input is fetched.
+       - Every keyword it evaluates, at any depth, spends one of its 50,000 steps, for all its inputs together. Its
+         `anyOf` tries a branch only up to its first error and keeps none.
+       - From one stored input it reads at most 100 errors, lazily, and keeps at most 5 distinct reasons, each of 300
+         characters at most.
+       - The rest are said: schedules past a bound, the one the steps ran out in, and any whose stored input can't be
+         read (the tenant's key unreadable), in a `schedule.unchecked` warning; reasons past a bound as `more`.
+       - Decoding and checking run in a worker thread, off the event loop.
+     - **Skipped** when the draft's input schema or CSV declaration has an error.
+     - Webhook bindings aren't checked here: the editor warns at the binding (the owner's ruling).
+
+     Why: nobody can see a schedule's stored input, and a draft that no longer fits makes it fail at every firing.
+     Costs:
+     - a stored input that breaks only a value rule (a new `maximum`, a narrower `enum`) isn't reported: it fails at
+       its first firing, as today, and the run says why;
+     - one that breaks only the structure listed above as dropped is reported as checked in part, not as broken;
+     - a schedule past the bounds isn't checked: it's counted, so the editor can say so.
+146. **Accepted. Migration slot 0054** (Task 2), the owner's (2026-10-10), chained after main's head, 0045.
+     0050–0053 are 2b-4b's.
+
+### 4c-3a, milestone 1 (2026-10-10)
+
+Built inline on `feat/editor-4c3a` (worktree `scratchpad/ui4c3/build`, from origin/main aed887f8 with the plan merged,
+5aca7730; `uv sync --frozen`), test-first, each test seen failing as the plan's step says before its code:
+- Task 1 (9d374ac7): this ledger: the owner's 4c-3 rulings, slot 0054, the plan accepted (rulings 139–146).
+- Task 2 (ba2e2037): migration 0054, `webhook_endpoints.trigger_key`; 6 failed, then the chain, ingress schema and
+  model tests 35 passed.
+- Task 3 (7ebff3c3): an endpoint made for a trigger; 8 failed, then the webhook and trigger-type API tests 35 passed.
+- Task 4 (a6fce0ac): B13, `GET …/workflows/{workflow_id}/webhook-bindings`; 1 failed (`404 == 200`), then the webhook
+  API tests 34 passed.
+
+ruff, mypy and the formatter clean after each. No mid-slice ruling: the code is the plan's, as written.
+
+### 4c-3a, milestone 2 (2026-10-10)
+
+- Task 5 (4d3a0cf1): a schedule's `sync_error_at` and `never_unpaused`; 4 failed (`KeyError`), then the schedule
+  tests 62 passed.
+- Task 6 (e39a2119): the list's `triggers` and `schedule_sync_failed`; 3 failed, then the summary and workflow tests
+  40 passed; the list's reads stay fixed, 7 at most.
+- Task 7 (2ce370cb): validate and publish say which live schedules a draft would break (ruling 145): the shape check,
+  bounded in work units (2 MiB of input fetched, 50,000 steps, 100 errors and 5 reasons an input), off the event loop;
+  2 collection errors (the module missing), then the check's and the workflow routes' tests 106 passed.
+
+Then the tests of every directory the milestone touched (`tests/apps/api`, `tests/core/ingress`, the migration chain
+and model schema, the schedule, summary, check and sync tests): 711 passed. ruff, mypy, the formatter and the import
+contracts (11 kept) clean. No mid-slice ruling: the code is the plan's, as written.
+
+Paused for the owner's review, as the plan says: Task 7 decides what validate may reveal of a schedule's sealed input.
+Milestone 3 (the named answers, the client's types, every check and the final review) starts on the owner's word.
+
+### 4c-3a, milestone 3 and the final checkpoint (2026-10-11)
+
+On the owner's word after milestone 2's review ("Continue with Milestone 3"):
+- Task 8 (688db154): named answers for the trigger routes and the start form (ruling 143); 15 failed, then the
+  OpenAPI, webhook, schedule, CSV start, run request and schedule check API tests 179 passed.
+- Task 9 (3a0adebd): the OpenAPI document and the client's types regenerated; the frontend's three typed validation
+  answers failed typecheck without `schedule_breaks`, then `check:api`, typecheck, lint and build clean, and the unit
+  suite 828 passed.
+- Task 10: §5's B13 row in the outline says where it was built.
+
+Checks, as run at 3a0adebd (no code changed after it):
+- the whole backend suite as CI runs it, on the owner's word ("You may run the full backend suite"): 4825 passed in
+  10 min 38 s (`-n auto`, without the CEL gate tests); the CEL gate tests apart, serially: 442 passed, 8 skipped
+  (Linux only: the evaluator's rlimits and the estimator's peak reset, which CI's runner runs);
+- ruff (check and format), mypy on `src` (285 files), the import contracts (11 kept), and CI's diff of the OpenAPI
+  document the backend serves against `frontend/src/api/openapi.json`: clean, no difference;
+- the frontend, Task 9's run: `check:api`, typecheck, lint and build clean; the unit suite 828 passed. The browser
+  gate wasn't run: no screen changed;
+- local CodeQL: no finding in either language.
+
+Milestone 1's Task 4 and milestone 2's Task 7 now read a6fce0ac and 2ce370cb: they were written a6fce0a0 and 2ce370c4
+(the P3 of milestone 2's pasted review). No mid-slice ruling: the code is the plan's, as written.
+
+Next, a fresh reviewer reviews the whole branch; its findings and their fixes follow in a section of their own.
+Nothing is pushed: a push and a PR wait for the owner's word.
+
+### 4c-3a, after the final review (2026-10-11)
+
+A fresh reviewer (the most capable model) reviewed aed887f8..495ff0f0 against the plan, its Review Focus, the outline's
+4c rows and rulings 68, 71, 74, 96 and 139–146: no critical finding, one important, five minor; "ready to merge: with
+fixes". It found the code to be the plan's blocks as written and each Review Focus test checking what its line says.
+It checked that the shape check replaces all 36 keywords of the installed jsonschema (4.26.0), and that FastAPI's own
+serialization keeps the start form's omitted keys omitted. Re-graded by what a person gets, one of its minors is
+important too (a stored input that doesn't open answered 500, as the important one did), and both were fixed in one
+pass, each test failing first:
+
+M78. **A stored input nested deeper than the check can follow is counted unchecked.** The steps bound the check's work,
+    not its depth: under a draft whose input recurses through a reference, a stored input nested 300 deep raised
+    `RecursionError` out of the check (about 250 levels), so validate answered 500, and publish too, its version
+    undone: ruling 145's "a warning, never a refusal" broken. That input is now counted unchecked, and the next ones
+    are still checked; the warning's text names the case ("nested deeper than it can follow"). Tests:
+    `test_a_stored_input_nested_deeper_than_the_check_follows_is_counted_unchecked`, and through validate and publish
+    `test_a_stored_input_nested_deeper_than_the_check_follows_never_fails_publishing`.
+M79. **A stored input that doesn't open under its tenant and id is counted unchecked**, as one whose key can't be read
+    is (ruling 145: "any whose stored input can't be read"). `ClaimCipher.open` raises `ClaimUnreadableError` there,
+    which isn't a key's failure, so a damaged row, or a tenant's data keys made again, made validate and publish answer
+    500 until the schedule was deleted. Test: `test_a_stored_input_that_doesnt_open_is_counted_unchecked`.
+    Checks, as run on the fix: the three tests failed (`RecursionError`, `ClaimUnreadableError`), then passed; the
+    tests of everything the fix touches (the check, its API tests, the workflow, version, portable, commit-before-
+    response and schedule API tests) 133 passed; ruff, mypy (285 files) and the import contracts (11 kept) clean. No
+    schema change. The whole suite wasn't run again: the owner decides.
+
+Deferred minors, for the owner: a `oneOf` whose branches all fail gives the generic reason ("doesn't have the shape
+this input declares"), not "fits none of the shapes"; a `false` property schema is placed one level up; comments say
+the reasons are kept in the order found, and they're sorted; the worker thread is started when no input was opened.
+
+What the reviewer set aside, ruled:
+- the firing-time check (`apps/inputs.py`, jsonschema's own validator) recursing on the same deep input under a
+  recursive version: main's admission path, unchanged here; with M78, publishing such a version goes ahead as on main,
+  and the schedule is said unchecked. Proposed as a follow-up, with the next line;
+- no nesting limit on any input at write, which makes M78's case reachable: platform-wide, not this slice's;
+- up to 100 schedules read and opened at each validate: ruling 145's cost, accepted;
+- 101 errors read to learn there are more: the design, tested;
+- `EndpointIn.trigger`'s 64 characters: the SDK's own bound on a trigger key (`TYPE_KEY_RE`, 1–64), so it never refuses
+  a declared key;
+- a `(root)` place for a stored input that isn't an object: unreachable, a schedule's input is an object;
+- disabled schedules checked: they're live (ruling 145);
+- the commits' co-author line: the plan's and the session's attribution;
+- no frontend use yet of the new fields and routes: 4c-3b's.
+
+Paused at the final checkpoint. Nothing is pushed: a push and a PR wait for the owner's word.
+
+### 4c-3a, migration renumbered (2026-10-11)
+
+The owner, in chat: "can you fix the Migration 0054 in this branch?" 2b-4b's work (local, `proto/2b4b-v1`) names its own
+0054 and 0055, and its plan holds 0048–0063: two revisions with one id can't both merge, whatever the order. 4c-3a's
+migration is now slot 0070 (`0070_endpoint_trigger.py`), still chained after main's head, 0045; this amends ruling 146.
+0064–0069 are left free after 2b-4b's plan. The column, its grant and its tests are unchanged.
+
+Test first: the chain test expecting 0070 failed (the head was 0054), then passed. `tests/core`, the legacy schedule
+test (which runs Alembic) and the webhook API tests: 951 passed; ruff and mypy clean.
+
+For the owner: 2b-4b's branch also names 0048 and 0049, which this ledger's slot table reserves for B4b and B8.

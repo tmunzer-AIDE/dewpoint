@@ -18,7 +18,8 @@ const doc = (declassify: { node: string; field: string }[] = []): GraphDoc => ({
   settings: { declassify },
 });
 const check = (over: Partial<Validation> = {}): Validation => ({
-  valid: false, draft_revision: 1, expressions: [], conditional_steps: [], taint: { sites: [], declassified: [] },
+  valid: false, draft_revision: 1, expressions: [], conditional_steps: [], schedule_breaks: [],
+  taint: { sites: [], declassified: [] },
   diagnostics: [], ...over,
 });  // prettier-ignore
 const undecided = {

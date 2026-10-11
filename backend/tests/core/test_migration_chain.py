@@ -24,7 +24,7 @@ def script() -> ScriptDirectory:
 
 
 def test_the_chain_has_one_head() -> None:
-    assert script().get_heads() == ["0045"]
+    assert script().get_heads() == ["0070"]
 
 
 def test_runs_workflow_last_comes_after_the_orphan_backoff() -> None:
@@ -34,3 +34,9 @@ def test_runs_workflow_last_comes_after_the_orphan_backoff() -> None:
 def test_the_samples_record_comes_after_the_workflows_list_index() -> None:
     """Slot 0045 (B7) is chained after main's head when it was written, 0047: slot numbers name ownership, not order."""
     assert script().get_revision("0045").down_revision == "0047"
+
+
+def test_the_endpoint_sender_comes_after_the_samples_record() -> None:
+    """Slot 0070 (4c-3a) is chained after main's head when it was written, 0045: slot numbers name ownership, not
+    order."""
+    assert script().get_revision("0070").down_revision == "0045"

@@ -39,8 +39,9 @@ class TenantEventKey(Base):
 
 
 class WebhookEndpoint(Base):
-    """An endpoint (`/hooks/<id>`): its authentication, its limits, where its events' ids are, its rate buckets, its
-    pending and retained counters and their quotas. Its secrets are sealed under the ingress key, never a tenant's."""
+    """An endpoint (`/hooks/<id>`): its authentication, its limits, where its events' ids are, the trigger it's for, its
+    rate buckets, its pending and retained counters and their quotas. Its secrets are sealed under the ingress key,
+    never a tenant's."""
 
     __tablename__ = "webhook_endpoints"
     __table_args__ = (UniqueConstraint("id", "tenant_id", name="webhook_endpoints_tenant"),)  # its rows' own tenant's
@@ -60,6 +61,7 @@ class WebhookEndpoint(Base):
     id_pointer: Mapped[str | None] = mapped_column(Text)
     id_header: Mapped[str | None] = mapped_column(Text)
     events_pointer: Mapped[str | None] = mapped_column(Text)
+    trigger_key: Mapped[str | None] = mapped_column(Text)  # the trigger type it was made for; null: another sender
     dedupe_key: Mapped[bytes] = mapped_column(LargeBinary)
     request_per_s: Mapped[float] = mapped_column(Float, server_default="20")
     request_burst: Mapped[int] = mapped_column(BigInteger, server_default="100")

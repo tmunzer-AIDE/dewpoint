@@ -7,6 +7,7 @@ the schedule's generation, which the dispatcher's sync follows; deleting leaves 
 what it belonged to."""
 
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -232,3 +233,54 @@ async def test_a_schedules_missed_firings_are_counted_only_when_certain_and_its_
         assert (shown["misses"], shown["accounting_complete"]) == (5, False)
         assert shown["uncounted_intervals"] == [{"from": "2026-10-06T08:00:00+00:00", "to": "2026-10-06T11:00:00+00:00",
                                                  "class": "unknown", "reason": "lost_before_unpause"}]  # fmt: skip
+
+
+async def incarnation(owner: Any, ctx: Any, schedule_id: str, number: int, **columns: Any) -> None:
+    """A Temporal schedule id the sync recorded for the schedule, as `schedule_incarnations` holds one."""
+    values = {"temporal_id": f"t-{schedule_id}-{number}", "tenant_id": ctx.tenant_id, "schedule_id": schedule_id,
+              "number": number, "generation": 1} | columns  # fmt: skip
+    async with owner() as s, s.begin():
+        await s.execute(text(f"insert into schedule_incarnations ({', '.join(values)}) "  # noqa: S608
+                             f"values ({', '.join(':' + k for k in values)})"), values)  # fmt: skip
+
+
+async def test_a_schedule_says_when_its_sync_failed_and_that_nothing_ever_unpaused_it(
+    keyed_app, workflow, owner_sessionmaker, api_settings
+) -> None:
+    """4c-3a ruling 6: the answer says when the sync last failed (an edit doesn't clear a failure, so the editor tells
+    an earlier one from the latest edit's), and that nothing ever unpaused it: created paused, only the sync unpauses
+    it, recording that first, so with no unpause recorded it has never fired."""
+    ctx, wf = workflow
+    editor = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "editor")
+    made = (await editor.post(schedules_url(ctx, wf), json=BODY)).json()
+    assert (made["sync_error"], made["sync_error_at"], made["never_unpaused"]) == (None, None, True)
+    await incarnation(owner_sessionmaker, ctx, made["id"], 1)  # recorded, created paused, its unpause not yet sent
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text("update schedules set sync_error = 'temporal_refused', sync_error_at = now() "
+                             "where id = :i"), {"i": made["id"]})  # fmt: skip
+    viewer = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "viewer")
+    got = (await viewer.get(schedule_url(ctx, made["id"]))).json()
+    stored = await row(owner_sessionmaker, made["id"])
+    assert (got["sync_error"], got["sync_error_at"], got["never_unpaused"]) == (
+        "temporal_refused", stored["sync_error_at"].isoformat(), True,
+    )  # fmt: skip
+    listed = (await viewer.get(schedules_url(ctx, wf))).json()["schedules"]
+    assert [(s["sync_error_at"], s["never_unpaused"]) for s in listed] == [(stored["sync_error_at"].isoformat(), True)]
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [{"unpause_sent_at": datetime(2026, 10, 10, 8, tzinfo=UTC)}, {"landed_paused": False}, {"backfilled": True}],
+    ids=["unpause-sent", "seen-unpaused", "from-before-2b-4a"],
+)
+async def test_a_schedule_that_may_have_been_unpaused_never_says_otherwise(
+    keyed_app, workflow, owner_sessionmaker, api_settings, evidence: dict[str, Any]
+) -> None:
+    """An unpause sent, an incarnation seen unpaused, or one from before 2b-4a (whose unpauses nobody recorded), on any
+    of its incarnations: it may have fired, so `never_unpaused` is false."""
+    ctx, wf = workflow
+    editor = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "editor")
+    made = (await editor.post(schedules_url(ctx, wf), json=BODY)).json()
+    await incarnation(owner_sessionmaker, ctx, made["id"], 0, **evidence)
+    await incarnation(owner_sessionmaker, ctx, made["id"], 1)
+    assert (await editor.get(schedule_url(ctx, made["id"]))).json()["never_unpaused"] is False

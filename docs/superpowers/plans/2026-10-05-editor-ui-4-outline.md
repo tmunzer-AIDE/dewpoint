@@ -224,7 +224,7 @@ need a migration (a slot from you each). Today no route sets `response_model`.
 | B10 | 4e | Runs list: status, mode, source and time filters, and the workflow's name per item (paging exists) | no |
 | B11 | 4e | CSV: read the saved default mapping; re-preview a staged upload under a new mapping | no |
 | B12 | 4b | Workflow export and import as JSON, connections replaced by typed placeholders and re-bound on import (D9) | no |
-| B13 | 4c | Webhook bindings per workflow, for the trigger drawer | no |
+| B13 | 4c | Webhook bindings per workflow, for the trigger drawer. Built in 4c-3a: `GET …/workflows/{workflow_id}/webhook-bindings`, each binding with its endpoint | no |
 | B14 | 4e | `expected_version_id` on `StartIn` and `RerunIn` (D13). Checked in `_frozen`, after `lock_for_admission`: a mismatch is `409 version_changed` naming the active number. Exact retries are resolved by key before that (`_by_key` → `_retry`), so they return their request whatever is active now. The digest stores no format version, so `canonical()` adds `expected_version_id` as a fifth key only when it's given: every existing digest, and every request without it, keeps its exact bytes (as a CSV start's `csv` already does). With it, the same key and another version is `idempotency_conflict` | no |
 
 Seen, not proposed here: `connection.use`, `approval.decide` and `agent.grant` are defined but no route checks them;
