@@ -20,6 +20,7 @@ from temporalio.client import WorkflowExecutionStatus
 
 from dewpoint.apps.dispatcher import dispatch, evidence, start_call
 from dewpoint.core import blockers
+from dewpoint.core.db import tenant_scope
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE
 from dewpoint.engine.runtime.ids import run_workflow_id
 from dewpoint.engine.runtime.workflow import RunGraph
@@ -161,14 +162,15 @@ def test_only_the_store_module_writes_the_store() -> None:
 
 
 def test_the_dispatcher_never_removes_an_identified_blocker() -> None:
-    """`gone` is the erasure's (task 13), and `identified` is called only behind the first run's check."""
+    """`gone` is the erasure's (task 13: step 60, `stages.py`), and `identified` is called only behind the first run's
+    check (the dispatcher's, and step 60's identity read)."""
     calls: dict[str, list[str]] = {"gone": [], "identified": []}
     for path in sorted(SRC.rglob("*.py")):
         for node in ast.walk(ast.parse(path.read_text())):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in calls and (
                     isinstance(node.func.value, ast.Name) and node.func.value.id == "blockers"):  # fmt: skip
                 calls[node.func.attr].append(path.name)
-    assert calls == {"gone": [], "identified": ["dispatch.py", "evidence.py"]}
+    assert calls == {"gone": ["stages.py"], "identified": ["dispatch.py", "evidence.py", "stages.py"]}
 
 
 async def test_gone_removes_only_an_identified_blocker_with_nothing_open_and_never_a_legacy_one(
@@ -180,6 +182,7 @@ async def test_gone_removes_only_an_identified_blocker_with_nothing_open_and_nev
 
     async def gone() -> bool:
         async with owner_sessionmaker() as s, s.begin():
+            await tenant_scope(s, request.tenant_id)  # its audit entry is the tenant's (task 13)
             return await blockers.gone(s, request.id)
 
     assert not await gone()  # unresolved

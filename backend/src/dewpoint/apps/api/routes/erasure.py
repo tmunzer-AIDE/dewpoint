@@ -17,7 +17,7 @@ from dewpoint.core.config import Settings
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.erasure import service
 from dewpoint.core.http import active_session, ensure_fresh_reauth, get_db, get_settings_dep, require_platform_admin
-from dewpoint.core.models.erasure import Stage, TenantErasure, TenantErasureItem
+from dewpoint.core.models.erasure import Stage, TenantErasure, TenantErasureItem, TenantErasureKnown
 from dewpoint.core.models.identity import AuthSession, User
 
 router = APIRouter(prefix="/api/v1/admin/tenants", tags=["admin"])
@@ -32,6 +32,10 @@ def _iso(value: Any) -> str | None:
 
 
 async def _shown(db: AsyncSession, record: TenantErasure) -> dict[str, object]:
+    """The erasure as recorded, with what's unresolved for its tenant (`erasure_unresolved`) and whether it's proven
+    (`erasure_proven`: completed, no qualification, nothing unresolved): `status` is `complete` only then, never for
+    one held, stopped or qualified (2b-4b M4 recovery, task 16). Its known executions counted by provenance, so
+    `retained_out` is reported apart from `gone`."""
     items: dict[str, dict[str, int]] = {}
     counted = await db.execute(
         select(TenantErasureItem.step, TenantErasureItem.state, func.count())
@@ -40,7 +44,16 @@ async def _shown(db: AsyncSession, record: TenantErasure) -> dict[str, object]:
     )
     for step, state, n in counted:
         items.setdefault(str(step), {})[state] = n
+    by_provenance = await db.execute(
+        select(TenantErasureKnown.provenance, func.count())
+        .where(TenantErasureKnown.tenant_id == record.tenant_id, TenantErasureKnown.kind == "execution")
+        .group_by(TenantErasureKnown.provenance)
+    )
+    known = {str(provenance): int(n) for provenance, n in by_provenance}
+    unresolved = int((await db.execute(text("SELECT erasure_unresolved(:t)"), {"t": record.tenant_id})).scalar_one())
+    proven = bool((await db.execute(text("SELECT erasure_proven(:t)"), {"t": record.tenant_id})).scalar_one())
     return {
+        "status": "complete" if proven else "incomplete", "proven": proven, "unresolved": unresolved,
         "tenant_id": str(record.tenant_id), "step": record.step, "step_name": Stage(record.step).name.lower(),
         "requested_by": str(record.requested_by), "requested_at": _iso(record.requested_at),
         "stopped_at": _iso(record.stopped_at), "stopped_by": str(record.stopped_by) if record.stopped_by else None,
@@ -49,7 +62,9 @@ async def _shown(db: AsyncSession, record: TenantErasure) -> dict[str, object]:
         "latest_close": _iso(record.latest_close), "check_after": _iso(record.check_after),
         "boundary": record.boundary, "counts": record.counts, "items": items,
         "completed_at": _iso(record.completed_at), "reopened_at": _iso(record.reopened_at),
-        "incidents": record.incidents,
+        "incidents": record.incidents, "verified_close": _iso(record.verified_close),
+        "qualification": record.qualification, "legacy_completed_at": _iso(record.legacy_completed_at),
+        "known": known,
     }  # fmt: skip
 
 

@@ -5,9 +5,12 @@ import uuid
 from typing import Any
 
 from sqlalchemy import text
+from temporalio.client import Client
+from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from dewpoint.core.auth.users import create_user
 from dewpoint.core.erasure import service
+from dewpoint.engine.runtime.ids import run_workflow_id
 from tests.core.erasure.test_fence import FENCED_TABLES
 from tests.core.ingress.support import KEYRING, digest, endpoint, key, record
 from tests.core.retention.support import CIPHER, OLD, request, sql, tree
@@ -88,3 +91,43 @@ async def rows_of(owner: Any, tenant: uuid.UUID) -> dict[str, int]:
 async def erasing(api: Any, tenant: uuid.UUID) -> None:
     async with api() as s, s.begin():
         await service.start(s, tenant_id=tenant, requested_by=uuid.uuid4())
+
+
+async def executed(client: Client, owner: Any, tenant: uuid.UUID) -> None:
+    """Every execution step 60 will enumerate for the tenant started on the dev server and closed at once (the runs
+    `populated` writes ended long ago; no worker serves the queue), and the exact runs its evidence and firings name set
+    to the started ones: each is then shown, deleted and read back, `gone`. `populated` writes those rows alone, as if
+    Temporal had them: an id Temporal never shows holds an erasure for good (2b-4b M4 recovery, task 12;
+    `test_erasure_bound.py`). Closed, not left open: the dev server takes minutes, more for each, to delete an execution
+    terminated just before (measured, task 12), and one closed a while before in about 30 s."""
+    runs_of = text("select id from runs where tenant_id = :t")
+    started_of = text("select id from run_requests where tenant_id = :t and status = 'started'")
+    async with owner() as s:
+        runs = [str(r) for r in (await s.execute(runs_of, {"t": tenant})).scalars()]
+        started = [str(r) for r in (await s.execute(started_of, {"t": tenant})).scalars()]
+        evidence = (await s.execute(text("select id, workflow_id from execution_evidence where tenant_id = :t"),
+                                    {"t": tenant})).all()  # fmt: skip
+        firings = (await s.execute(text("select workflow_id, run_id from schedule_firings where tenant_id = :t"),
+                                   {"t": tenant})).all()  # fmt: skip
+    run_ids: dict[str, str] = {}
+
+    async def start(workflow_id: str) -> str:
+        if workflow_id not in run_ids:
+            try:
+                handle = await client.start_workflow("Unserved", id=workflow_id, task_queue="erasure-unserved")
+                await handle.terminate()
+                run_ids[workflow_id] = str(handle.first_execution_run_id or handle.result_run_id)
+            except WorkflowAlreadyStartedError as err:  # the test started it itself: its open run, left as it is
+                run_ids[workflow_id] = str(err.run_id)
+        return run_ids[workflow_id]
+
+    for run in dict.fromkeys([*runs, *started]):
+        await start(run_workflow_id(str(tenant), run))
+    async with owner() as s, s.begin():
+        for evidence_id, workflow_id in evidence:
+            await s.execute(text("update execution_evidence set run_id = :r where id = :i"),
+                            {"r": await start(workflow_id), "i": evidence_id})  # fmt: skip
+        for workflow_id, run_id in firings:
+            await s.execute(text("update schedule_firings set run_id = :r where workflow_id = :w and run_id = :o "
+                                 "and tenant_id = :t"),
+                            {"r": await start(workflow_id), "w": workflow_id, "o": run_id, "t": tenant})  # fmt: skip

@@ -19,7 +19,7 @@ from temporalio.client import Client
 from dewpoint.apps.dispatcher import evidence
 from dewpoint.apps.erasure import bound, process, temporal
 from dewpoint.core.models.erasure import Stage
-from tests.apps.erasure.support import erasing, populated
+from tests.apps.erasure.support import erasing, executed, populated
 from tests.apps.erasure.test_stages import QUEUE, Leaf, record, serving, until
 from tests.core.retention.support import sql
 
@@ -29,6 +29,7 @@ BOUNDARY = "self-hosted authorizer (test)"
 
 async def at_bound(owner: Any, ingress: Any, api: Any, retention: Any, client: Client) -> dict[str, Any]:
     data = await populated(owner, ingress)
+    await executed(client, owner, data["t"])  # nothing left unresolved: the bound and the final check run
     await erasing(api, data["t"])
     assert await until(retention, client, data["t"], Stage.BOUND) == Stage.BOUND
     return data

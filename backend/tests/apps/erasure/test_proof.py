@@ -25,7 +25,7 @@ from dewpoint.core.models.erasure import Stage
 from dewpoint.engine.runtime.ids import run_workflow_id, schedule_workflow_id
 from tests.apps.api.test_erasure_api import admin_of, url
 from tests.apps.dispatcher.test_schedule_sync import Leading
-from tests.apps.erasure.support import populated
+from tests.apps.erasure.support import executed, populated
 from tests.apps.erasure.test_stages import QUEUE, Root, serving, until
 from tests.core.ingress.support import KEYRING
 from tests.core.retention.support import sql
@@ -66,6 +66,7 @@ async def test_after_completion_nothing_of_the_tenant_is_decodable_or_stored_bey
             if len(await temporal.listed(client, f"t:{tenant}:run:")) >= 3:
                 break
             await asyncio.sleep(0.1)
+    await executed(client, owner_sessionmaker, tenant)  # every other id shown, none left unresolved (task 12)
     temporal_before = await temporal.listed(client, f"t:{tenant}:")
     assert len(temporal_before) >= 4  # ticks, the run's chain, its child
 

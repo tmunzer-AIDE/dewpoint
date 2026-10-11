@@ -130,3 +130,7 @@ class ExecutionEvidence(Base):
     read_run: Mapped[str | None] = mapped_column(Text)
     read_pending: Mapped[dict[str, list[str]] | None] = mapped_column(JSONB)
     read_last_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Temporal's close of that exact run, from a describe of it or its history's close event, and when it was seen
+    # (0063, 2b-4b M4 recovery task 15): what `retained_out` rests on, copied into the erasure's known row
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    closed_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

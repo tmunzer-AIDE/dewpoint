@@ -73,9 +73,22 @@ async def _moved(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid
             values["fenced_at"] = func.coalesce(TenantErasure.fenced_at, now)  # the insert fence, never lifted
         if done == Stage.PAUSE:
             values["paused_at"] = now  # the last schedule verified paused
-        if done == Stage.EXECUTIONS:  # every execution found is verified gone: none of them closes after this
-            values["latest_close"] = now
-            values["check_after"] = now + NAMESPACE_RETENTION_MAX
+        if done == Stage.EXECUTIONS:  # every execution found was verified gone by now; the bound only if nothing is
+            # unresolved, read under the erasure row's lock, which every bound or return decision takes first
+            await s.execute(select(TenantErasure.tenant_id).where(TenantErasure.tenant_id == tenant_id)
+                            .with_for_update())  # fmt: skip
+            # still settled under that lock: a recheck's reopen may have added items since (the review's ruling b)
+            unsettled = await s.execute(select(TenantErasureItem.id).where(
+                TenantErasureItem.tenant_id == tenant_id, TenantErasureItem.step == int(done),
+                TenantErasureItem.state.in_(("found", "requested")),
+            ).limit(1))  # fmt: skip
+            if unsettled.first() is not None:
+                return done
+            unresolved = int((await s.execute(text("SELECT erasure_unresolved(:t)"), {"t": tenant_id})).scalar_one())
+            values["verified_close"], values["absence_unresolved"] = now, unresolved
+            if unresolved == 0:
+                values["latest_close"] = now
+                values["check_after"] = now + NAMESPACE_RETENTION_MAX
         moved = await s.execute(
             update(TenantErasure)
             .where(TenantErasure.tenant_id == tenant_id, TenantErasure.step == int(done))
@@ -147,7 +160,7 @@ async def advance(sessionmaker: async_sessionmaker[AsyncSession], client: Client
         stage = Stage(record.step)
         if stage == Stage.BOUND:
             try:
-                if await bound.check(ctx) == "reopened":
+                if await bound.check(ctx) in ("reopened", "returned"):  # back at 31 or 60: carried on
                     continue
                 return Stage.COMPLETE
             except bound.Held as held:

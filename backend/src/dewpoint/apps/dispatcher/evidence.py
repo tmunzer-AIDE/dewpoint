@@ -31,6 +31,7 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio.api.common.v1 import WorkflowExecution
+from temporalio.api.enums.v1 import EventType
 from temporalio.api.workflowservice.v1 import DescribeNamespaceRequest, GetWorkflowExecutionHistoryRequest
 from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.service import RPCError, RPCStatusCode
@@ -50,6 +51,11 @@ RETAINED_FOR = timedelta(days=1)  # when the namespace's retention can't be read
 BATCH = 50  # rows a pass
 CALL_DEADLINE = timedelta(seconds=10)
 PAGES = 8  # history pages a visit reads, at most (the owner's D16 ruling: an experimental cap, not a time budget)
+CLOSES = frozenset((  # a run's close, the last event of its history
+    EventType.EVENT_TYPE_WORKFLOW_EXECUTION_COMPLETED, EventType.EVENT_TYPE_WORKFLOW_EXECUTION_FAILED,
+    EventType.EVENT_TYPE_WORKFLOW_EXECUTION_TIMED_OUT, EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CANCELED,
+    EventType.EVENT_TYPE_WORKFLOW_EXECUTION_TERMINATED, EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CONTINUED_AS_NEW,
+))  # fmt: skip
 
 
 @dataclass
@@ -64,6 +70,7 @@ class _Reading:
     last: datetime | None = None
     children: list[tuple[str, str | None, datetime]] = field(default_factory=list)
     continued: tuple[str, datetime] | None = None
+    closed: datetime | None = None  # its close event's time, once a page reached it (0063)
     done: bool = False
 
     @classmethod
@@ -135,6 +142,8 @@ async def _read_on(client: Client, workflow_id: str, reading: _Reading) -> _Read
         for event in answer.history.events:
             at = event.event_time.ToDatetime(tzinfo=UTC)
             reading.last = at
+            if event.event_type in CLOSES:
+                reading.closed = at
             if event.HasField("start_child_workflow_execution_initiated_event_attributes"):
                 child = event.start_child_workflow_execution_initiated_event_attributes.workflow_id
                 reading.initiated[event.event_id] = (child, at)
@@ -218,6 +227,8 @@ async def _check(sessionmaker: async_sessionmaker[AsyncSession], client: Client,
                 return judged
             asked = await _after(s, timedelta(0))
             row.seen_at, row.checked_at = row.seen_at or asked, asked
+            if run_id is not None and row.closed_at is None and not _open(described) and described.close_time:
+                row.closed_at, row.closed_seen_at = described.close_time, asked  # that exact run's, from Temporal
             if _open(described):
                 first = described.raw_description.workflow_execution_info.first_run_id
                 if run_id is None and first and first != described.run_id:
@@ -385,6 +396,8 @@ async def _recorded(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: u
         kept = (retention or RETAINED_FOR) + timedelta(minutes=1)
         row.read_token = row.read_run = row.read_pending = row.read_last_at = None
         row.run_id, row.read_at = reading.run_id, await _after(s, timedelta(0))
+        if reading.closed is not None and row.closed_at is None:  # the run read: its history's close event
+            row.closed_at, row.closed_seen_at = reading.closed, row.read_at
         row.next_check_at = await _later(s, kept, reading.last)
     return "read"
 

@@ -407,3 +407,195 @@ async def test_0059s_downgrade_never_drops_a_record_written_while_it_checks(db: 
     await asyncio.to_thread(upgrade, db, "0059")
     [outcome] = await _while_written(db, ABANDONED, "0058")
     assert isinstance(outcome, Exception) and "0059 refused" in str(outcome), outcome
+
+
+# 0060 (task 11): provenance. Every execution row from before is `legacy`: an incomplete erasure with one loses its
+# bound (its close kept as `verified_close`), a completed one is qualified, its completion kept, and alerted once.
+async def _tenant(db: str) -> uuid.UUID:
+    made = await _rows(db, "INSERT INTO tenants (id, name, slug) VALUES (gen_random_uuid(), 'T', "
+                           "substr(md5(random()::text), 1, 12)) RETURNING id")  # fmt: skip
+    return uuid.UUID(str(made[0][0]))
+
+
+async def test_0060_marks_every_known_execution_legacy_and_holds_or_qualifies_its_erasure(db: str) -> None:
+    import structlog
+
+    await asyncio.to_thread(upgrade, db, "0059")
+    completed, incomplete, clean = [await _tenant(db) for _ in range(3)]
+    await _sql(db, "INSERT INTO tenant_erasures (tenant_id, requested_by, step, completed_at) VALUES "
+                   f"('{completed}', gen_random_uuid(), 100, '2026-09-01T00:00:00Z'), "
+                   f"('{clean}', gen_random_uuid(), 100, '2026-09-02T00:00:00Z')")  # fmt: skip
+    await _sql(db, "INSERT INTO tenant_erasures (tenant_id, requested_by, step, latest_close, check_after) VALUES "
+                   f"('{incomplete}', gen_random_uuid(), 90, '2026-10-01T00:00:00Z', "
+                   "'2026-10-31T00:00:00Z')")  # fmt: skip
+    rows = ((completed, "execution", "w:1", "'r1'"), (completed, "execution", "w:2", "NULL"),
+            (completed, "schedule", "s:1", "NULL"), (incomplete, "execution", "w:3", "'r3'"),
+            (clean, "schedule", "s:2", "NULL"))  # fmt: skip
+    for tenant, kind, workflow_id, run_id in rows:
+        await _sql(db, "INSERT INTO tenant_erasure_known (tenant_id, kind, workflow_id, run_id) "
+                       f"VALUES ('{tenant}', '{kind}', '{workflow_id}', {run_id})")  # fmt: skip
+    with structlog.testing.capture_logs() as logs:
+        await asyncio.to_thread(upgrade, db, "0060")
+    known = await _rows(db, "SELECT kind, workflow_id, provenance FROM tenant_erasure_known ORDER BY workflow_id")
+    assert known == [("schedule", "s:1", None), ("schedule", "s:2", None), ("execution", "w:1", "legacy"),
+                     ("execution", "w:2", "legacy"), ("execution", "w:3", "legacy")]  # fmt: skip
+    erasures = await _rows(db, "SELECT tenant_id, step, completed_at IS NOT NULL, qualification, "
+                               "legacy_completed_at = completed_at, verified_close, latest_close, check_after "
+                               "FROM tenant_erasures")  # fmt: skip
+    by = {row[0]: row[1:] for row in erasures}
+    assert by[completed][:4] == (100, True, "legacy_completion_unproven", True)  # its completion kept, qualified
+    assert by[clean][:4] == (100, True, None, None)
+    assert str(by[incomplete][4])[:10] == "2026-10-01" and by[incomplete][5:] == (None, None)  # held: no bound
+    assert [e["tenant"] for e in logs if e["event"] == "erasure_legacy_unproven"] == [str(completed)]
+
+
+ERASURE_COLUMNS = """SELECT string_agg(attrelid::regclass || '.' || attname, ','
+                         ORDER BY attrelid::regclass::text, attnum)
+  FROM pg_attribute WHERE attrelid IN ('public.tenant_erasures'::regclass, 'public.tenant_erasure_known'::regclass)
+   AND attnum > 0 AND NOT attisdropped"""
+
+
+async def test_0060_and_back_restores_0059s_erasure_tables_exactly(db: str) -> None:
+    await asyncio.to_thread(upgrade, db, "0059")
+    before = await _rows(db, ERASURE_COLUMNS)
+    await asyncio.to_thread(upgrade, db, "0060")
+    assert "provenance" in str((await _rows(db, ERASURE_COLUMNS))[0][0])
+    await asyncio.to_thread(downgrade, db, "0059")
+    assert await _rows(db, ERASURE_COLUMNS) == before
+
+
+async def _gone_row(db: str) -> str:
+    tenant = await _tenant(db)
+    await _sql(db, f"INSERT INTO tenant_erasures (tenant_id, requested_by) VALUES ('{tenant}', gen_random_uuid())")
+    return (f"INSERT INTO tenant_erasure_known (tenant_id, kind, workflow_id, run_id, provenance) "
+            f"VALUES ('{tenant}', 'execution', 'w:1', 'r1', 'gone')")  # fmt: skip
+
+
+async def test_0060s_downgrade_refuses_while_a_provenance_is_kept(db: str) -> None:
+    await asyncio.to_thread(upgrade, db, "0060")
+    await _sql(db, await _gone_row(db))
+    with pytest.raises(Exception, match="0060 refused"):
+        await asyncio.to_thread(downgrade, db, "0059")
+    assert await _rows(db, "SELECT version_num FROM alembic_version") == [("0060",)]
+
+
+async def test_0060s_downgrade_never_drops_a_provenance_written_while_it_checks(db: str) -> None:
+    await asyncio.to_thread(upgrade, db, "0060")
+    [outcome] = await _while_written(db, await _gone_row(db), "0059")
+    assert isinstance(outcome, Exception) and "0060 refused" in str(outcome), outcome
+
+
+# 0061 (task 12): the predicates. Its downgrade restores 0040's item states exactly, and refuses while an item is
+# absent.
+PREDICATES = """SELECT (SELECT pg_get_constraintdef(oid) FROM pg_constraint
+                         WHERE conname = 'tenant_erasure_items_state'),
+  to_regprocedure('erasure_unresolved(uuid)'), to_regprocedure('erasure_proven(uuid)'),
+  to_regclass('public.unresolved_sends_tenant')"""
+
+
+async def _absent_item(db: str) -> str:
+    tenant = await _tenant(db)
+    await _sql(db, f"INSERT INTO tenant_erasures (tenant_id, requested_by) VALUES ('{tenant}', gen_random_uuid())")
+    return ("INSERT INTO tenant_erasure_items (tenant_id, step, kind, workflow_id, source, state) "
+            f"VALUES ('{tenant}', 60, 'execution', 'w:1', 'tests', 'absent')")  # fmt: skip
+
+
+async def test_0061_and_back_restores_0060s_item_states_exactly(db: str) -> None:
+    await asyncio.to_thread(upgrade, db, "0060")
+    before = await _rows(db, PREDICATES)
+    await asyncio.to_thread(upgrade, db, "0061")
+    after = (await _rows(db, PREDICATES))[0]
+    assert "absent" in str(after[0]) and None not in after
+    await asyncio.to_thread(downgrade, db, "0060")
+    assert await _rows(db, PREDICATES) == before
+
+
+async def test_0061s_downgrade_refuses_while_an_item_is_absent(db: str) -> None:
+    await asyncio.to_thread(upgrade, db, "0061")
+    await _sql(db, await _absent_item(db))
+    with pytest.raises(Exception, match="0061 refused"):
+        await asyncio.to_thread(downgrade, db, "0060")
+
+
+async def test_0061s_downgrade_never_drops_an_absent_item_written_while_it_checks(db: str) -> None:
+    await asyncio.to_thread(upgrade, db, "0061")
+    [outcome] = await _while_written(db, await _absent_item(db), "0060")
+    assert isinstance(outcome, Exception) and "0061 refused" in str(outcome), outcome
+
+
+# 0062 (task 14): the lifelong check's selection, a function alone. No row is kept, so its downgrade refuses nothing.
+RECHECKED = """SELECT to_regprocedure('erasures_rechecked()') IS NOT NULL,
+  coalesce((SELECT has_function_privilege('dewpoint_retention', 'erasures_rechecked()', 'EXECUTE')
+            WHERE to_regprocedure('erasures_rechecked()') IS NOT NULL), false),
+  coalesce((SELECT has_function_privilege('dewpoint_api', 'erasures_rechecked()', 'EXECUTE')
+            WHERE to_regprocedure('erasures_rechecked()') IS NOT NULL), false)"""
+
+
+async def test_0062_and_back_adds_and_drops_the_rechecked_selection_for_retention_alone(db: str) -> None:
+    await asyncio.to_thread(upgrade, db, "0061")
+    assert await _rows(db, RECHECKED) == [(False, False, False)]
+    await asyncio.to_thread(upgrade, db, "0062")
+    assert await _rows(db, RECHECKED) == [(True, True, False)]
+    await asyncio.to_thread(downgrade, db, "0061")
+    assert await _rows(db, RECHECKED) == [(False, False, False)]
+
+
+# 0063 (task 15): `retained_out`'s evidence. Its downgrade refuses while a captured close, a registration or a
+# qualification interval is kept: what a qualification rests on is never dropped.
+RETAINED = """SELECT (SELECT string_agg(attname, ',' ORDER BY attnum) FROM pg_attribute
+                       WHERE attrelid = 'public.execution_evidence'::regclass AND attnum > 0 AND NOT attisdropped),
+  to_regclass('public.target_namespace_registrations'), to_regclass('public.target_qualification_intervals')"""
+INTERVAL = ("INSERT INTO target_qualification_intervals (namespace, valid_from, valid_to, evidence) "
+            "VALUES ('ns', now() - interval '1 day', now(), 'tests')")  # fmt: skip
+
+
+async def _closed_evidence(db: str) -> str:
+    tenant = await _tenant(db)
+    return ("INSERT INTO execution_evidence (tenant_id, workflow_id, run_id, started_at, closed_at, closed_seen_at) "
+            f"VALUES ('{tenant}', 'w:1', 'r1', now(), now(), now())")  # fmt: skip
+
+
+async def test_0063_and_back_restores_0062s_evidence_exactly(db: str) -> None:
+    await asyncio.to_thread(upgrade, db, "0062")
+    before = await _rows(db, RETAINED)
+    await asyncio.to_thread(upgrade, db, "0063")
+    after = (await _rows(db, RETAINED))[0]
+    assert "closed_at,closed_seen_at" in str(after[0]) and None not in after
+    await asyncio.to_thread(downgrade, db, "0062")
+    assert await _rows(db, RETAINED) == before
+
+
+@pytest.mark.parametrize("kept", ["interval", "registration", "close"])
+async def test_0063s_downgrade_refuses_while_its_evidence_is_kept(db: str, kept: str) -> None:
+    await asyncio.to_thread(upgrade, db, "0063")
+    write = {"interval": INTERVAL, "close": await _closed_evidence(db),
+             "registration": "INSERT INTO target_namespace_registrations (namespace, registered_at, evidence) "
+                             "VALUES ('ns', now(), 'tests')"}[kept]  # fmt: skip
+    await _sql(db, write)
+    with pytest.raises(Exception, match="0063 refused"):
+        await asyncio.to_thread(downgrade, db, "0062")
+    assert await _rows(db, "SELECT version_num FROM alembic_version") == [("0063",)]
+
+
+async def test_0063s_downgrade_never_drops_evidence_written_while_it_checks(db: str) -> None:
+    await asyncio.to_thread(upgrade, db, "0063")
+    [outcome] = await _while_written(db, INTERVAL, "0062")
+    assert isinstance(outcome, Exception) and "0063 refused" in str(outcome), outcome
+
+
+# 0064 (gate D, the owner's item 3): `erasures_held` counts stopped erasures too. The function alone is replaced, its
+# grant kept; the downgrade restores 0058's text exactly.
+COUNTS_DEF = """SELECT pg_get_functiondef('unresolved_sends_counts(text)'::regprocedure),
+  has_function_privilege('dewpoint_api', 'unresolved_sends_counts(text)', 'EXECUTE'),
+  has_function_privilege('dewpoint_retention', 'unresolved_sends_counts(text)', 'EXECUTE')"""
+
+
+async def test_0064_and_back_counts_stopped_erasures_held_and_restores_0058s_count_exactly(db: str) -> None:
+    await asyncio.to_thread(upgrade, db, "0063")
+    before = await _rows(db, COUNTS_DEF)
+    assert "e.stopped_at IS NULL" in str(before[0][0])
+    await asyncio.to_thread(upgrade, db, "0064")
+    after = (await _rows(db, COUNTS_DEF))[0]
+    assert "stopped_at" not in str(after[0]) and after[1:] == (True, False)
+    await asyncio.to_thread(downgrade, db, "0063")
+    assert await _rows(db, COUNTS_DEF) == before

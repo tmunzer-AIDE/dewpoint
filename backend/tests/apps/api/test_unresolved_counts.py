@@ -142,6 +142,24 @@ async def test_an_erasure_of_a_tenant_with_a_blocker_is_counted_held(
     assert found["erasures_held"] == 1
 
 
+async def test_a_stopped_erasure_of_a_tenant_with_a_blocker_is_still_counted_held(
+    owner_sessionmaker, api_sessionmaker, api_settings
+) -> None:
+    """Stopping an erasure removes neither its blocker nor the hold (the owner's gate-D ruling, item 3; 0064); a
+    completed one isn't held."""
+    [first, second, *_] = await _blockers(owner_sessionmaker)
+    async with owner_sessionmaker() as s, s.begin():
+        for request, values in ((first, "now(), null"), (second, "null, now()")):
+            tenant = (await s.execute(text("select tenant_id from unresolved_sends where request_id = :r"),
+                                      {"r": request})).scalar_one()  # fmt: skip
+            await s.execute(text("insert into tenant_erasures (tenant_id, requested_by, stopped_at, completed_at) "
+                                 f"values (:t, gen_random_uuid(), {values})"), {"t": tenant})  # noqa: S608  # fmt: skip
+    token = await _session(owner_sessionmaker, api_settings)
+    async with api_sessionmaker() as s:
+        found = {r["state"]: r["requests"] for r in (await s.execute(text(COUNTS), {"token": token})).mappings()}
+    assert found["erasures_held"] == 1  # the stopped one; never the completed one
+
+
 async def test_an_inspect_command_is_recorded_for_its_operator_and_never_carried_out_by_the_leader(
     app, owner_sessionmaker, api_settings, dispatch_sessionmaker
 ) -> None:

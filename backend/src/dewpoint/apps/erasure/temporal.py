@@ -10,13 +10,14 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from temporalio.api.common.v1 import WorkflowExecution
-from temporalio.api.enums.v1 import WorkflowExecutionStatus
+from temporalio.api.enums.v1 import EventType, WorkflowExecutionStatus
 from temporalio.api.schedule.v1 import SchedulePatch
 from temporalio.api.workflowservice.v1 import (
     DeleteScheduleRequest,
     DeleteWorkflowExecutionRequest,
     DescribeScheduleRequest,
     DescribeWorkflowExecutionRequest,
+    DescribeWorkflowExecutionResponse,
     GetWorkflowExecutionHistoryRequest,
     ListWorkflowExecutionsRequest,
     PatchScheduleRequest,
@@ -142,6 +143,44 @@ async def delete_execution(client: Client, workflow_id: str, run_id: str) -> Non
     except RPCError as e:
         if not _gone(e):
             raise
+
+
+@dataclass(frozen=True)
+class FirstRun:
+    """A chain's first run, and the request id on its started event: the identity a blocker's recorded start request
+    id is compared with (2b-4b M4 recovery, task 13)."""
+
+    run_id: str
+    request_id: str
+
+
+async def _described(client: Client, workflow_id: str, run_id: str) -> DescribeWorkflowExecutionResponse:
+    return await client.workflow_service.describe_workflow_execution(
+        DescribeWorkflowExecutionRequest(
+            namespace=client.namespace, execution=WorkflowExecution(workflow_id=workflow_id, run_id=run_id)
+        ),
+        timeout=CALL_DEADLINE,
+    )
+
+
+async def first_run_request_id(client: Client, workflow_id: str, run_id: str) -> FirstRun | None:
+    """The first run of `run_id`'s chain, whichever run of it is named, and the request id Temporal attached to that
+    run's started event (describe's `request_id_infos`, as `dispatch.started_by` reads it: the design's "first run's
+    started event", revision 6 §6). None when it can't be read: that run or the first gone, or not exactly one request
+    id on the first run's started event. Any other failure is raised: unanswered this time isn't unreadable, and a
+    deletion after it would lose the identity for good."""
+    try:
+        named = await _described(client, workflow_id, run_id)
+        info = named.workflow_execution_info
+        first = info.first_run_id or info.execution.run_id
+        described = named if first == info.execution.run_id else await _described(client, workflow_id, first)
+    except RPCError as e:
+        if _gone(e):
+            return None
+        raise
+    started = [request_id for request_id, request in described.workflow_extended_info.request_id_infos.items()
+               if request.event_type == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_STARTED]  # fmt: skip
+    return FirstRun(first, started[0]) if len(started) == 1 else None
 
 
 @dataclass(frozen=True)
