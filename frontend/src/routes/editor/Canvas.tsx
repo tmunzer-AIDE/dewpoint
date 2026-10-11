@@ -48,6 +48,7 @@ export interface CanvasProps {
   placing: boolean; // the next click on an empty place puts a step there (WCAG 2.5.7)
   overview: boolean; // the minimap: off while a side panel narrows the canvas (the owner's ruling on milestone 3)
   onPlace: (at: { x: number; y: number }) => void; // the click, in the canvas's own coordinates
+  start: { summary: string; open: boolean; onOpen: () => void }; // the start card: what starts a run, and its panel
 }
 
 /** What React Flow draws: the start card, each step, an edge from the start card to each entry step, and each edge
@@ -57,7 +58,7 @@ function build(p: CanvasProps): { nodes: Node[]; edges: Edge[] } {
   const used = new Map<string, string[]>();
   for (const e of drawableEdges(p.doc)) used.set(idKey(e.from.node), [...(used.get(idKey(e.from.node)) ?? []), portOf(e)]);
   const keyOf = new Map(nodesOf(p.doc).map((n) => [idKey(n.id), n.key]));
-  const start: StartData = { empty: nodesOf(p.doc).length === 0, focusId: p.focusId, editable: p.editable, onItem: p.onItem };
+  const start: StartData = { empty: nodesOf(p.doc).length === 0, focusId: p.focusId, editable: p.editable, onItem: p.onItem, ...p.start };
   const nodes: Node[] = [
     { id: START, type: "start", position: startPosition(p.doc), draggable: false, selectable: false, data: start, ...SIZE },
     ...nodesOf(p.doc).map((n): Node => {

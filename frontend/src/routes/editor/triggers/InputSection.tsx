@@ -1,0 +1,122 @@
+// SPDX-License-Identifier: Apache-2.0
+// The input (4c-3b; the InputFields and InputEdit boards): what every trigger starts a run with, and, by hand, the
+// run's form. Saved with the draft, used once published. As form fields, or as JSON (Task 8 adds a Mist event's shape
+// and a CSV file). Focus goes back to what opened a part once it closes (WCAG 2.4.3).
+import { useEffect, useState } from "react";
+import { Button } from "../../../components/Button";
+import { addField, fieldPointer, inputOf, inputRows, setSettings } from "../../../lib/input";
+import { useTriggers } from "./context";
+import { FieldEditor } from "./FieldEditor";
+import { InputJson, JSON_AT } from "./InputJson";
+import { Problems, Section, problemsAt, useFocusBack } from "./parts";
+
+const TYPE_WORDS: Record<string, string> = { text: "Text", whole: "Whole number", number: "Number", yesno: "Yes or no", choice: "Choice", datetime: "Date and time" };
+
+type Mode = "fields" | "json";
+
+/** Where "Go to it" in the edits not applied lands: JSON, or a field. */
+export type FocusAt = { pointer: string; n: number } | null;
+
+export function InputSection({ focusAt }: { focusAt: FocusAt }) {
+  const t = useTriggers();
+  const { actions, doc } = t;
+  const schema = inputOf(doc);
+  const [mode, setMode] = useState<Mode>(() => (actions.held("json", JSON_AT) ? "json" : "fields"));
+  const [editing, setEditing] = useState<string | null>(null);
+  // The field being edited keeps its row through a rename, so its editor stays as it is: focus where it went, a click in
+  // it landing (the review of revision 2).
+  const [kept, setKept] = useState<{ name: string; key: string } | null>(null);
+  const keyOf = (name: string) => (kept !== null && kept.name === name && editing === name ? kept.key : name);
+  const { box, back } = useFocusBack<HTMLElement>();
+  useEffect(() => {
+    if (!focusAt) return;
+    if (focusAt.pointer === JSON_AT) return setMode("json");
+    const m = /^\/settings\/input_schema\/properties\/([^/]+)/.exec(focusAt.pointer);
+    if (m) {
+      setMode("fields");
+      setEditing(m[1]!.replaceAll("~1", "/").replaceAll("~0", "~"));
+    }
+  }, [focusAt]);
+  const rows = inputRows(schema);
+  const heldJson = actions.held("json", JSON_AT);
+  const add = () => {
+    const made = addField(inputOf(doc));
+    if (actions.update((d) => setSettings(d, { input_schema: addField(inputOf(d)).schema }), `Added the field ${made.name}.`) === null) setEditing(made.name);
+  };
+  return (
+    <Section id="triggers-input" title="Input" note="Saved with the draft · used once published" box={box}>
+      {mode !== "json" && <p className="text-small text-muted">Every trigger starts a run with this input. By hand, it&apos;s the run&apos;s form.</p>}
+      <Problems problems={problemsAt(t.check, "/settings/input_schema", true)} />
+      {heldJson && mode !== "json" && (
+        <p className="text-small text-warn-ink">JSON typed here isn&apos;t saved yet: Edit as JSON shows it, with why.</p>
+      )}
+      {mode === "json" ? (
+        <InputJson
+          onBack={() => {
+            setMode("fields");
+            back("json");
+          }}
+        />
+      ) : (
+        <>
+          {rows.length === 0 && <p className="text-small text-muted">No fields: a run starts with an empty input.</p>}
+          <ul className="flex flex-col">
+            {rows.map((r) => {
+              const name = r.kind === "field" ? r.field.name : r.name;
+              const pointer = fieldPointer(name);
+              return (
+                <li key={keyOf(name)} className="flex flex-col gap-2 border-t border-line py-2.5 first:border-t-0">
+                  {r.kind === "field" && editing === name ? (
+                    <FieldEditor
+                      field={r.field}
+                      onRenamed={(to) => {
+                        setKept({ name: to, key: keyOf(name) });
+                        setEditing(to);
+                      }}
+                      onClose={() => {
+                        setEditing(null);
+                        back(`field:${name}`, "add");
+                      }}
+                    />
+                  ) : (
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="min-w-0 text-small">
+                        <span className="font-mono">{name}</span>
+                        {r.kind === "field" ? (
+                          <>
+                            {r.field.label && ` · ${r.field.label}`} · {TYPE_WORDS[r.field.type]}
+                            {r.field.required ? " · required" : " · optional"}
+                            {r.field.sensitive && " · sensitive"}
+                          </>
+                        ) : (
+                          <span className="text-muted"> · {r.what}{r.required ? " · required" : ""} · read only here</span>
+                        )}
+                      </span>
+                      {r.kind === "field" && t.editable && (
+                        <Button size="sm" aria-label={`Edit ${name}`} data-back={`field:${name}`} onClick={() => setEditing(name)}>Edit</Button>
+                      )}
+                    </div>
+                  )}
+                  {editing !== name && <Problems problems={problemsAt(t.check, pointer)} />}
+                  {actions.held("name", pointer) && editing !== name && (
+                    <p className="text-small text-warn-ink">A new name typed for it isn&apos;t applied: Edit shows it, with why.</p>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+          {rows.some((r) => r.kind === "other") && (
+            <p className="text-small text-muted">A field the list can&apos;t show (a list, an object of fields) appears read only: Edit as JSON changes it.</p>
+          )}
+          {t.editable && (
+            <div className="flex flex-wrap gap-2">
+              <Button size="sm" data-back="add" onClick={add}>＋ Field</Button>
+              <Button size="sm" data-back="json" onClick={() => setMode("json")}>Edit as JSON</Button>
+            </div>
+          )}
+          {!t.editable && <Button size="sm" className="self-start" data-back="json" onClick={() => setMode("json")}>Show as JSON</Button>}
+        </>
+      )}
+    </Section>
+  );  // prettier-ignore
+}
