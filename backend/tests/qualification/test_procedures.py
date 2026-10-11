@@ -205,7 +205,7 @@ def _target(monkeypatch: Any, *, duplicate_refused: bool = True, wait_seen: bool
     monkeypatch.setattr(recovery, "rotate", rotate)
     monkeypatch.setattr(log_search, "get_settings", lambda: None)
     for name in ("ADMIN", "OWNER", "VERIFIER"):
-        monkeypatch.setenv(f"DEWPOINT_QUALIFICATION_{name}_PASSWORD", "violet-otter-canyon-42-x")
+        monkeypatch.setenv(f"DEWPOINT_QUALIFICATION_{name}_PASSWORD", "violet-otter-canyon-42")
 
 
 def _exercised(tmp_path: Path) -> Record:

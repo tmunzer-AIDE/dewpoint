@@ -1,0 +1,5 @@
+# Findings gitleaks reports in this repository's history that are known not to be secrets, each by its fingerprint
+# (commit:file:rule:line), so the commit stays scannable while every other line still fails CI.
+# 5c4c8790: a qualification test's environment password, a fixture that a stand-in connection reads ("-x" kept it off
+# .gitleaks.toml's exact allowlist; the test now uses the allowlisted value).
+5c4c8790c59a8a32dc8670d2d77c2480fb81023b:backend/tests/qualification/test_procedures.py:generic-api-key:208
