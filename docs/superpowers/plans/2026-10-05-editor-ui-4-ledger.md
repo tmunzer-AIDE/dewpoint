@@ -2584,3 +2584,32 @@ M80. **Task 14's browser flows get a commit of their own** (39b23e4b), made once
 
 Deferred: at 320 px the CSV column editor's autofocus scrolls the columns table 22 px, clipping its first header
 ("eader"); P3 polish, as the Milestone 2 review graded it. A fresh review of the whole branch follows.
+
+### 4c-3b, after the final review (2026-10-11)
+
+A fresh review (fable) of b1183473..dd61faa0: no critical finding, three important, nine minor; ready with fixes.
+Re-graded by what a person gets, three minors became important: New workflow's nested labels, a filter value with a
+line break, refusals not describing their controls. The six were fixed in one pass (a7537698), each with a test that
+failed first:
+
+M81. **A decimal is kept as it's typed** in a CSV number column's default and in the file's limits: the control keeps
+     its own text while it still means the value, as a field's default does ("2.5" was written as 25; 1.5 MB was
+     refused). Task 8's blocks, a plan defect.
+M82. **Focus goes back where a person carries on** once a form closes: an edited schedule's Edit; a made or rotated
+     endpoint's token; an edited endpoint's Details, the one on screen. Tasks 9 and 10's blocks, a plan defect.
+M83. **A sender is named by its key while the trigger types are loading or couldn't be read**, never "An unknown
+     sender", which stays for a list that lacks it.
+M84. **A filter value with a line break is shown as JSON text**, which a one-line field keeps.
+M85. **A refused condition and a refused allowlist describe their controls** (`aria-describedby`).
+M86. **New workflow's webhook choice names its radio alone**: its endpoint and topic sit beside its label, in a box
+     that stays the same whether they show or not, so the radio keeps its focus.
+
+The unit suite 979 passed (72 files), three runs; typecheck, lint, check:api and build clean; the browser gate 43
+passed (1.7 min, 211 s); local CodeQL 0 findings in both languages, at a7537698.
+
+Deferred (minor): an unterminated string could run `pointerLines` past the text (unreachable today); Escape in the Mist
+topic picker closes the whole panel; "Go to it" doesn't focus a held CSV limit, and focuses a field's Name rather than
+its held Default; an interval schedule's PATCH carries `time_zone: "UTC"` when the stored zone differs (harmless); a
+schedule's Edit is disabled without its reason when the published form can't be read; the endpoints table shows "–"
+both while bindings load and when their read failed; the 320 px CSV column editor's table scroll (P3, Milestone 2).
+The review's set-aside lines stand as ruled in the execution ledger.
