@@ -2528,3 +2528,16 @@ code:
 - Task 6 (adcab07f): webhook endpoints in words; `./endpoints` missing, then 8 passed.
 
 The unit suite 891 passed (68 files); typecheck and lint clean. No mid-slice ruling: the code is the plan's, as written.
+
+### 4c-3b, milestone 2 (2026-10-11)
+
+- Task 7 (d7a11a87): the start card and the Triggers panel, its input as fields and as JSON; every `Editor.test.tsx`
+  test failed on the stand-in canvas's `start` (139) and `InputSection.test.tsx` couldn't import the panel, then the
+  editor's tests 336 passed (24 files).
+- Task 8 (c39a51fd): a Mist event's shape, and the CSV file; 8 failed, then the panel's tests 21 passed.
+
+The unit suite 918 passed (69 files); typecheck, lint and build clean. On the isolated stack, reset from this branch:
+the foundations' and the gate's checks (the CSP, the console, axe) 8 passed; the start card and the panel's input
+(its fields, a field edited, a Mist event's shape, a CSV file with a column edited, JSON held) drawn light and dark at
+1280 and 320 px, 24 screens, no console error, for the owner's review. No mid-slice ruling: the code is the plan's, as
+written. Paused for the owner before Task 9.
