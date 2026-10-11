@@ -122,6 +122,7 @@ jobs:
           } > .env
       - working-directory: deploy/compose
         run: |
+          sh postgres/make-dev-ca.sh  # PostgreSQL's TLS: a development authority, never committed
           docker compose up -d --build --wait
           set -a; . ./.env; set +a
           docker compose run --rm -e DEWPOINT_INIT_PASSWORD=violet-otter-canyon-42 \
