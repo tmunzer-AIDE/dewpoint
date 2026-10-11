@@ -148,6 +148,21 @@ describe("the input as form fields", () => {
     await vi.waitFor(() => expect(document.activeElement).toBe(within(input()).getByRole("textbox", { name: "Name" })));
   });
 
+  it.each([
+    { through: "another field's Edit", open: "Edit room" },
+    { through: "＋ Field", open: "＋ Field" },
+  ])("opens Go to it's field on its Name when it's edited again, through $through", async ({ open }) => {
+    // The review of the deferred minors' fixes: only Done cleared the Default focus; an Edit or ＋ Field kept it.
+    const input_schema = { type: "object", properties: { floor: { type: "integer", title: "Floor" }, room: { type: "string" } } };
+    await showPanel({ doc: draft({ input_schema }), focusAt: { pointer: "/settings/input_schema/properties/floor/default", n: 1 } });
+    await vi.waitFor(() => expect(document.activeElement).toBe(within(input()).getByRole("textbox", { name: "Default" })));
+    await userEvent.click(within(input()).getByRole("button", { name: open }));
+    await vi.waitFor(() => expect(document.activeElement).toBe(within(input()).getByRole("textbox", { name: "Name" })));
+    await userEvent.click(within(input()).getByRole("button", { name: "Edit floor" }));
+    await vi.waitFor(() => expect(document.activeElement).toBe(within(input()).getByRole("textbox", { name: "Name" })));
+    expect((document.activeElement as HTMLInputElement).value).toBe("floor");
+  });
+
   it("shows the server's problems at their field", async () => {
     await showPanel({
       doc: draft({ input_schema: { type: "object", properties: { rows: { type: "string" } } } }),
