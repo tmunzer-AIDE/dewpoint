@@ -397,23 +397,23 @@ async def test_issue_16s_run_ends_the_same_through_the_servers_force_close_of_a_
 ) -> None:  # fmt: skip
     """The case #16's acceptance permits, forced: the first four workflow tasks its steps' results reach are each held
     1.2 s, so more than the server's 100 buffered events arrive meanwhile, and the server fails such a task itself.
-    The next task carries on: the run ends as it would, and its history replays."""
-    import time
-
+    The next task carries on: the run ends as it would, and its history replays. Each is held before its activation
+    runs, so the SDK's 2 s deadlock bound times the activation alone: held inside it, the activation had 0.8 s left,
+    which a busy CI runner overran (the worker's own deadlock failure beside the server's)."""
     from temporalio.worker import _workflow as running
 
     from dewpoint.engine.runtime import size
 
     monkeypatch.setattr(size, "SNAPSHOT_BYTES", 5_000)
-    real, held = running._RunningWorkflow.activate, []
+    real, held = running._WorkflowWorker._handle_activation, []
 
-    def activate(self: Any, act: Any) -> Any:
+    async def handled(self: Any, act: Any) -> None:
         if len(held) < 4 and sum(job.HasField("resolve_activity") for job in act.jobs) >= 10:
             held.append(len(act.jobs))
-            time.sleep(1.2)  # under the SDK's 2 s deadlock bound
-        return real(self, act)
+            await asyncio.sleep(1.2)  # the task held, its activation not yet started: no deadlock bound runs
+        return await real(self, act)
 
-    monkeypatch.setattr(running._RunningWorkflow, "activate", activate)
+    monkeypatch.setattr(running._WorkflowWorker, "_handle_activation", handled)
     client, store = dev_env.client, MemoryStore()
     async with serving(client, store):
         handle = await start(client, store, issue_16(), checkpoint_events=300, drain_events=600)
