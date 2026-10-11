@@ -2541,3 +2541,14 @@ the foundations' and the gate's checks (the CSP, the console, axe) 8 passed; the
 (its fields, a field edited, a Mist event's shape, a CSV file with a column edited, JSON held) drawn light and dark at
 1280 and 320 px, 24 screens, no console error, for the owner's review. No mid-slice ruling: the code is the plan's, as
 written. Paused for the owner before Task 9.
+
+### 4c-3b, milestone 3 (2026-10-11)
+
+Begun on the owner's word after the Milestone 2 review ("let's start it").
+- Task 9 (84825aac): schedules; 22 failed, then the panel's tests 43 passed (2 files).
+- Task 10 (58b70393): Settings → Webhook endpoints; `./WebhookEndpoints` missing and 2 failed, then 30 passed (3
+  files).
+- Task 11 (c65f246e): webhooks; 10 failed, then the panel's tests 53 passed (3 files).
+
+The unit suite 962 passed (72 files); typecheck and lint clean. No mid-slice ruling: the code is the plan's, as
+written.
