@@ -2552,3 +2552,12 @@ Begun on the owner's word after the Milestone 2 review ("let's start it").
 
 The unit suite 962 passed (72 files); typecheck and lint clean. No mid-slice ruling: the code is the plan's, as
 written.
+
+### 4c-3b, milestone 4 (2026-10-11)
+
+- Task 12 (ce7e443b): New workflow's "What starts it?"; 6 failed, then New workflow's, the editor's and the router's
+  tests 184 passed (3 files).
+- Task 13 (e0d83e63): the list's Trigger column; 1 failed, then the list's tests 10 passed.
+
+The unit suite 968 passed (72 files), as the plan's dry run counted; typecheck and lint clean. No mid-slice ruling:
+the code is the plan's, as written.
