@@ -416,14 +416,19 @@ async def test_a_cancelled_requests_not_permitted_denial_is_expected_never_alert
 
 
 async def _rechecked_long_ago(owner: Any, request_id: uuid.UUID) -> None:
+    """Its last look, and when it was first noted, both an hour and a second back: due again, whatever its paced gap
+    (task 5: a spent request's looks double from 30 s to an hour)."""
+    by = timedelta(hours=1, seconds=1)
     async with owner() as s, s.begin():
         await s.execute(text("update run_requests set checked_at = checked_at - cast(:by as interval) where id = :i"),
-                        {"by": reconcile.RECHECK + timedelta(seconds=1), "i": request_id})  # fmt: skip
+                        {"by": by, "i": request_id})  # fmt: skip
+        await s.execute(text("update recovery_items set since = since - cast(:by as interval) where item_id = :i"),
+                        {"by": by, "i": request_id})  # fmt: skip
 
 
 async def _observed_twice_as_unresolved(owner: Any, dispatcher: Any, settings: Any, client: Any, request: Any) -> None:
-    """Two reconciler passes, RECHECK apart, each seeing the run absent: each leaves it unresolved, and none asks about
-    it again before RECHECK."""
+    """Two reconciler passes, each when its look is due, each seeing the run absent: each leaves it unresolved, and none
+    asks about it again before its next look."""
     await aged(owner, request.id)
     for _ in range(2):
         assert await once(dispatcher, client, settings) == {"unresolved": 1}
@@ -480,6 +485,20 @@ async def test_a_later_sighting_by_its_recorded_id_settles_an_unresolved_start_a
     await env.client.get_workflow_handle(run_workflow_id(starting.start.tenant_id, starting.start.run_id)).terminate()
 
 
+async def _as_0052_left(owner: Any, request: Any) -> None:
+    """A request `starting` from before 0052, as 0054's backfill then found it: no recorded start request id, no counted
+    send (`starting` only as the dispatcher's own hold has it, the fence's), and a legacy-unknown blocker with no send
+    recorded. Its run's row, slot and evidence are its `begin`'s."""
+    async with owner() as s, s.begin():
+        await s.execute(text("update run_requests set status = 'queued', start_request_id = null, sends = 0 "
+                             "where id = :i"), {"i": request.id})  # fmt: skip
+        await s.execute(text("select set_config('dewpoint.start_held', 'on', true)"))
+        await s.execute(text("update run_requests set status = 'starting' where id = :i"), {"i": request.id})
+        await s.execute(text("delete from start_sends where request_id = :i"), {"i": request.id})
+        await s.execute(text("update unresolved_sends set legacy_unknown = true, state = 'unresolved', "
+                             "start_request_id = null where request_id = :i"), {"i": request.id})  # fmt: skip
+
+
 async def test_a_request_starting_from_before_0052_is_requeued_unended_and_gets_its_id_at_its_next_intent(
     queued, owner_sessionmaker, dispatch_sessionmaker, api_settings, env
 ) -> None:
@@ -488,9 +507,7 @@ async def test_a_request_starting_from_before_0052_is_requeued_unended_and_gets_
     unconfirmed, a denial of it is uncertain, never a refusal that could end it."""
     _, _, request = queued
     await begin(dispatch_sessionmaker, request, api_settings)
-    async with owner_sessionmaker() as s, s.begin():  # as 0052 leaves one
-        await s.execute(text("update run_requests set start_request_id = null, sends = 0 where id = :i"),
-                        {"i": request.id})  # fmt: skip
+    await _as_0052_left(owner_sessionmaker, request)
     expected = await reconcile._expected(dispatch_sessionmaker, KEYS, api_settings, request.tenant_id, request.id)
     assert expected is not None and expected.start_request_id is None  # its payload verifies a found execution
     await aged(owner_sessionmaker, request.id)
@@ -512,9 +529,7 @@ async def test_a_request_starting_from_before_0052_whose_start_landed_is_identif
     _, _, request = queued
     found = await begin(dispatch_sessionmaker, request, api_settings)
     assert isinstance(found, dispatch.Starting)
-    async with owner_sessionmaker() as s, s.begin():
-        await s.execute(text("update run_requests set start_request_id = null, sends = 0 where id = :i"),
-                        {"i": request.id})  # fmt: skip
+    await _as_0052_left(owner_sessionmaker, request)
     workflow_id = run_workflow_id(found.start.tenant_id, found.start.run_id)
     handle = await env.client.start_workflow(RunGraph.run, found.start, id=workflow_id, task_queue=ENGINE_QUEUE)
     try:  # the earlier build's start: the SDK's own request id

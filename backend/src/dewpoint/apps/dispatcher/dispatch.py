@@ -11,6 +11,7 @@ retired (the defensive check, which should never fire), cancels the request expl
 reserved, the run's row written (or an earlier attempt's reused) and the request marked `starting`, together; the start
 itself is sent after the commit, with no lock held across the call to Temporal."""
 
+import dataclasses
 import time
 import uuid
 from collections import Counter
@@ -39,6 +40,7 @@ from dewpoint.apps.cancels import USER_CANCELLED
 from dewpoint.apps.codec import CodecRefusedError
 from dewpoint.apps.dispatcher import budget, failures, recovery, start_call
 from dewpoint.apps.dispatcher.observe import REQUIRED, Build
+from dewpoint.core import blockers
 from dewpoint.core.audit import service as audit
 from dewpoint.core.claims import service as claims
 from dewpoint.core.claims.cipher import ClaimCipher
@@ -112,6 +114,7 @@ class Starting:
     tenant_id: uuid.UUID
     start: RunInput
     start_request_id: uuid.UUID | None = None  # every start of the request carries it (the start-check slice)
+    attempt: int | None = None  # its send, counted and recorded in the starting transaction (0054); none to verify
 
 
 # Why a request is left queued, no attempt counted: waiting isn't failing, nor a success that clears its failures
@@ -294,12 +297,14 @@ async def _begin(
     ran = (await s.execute(text("select status from runs where id = :i for update"), {"i": request.id})).scalar()
     if ran is not None and ran != "running":  # an earlier attempt's execution ran to its end: never a second start
         log.error("start_after_end", request_id=str(request.id))
+        await _held(s)
         request.status, request.starting_at = "starting", func.statement_timestamp()
         await s.flush()
         await recovery.noted(s, request.tenant_id, recovery.START_AFTER_END, request.id)  # for an operator (2b-4b M3)
         return Held(RUN_ENDED)
     if _spent(request):  # settling never queues a spent request again: a bug, or a hand's edit
         log.error("start_send_cap", request_id=str(request.id))
+        await _held(s)
         request.status, request.starting_at = "starting", func.statement_timestamp()
         await s.flush()
         await recovery.noted(s, request.tenant_id, recovery.START_UNRESOLVED, request.id)  # the reconciler observes it
@@ -373,7 +378,16 @@ async def _begin(
     request.status = "starting"
     request.starting_at = func.statement_timestamp()  # the reconciler's grace runs from here, slot or not (§7.6)
     await s.flush()
-    return Starting(request.id, tenant_id, start, request.start_request_id)
+    # Its intent, recorded with the count in the same transaction (0054): the fence lets nothing else commit
+    workflow_id = run_workflow_id(str(tenant_id), str(request.id))
+    await blockers.intend(s, request.id, tenant_id, workflow_id, request.start_request_id, request.sends)
+    return Starting(request.id, tenant_id, start, request.start_request_id, request.sends)
+
+
+async def _held(s: AsyncSession) -> None:
+    """A hold back to `starting` with nothing sent (`Held`), said in its own transaction: the fence (0054) lets it
+    commit without a recorded send, and never lets it count one."""
+    await s.execute(text("select set_config('dewpoint.start_held', 'on', true)"))
 
 
 def run_input(request: RunRequest, version_id: uuid.UUID, envelope: Any, settings: Settings) -> RunInput:
@@ -417,11 +431,31 @@ async def _cancel(s: AsyncSession, request: RunRequest, reason: str, details: di
 @dataclass(frozen=True)
 class Outcome:
     """What a start's answer means: `started` (accepted, or a verified duplicate, at `at` when Temporal says),
-    `refused` (an attempt), `throttled` (certainly not started, no attempt), `collision` or `uncertain`."""
+    `refused` (an attempt), `throttled` (certainly not started, no attempt), `collision` or `uncertain`. Apart from it,
+    the call's own definitive answer (`answer`: `already_started` whatever `verify()` then found; None when uncertain)
+    and, for `started`, the run it created (`run_id`, its first execution's)."""
 
     kind: str
     at: datetime | None = None
     detail: str = ""
+    answer: str | None = None
+    run_id: str | None = None
+    identified: str | None = None  # the first run, shown carrying the recorded start request id (`started_by`)
+
+
+@dataclass(frozen=True)
+class Sent:
+    """One send's own direct result: built only by the dispatcher, right after its own call (ruling 9)."""
+
+    attempt: int
+    answer: str | None  # answer_of(outcome); None when the call's result was uncertain
+    run_id: str | None  # the call's first_execution_run_id, for `started`
+
+
+def answer_of(outcome: Outcome) -> str | None:
+    """The call's own definitive answer (ruling 3: `already_started` when Temporal said so, whatever `verify()` found),
+    or None when it was uncertain."""
+    return outcome.answer
 
 
 def backoff(attempts: int) -> timedelta:
@@ -451,27 +485,27 @@ async def start(client: Client, starting: Starting, *, reasons: bool = False) ->
     workflow_id = run_workflow_id(starting.start.tenant_id, starting.start.run_id)
     try:
         with start_call.sending(starting.start_request_id):
-            await client.start_workflow(
+            handle = await client.start_workflow(
                 RunGraph.run, starting.start, id=workflow_id, task_queue=ENGINE_QUEUE,
                 id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE, rpc_timeout=START_DEADLINE,
             )  # fmt: skip
-        return Outcome("started")
-    except WorkflowAlreadyStartedError:
-        return await verify(client, starting)
+        return Outcome("started", answer="started", run_id=getattr(handle, "first_execution_run_id", None) or "")
+    except WorkflowAlreadyStartedError:  # the call's answer; what `verify()` finds is apart from it (ruling 3)
+        return dataclasses.replace(await verify(client, starting), answer="already_started", run_id=None)
     except CodecRefusedError:  # the client seals the start again, and failed: it was never sent
-        return Outcome("throttled", detail="unsealed")
+        return Outcome("throttled", detail="unsealed", answer="throttled")
     except RPCError as e:
         if e.status == RPCStatusCode.PERMISSION_DENIED:  # told apart only by D12's own reasons, once confirmed
             reason = deny_reason(e) if reasons else None
             if reason == NOT_PERMITTED:
-                return Outcome("not_permitted")
+                return Outcome("not_permitted", answer="not_permitted")
             if reason == CHECK_UNAVAILABLE:
-                return Outcome("check_unavailable")
+                return Outcome("check_unavailable", answer="check_unavailable")
             return Outcome("uncertain", detail=e.status.name)  # unconfirmed, unknown or missing: conservative
         if e.status in REFUSED:
-            return Outcome("refused", detail=e.status.name)
+            return Outcome("refused", detail=e.status.name, answer="refused")
         if e.status == RPCStatusCode.RESOURCE_EXHAUSTED:  # throttled before anything was created
-            return Outcome("throttled", detail=e.status.name)
+            return Outcome("throttled", detail=e.status.name, answer="throttled")
         return Outcome("uncertain", detail=e.status.name)
     except Exception as e:  # a lost connection or a timeout: it may have been accepted
         return Outcome("uncertain", detail=type(e).__name__)
@@ -517,7 +551,7 @@ async def verify(client: Client, starting: Starting) -> Outcome:
             return Outcome("uncertain", detail=f"unidentified ({type(e).__name__})")
         if first_run is None:
             return Outcome("uncertain", detail="unidentified")
-        return Outcome("started", at=first_run.start_time.ToDatetime(tzinfo=UTC))
+        return Outcome("started", at=first_run.start_time.ToDatetime(tzinfo=UTC), identified=first_run.execution.run_id)
     try:
         first: Any = None
         async for event in client.get_workflow_handle(workflow_id).fetch_history_events(rpc_timeout=START_DEADLINE):
@@ -538,13 +572,17 @@ async def verify(client: Client, starting: Starting) -> Outcome:
 
 
 async def settle(
-    sessionmaker: async_sessionmaker[AsyncSession], starting: Target, outcome: Outcome, *, audited: bool = False
-) -> str:
+    sessionmaker: async_sessionmaker[AsyncSession], starting: Target, outcome: Outcome, *, audited: bool = False,
+    sent: Sent | None = None, live: bool = False,
+) -> str:  # fmt: skip
     """The outcome applied to the request, its slot and its run's row in one transaction (§7.8); what happened, for
     the cycle's report. A request no longer `starting` (the other of the dispatcher and the reconciler settled it) is
-    left as it is. `audited`: the reconciler's settlements are audited (§2.4), a dead one as every dead one is."""
+    left as it is. `audited`: the reconciler's settlements are audited (§2.4), a dead one as every dead one is. `sent`:
+    the dispatcher's own send's direct result, which alone answers its row and moves its blocker (rulings 8, 9); the
+    reconciler's settlements pass none. `live`: the reconciler's late sighting showed its execution live, so a
+    `started` reserves the owed slot in this same transaction (`_owed`): stopped between them, neither stays."""
     async with sessionmaker() as s, s.begin():
-        happened = await _settle(s, starting, outcome)
+        happened = await _settle(s, starting, outcome, sent, live)
         if audited and happened in ("started", "absent"):
             await audit.record(s, tenant_id=starting.tenant_id, actor_id=None, action="run.request.reconciled",
                                target_type="run_request", target_id=str(starting.request_id),
@@ -552,8 +590,15 @@ async def settle(
         return happened
 
 
-async def _settle(s: AsyncSession, starting: Target, outcome: Outcome) -> str:
+async def _settle(
+    s: AsyncSession, starting: Target, outcome: Outcome, sent: Sent | None = None, live: bool = False
+) -> str:
     await tenant_scope(s, starting.tenant_id)
+    matched = False
+    if sent is not None:  # the send's own answer first, on its own row, before the request is read (ruling 8)
+        matched = await blockers.answered(s, starting.request_id, sent.attempt, sent.answer, sent.run_id)
+        if not matched:
+            log.warning("start_send_unmatched", request_id=str(starting.request_id), attempt=sent.attempt)
     request = (
         await s.execute(
             select(RunRequest)
@@ -563,7 +608,40 @@ async def _settle(s: AsyncSession, starting: Target, outcome: Outcome) -> str:
         )
     ).scalar_one()
     if request.status != "starting":
+        if sent is not None and matched and sent.answer in ("started", None):  # a late `started`, or an uncertain one
+            await blockers.unresolved(s, request.id)  # never `identified` from the reply alone (ruling 8)
+        await _identified(s, request.id, outcome)
         return "moved"
+    happened = await _settled(s, request, outcome)
+    if happened == "started" and live:
+        await _owed(s, request.tenant_id, request.id)
+    if sent is not None and matched:
+        await _blocker(s, request.id, outcome, sent, happened)
+    elif sent is None and (outcome.kind == "collision" or happened == "absent"):  # the reconciler's: never removed
+        await blockers.unresolved(s, request.id)
+    await _identified(s, request.id, outcome)
+    return happened
+
+
+async def _identified(s: AsyncSession, request_id: uuid.UUID, outcome: Outcome) -> None:
+    """The blocker identified, only where `verify` showed the recorded start request id on the first run's started
+    event (`Outcome.identified`, from `started_by`): never from a reply, a sighting or a describe alone."""
+    if outcome.identified is not None:
+        await blockers.identified(s, request_id, outcome.identified)
+
+
+async def _blocker(s: AsyncSession, request_id: uuid.UUID, outcome: Outcome, sent: Sent, happened: str) -> None:
+    """The blocker's rule once a send settled its request (rulings 1 and 3): `unresolved` on an uncertain answer, a
+    collision, or `already_started` with no own `started`; removed only where `removable` says; else as it is."""
+    if sent.answer is None or outcome.kind == "collision" or sent.answer == "already_started":
+        await blockers.unresolved(s, request_id)
+        return
+    if await blockers.removable(s, request_id, settling_started=happened == "started"):
+        await blockers.remove(s, request_id)
+
+
+async def _settled(s: AsyncSession, request: RunRequest, outcome: Outcome) -> str:
+    """The outcome applied to a request still `starting`: what happened."""
     if outcome.kind == "started":
         await confirm(s, request, outcome.at)
         return "started"
@@ -615,6 +693,34 @@ async def _settle(s: AsyncSession, starting: Target, outcome: Outcome) -> str:
         return "absent"
     request.status, request.next_attempt_at = "queued", datetime.now(UTC) + backoff(request.attempts)
     return "refused"
+
+
+async def _owed(s: AsyncSession, tenant_id: uuid.UUID, run_id: uuid.UUID) -> None:
+    """In a late `started`'s settling transaction, its execution seen live, its request without its slot (spent, it
+    released it): the owed slot reserved again, even over the tenant's limit, under the run's row lock then the slot's
+    (the end write's order: one in flight is waited for, then seen; an ended row is owed nothing). Over the limit:
+    alerted, `start_over_limit` recorded (2b-4b M4 recovery, the owner's ruling 2 on the design)."""
+    status = (await s.execute(text("select status from runs where id = :i for update"), {"i": run_id})).scalar()
+    if status != "running":
+        return
+    # the limits row's lock, as `_slot_free` takes it: the slots are counted under it
+    await s.execute(
+        text("insert into tenant_run_limits (tenant_id) values (:t) on conflict do nothing"), {"t": tenant_id}
+    )
+    own = await s.execute(text("select max_concurrent from tenant_run_limits where tenant_id = :t for update"),
+                          {"t": tenant_id})  # fmt: skip
+    platform = await s.execute(text("select max_concurrent_runs from platform_settings where id = 1"))
+    allowed = own.scalar() or platform.scalar()
+    reserved = await s.execute(
+        text("insert into run_slots (run_id, tenant_id) values (:i, :t) on conflict do nothing returning run_id"),
+        {"i": run_id, "t": tenant_id},
+    )
+    if reserved.first() is None:  # it held its slot
+        return
+    held = (await s.execute(text("select count(*) from run_slots where tenant_id = :t"), {"t": tenant_id})).scalar()
+    if allowed is not None and int(held or 0) > int(allowed):
+        log.error("start_over_limit", request_id=str(run_id), held=int(held or 0), limit=int(allowed))
+        await recovery.noted(s, tenant_id, recovery.START_OVER_LIMIT, run_id)
 
 
 def _spent(request: RunRequest) -> bool:
@@ -808,5 +914,9 @@ async def _dispatch(
         await _after_starting_commit(outcome.request_id)
         answered = await start(client, outcome, reasons=settings.start_check_reasons_confirmed)
         await _after_start_call(outcome.request_id)
-        return await settle(sessionmaker, outcome, answered)
+        if outcome.attempt is None:
+            raise RuntimeError("A start is sent only once its send is counted and recorded.")
+        answer = answer_of(answered)
+        sent = Sent(outcome.attempt, answer, answered.run_id if answer == "started" else None)
+        return await settle(sessionmaker, outcome, answered, sent=sent)
     return outcome.reason if outcome is not None else None

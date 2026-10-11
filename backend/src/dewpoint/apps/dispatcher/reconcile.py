@@ -47,6 +47,14 @@ FAILED_MESSAGE = "The run's workflow failed outside its own code (engine 2b spec
 UNVERIFIED_COUNT = "Its iterations are as its interpreter last counted them, unverified."  # a bug failed it (2b-4b M2)
 UNKNOWN_COUNT = "The iterations it used are unknown."
 LIVE = (WorkflowExecutionStatus.RUNNING, WorkflowExecutionStatus.CONTINUED_AS_NEW)  # its successor is starting
+LOOK_MAX = timedelta(hours=1)  # a spent unresolved request's looks, paced: never further apart than this
+
+
+def next_look(previous: timedelta | None) -> timedelta:
+    """The gap before a spent unresolved request is described again (2b-4b M4 recovery, the design's paced observation):
+    RECHECK after it was noted, then twice the last gap, up to LOOK_MAX. `reconcile_candidates` applies it (0055),
+    reading the last gap from the rows; each look is one error, and resolves nothing."""
+    return RECHECK if previous is None else min(2 * previous, LOOK_MAX)
 
 
 class Leader:
@@ -136,11 +144,11 @@ async def _starting(
     sessionmaker: async_sessionmaker[AsyncSession], client: Client, keys: KeySource, settings: Settings,
     tenant_id: uuid.UUID, request_id: uuid.UUID,
 ) -> str:  # fmt: skip
-    """A request still `starting` past its grace period: found and verified, `started`; absent from a namespace that
-    answers, back in the queue; anything else, left `starting`."""
+    """A request still `starting` past its grace period: found and verified, `started` (live, its owed slot reserved if
+    it had none); absent from a namespace that answers, back in the queue; anything else, left `starting`."""
     handle = client.get_workflow_handle(run_workflow_id(str(tenant_id), str(request_id)))
     try:
-        await handle.describe(rpc_timeout=CALL_DEADLINE)
+        described = await handle.describe(rpc_timeout=CALL_DEADLINE)
     except RPCError as e:
         if e.status == RPCStatusCode.NOT_FOUND and await namespace_answers(client):
             ref = dispatch.Ref(request_id, tenant_id)
@@ -166,7 +174,8 @@ async def _starting(
     if outcome.kind == "uncertain":
         return await _unresolved(sessionmaker, tenant_id, request_id, outcome.detail)
     # Started: a closed execution's end is recorded by the next pass, which finds the row still `running`.
-    return await dispatch.settle(sessionmaker, expected, outcome, audited=True)
+    live = described.status is None or described.status in LIVE  # its owed slot, reserved in the same transaction
+    return await dispatch.settle(sessionmaker, expected, outcome, audited=True, live=live)
 
 
 async def _expected(

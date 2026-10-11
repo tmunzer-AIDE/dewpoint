@@ -9,14 +9,17 @@ import asyncio
 import secrets
 import time
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 import asyncpg
 import pytest
 from sqlalchemy import text
 
+from dewpoint.apps.dispatcher import start_call
 from tests.apps.test_admission import admit, ready  # noqa: F401 - `ready`: the fixture
 from tests.conftest import _url_for
+from tests.support.starting import mark_starting
 
 pytestmark = pytest.mark.usefixtures("development_deployment")  # admission needs a recorded environment
 CHECK = "SELECT start_permitted($1, $2)"
@@ -50,13 +53,22 @@ async def starting(owner: Any, api: Any, ready: Any, *, status: str = "starting"
     request = (await admit(api, ctx, wf, key=str(uuid.uuid4()))).request
     start_request_id = uuid.uuid4()
     async with owner() as s, s.begin():
-        await s.execute(
-            text("UPDATE run_requests SET status = :status, sends = :sends, start_request_id = :rid, "
-                 "starting_at = now(), cancel_requested_at = CASE WHEN :cancelled THEN now() END, "
-                 "ended_at = CASE WHEN :ended THEN now() END WHERE id = :id"),
-            {"status": status, "sends": sends, "rid": start_request_id, "cancelled": cancelled,
-             "ended": status in TERMINAL, "id": request.id},
-        )  # fmt: skip
+        if status == "starting" and 1 <= sends <= start_call.CAP:  # as the dispatcher counts and records a send
+            await mark_starting(s, request.id, sends=sends, start_request_id=start_request_id,
+                                cancel_requested_at=datetime.now(UTC) if cancelled else None)  # fmt: skip
+        else:
+            if status == "starting":  # a count no send records: `starting` only as the dispatcher's own hold has it
+                await s.execute(text("select set_config('dewpoint.start_held', 'on', true)"))
+            await s.execute(
+                text("UPDATE run_requests SET sends = :sends, start_request_id = :rid, "
+                     "cancel_requested_at = CASE WHEN :cancelled THEN now() END WHERE id = :id"),
+                {"sends": sends, "rid": start_request_id, "cancelled": cancelled, "id": request.id},
+            )  # fmt: skip
+            await s.execute(
+                text("UPDATE run_requests SET status = :status, starting_at = now(), "
+                     "ended_at = CASE WHEN :ended THEN now() END WHERE id = :id"),
+                {"status": status, "ended": status in TERMINAL, "id": request.id},
+            )  # fmt: skip
         workflow_id = f"t:{ctx.tenant_id}:run:{request.id}"
         if evidence:
             await s.execute(

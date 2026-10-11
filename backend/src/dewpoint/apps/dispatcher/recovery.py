@@ -19,6 +19,10 @@ log = structlog.get_logger("dewpoint.dispatcher")
 START_AFTER_END, START_HISTORY_MISSING = "start_after_end", "start_history_missing"
 START_UNRESOLVED, RUN_HISTORY_MISSING = "start_unresolved", "run_history_missing"
 SLOT_HISTORY_MISSING, SUBRUN_HISTORY_MISSING = "slot_history_missing", "subrun_history_missing"
+# 2b-4b M4 recovery (0055), none cleared by a pass's settling: a late sighting's owed slot reserved over its tenant's
+# limit (cleared once its run ends: `work_settled_clear`); a root execution of an ended request, terminated on the exact
+# match, or one whose first run carries another id, never terminated (both an operator's)
+START_OVER_LIMIT, LATE_START, LATE_START_UNMATCHED = "start_over_limit", "late_start", "late_start_unmatched"
 # A request's: any phase of its reconciliation settling resolves them all
 REQUEST = (START_AFTER_END, START_HISTORY_MISSING, START_UNRESOLVED, RUN_HISTORY_MISSING, SLOT_HISTORY_MISSING)
 
@@ -40,6 +44,11 @@ async def noted(s: AsyncSession, tenant_id: uuid.UUID, reason: str, item_id: uui
         if getattr(e.orig, "sqlstate", None) != FENCED:
             raise
         log.info("recovery_reason_fenced", reason=reason)
+
+
+async def cleared(s: AsyncSession, tenant_id: uuid.UUID, reason: str, item_id: uuid.UUID) -> None:
+    """The item loses `reason` in `s`'s transaction: the record that supersedes it is written in the same one."""
+    await s.execute(_RESOLVED, {"r": [reason], "t": [tenant_id], "i": [item_id]})
 
 
 async def resolved(

@@ -93,15 +93,18 @@ async def state(url: str) -> State:
 
 @pytest.fixture(scope="module")
 def cluster() -> Iterator[str]:
+    """The module's cluster, with the role that stands for PUBLIC (`PROBE`), whichever test runs first."""
     with PostgresContainer("postgres:16-alpine", driver=None) as pg:
-        yield pg.get_connection_url().rsplit("/", 1)[0]
+        base = pg.get_connection_url().rsplit("/", 1)[0]
+        asyncio.run(_sql(f"{base}/postgres", f"CREATE ROLE {PROBE} NOLOGIN"))
+        yield base
 
 
 @pytest.fixture(scope="module")
 def template(cluster: str) -> str:
     """A seeded database at 0052, seeded at 0034 as test_online seeds, then upgraded (0053 never runs here). No
     deployment recorded: a fresh installation records it only after migrating."""
-    asyncio.run(_sql(f"{cluster}/postgres", 'CREATE DATABASE "t0052"', f"CREATE ROLE {PROBE} NOLOGIN"))
+    asyncio.run(_sql(f"{cluster}/postgres", 'CREATE DATABASE "t0052"'))
     upgrade(f"{cluster}/t0052", "0034")
     asyncio.run(seed(f"{cluster}/t0052", ROOTS))
     upgrade(f"{cluster}/t0052", "0052")
@@ -673,10 +676,11 @@ async def test_a_non_superuser_with_a_schema_to_create_in_uses_no_language(db: s
         assert f"permission denied for language {language}" in outcome, (statement, outcome)
 
 
-# Test 11: the latest schema, from a fresh database, its deployment not yet recorded (as a fresh installation's).
+# Test 11: 0053's schema, from a fresh database, its deployment not yet recorded (as a fresh installation's): to 0053,
+# where 0053 ends (later revisions have tests of their own; tests/migrations/test_0054.py checks head's).
 
 
-@pytest.mark.parametrize("path", [["head"], ["0052", "head"]])
+@pytest.mark.parametrize("path", [["0053"], ["0052", "0053"]])
 async def test_a_fresh_database_migrated_to_head_ends_at_the_reference(cluster: str, made: list[str],
                                                                           path: list[str]) -> None:  # fmt: skip
     name = f"f{uuid.uuid4().hex[:12]}"

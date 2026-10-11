@@ -19,8 +19,11 @@ from dewpoint.core.db import tenant_scope
 from tests.support.workflows import seed_workflow
 
 # What holds a tenant id and isn't fenced, each for its reason: the audit log (kept under the platform's audit policy),
-# the retention sweep's counts (the erasure's sweep deletes them once audited), and the erasure's own record.
-UNFENCED = {"audit_log", "retention_sweep_tenants", "tenant_erasures", "tenant_erasure_items", "tenant_erasure_known"}
+# the retention sweep's counts (the erasure's sweep deletes them once audited), the erasure's own record, and the
+# blocker store (0054: platform-scoped, kept past the erasure, its writes, the backfill's included, landing whatever a
+# tenant's stage).
+UNFENCED = {"audit_log", "retention_sweep_tenants", "tenant_erasures", "tenant_erasure_items", "tenant_erasure_known",
+            "unresolved_sends"}  # fmt: skip
 FENCED_TABLES = (
     "claim_grants", "connections", "csv_mappings", "csv_uploads", "data_keys", "egress_allowlist", "execution_evidence",
     "inbound_events", "ingress_outstanding", "memberships", "operator_commands", "plugin_calls", "rate_buckets",

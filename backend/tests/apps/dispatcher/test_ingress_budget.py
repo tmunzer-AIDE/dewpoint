@@ -24,6 +24,7 @@ from tests.apps.test_admission import KEYS, OPEN_GRAPH
 from tests.apps.test_runs import FakeClient
 from tests.apps.test_workflow_ops import create, publish
 from tests.core.ingress.support import RECORD
+from tests.support.starting import mark_starting
 
 pytestmark = pytest.mark.usefixtures("development_deployment")
 ALARM = {"type": "ap_down", "site": "s-1"}
@@ -218,8 +219,9 @@ async def test_a_started_request_releases_its_credit_and_a_start_put_back_keeps_
     await deliver(ingress_sessionmaker, ready)
     await matching.match_once(dispatch_sessionmaker, KEYS, matching.Verified())
     async with owner_sessionmaker() as s, s.begin():  # a start found absent goes back to the queue: still outstanding
-        await s.execute(text("update run_requests set status = 'starting', starting_at = now() where tenant_id = :t"),
-                        {"t": ready.tenant_id})  # fmt: skip
+        found = await s.execute(text("select id from run_requests where tenant_id = :t"), {"t": ready.tenant_id})
+        for (request_id,) in found.all():
+            await mark_starting(s, request_id)
         await s.execute(text("update run_requests set status = 'queued', starting_at = null where tenant_id = :t"),
                         {"t": ready.tenant_id})  # fmt: skip
     assert await exact(owner_sessionmaker) == 2

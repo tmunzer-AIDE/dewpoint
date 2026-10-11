@@ -27,6 +27,7 @@ from tests.apps.dispatcher.test_schedule_sync import Leading, before_the_cutover
 from tests.apps.erasure.support import erasing, populated, rows_of
 from tests.core.erasure.test_fence import FENCED_TABLES
 from tests.core.retention.support import sql
+from tests.support.starting import mark_starting
 
 pytestmark = pytest.mark.usefixtures("development_deployment")
 QUEUE = "erasure-stages"
@@ -116,8 +117,8 @@ async def test_a_starting_request_holds_the_erasure_until_the_reconciler_resolve
     server, owner_sessionmaker, ingress_sessionmaker, api_sessionmaker, retention_sessionmaker
 ) -> None:
     data = await populated(owner_sessionmaker, ingress_sessionmaker)
-    await sql(owner_sessionmaker, "update run_requests set status = 'starting', starting_at = now() where id = :i",
-              i=data["queued"])  # fmt: skip
+    async with owner_sessionmaker() as s, s.begin():
+        await mark_starting(s, data["queued"])
     await erasing(api_sessionmaker, data["t"])
     for _ in range(3):
         assert await process.advance(retention_sessionmaker, server.client, data["t"]) == Stage.RECONCILE

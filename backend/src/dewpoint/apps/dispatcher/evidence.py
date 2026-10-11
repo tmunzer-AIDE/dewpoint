@@ -35,7 +35,9 @@ from temporalio.api.workflowservice.v1 import DescribeNamespaceRequest, GetWorkf
 from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.service import RPCError, RPCStatusCode
 
-from dewpoint.apps.dispatcher import budget
+from dewpoint.apps.dispatcher import budget, dispatch, recovery
+from dewpoint.core import blockers
+from dewpoint.core.audit import service as audit
 from dewpoint.core.crypto.retire import RunProof
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.models.runs import ExecutionEvidence
@@ -192,6 +194,8 @@ async def _check(sessionmaker: async_sessionmaker[AsyncSession], client: Client,
         reading = _Reading.kept(row) if row.read_token is not None and not read else None
     if reading is None:
         described = await _described(client, workflow_id, run_id)
+        if described is not None:  # any run of its chain shown: what its blocker is owed, retried on every sighting
+            await _sighted(sessionmaker, client, tenant_id, workflow_id, described if run_id is None else None)
         asked: datetime | None = None
         kept = (retention or RETAINED_FOR) + timedelta(minutes=1)
         async with sessionmaker() as s, s.begin():
@@ -237,6 +241,79 @@ async def _check(sessionmaker: async_sessionmaker[AsyncSession], client: Client,
             raise
         return await _gone_reading(sessionmaker, tenant_id, row_id, run_id, started_from)
     return await _recorded(sessionmaker, tenant_id, row_id, workflow_id, run_id, started_from, reading, retention)
+
+
+ENDED = ("dead", "cancelled", "refused")  # a request that never sends again
+LATE_START = "A late start: its request had ended before this execution was seen (2b-4b M4 recovery)."
+
+
+async def _sighted(sessionmaker: async_sessionmaker[AsyncSession], client: Client, tenant_id: uuid.UUID,
+                   workflow_id: str, latest: Any | None) -> None:  # fmt: skip
+    """A chain Temporal shows, whose root's request has a blocker (2b-4b M4 recovery, tasks 4 and 5; the owner's
+    gate-B review). Looked at on every sighting of any run of the chain, while something is owed:
+
+    - Not yet identified: identified only when the chain's first run's started event carries the recorded start
+      request id (`dispatch.started_by`). Another id, or none: left as it is, alerted. A lookup that fails is retried on
+      the next sighting, whichever run of the chain it describes.
+    - A late start (the chain's latest run live, its request ended): terminated only on the exact match (that started
+      event, the request's own workflow id, the call naming the chain's first run). Its record commits first: on its
+      blocker (`late_start`, once, never refused by the erasure's fence), with its audit entry and, where the fence
+      allows, its `late_start` item; the termination follows, and is tried again on each sighting while the chain is
+      live. A mismatch is recorded for an operator, on its blocker and as a `late_start_unmatched` item, alerted once,
+      never identified nor terminated (the owner's ruling, the design's revision 2, section D).
+
+    `latest`: the chain's latest run as just described, or None to describe it here."""
+    async with sessionmaker() as s:
+        await tenant_scope(s, tenant_id)
+        found = await blockers.of_root(s, workflow_id)
+        if found is None:
+            return
+        request_id, start_request_id, state = found
+        status = (await s.execute(text("select status from run_requests where id = :i"), {"i": request_id})).scalar()
+    unidentified, ended = state in ("pending", "unresolved"), status in ENDED
+    if not (unidentified or ended):
+        return
+    try:
+        latest = latest if latest is not None else await _described(client, workflow_id, None)
+        late = ended and latest is not None and _open(latest)
+        if not (unidentified or late):
+            return
+        first_run = (
+            None if start_request_id is None else await dispatch.started_by(client, workflow_id, start_request_id)
+        )
+    except Exception as e:  # unanswered this time: the next sighting asks again
+        log.warning("start_identity_unread", request_id=str(request_id), error=type(e).__name__)
+        return
+    if first_run is None:  # another id, none, or no recorded id to match: never identified, never terminated
+        if not late:
+            log.error("start_unidentified", request_id=str(request_id))
+            return
+        async with sessionmaker() as s, s.begin():  # recorded for an operator, durably (the owner's ruling, design §D)
+            await tenant_scope(s, tenant_id)
+            if await blockers.late_started(s, request_id, matched=False):
+                log.error("late_start_unmatched", request_id=str(request_id))
+                await recovery.noted(s, tenant_id, recovery.LATE_START_UNMATCHED, request_id)
+        return
+    run = first_run.execution.run_id
+    async with sessionmaker() as s, s.begin():  # the record first: a failure before the termination terminates nothing
+        await tenant_scope(s, tenant_id)
+        await blockers.identified(s, request_id, run)
+        recorded = await blockers.late_started(s, request_id, matched=True) if late else None
+        if recorded is not None:  # once: on the unfenced blocker
+            log.error("late_start", request_id=str(request_id), run_id=run)
+            if recorded == "promoted":  # a mismatch shown matched later: its item is obsolete, with this record
+                await recovery.cleared(s, tenant_id, recovery.LATE_START_UNMATCHED, request_id)
+            await recovery.noted(s, tenant_id, recovery.LATE_START, request_id)
+            await audit.record(s, tenant_id=tenant_id, actor_id=None, action="run.request.late_start",
+                               target_type="run_request", target_id=str(request_id),
+                               details={"run_id": run})  # fmt: skip
+    if late:
+        try:
+            await client.get_workflow_handle(workflow_id, first_execution_run_id=run).terminate(
+                reason=LATE_START, rpc_timeout=CALL_DEADLINE
+            )
+        except RPCError as e:  # recorded: tried again on the next sighting while it's live
+            log.warning("late_start_unterminated", request_id=str(request_id), error=e.status.name)
 
 
 async def _restarted(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, row_id: int,
