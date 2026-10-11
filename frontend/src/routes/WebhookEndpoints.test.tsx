@@ -196,6 +196,43 @@ describe("Settings → Webhook endpoints", () => {
     expect(await within(form).findByRole("textbox", { name: "Allowed networks", description: /One network a line, like 203\.0\.113\.0\/24/ })).toBeTruthy();
   });
 
+  it("opens the optional settings a refusal is about, and gives the refused control focus", async () => {
+    // The review of the final head: refused while folded away, the allowlist's error stayed hidden; nothing showed.
+    api("editor", "development", { "POST /api/v1/t/t1/webhook-endpoints": () => json({ error: "endpoint_invalid", fields: ["allowlist"] }, 422) });
+    await show();
+    await userEvent.click(await screen.findByRole("button", { name: "＋ Endpoint" }));
+    const form = screen.getByRole("form", { name: "New endpoint" });
+    await userEvent.type(within(form).getByRole("textbox", { name: "Name" }), "Mist lab");
+    const folded = within(form).getByText("Allowed addresses and the largest event").closest("details")!;
+    await userEvent.click(within(form).getByText("Allowed addresses and the largest event"));
+    await userEvent.type(within(form).getByRole("textbox", { name: "Allowed networks" }), "10.0.0.1/8");
+    await userEvent.click(within(form).getByText("Allowed addresses and the largest event"));
+    expect(folded.open).toBe(false);
+    await userEvent.click(within(form).getByRole("button", { name: "Create the endpoint" }));
+    await vi.waitFor(() => expect(folded.open).toBe(true));
+    await vi.waitFor(() => expect(document.activeElement).toBe(within(form).getByRole("textbox", { name: "Allowed networks" })));
+  });
+
+  it("says each refused pointer and header to whoever reads it", async () => {
+    // The review of the final head: the list's pointer, the id's pointer and header were marked invalid without why.
+    let fields = ["events_pointer", "id_pointer"];
+    api("editor", "development", { "POST /api/v1/t/t1/webhook-endpoints": () => json({ error: "endpoint_invalid", fields }, 422) });
+    await show();
+    await userEvent.click(await screen.findByRole("button", { name: "＋ Endpoint" }));
+    const form = screen.getByRole("form", { name: "New endpoint" });
+    await userEvent.type(within(form).getByRole("textbox", { name: "Name" }), "Ticketing");
+    await userEvent.click(within(form).getByRole("radio", { name: "Another sender" }));
+    await userEvent.click(within(form).getByRole("radio", { name: /^A list in the body, at/ }));
+    await userEvent.click(within(form).getByRole("radio", { name: /^In each event, at/ }));
+    await userEvent.click(within(form).getByRole("button", { name: "Create the endpoint" }));
+    expect(await within(form).findByRole("textbox", { name: "The list's pointer", description: "A pointer into the body starts with /, like /items, at most 256 characters." })).toBeTruthy();
+    expect(within(form).getByRole("textbox", { name: "The id's pointer", description: "A pointer starts with /, like /id, at most 256 characters." })).toBeTruthy();
+    fields = ["id_header"];
+    await userEvent.click(within(form).getByRole("radio", { name: /^In a header/ }));
+    await userEvent.click(within(form).getByRole("button", { name: "Create the endpoint" }));
+    expect(await within(form).findByRole("textbox", { name: "The id's header", description: /^A header's name: lowercase letters, digits and -/ })).toBeTruthy();
+  });
+
   it("turns an endpoint off at once", async () => {
     const sent = api("editor", "development", { "PATCH /api/v1/t/t1/webhook-endpoints/e1": () => json({ ...ENDPOINT, enabled: false }) });
     await show();

@@ -4,7 +4,7 @@
 // where its events are and where their ids are, each fixed once it's made; then where deliveries may come from and how
 // large one may be. Editing: what the API lets change, beside what was fixed when it was made.
 import { useMutation } from "@tanstack/react-query";
-import { useId, useState, type FormEvent, type ReactNode } from "react";
+import { useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Button } from "../components/Button";
 import { Field, Select, controlClass } from "../components/Field";
 import { ApiError } from "../lib/client";
@@ -66,8 +66,10 @@ export function NewEndpoint({ tenantId, types, onCreated, onCancel }: {
   tenantId: string; types: TriggerType[]; onCreated: (made: Created) => void; onCancel: () => void;
 }) {  // prettier-ignore
   const id = useId();
+  const box = useRef<HTMLFormElement>(null);
   const webhook = types.find((t) => Object.keys(t.topics).length > 0);
   const [form, setForm] = useState<Form>(() => blankForm(webhook?.key ?? null));
+  const [limitsOpen, setLimitsOpen] = useState(false); // a Mist endpoint's optional settings, folded away
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [refused, setRefused] = useState<string | null>(null);
   const set = (p: Partial<Form>) => setForm((f) => ({ ...f, ...p }));
@@ -82,6 +84,10 @@ export function NewEndpoint({ tenantId, types, onCreated, onCancel }: {
       const r = refusal(e);
       setErrors(r.fields);
       setRefused(r.text);
+      // A refusal is never folded away: its settings open, and its first refused control takes focus (the review of the
+      // final head).
+      if ("allowlist" in r.fields || "body_limit" in r.fields) setLimitsOpen(true);
+      requestAnimationFrame(() => box.current?.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus());
     },
   });
   function submit(e: FormEvent) {
@@ -92,7 +98,7 @@ export function NewEndpoint({ tenantId, types, onCreated, onCancel }: {
   const other = form.trigger === null;
   const sender = webhook ? senderName(webhook) : null;
   return (
-    <form onSubmit={submit} aria-labelledby={`${id}-title`} className="flex max-w-2xl flex-col gap-4 rounded-lg border border-line bg-surface p-4">
+    <form ref={box} onSubmit={submit} aria-labelledby={`${id}-title`} className="flex max-w-2xl flex-col gap-4 rounded-lg border border-line bg-surface p-4">
       <h3 id={`${id}-title`} className="text-body-lg font-semibold">New endpoint</h3>
       <Field label="Name" value={form.name} maxLength={120} error={errors.name} autoFocus onChange={(e) => set({ name: e.target.value })} />
       <fieldset className="flex flex-col gap-2">
@@ -132,11 +138,12 @@ export function NewEndpoint({ tenantId, types, onCreated, onCancel }: {
             <Radio name={`${id}-events`} checked={form.events === "at"} label="A list in the body, at" onChange={() => set({ events: "at" })}>
               <input
                 aria-label="The list's pointer" value={form.eventsAt} spellCheck={false} aria-invalid={!!errors.events_pointer}
+                aria-describedby={errors.events_pointer ? `${id}-events-why` : undefined}
                 onFocus={() => set({ events: "at" })} onChange={(e) => set({ eventsAt: e.target.value })} className={`${controlClass(!!errors.events_pointer)} w-40`}
               />
             </Radio>
             <p className="text-small text-muted">A pointer into the body, like /items. At most 500 events a delivery, each matched to the workflows on its own.</p>
-            {errors.events_pointer && <p className="text-small text-danger">{errors.events_pointer}</p>}
+            {errors.events_pointer && <p id={`${id}-events-why`} className="text-small text-danger">{errors.events_pointer}</p>}
           </fieldset>
           <fieldset className="flex flex-col gap-2">
             <legend className="mb-1 text-small font-semibold">Each event&apos;s id · fixed once made</legend>
@@ -144,17 +151,20 @@ export function NewEndpoint({ tenantId, types, onCreated, onCancel }: {
             <Radio name={`${id}-ids`} checked={form.ids === "pointer"} label="In each event, at" onChange={() => set({ ids: "pointer" })}>
               <input
                 aria-label="The id's pointer" value={form.idPointer} spellCheck={false} aria-invalid={!!errors.id_pointer}
+                aria-describedby={errors.id_pointer ? `${id}-id-pointer-why` : undefined}
                 onFocus={() => set({ ids: "pointer" })} onChange={(e) => set({ idPointer: e.target.value })} className={`${controlClass(!!errors.id_pointer)} w-40`}
               />
             </Radio>
             <Radio name={`${id}-ids`} checked={form.ids === "header"} label="In a header" onChange={() => set({ ids: "header" })}>
               <input
                 aria-label="The id's header" value={form.idHeader} spellCheck={false} aria-invalid={!!errors.id_header}
+                aria-describedby={errors.id_header ? `${id}-id-header-why` : undefined}
                 onFocus={() => set({ ids: "header" })} onChange={(e) => set({ idHeader: e.target.value })} className={`${controlClass(!!errors.id_header)} w-40`}
               />
             </Radio>
             <p className="text-small text-muted">With an id, a delivery the sender repeats is recognized, and doesn&apos;t run twice. A pointer starts with /, like /id.</p>
-            {(errors.id_pointer ?? errors.id_header) && <p className="text-small text-danger">{errors.id_pointer ?? errors.id_header}</p>}
+            {errors.id_pointer && <p id={`${id}-id-pointer-why`} className="text-small text-danger">{errors.id_pointer}</p>}
+            {errors.id_header && <p id={`${id}-id-header-why`} className="text-small text-danger">{errors.id_header}</p>}
           </fieldset>
         </>
       )}
@@ -164,7 +174,7 @@ export function NewEndpoint({ tenantId, types, onCreated, onCancel }: {
           <Limits form={form} set={set} errors={errors} />
         </fieldset>
       ) : (
-        <details>
+        <details open={limitsOpen} onToggle={(e) => setLimitsOpen(e.currentTarget.open)}>
           <summary className="min-h-6 cursor-pointer text-small font-semibold">Allowed addresses and the largest event</summary>
           <p className="text-small text-muted">Optional: up to 32 networks, like 203.0.113.0/24, and a size limit.</p>
           <div className="mt-3 flex flex-col gap-3">

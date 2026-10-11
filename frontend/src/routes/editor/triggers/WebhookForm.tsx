@@ -16,7 +16,8 @@ import { announce } from "../../../lib/announce";
 import { ApiError } from "../../../lib/client";
 import { inputOf, inputRows, sameSchema, setSettings } from "../../../lib/input";
 import {
-  createBinding, deleteBinding, endpointsQuery, parseValue, possessive, senderName, topicOf, triggerTypesQuery, updateBinding, valueText,
+  createBinding, deleteBinding, endpointsQuery, parsePointer, parseValue, pointerText, possessive, senderName, topicOf, triggerTypesQuery,
+  updateBinding, valueText,
   workflowBindingsQuery, type FilterClause, type WorkflowBinding,
 } from "../../../lib/triggers";  // prettier-ignore
 import { useTriggers } from "./context";
@@ -54,7 +55,7 @@ export function WebhookForm({ binding, onDone }: { binding: WorkflowBinding | nu
   const [topic, setTopic] = useState<string | null>(null); // chosen here; until then, the binding's or the first
   const shownTopic = !byTopic ? null : topic !== null && topics.includes(topic) ? topic : editing ? topicOf(binding.filter, type) : (topics[0] ?? null);
   const [useShape, setUseShape] = useState(true);
-  const [clauses, setClauses] = useState<Clause[]>(() => (binding?.filter ?? []).map((c) => ({ pointer: c.pointer, value: valueText(c.value) })));
+  const [clauses, setClauses] = useState<Clause[]>(() => (binding?.filter ?? []).map((c) => ({ pointer: pointerText(c.pointer), value: valueText(c.value) })));
   const [errors, setErrors] = useState<Record<number, string>>({});
   const [refused, setRefused] = useState<string | null>(null);
   const [removing, setRemoving] = useState(false);
@@ -69,9 +70,10 @@ export function WebhookForm({ binding, onDone }: { binding: WorkflowBinding | nu
     const out: FilterClause[] = [];
     clauses.forEach((c, i) => {
       const read = parseValue(c.value);
-      if (!c.pointer.startsWith("/") || c.pointer.length > 256) found[i] = "A field is a pointer into the event, starting with /, like /type.";
+      const field = parsePointer(c.pointer);
+      if ("problem" in field) found[i] = field.problem;
       else if ("problem" in read) found[i] = read.problem;
-      else out.push({ pointer: c.pointer, value: read.value });
+      else out.push({ pointer: field.pointer, value: read.value });
     });
     setErrors(found);
     return Object.keys(found).length > 0 ? null : out;

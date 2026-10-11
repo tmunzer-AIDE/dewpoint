@@ -200,7 +200,27 @@ export const valueWords = (v: FilterClause["value"]): string => valueText(v);
 
 /** A filter in words: "/type is incident and /priority is 1"; none matches every event. */
 export const filterWords = (filter: FilterClause[]) =>
-  filter.length === 0 ? "every event" : filter.map((c) => `${c.pointer} is ${valueWords(c.value)}`).join(" and ");
+  filter.length === 0 ? "every event" : filter.map((c) => `${pointerText(c.pointer)} is ${valueWords(c.value)}`).join(" and ");
+
+const POINTER_WORDS = "A field is a pointer into the event, starting with /, like /type.";
+
+/** A condition's field as the form shows it, so that reading it again gives it back exactly: as itself, or as JSON text
+ * in quotes when it holds a line break, which a one-line field would drop (the review of the final head). */
+export const pointerText = (pointer: string): string => (/[\r\n]/.test(pointer) ? JSON.stringify(pointer) : pointer);
+
+/** A condition's field as typed: a pointer starting with /, of at most 256 characters, or one in quotes read as JSON
+ * text (a pointer never starts with a quote, so nothing typed is read two ways). */
+export function parsePointer(text: string): { pointer: string } | { problem: string } {
+  let pointer = text;
+  if (text.length >= 2 && text.startsWith('"') && text.endsWith('"')) {
+    try {
+      pointer = JSON.parse(text) as string;
+    } catch {
+      return { problem: POINTER_WORDS };
+    }
+  }
+  return typeof pointer === "string" && pointer.startsWith("/") && pointer.length <= 256 ? { pointer } : { problem: POINTER_WORDS };
+}
 
 /** The topic a filter picks for a trigger type: one clause on its topic pointer, naming one of its topics. */
 export function topicOf(filter: FilterClause[], type: TriggerType | undefined): string | null {

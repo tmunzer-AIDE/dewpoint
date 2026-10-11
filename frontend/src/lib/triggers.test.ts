@@ -2,7 +2,7 @@
 import { QueryClient } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  attentionWords, bindingLine, filterWords, missesNote, parseValue, scheduleMeta, scheduleNote, startFormQuery, startLabel,
+  attentionWords, bindingLine, filterWords, missesNote, parsePointer, parseValue, pointerText, scheduleMeta, scheduleNote, startFormQuery, startLabel,
   possessive, startSummary, topicOf, triggerColumn, valueText,
 } from "./triggers";  // prettier-ignore
 import { MIST, SCHEDULE } from "../test/triggers";
@@ -124,6 +124,19 @@ describe("a webhook binding in words", () => {
       expect(valueText(v)).toBe(JSON.stringify(v));
       expect(parseValue(valueText(v))).toEqual({ value: v });
     }
+  });
+
+  it("shows a pointer with a line break as JSON text, and reads it back exactly", () => {
+    // The review of the final head: "/room\nname" was shown as "/roomname", and an edit saved that.
+    for (const p of ["/room\nname", "/room\rname", "/room\r\nname"]) {
+      expect(pointerText(p)).toBe(JSON.stringify(p));
+      expect(parsePointer(pointerText(p))).toEqual({ pointer: p });
+    }
+    expect(pointerText("/type")).toBe("/type");
+    expect(parsePointer("/type")).toEqual({ pointer: "/type" });
+    expect(parsePointer("type")).toEqual({ problem: "A field is a pointer into the event, starting with /, like /type." });
+    expect(parsePointer('"/room\\nname"_2')).toEqual({ problem: "A field is a pointer into the event, starting with /, like /type." });
+    expect(filterWords([{ pointer: "/room\nname", value: 1 }])).toBe('"/room\\nname" is 1');
   });
 
   it("names a binding's sender by its key while the trigger types aren't known, never as unknown", () => {

@@ -190,6 +190,20 @@ describe("a workflow's webhooks", () => {
     await vi.waitFor(() => expect(sent.find((r) => r.method === "PATCH")?.body).toEqual({ filter: [{ pointer: "/type", value: "a\nb" }, { pointer: "/priority", value: 2 }] }));
   });
 
+  it("keeps a field with a line break as it was when a sibling condition is saved", async () => {
+    // The review of the final head: "/room\nname" showed as "/roomname", and an edit to it saved that.
+    const broken: WorkflowBinding = { ...OTHER, filter: [{ pointer: "/room\nname", value: "a" }, { pointer: "/priority", value: 1 }] };
+    const sent = api([broken], { "PATCH /api/v1/t/t1/webhook-bindings/b2": () => json(broken) });
+    await showPanel();
+    await userEvent.click(await within(section()).findByRole("button", { name: "Edit Ticketing" }));
+    const form = within(section()).getByRole("form", { name: "The webhook from Ticketing" });
+    expect(within(form).getByRole<HTMLInputElement>("textbox", { name: "Field 1" }).value).toBe(JSON.stringify("/room\nname"));
+    await userEvent.clear(within(form).getByRole("textbox", { name: "Value 2" }));
+    await userEvent.type(within(form).getByRole("textbox", { name: "Value 2" }), "2");
+    await userEvent.click(within(form).getByRole("button", { name: "Save" }));
+    await vi.waitFor(() => expect(sent.find((r) => r.method === "PATCH")?.body).toEqual({ filter: [{ pointer: "/room\nname", value: "a" }, { pointer: "/priority", value: 2 }] }));
+  });
+
   it("says a condition's refusal to whoever reads its field and its value", async () => {
     // The final review: the refusal showed under the condition, but neither control was described by it.
     api([OTHER]);
