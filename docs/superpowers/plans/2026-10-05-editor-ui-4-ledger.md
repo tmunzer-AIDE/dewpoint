@@ -2561,3 +2561,26 @@ written.
 
 The unit suite 968 passed (72 files), as the plan's dry run counted; typecheck and lint clean. No mid-slice ruling:
 the code is the plan's, as written.
+
+### 4c-3b, milestone 5 and the final checkpoint (2026-10-11)
+
+- Task 9 (84825aac), Task 10 (58b70393), Task 11 (c65f246e): milestone 3, above.
+- Task 12 (ce7e443b), Task 13 (e0d83e63): milestone 4, above.
+- Task 14 (39b23e4b): the browser flows, the trigger flows and the 4b flows following the start card.
+
+Checks as run at 39b23e4b: the unit suite 968 passed (72 files); typecheck, lint, check:api (no OpenAPI change) and
+build clean; the browser gate on the isolated stack, reset from this branch, 43 passed (1.6 min, 201 s with the reset:
+the 6 trigger flows, the 29 workflow flows, the foundations' 2 and the gate's 6); local CodeQL, CI's versions, 0
+findings in python and 0 in javascript-typescript. The screens, after another reset: the Triggers panel's schedules
+(four made through the API: daily and live, every 15 minutes and simulated, a custom cron turned off, every 90
+seconds), a new schedule's form, the 90-second one's form ("as it is"), the webhooks (a Mist binding with its warning,
+another sender's), Settings → Webhook endpoints (the table, the details, a new endpoint of each kind, a token shown
+once), New workflow and the list; light and dark at 1280 and 320 px, 44 screens, no console error.
+
+Mid-slice ruling:
+
+M80. **Task 14's browser flows get a commit of their own** (39b23e4b), made once the browser gate passed: the plan's
+     Task 14 commits only its ledger section. Cost if wrong: one extra commit.
+
+Deferred: at 320 px the CSV column editor's autofocus scrolls the columns table 22 px, clipping its first header
+("eader"); P3 polish, as the Milestone 2 review graded it. A fresh review of the whole branch follows.
