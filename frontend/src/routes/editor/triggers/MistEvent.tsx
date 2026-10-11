@@ -24,7 +24,15 @@ export function MistPicker({ type, fields, onDone }: { type: TriggerType; fields
     if (actions.update((d) => setSettings(d, { input_schema: shape }), `The input is now ${possessive(chosen)} shape. Undo brings back what it replaced.`) === null) onDone();
   };
   return (
-    <div role="group" aria-labelledby={legend} className="flex flex-col gap-3">
+    <div
+      role="group" aria-labelledby={legend} className="flex flex-col gap-3"
+      onKeyDown={(e) => {
+        if (e.key === "Escape") {
+          e.stopPropagation(); // cancels the picker, not the panel (4c-3b's final review)
+          onDone();
+        }
+      }}
+    >
       <span id={legend} className="text-small font-semibold">Use a {sender} event</span>
       <input
         type="search" aria-label="Find a topic" placeholder="Find a topic, like device" value={query} autoFocus

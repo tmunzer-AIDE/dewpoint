@@ -85,13 +85,16 @@ function Default({ field, pointer, disabled, set }: {
   );  // prettier-ignore
 }
 
-export function FieldEditor({ field, onClose, onRenamed }: { field: InputField; onClose: () => void; onRenamed: (to: string) => void }) {
+export function FieldEditor({ field, focusDefault = false, onClose, onRenamed }: {
+  field: InputField; focusDefault?: boolean; onClose: () => void; onRenamed: (to: string) => void;
+}) {  // prettier-ignore
   const t = useTriggers();
   const { actions } = t;
   const disabled = !t.editable;
   const pointer = fieldPointer(field.name);
   const box = useRef<HTMLDivElement>(null);
-  useEffect(() => box.current?.querySelector("input")?.focus(), []);
+  // Its first control takes focus, or its Default when "Go to it" was for the default (4c-3b's final review).
+  useEffect(() => box.current?.querySelector<HTMLElement>(focusDefault ? "[data-default] input, [data-default] select" : "input")?.focus(), []);
   const set = (patch: Partial<InputField>, key: string) =>
     actions.update((d) => setSettings(d, { input_schema: setField(inputOf(d), field.name, patch) }), null, `${pointer}/${key}`);
   const name = actions.held("name", pointer);
@@ -160,7 +163,9 @@ export function FieldEditor({ field, onClose, onRenamed }: { field: InputField; 
           onChange={(values) => set({ values }, "enum")}
         />
       )}
-      <Default field={field} pointer={pointer} disabled={disabled} set={set} />
+      <div data-default className="flex flex-col">
+        <Default field={field} pointer={pointer} disabled={disabled} set={set} />
+      </div>
       <Problems problems={problemsAt(t.check, pointer)} />
       <div className="flex flex-wrap gap-2">
         <Button size="sm" variant="primary" onClick={() => applyName() && onClose()}>Done</Button>

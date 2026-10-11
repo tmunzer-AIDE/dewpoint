@@ -233,6 +233,19 @@ describe("Settings → Webhook endpoints", () => {
     expect(await within(form).findByRole("textbox", { name: "The id's header", description: /^A header's name: lowercase letters, digits and -/ })).toBeTruthy();
   });
 
+  it("tells the workflows an endpoint starts while they load from when they couldn't be read", async () => {
+    // 4c-3b's final review: both showed "–".
+    api("editor", "development", {
+      "GET /api/v1/t/t1/webhook-endpoints/e1/bindings": () => new Promise<Response>(() => undefined), // still loading
+      "GET /api/v1/t/t1/webhook-endpoints/e2/bindings": () => json({ error: "http_error" }, 500),
+    });
+    await show();
+    const row = async (name: string) => (await within(table()).findByText(name)).closest("tr")!;
+    await vi.waitFor(async () => expect((await row("Ticketing")).textContent).toContain("couldn't be read"));
+    expect((await row("Mist prod")).textContent).toContain("…");
+    expect((await row("Mist prod")).textContent).not.toContain("–");
+  });
+
   it("turns an endpoint off at once", async () => {
     const sent = api("editor", "development", { "PATCH /api/v1/t/t1/webhook-endpoints/e1": () => json({ ...ENDPOINT, enabled: false }) });
     await show();

@@ -125,6 +125,13 @@ describe("the input as form fields", () => {
     await vi.waitFor(() => expect(document.activeElement).toBe(within(input()).getByRole("button", { name: "Edit place" })));
   });
 
+  it("opens a field on its Default when Go to it lands on its default", async () => {
+    // 4c-3b's final review: Go to it for a held default focused the field's Name.
+    const input_schema = { type: "object", properties: { floor: { type: "integer", title: "Floor" } } };
+    await showPanel({ doc: draft({ input_schema }), focusAt: { pointer: "/settings/input_schema/properties/floor/default", n: 1 } });
+    await vi.waitFor(() => expect(document.activeElement).toBe(within(input()).getByRole("textbox", { name: "Default" })));
+  });
+
   it("shows the server's problems at their field", async () => {
     await showPanel({
       doc: draft({ input_schema: { type: "object", properties: { rows: { type: "string" } } } }),
@@ -148,6 +155,23 @@ describe("the input from a Mist event", () => {
     expect(within(input()).getByRole("list", { name: "The event's shape" }).textContent).toContain("[ ].ap_name");
     await userEvent.click(within(input()).getByRole("button", { name: "Use form fields instead" }));
     expect(panel.settings()?.input_schema).toEqual({ type: "object", properties: {} });
+  });
+
+  it("closes the topic picker on Escape, not the panel, and gives focus back to what opened it", async () => {
+    // 4c-3b's final review: Escape in the picker reached the panel and closed Triggers.
+    await showPanel({ doc: draft({ input_schema: SCHEMA }) });
+    await userEvent.click(await within(input()).findByRole("button", { name: "Use a Mist event…" }));
+    await userEvent.keyboard("{Escape}");
+    expect(within(input()).queryByRole("searchbox", { name: "Find a topic" })).toBeNull();
+    await vi.waitFor(() => expect(document.activeElement).toBe(within(input()).getByRole("button", { name: "Use a Mist event…" })));
+    await userEvent.click(within(input()).getByRole("button", { name: "Use a Mist event…" }));
+    await userEvent.click(within(input()).getByRole("radio", { name: "alarms" }));
+    await userEvent.click(within(input()).getByRole("button", { name: "Use alarms" }));
+    await userEvent.click(await within(input()).findByRole("button", { name: "Use another event…" }));
+    within(input()).getByRole("searchbox", { name: "Find a topic" }).focus();
+    await userEvent.keyboard("{Escape}");
+    expect(within(input()).queryByRole("searchbox", { name: "Find a topic" })).toBeNull();
+    await vi.waitFor(() => expect(document.activeElement).toBe(within(input()).getByRole("button", { name: "Use another event…" })));
   });
 
   it("gives focus back to what opened the picker, and to what replaces each choice", async () => {
@@ -268,6 +292,12 @@ describe("the input's CSV file", () => {
     expect(mb.value).toBe("1.5");
     expect(panel.held()).toEqual([]);
     expect(panel.settings()?.csv?.max_bytes).toBe(1_572_864);
+  });
+
+  it("gives a held limit focus when Go to it lands on it", async () => {
+    // 4c-3b's final review: Go to it opened the CSV file but focused nothing for a limit.
+    await showPanel({ doc: draft({ csv: { columns: [{ header: "A", name: "a", type: "string" }] } }), focusAt: { pointer: "/settings/csv/max_rows", n: 1 } });
+    await vi.waitFor(() => expect(document.activeElement).toBe(within(input()).getByRole("textbox", { name: "Most rows" })));
   });
 
   it("holds most rows past the platform's, and writes a lower one", async () => {

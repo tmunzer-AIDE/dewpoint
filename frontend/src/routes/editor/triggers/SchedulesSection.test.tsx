@@ -333,6 +333,26 @@ describe("a workflow's schedules", () => {
     expect(Object.keys(second)).toEqual(["__proto__", "site"]);
   });
 
+  it("sends an interval's mode alone when only it changes, whatever zone was stored", async () => {
+    // 4c-3b's final review: an interval's PATCH carried time_zone "UTC" when the stored zone differed.
+    const interval: Schedule = { ...SCHEDULE, cron: null, every_s: 900, offset_s: 0, time_zone: "Europe/Paris" };
+    const sent = api([interval], { "PATCH /api/v1/t/t1/schedules/s1": () => json({ ...interval, mode: "simulate" }) });
+    await showPanel();
+    await userEvent.click(await within(section()).findByRole("button", { name: "Edit Every 15 minutes" }));
+    await userEvent.click(within(section()).getByRole("radio", { name: "Simulate" }));
+    await userEvent.click(within(section()).getByRole("button", { name: "Save" }));
+    await vi.waitFor(() => expect(sent.find((r) => r.method === "PATCH")?.body).toEqual({ mode: "simulate" }));
+  });
+
+  it("says why a schedule can't be edited when the published form can't be read", async () => {
+    // 4c-3b's final review: Edit was disabled, and the only words said a schedule can't be added.
+    api([SCHEDULE], { "GET /api/v1/t/t1/workflows/w1/start-form": () => json({ error: "http_error" }, 500) });
+    await showPanel();
+    const why = "The published version's form couldn't be read, so a schedule can't be added or edited now.";
+    const edit = await within(section()).findByRole<HTMLButtonElement>("button", { name: "Edit Every day at 07:00", description: why });
+    expect(edit.disabled).toBe(true);
+  });
+
   it("replaces an edited one's input whole, never showing the stored one", async () => {
     const sent = api([SCHEDULE], { "PATCH /api/v1/t/t1/schedules/s1": () => json(SCHEDULE) });
     await showPanel();
