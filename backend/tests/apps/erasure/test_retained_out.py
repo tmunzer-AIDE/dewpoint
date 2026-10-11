@@ -100,6 +100,10 @@ MISSING = {
     # past the bound without the skew (12 h before now), before it with the skew (12 h after now): review focus 3
     "the skew": (NOW - 30 * DAY - timedelta(minutes=30) - timedelta(hours=12), [{"clock_skew_max": DAY}]),
     "a NULL skew disables it": (NOW - 60 * DAY, [{"clock_skew_max": None}]),
+    # a negative maximum would move the bound earlier: never a qualification (the owner's final-gate ruling)
+    "a negative retention": (NOW - 60 * DAY, [{"retention_max": -30 * DAY}]),
+    "a negative jitter": (NOW - 60 * DAY, [{"jitter_max": -DAY}]),
+    "a negative skew": (NOW - 60 * DAY, [{"clock_skew_max": -DAY}]),
     # the qualification lapsed before the NOT_FOUND: no skew is qualified at that moment (the final review's finding 2)
     "the NOT_FOUND past every interval": (NOW - 60 * DAY, [{"valid_to": NOW - DAY}]),
     "a NULL skew on an interval covering the NOT_FOUND": (

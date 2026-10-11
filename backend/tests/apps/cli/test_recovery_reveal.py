@@ -122,6 +122,18 @@ async def test_a_revoked_login_is_shown_nothing(owner_sessionmaker) -> None:
     await _refused(owner_sessionmaker, login, command, "not the confirming login")
 
 
+@pytest.mark.parametrize("change", ["is_platform_admin = false", "is_active = false"])
+async def test_an_actor_no_longer_an_active_platform_admin_is_shown_nothing(owner_sessionmaker, change: str) -> None:
+    """Demoted or deactivated between confirming and revealing, its login not yet revoked: no identifier returned, the
+    command not applied (the owner's final-gate ruling; 0065), as the leader refuses every other command."""
+    command, admin, _, _ = await _inspect(owner_sessionmaker)
+    login = await mapped_login(owner_sessionmaker, admin)
+    await confirm(owner_sessionmaker, login, command)
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text(f"update users set {change} where id = :u"), {"u": admin})  # noqa: S608  # fixed text
+    await _refused(owner_sessionmaker, login, command, "not an active platform admin")
+
+
 async def test_an_inspection_past_its_hour_reveals_nothing(owner_sessionmaker) -> None:
     command, admin, _, _ = await _inspect(owner_sessionmaker)
     login = await mapped_login(owner_sessionmaker, admin)

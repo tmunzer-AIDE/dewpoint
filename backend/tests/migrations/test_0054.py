@@ -599,3 +599,53 @@ async def test_0064_and_back_counts_stopped_erasures_held_and_restores_0058s_cou
     assert "stopped_at" not in str(after[0]) and after[1:] == (True, False)
     await asyncio.to_thread(downgrade, db, "0063")
     assert await _rows(db, COUNTS_DEF) == before
+
+
+# 0065 (the final gate, the owner's ruling): the reveal re-checks that its actor is still an active platform admin.
+REVEAL_DEF = """SELECT pg_get_functiondef('recovery.unresolved_send_reveal(uuid)'::regprocedure),
+  has_function_privilege('dewpoint_recovery', 'recovery.unresolved_send_reveal(uuid)', 'EXECUTE'),
+  has_function_privilege('dewpoint_api', 'recovery.unresolved_send_reveal(uuid)', 'EXECUTE')"""
+
+
+async def test_0065_and_back_rechecks_the_actor_and_restores_0058s_reveal_exactly(db: str) -> None:
+    await asyncio.to_thread(upgrade, db, "0064")
+    before = await _rows(db, REVEAL_DEF)
+    assert "platform_admin_active" not in str(before[0][0])
+    await asyncio.to_thread(upgrade, db, "0065")
+    after = (await _rows(db, REVEAL_DEF))[0]
+    assert "platform_admin_active(v.actor_id)" in str(after[0]) and after[1:] == (True, False)
+    await asyncio.to_thread(downgrade, db, "0064")
+    assert await _rows(db, REVEAL_DEF) == before
+
+
+RECOVERY_ACCESS = {  # what 0065's downgrade refuses while kept: 0058's reveal would disclose through it
+    "an inspection": INSPECTION,
+    "an unrevoked login's mapping": KEPT["a login's mapping"],
+    "a member of the recovery group": "CREATE ROLE rcv_q0065 LOGIN IN ROLE dewpoint_recovery",
+}
+
+
+@pytest.mark.parametrize("kept", list(RECOVERY_ACCESS))
+async def test_0065s_downgrade_refuses_while_recovery_access_or_an_inspection_is_kept(db: str, kept: str) -> None:
+    await asyncio.to_thread(upgrade, db, "0065")
+    await _sql(db, RECOVERY_ACCESS[kept])
+    try:
+        with pytest.raises(Exception, match="0065 refused"):
+            await asyncio.to_thread(downgrade, db, "0064")
+        assert await _rows(db, "SELECT version_num FROM alembic_version") == [("0065",)]
+    finally:
+        await _sql(db, "DROP ROLE IF EXISTS rcv_q0065")  # the cluster's: the module's other databases share it
+
+
+async def test_0065s_downgrade_passes_a_revoked_mapping(db: str) -> None:
+    await asyncio.to_thread(upgrade, db, "0065")
+    await _sql(db, "INSERT INTO recovery_operators (login, user_id, provisioned_by, provisioned_at, revoked_by, "
+                   "revoked_at) VALUES ('rcv_gone', gen_random_uuid(), 'admin', now(), 'admin', now())")  # fmt: skip
+    await asyncio.to_thread(downgrade, db, "0064")
+    assert await _rows(db, "SELECT version_num FROM alembic_version") == [("0064",)]
+
+
+async def test_0065s_downgrade_never_drops_an_inspection_recorded_while_it_checks(db: str) -> None:
+    await asyncio.to_thread(upgrade, db, "0065")
+    [outcome] = await _while_written(db, INSPECTION, "0064")
+    assert isinstance(outcome, Exception) and "0065 refused" in str(outcome), outcome

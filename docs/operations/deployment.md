@@ -478,6 +478,19 @@ keeps no record off the host.
 trusted exception: `audit monitor` sees it only as drift (`admin_revision_unrecorded`), and only if it persists between
 two reads.
 
+**PostgreSQL serves TLS, and admits recovery logins on one path (2b-4b M4 recovery).** The `postgres` service reads
+its certificate and key from `DEWPOINT_POSTGRES_TLS_DIR` (`./postgres/tls` unless set) and its admission file from
+`./postgres/pg_hba.conf`. **It doesn't start without `server.crt` and `server.key` there,** so create them before
+upgrading an existing Compose deployment:
+
+- **Evaluation and CI:** `sh postgres/make-dev-ca.sh` makes a development authority and the server certificate it
+  signs (for `postgres`, `localhost` and `127.0.0.1`; add names as arguments). Git ignores the directory. A rerun
+  leaves existing files as they are.
+- **Anywhere else:** your own private authority's server certificate and key, in that directory. Recovery tools trust
+  that authority's certificate alone (Operator recovery, below).
+
+The admission file admits no recovery login until you name your operators' addresses in it (below).
+
 **Schedules need the inventory's cutover recorded** (above): until then the API creates none. On a fresh Compose
 deployment, once `up` is done and Temporal answers, record it as the key admin (CI does the same):
 
@@ -529,3 +542,115 @@ CREATE ROLE dewpoint_dispatch_login LOGIN PASSWORD '<dispatch password>' IN ROLE
 CREATE ROLE dewpoint_ingress_login LOGIN PASSWORD '<ingress password>' IN ROLE dewpoint_ingress;
 CREATE ROLE dewpoint_retention_login LOGIN PASSWORD '<retention password>' IN ROLE dewpoint_retention;
 ```
+
+## Operator recovery (2b-4b M4)
+
+An operator recovers a stuck start request (confirming a command, revealing a blocker's identifiers, abandoning a
+start) under a personal recovery login (`rcv_...`, a member of `dewpoint_recovery`), never a service's credentials.
+**It's off until the target is qualified** (below).
+
+### The trust boundary and its three prerequisites
+
+The database administrator (the bootstrap superuser, `dewpoint_owner` in Compose) and the migration run are trusted
+exceptions: they own the tables and the definer functions that carry out every check, and a superuser bypasses grants,
+memberships and row-level security. No service role or its login reaches the recovery group, its functions or its
+tables. Before operator recovery is enabled on a target:
+
+1. **No long-running service holds the superuser's credential,** in its environment, secrets or volumes. In Compose,
+   only `migrate` and the database's own container do.
+2. **`migrate` gets that credential only for an upgrade run,** supplied when the upgrade is run (a secrets manager's
+   one-shot injection, say), never kept in a persistent environment file. **Compose doesn't meet this:** every
+   Compose command reads `POSTGRES_PASSWORD` from `.env`. So Compose is for evaluation only where operator recovery is
+   concerned, and is never qualified as meeting this prerequisite. A target for operator recovery runs its upgrades
+   another way.
+3. **Every migration run and every administrator action leaves a record off the database host:**
+   `dewpoint deployment migrate` and `dewpoint recovery operator add | rotate | revoke` write an intent before they act
+   (a failed write stops them) and an outcome after, in D6's bucket under `<prefix>database-administration/`, with
+   the writer's own put-only identity. No record holds a secret.
+
+**The monitor's limit.** `dewpoint audit monitor` reads, read-only, the recovery group's memberships, the
+`recovery_operators` mapping, the recovery logins' attributes and the schema revision, and alerts on any with no
+matching outcome record. It sees drift that's still there at a read. A change made and reversed between two reads goes
+unseen: a shorter interval narrows that window but never closes it, and the target's qualification sets it. A trusted
+administrator acting outside the prescribed commands leaves no record; only its persisting result is seen.
+
+### Provisioning, rotation and revocation
+
+1. **The operator** computes their login's verifier on their own machine: `dewpoint recovery verifier` asks for the
+   password twice (at least 16 printable ASCII characters) and prints the SCRAM-SHA-256 verifier and its fingerprint.
+   The password never leaves them.
+2. **They hand the verifier over, and its fingerprint by another channel** (a call, a ticket the administrator didn't
+   receive the verifier through). The administrator checks they match before using it.
+3. **The administrator** provisions it: `dewpoint recovery operator add rcv_<name> --user <the operator's
+   platform-admin user id> --verifier-file <file> --dsn <their verify-full DSN>` (or `DEWPOINT_ADMINISTRATOR_DSN`).
+   One transaction: the login, its membership, its mapping and its audit entry, with statement logging off for it. A
+   name is never reused.
+4. **Rotation** (`operator rotate`) replaces the verifier the same way. **Revocation** (`operator revoke`) marks the
+   mapping, removes the membership, sets `NOLOGIN` and ends the login's sessions; the admission file still rejects it
+   by name.
+
+Production refuses each of these without D6's bucket and the writer's credentials (`DEWPOINT_AUDIT_S3_BUCKET`,
+`DEWPOINT_AUDIT_S3_PREFIX`, the writer's `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`).
+
+### Distributing the authority's certificate
+
+Every recovery tool connects with `sslmode=verify-full` and `sslrootcert=<the deployment's CA file>`, and trusts that
+authority alone, never the system's store: no CA file, a weaker mode, another issuer or another name is refused before
+any credential is sent. Give operators the authority's certificate (`ca.crt`, never its key) and its fingerprint by
+another channel, and have them check it:
+
+```bash
+openssl x509 -in ca.crt -noout -fingerprint -sha256
+```
+
+### Admission
+
+The server's admission file uses the first line that matches, so the recovery lines come first: one `hostssl` line per
+operator range, to `dewpoint` alone, by `scram-sha-256`; then every other path rejected, by the group and by the
+`rcv_` name (TCP with or without SSL, the Unix socket, other databases, replication). Compose's
+`postgres/pg_hba.conf` has them. Its operator range is `192.0.2.0/24`, a documentation range routed nowhere, so by
+default it admits no one. **On each target, replace it with your operators' ranges,** one `hostssl` line each, above
+the reject lines, and qualify that target's admission (`admission`, below). A deployment with its own file copies the
+same lines to its top, and checks the server's reading of it:
+
+```sql
+SELECT line_number, type, database, user_name, address, auth_method, error FROM pg_hba_file_rules ORDER BY 1;
+```
+
+The reject lines come before every broader line, and no line is in error.
+
+### Qualifying a target
+
+Each procedure is run by hand against the target, under its own approval
+(`DEWPOINT_QUALIFICATION_APPROVED=<approval id>`, without which it refuses before reading its arguments), with test
+credentials only, from the environment, never arguments. Each writes its record (`--out`) and exits 0 only when every
+check passed. `--help` on each lists its arguments.
+
+| Procedure (`python -m tests.qualification.<name>`) | What it establishes |
+|---|---|
+| `admission` | From an operator's address and from elsewhere, with a current and a revoked test login: one path accepted, every other rejected (physical replication by the `replication` lines; a logical walsender to `dewpoint` from an operator's address is refused by the server, the login having no `REPLICATION`), on every database the server lists; a service login still connects; `pg_hba_file_rules` as above. The socket paths run on the database host. |
+| `logging` | Provisioning and rotation on every path (success, refused verifiers, a duplicate, a failure after `CREATE ROLE`, a cancellation) with marked test verifiers, then every log searched (PostgreSQL's in each format, an audit extension's, poolers and proxies, the host's and the container runtime's, wherever they're shipped). Any hit fails, and so do an incomplete marker set, a path that isn't there, an unreadable file, or nothing read. |
+| `privileges` | A test recovery login holds exactly gate A's allow-list on `dewpoint` and is a member of `dewpoint_recovery` alone; each service role holds exactly the rights a fresh database at head gives it (`tests/qualification/reference_rights.json`): a grant the migrations never made is drift. Every login the target's inventory names (`--inventory`: each service login with its intended role, the start check's included) exists, is a member of that one role alone, with no attribute beyond `LOGIN`, and holds exactly its rights: a grant made to the login directly, a lost membership, or a login of a service role the inventory doesn't name, each fails. |
+| `server_verification` | The server verified with the deployment's authority and name over TLS 1.2 or later; refused under another name, another authority or the system's store alone. |
+| `d6` | The bucket locks every version (compliance mode); the writer puts a record once under its prefix and is refused anything else; the monitor's reader reads every version and writes nothing. |
+| `clock_skew` | Temporal's clock against the database's, through paired readings: the largest skew each reading allows, plus a margin (never negative), proposed as the intervals' `clock_skew_max`. Run it with a Temporal identity of the qualification's own. |
+
+**Provisioning by verifier is enabled on a target only once `logging` passes there.** A target that can't pass (an
+audit extension that can't be quieted per transaction, say) uses certificate authentication instead, and its
+qualification still covers admission and the logs for the certificate's identity.
+
+**`retained_out`** (the erasure's resolution for a run Temporal's own retention deleted) qualifies nothing until the
+target's qualification records the namespace's registration (`target_namespace_registrations`) and the intervals over
+which it enforced its retention maximum with archival off, its jitter and its clock skew
+(`target_qualification_intervals`). No application role writes either table. **Measure Temporal's deletion timing on
+the target** as part of its qualification: it isn't assumed from the development server's.
+
+**Run a procedure again** whenever what it established may have changed:
+- `admission`: the admission file, the operators' ranges, the network path to the server, a pooler or proxy added;
+- `logging`: the server's logging configuration, an extension, or any component on a path to the server or its logs;
+- `privileges`: any migration, any grant made outside one, a role added or changed;
+- `server_verification`: the server's certificate or the authority, renewed or replaced;
+- `d6`: the bucket's lock settings, either identity or its policy;
+- `clock_skew`: the hosts' time sources, or Temporal or the database moved to other hosts;
+- and on the schedule the qualification sets.
+

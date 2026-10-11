@@ -309,7 +309,7 @@ def _retained_bound(intervals: Sequence[TargetQualificationInterval], registered
     namespace's life from its registration to `closed` (each with archival off, together without a gap), plus the
     highest jitter maximum over those covering `closed`, plus the highest clock-skew maximum over those covering
     `closed` or the NOT_FOUND (`observed`), at least one covering it. None: an uncovered moment, a value missing
-    (NULL), no interval, or a close before the registration."""
+    (NULL), a negative one, no interval, or a close before the registration."""
 
     def covers(interval: TargetQualificationInterval, at: datetime) -> bool:
         return interval.valid_from <= at <= interval.valid_to
@@ -332,6 +332,8 @@ def _retained_bound(intervals: Sequence[TargetQualificationInterval], registered
     skew = [k for i in skewed if (k := i.clock_skew_max) is not None]
     if not life or reach < closed or (len(retention), len(jitter), len(skew)) != (len(life), len(at_close),
                                                                                   len(skewed)):  # fmt: skip
+        return None
+    if any(value < timedelta(0) for value in (*retention, *jitter, *skew)):  # it would move the bound earlier
         return None
     return closed + max(retention) + max(jitter) + max(skew)
 
