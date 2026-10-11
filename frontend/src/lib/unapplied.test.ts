@@ -2,9 +2,10 @@
 import { describe, expect, it } from "vitest";
 import { IF, SWITCH, TRANSFORM } from "../test/nodeTypes";
 import { formula, literal, setConfig } from "./config";
+import type { CsvSettings } from "./csv";
 import type { Path } from "./schemaForm";
 import {
-  STALE, applyAll, applyUnapplied, baseOf, isStale, lineageOf, parseNumber, unappliedFile, unappliedId, within,
+  STALE, TRIGGERS, applyAll, applyUnapplied, baseOf, isStale, lineageOf, parseNumber, unappliedFile, unappliedId, within,
   type Unapplied, type UnappliedKind,
 } from "./unapplied";  // prettier-ignore
 import type { GraphDoc, GraphNode, NodeType } from "./workflows";
@@ -242,4 +243,65 @@ it("writes held text and pills, and a condition being built, whole into the reco
     { step: "fetch", field: "Name", at: "/name", text: "at {trigger.site}", why: "Not written.", segments },
     { step: "fetch", field: "When", at: "/when", text: "", why: "Write a number, like 3, -2 or 0.5.", condition },
   ]);
+});
+
+describe("the Triggers panel's held edits (4c-3b)", () => {
+  const SCHEMA = { type: "object", properties: { site: { type: "string" }, floor: { type: "integer" } }, required: ["site"] };
+  const CSV: CsvSettings = { columns: [{ header: "AP name", name: "ap_name", type: "string" }, { header: "Floor", name: "floor", type: "integer" }] };
+  const settings = (more: Record<string, unknown> = {}): GraphDoc => ({ graph_format: 1, nodes: [], edges: [], settings: { input_schema: SCHEMA, csv: CSV, ...more } });
+  /** An edit held for the Triggers panel, typed over what `doc` holds there now. */
+  function panel(doc: GraphDoc, kind: UnappliedKind, path: Path, text: string, more: Partial<Unapplied> = {}): Unapplied {
+    const pointer = `/settings/${path.join("/")}`;
+    const u: Unapplied = { id: unappliedId(TRIGGERS, kind, pointer), node: TRIGGERS, kind, pointer, path, label: pointer, text, why: null, base: "", lineage: [], ...more };
+    return { ...u, base: baseOf(doc, u), lineage: lineageOf(doc, u) };
+  }
+
+  it("applies JSON text as the input, or says where it breaks and what a save would refuse", () => {
+    const doc = settings();
+    const text = JSON.stringify({ input_schema: { type: "object" } });
+    expect(applied(applyUnapplied(doc, panel(doc, "json", [], text), undefined)).doc.settings).toEqual({ input_schema: { type: "object" } });
+    expect(applyUnapplied(doc, panel(doc, "json", [], '{\n"input_schema": {,\n}'), undefined)).toEqual({ problem: "Line 2: This isn't valid JSON, so it isn't saved." });
+    expect(applyUnapplied(doc, panel(doc, "json", [], '{"input_schema": {}, "csv": {"columns": []}}'), undefined)).toEqual({ problem: "A CSV file has from 1 to 200 columns." });
+  });
+
+  it("renames a field in place once its name can be one, or keeps it with why", () => {
+    const doc = settings();
+    const done = applied(applyUnapplied(doc, panel(doc, "name", ["input_schema", "properties"], "site_name", { from: "site" }), undefined));
+    expect(Object.keys((done.doc.settings?.input_schema as { properties: object }).properties)).toEqual(["site_name", "floor"]);
+    expect(applyUnapplied(doc, panel(doc, "name", ["input_schema", "properties"], "Floor", { from: "site" }), undefined)).toMatchObject({ problem: expect.stringMatching(/^Lowercase letters/) as unknown });
+    expect(applyUnapplied(doc, panel(doc, "name", ["input_schema", "properties"], "floor", { from: "site" }), undefined)).toEqual({ problem: "Another field has this name." });
+  });
+
+  it("writes a default, a column's header and the file's limits within what a save takes", () => {
+    const doc = settings();
+    const at = (u: Unapplied) => applied(applyUnapplied(doc, u, undefined)).doc.settings;
+    expect(at(panel(doc, "number", ["input_schema", "properties", "floor", "default"], "3", { whole: true }))?.input_schema).toMatchObject({ properties: { floor: { type: "integer", default: 3 } } });
+    expect(at(panel(doc, "text", ["csv", "columns", 1, "header"], "Level"))?.csv).toMatchObject({ columns: [{ header: "AP name" }, { header: "Level" }] });
+    expect(applyUnapplied(doc, panel(doc, "text", ["csv", "columns", 1, "header"], ""), undefined)).toEqual({ problem: "A header is from 1 to 200 characters." });
+    expect(at(panel(doc, "limit", ["csv", "max_rows"], "500"))?.csv).toMatchObject({ max_rows: 500 });
+    expect(at(panel(doc, "limit", ["csv", "max_bytes"], "0.5"))?.csv).toMatchObject({ max_bytes: 524_288 });
+    expect(applyUnapplied(doc, panel(doc, "limit", ["csv", "max_rows"], "10001"), undefined)).toEqual({ problem: "A whole number from 1 to 10,000." });
+    expect(applyUnapplied(doc, panel(doc, "limit", ["csv", "max_bytes"], "6"), undefined)).toEqual({ problem: "A size in MB, above 0 and up to 5." });
+  });
+
+  it("never writes into a field or a column that went, and is stale once a removal moved the columns", () => {
+    const doc = settings();
+    const typed = panel(doc, "number", ["input_schema", "properties", "floor", "default"], "3", { whole: true });
+    const renamed: GraphDoc = { ...doc, settings: { ...doc.settings, input_schema: { type: "object", properties: { site: { type: "string" }, level: { type: "integer" } } } } };
+    expect(applyUnapplied(renamed, typed, undefined)).toEqual({ problem: "Not applied: what it was typed in is no longer in the input." });
+    const header = panel(doc, "text", ["csv", "columns", 1, "header"], "Level");
+    const removed: GraphDoc = { ...doc, settings: { ...doc.settings, csv: { columns: [CSV.columns[1]!] } } };
+    expect(isStale(removed, header)).toBe(true);
+    expect(applyUnapplied(removed, header, undefined)).toEqual({ problem: STALE });
+  });
+
+  it("settles with the step's edits, a field's default before its rename", () => {
+    const doc = settings();
+    const name = panel(doc, "name", ["input_schema", "properties"], "level", { from: "floor" });
+    const value = panel(doc, "number", ["input_schema", "properties", "floor", "default"], "2", { whole: true });
+    const { doc: next, left } = applyAll(doc, [name, value], typeOf, () => true);
+    expect(left).toEqual([]);
+    expect((next.settings?.input_schema as { properties: object }).properties).toEqual({ site: { type: "string" }, level: { type: "integer", default: 2 } });
+    expect(within(TRIGGERS, "/settings/input_schema/properties/floor")(value)).toBe(true);
+  });
 });
