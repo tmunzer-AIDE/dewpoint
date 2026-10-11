@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // The Triggers panel (4c-3b; the mockups' Main, ReadOnly and Narrow boards): what starts the workflow, opened from the
-// start card. Its input is the draft's, saved with it and used once published (Task 9 adds its live schedules, Task 11
-// its webhooks). A viewer or an operator sees it all, read only.
+// start card. Its input is the draft's, saved with it and used once published; its schedules are live, saved at once
+// on the published version, outside undo (Task 11 adds its webhooks). A viewer or an operator sees it all, read only.
 import { useEffect, useRef } from "react";
 import { Button } from "../../../components/Button";
 import { SIDE } from "../side";
 import { TriggersContext, type Triggers } from "./context";
 import { InputSection, type FocusAt } from "./InputSection";
+import { SchedulesSection } from "./SchedulesSection";
 
 export function TriggersPanel({ value, focusAt, onClose }: { value: Triggers; focusAt: FocusAt; onClose: () => void }) {
   const heading = useRef<HTMLHeadingElement>(null);
@@ -34,6 +35,7 @@ export function TriggersPanel({ value, focusAt, onClose }: { value: Triggers; fo
         </div>
         {value.viewer && <p className="text-small text-muted">You can see this workflow&apos;s triggers; changing them needs the editor role.</p>}
         <InputSection focusAt={focusAt} />
+        <SchedulesSection />
       </aside>
     </TriggersContext.Provider>
   );

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { useId, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes } from "react";
+import { useId, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from "react";
 
 // A control's boundary is 3:1 against its surface (line-control, WCAG 1.4.11); red when its value is refused.
 // Full width of its column, never wider: an input's own width (20 characters) would push a narrow screen sideways.
@@ -44,6 +44,15 @@ export function Select({ label, hint, error, children, ...select }: SelectHTMLAt
       <select id={id} {...select} aria-invalid={!!error} aria-describedby={describedBy} className={className}>
         {children}
       </select>
+    )} />
+  );
+}
+
+/** Text of several lines, like JSON: a fixed-width face, its height from `rows`. */
+export function TextArea({ label, hint, error, ...area }: TextareaHTMLAttributes<HTMLTextAreaElement> & Labelled) {
+  return (
+    <Frame label={label} hint={hint} error={error} control={({ id, describedBy, className }) => (
+      <textarea id={id} {...area} aria-invalid={!!error} aria-describedby={describedBy} className={`${className} py-2 font-mono text-small`} />
     )} />
   );
 }
