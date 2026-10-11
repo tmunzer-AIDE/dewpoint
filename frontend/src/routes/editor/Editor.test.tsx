@@ -1086,12 +1086,16 @@ describe("status messages", () => {
   it("says when the latest edits aren't saved", async () => {
     const said: string[] = [];
     const stop = onAnnounce((m) => said.push(m));
-    answers.set(`PUT ${BASE}/draft`, () => json({ error: "http_error" }, 500));
-    await show();
-    await addTransform();
-    await screen.findByText("Not saved", {}, { timeout: 3000 });
-    expect(said).toContain("Your latest edits aren't saved. Retry is in the toolbar.");
-    stop();
+    try {
+      answers.set(`PUT ${BASE}/draft`, () => json({ error: "http_error" }, 500));
+      await show();
+      await addTransform();
+      await screen.findByText("Not saved", {}, { timeout: 3000 });
+      // Said by an effect once the failed status is drawn, so it may come a moment after "Not saved" shows.
+      await vi.waitFor(() => expect(said).toContain("Your latest edits aren't saved. Retry is in the toolbar."));
+    } finally {
+      stop(); // never left listening, whatever failed
+    }
   });
 
   it("keeps the notices' live region in place before any notice", async () => {
