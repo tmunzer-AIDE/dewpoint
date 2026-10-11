@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, focusManager } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Endpoint, EndpointBinding } from "../lib/triggers";
@@ -231,6 +231,40 @@ describe("Settings → Webhook endpoints", () => {
     await userEvent.click(within(form).getByRole("radio", { name: /^In a header/ }));
     await userEvent.click(within(form).getByRole("button", { name: "Create the endpoint" }));
     expect(await within(form).findByRole("textbox", { name: "The id's header", description: /^A header's name: lowercase letters, digits and -/ })).toBeTruthy();
+  });
+
+  it("tells the workflows an endpoint starts while they load from when they couldn't be read", async () => {
+    // 4c-3b's final review: both showed "–".
+    api("editor", "development", {
+      "GET /api/v1/t/t1/webhook-endpoints/e1/bindings": () => new Promise<Response>(() => undefined), // still loading
+      "GET /api/v1/t/t1/webhook-endpoints/e2/bindings": () => json({ error: "http_error" }, 500),
+    });
+    await show();
+    const row = async (name: string) => (await within(table()).findByText(name)).closest("tr")!;
+    await vi.waitFor(async () => expect((await row("Ticketing")).textContent).toContain("couldn't be read"));
+    expect((await row("Mist prod")).textContent).toContain("…");
+    expect((await row("Mist prod")).textContent).not.toContain("–");
+  });
+
+  it("keeps a known count when a refresh fails, and says the refresh failed", async () => {
+    // The review of the deferred minors: a failed background refresh replaced a known count with "couldn't be read".
+    let failing = false;
+    api("editor", "development", {
+      "GET /api/v1/t/t1/webhook-endpoints/e1/bindings": () =>
+        failing ? json({ error: "http_error" }, 500) : json({ bindings: [bound("b1", "w1", "device-events"), bound("b2", "w2", "alarms")] }),
+    });
+    await show();
+    const workflows = async () => (await within(table()).findByText("Mist prod")).closest("tr")!.querySelectorAll("td")[3]!;
+    await vi.waitFor(async () => expect((await workflows()).textContent).toBe("2"));
+    failing = true;
+    act(() => {
+      focusManager.setFocused(false);
+      focusManager.setFocused(true); // the window regains focus: stale reads refresh
+    });
+    await vi.waitFor(async () => expect((await workflows()).textContent).toContain("couldn't be refreshed"));
+    expect((await workflows()).textContent).toContain("2");
+    expect((await workflows()).textContent).not.toContain("couldn't be read");
+    act(() => focusManager.setFocused(undefined));
   });
 
   it("turns an endpoint off at once", async () => {

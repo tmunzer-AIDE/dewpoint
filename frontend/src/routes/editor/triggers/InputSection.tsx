@@ -37,13 +37,18 @@ export function InputSection({ focusAt }: { focusAt: FocusAt }) {
   const [kept, setKept] = useState<{ name: string; key: string } | null>(null);
   const keyOf = (name: string) => (kept !== null && kept.name === name && editing === name ? kept.key : name);
   const { box, back } = useFocusBack<HTMLElement>();
+  // The field "Go to it" opened on its held default: its editor opens on Default, that once. Done, another field's Edit
+  // or ＋ Field clears it, so any later opening is on Name.
+  const [defaultOf, setDefaultOf] = useState<string | null>(null);
   useEffect(() => {
     if (!focusAt) return;
     if (focusAt.pointer === JSON_AT) return setMode("json");
-    const m = /^\/settings\/input_schema\/properties\/([^/]+)/.exec(focusAt.pointer);
+    const m = /^\/settings\/input_schema\/properties\/([^/]+)(\/default)?/.exec(focusAt.pointer);
     if (m) {
       setMode("fields");
-      setEditing(m[1]!.replaceAll("~1", "/").replaceAll("~0", "~"));
+      const name = m[1]!.replaceAll("~1", "/").replaceAll("~0", "~");
+      setDefaultOf(m[2] !== undefined ? name : null);
+      setEditing(name);
     }
   }, [focusAt]);
   const rows = inputRows(schema);
@@ -51,7 +56,10 @@ export function InputSection({ focusAt }: { focusAt: FocusAt }) {
   const heldJson = actions.held("json", JSON_AT);
   const add = () => {
     const made = addField(inputOf(doc));
-    if (actions.update((d) => setSettings(d, { input_schema: addField(inputOf(d)).schema }), `Added the field ${made.name}.`) === null) setEditing(made.name);
+    if (actions.update((d) => setSettings(d, { input_schema: addField(inputOf(d)).schema }), `Added the field ${made.name}.`) === null) {
+      setDefaultOf(null);
+      setEditing(made.name);
+    }
   };
   return (
     <Section id="triggers-input" title={csv ? "Input · CSV file" : "Input"} note="Saved with the draft · used once published" box={box}>
@@ -88,13 +96,14 @@ export function InputSection({ focusAt }: { focusAt: FocusAt }) {
                 <li key={keyOf(name)} className="flex flex-col gap-2 border-t border-line py-2.5 first:border-t-0">
                   {r.kind === "field" && editing === name ? (
                     <FieldEditor
-                      field={r.field}
+                      field={r.field} focusDefault={defaultOf === name}
                       onRenamed={(to) => {
                         setKept({ name: to, key: keyOf(name) });
                         setEditing(to);
                       }}
                       onClose={() => {
                         setEditing(null);
+                        setDefaultOf(null);
                         back(`field:${name}`, "add");
                       }}
                     />
@@ -113,7 +122,15 @@ export function InputSection({ focusAt }: { focusAt: FocusAt }) {
                         )}
                       </span>
                       {r.kind === "field" && t.editable && (
-                        <Button size="sm" aria-label={`Edit ${name}`} data-back={`field:${name}`} onClick={() => setEditing(name)}>Edit</Button>
+                        <Button
+                          size="sm" aria-label={`Edit ${name}`} data-back={`field:${name}`}
+                          onClick={() => {
+                            setDefaultOf(null);
+                            setEditing(name);
+                          }}
+                        >
+                          Edit
+                        </Button>
                       )}
                     </div>
                   )}
