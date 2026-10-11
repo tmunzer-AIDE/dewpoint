@@ -4,7 +4,7 @@ from functools import lru_cache
 from pydantic import Field
 from pydantic_settings import SettingsConfigDict
 
-from dewpoint.core.temporal_connect import TemporalConnection
+from dewpoint.core.temporal_settings import TemporalConnection
 
 
 class Settings(TemporalConnection):  # Temporal's §10.4 security settings with the others

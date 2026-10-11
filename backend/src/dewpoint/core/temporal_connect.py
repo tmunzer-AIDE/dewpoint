@@ -13,39 +13,20 @@ from pathlib import Path
 from typing import Any
 
 import structlog
-from pydantic import field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
 from temporalio.client import Client
 from temporalio.service import TLSConfig
+
+# The settings live apart, so a process that never connects reads them without the SDK; re-exported here
+from dewpoint.core.temporal_settings import TLS_SETTINGS as TLS_SETTINGS
+from dewpoint.core.temporal_settings import TemporalConnection as TemporalConnection
 
 log = structlog.get_logger("dewpoint.temporal")
 DEVELOPMENT = "development"
 TOKEN_REFRESH_S = 60.0  # a long-running process rereads its token file this often
-TLS_SETTINGS = ("temporal_tls_ca", "temporal_tls_server_name", "temporal_tls_cert", "temporal_tls_key",
-                "temporal_bearer_token_file")  # fmt: skip
 
 
 class TemporalConfigError(Exception):
     """This process's Temporal settings are refused: it must not connect."""
-
-
-class TemporalConnection(BaseSettings):
-    """The settings every Temporal-connected process's own settings include."""
-
-    model_config = SettingsConfigDict(env_prefix="DEWPOINT_", env_file=".env", extra="ignore")
-
-    temporal_tls_ca: str | None = None  # a CA file; the system roots verify the server when unset
-    temporal_tls_server_name: str | None = None  # the name verified, when it isn't the address's host
-    temporal_tls_cert: str | None = None  # mTLS: the client's certificate file
-    temporal_tls_key: str | None = None  # mTLS: its private key file
-    temporal_bearer_token_file: str | None = None  # a JWT, reread every TOKEN_REFRESH_S by a long-running process
-    temporal_insecure_dev: bool = False  # plaintext: a deployment recorded as development only
-
-    @field_validator(*TLS_SETTINGS, mode="before")
-    @classmethod
-    def _empty_is_unset(cls, value: object) -> object:
-        """An empty setting (as a template leaves one) is unset: never a mode chosen with no file (the review's M1)."""
-        return None if isinstance(value, str) and not value.strip() else value
 
 
 def _setting(name: str) -> str:
