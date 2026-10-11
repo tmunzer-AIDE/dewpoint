@@ -35,7 +35,7 @@ cover local work only: anything outward-facing (push, PR, issues) is confirmed i
 | 0047 | 4b: `runs_workflow_last` (ruling 72; merged in #60, chained after 0044: M36) |
 | 0048 | B4b: `skipped` and `not_started` projection statuses (the owner, 2026-10-08) |
 | 0049 | B8: draft and single-step simulation (the owner, 2026-10-08) |
-| 0054 | 4c-3a: `webhook_endpoints.trigger_key`, an endpoint's sender (the owner, 2026-10-10; 0050–0053 are 2b-4b's) |
+| 0070 | 4c-3a: `webhook_endpoints.trigger_key`, an endpoint's sender (the owner; it was 0054 until 2026-10-11, which 2b-4b's work also names; 2b-4b's plan holds 0048–0063) |
 
 - One Alembic chain: before merging, the first unmerged migration's `down_revision` is reconciled with the actual head.
 - Deployed migrations are never rewritten; 0035–0042 are never altered.
@@ -2375,3 +2375,15 @@ What the reviewer set aside, ruled:
 - no frontend use yet of the new fields and routes: 4c-3b's.
 
 Paused at the final checkpoint. Nothing is pushed: a push and a PR wait for the owner's word.
+
+### 4c-3a, migration renumbered (2026-10-11)
+
+The owner, in chat: "can you fix the Migration 0054 in this branch?" 2b-4b's work (local, `proto/2b4b-v1`) names its own
+0054 and 0055, and its plan holds 0048–0063: two revisions with one id can't both merge, whatever the order. 4c-3a's
+migration is now slot 0070 (`0070_endpoint_trigger.py`), still chained after main's head, 0045; this amends ruling 146.
+0064–0069 are left free after 2b-4b's plan. The column, its grant and its tests are unchanged.
+
+Test first: the chain test expecting 0070 failed (the head was 0054), then passed. `tests/core`, the legacy schedule
+test (which runs Alembic) and the webhook API tests: 951 passed; ruff and mypy clean.
+
+For the owner: 2b-4b's branch also names 0048 and 0049, which this ledger's slot table reserves for B4b and B8.

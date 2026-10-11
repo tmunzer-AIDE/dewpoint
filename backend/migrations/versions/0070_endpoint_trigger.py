@@ -4,13 +4,14 @@
 and their ids are (2b-4 ruling D10), it never changes: the API's role has no grant to update it, and still sets it on a
 new endpoint (its INSERT is table-wide). A nullable column with no default: a catalog change, no rewrite.
 
-Slot 0054 is the owner's (2026-10-10; 0050-0053 are 2b-4b's); slot numbers name ownership, not order, so it is chained
-after main's head when it was written, 0045."""
+Slot 0070 is 4c-3a's (the owner, 2026-10-11): it was 0054, which 2b-4b's work also names (its plan holds 0048-0063,
+with room left after it). Slot numbers name ownership, not order, so it is chained after main's head when it was
+written, 0045."""
 
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0054"
+revision = "0070"
 down_revision = "0045"
 branch_labels = None
 depends_on = None
