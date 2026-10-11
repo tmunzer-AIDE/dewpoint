@@ -27,6 +27,7 @@ from tests.apps.dispatcher.test_reconcile import DescribeFails
 from tests.apps.dispatcher.test_reconcile_runs import Described
 from tests.apps.test_runs import rpc
 from tests.core.retention.support import request, run, sql, tenant
+from tests.support.recovery import confirmed_by_actor
 
 pytestmark = pytest.mark.usefixtures("development_deployment")
 EVIDENCE = "Its namespace's retention passed: checked in the Temporal UI."
@@ -77,8 +78,9 @@ ITEMS = {  # a command's kind: how its item is made, the reason it's asked on
 
 
 async def asked(owner: Any, ctx: dict[str, Any], kind: str, actor: uuid.UUID, *, evidence: str = EVIDENCE,
-                item: uuid.UUID | None = None) -> tuple[uuid.UUID, uuid.UUID]:  # fmt: skip
-    """`kind`'s item with its reason recorded, and a command on it, pending, as the API records one: (item, command)."""
+                item: uuid.UUID | None = None, confirmed: bool = True) -> tuple[uuid.UUID, uuid.UUID]:  # fmt: skip
+    """`kind`'s item with its reason recorded, and a command on it, pending, as the API records one: (item, command).
+    `confirmed`: by its actor, through their recovery login (2b-4b M4 recovery, task 6), as the leader requires."""
     made, reason = ITEMS[kind]
     item = item or await made(owner, ctx)
     command = uuid.uuid4()
@@ -93,6 +95,8 @@ async def asked(owner: Any, ctx: dict[str, Any], kind: str, actor: uuid.UUID, *,
                              "actor_id, idempotency_key, evidence) values (:c, :t, :k, :i, :r, :since, :u, :key, :e)"),
                         {"c": command, "t": ctx["t"], "k": kind, "i": item, "r": reason, "since": since, "u": actor,
                          "key": uuid.uuid4().hex, "e": evidence})  # fmt: skip
+    if confirmed:
+        await confirmed_by_actor(owner, command, actor)
     return item, command
 
 
@@ -123,6 +127,13 @@ async def count(owner: Any, query: str, item: uuid.UUID) -> int:
 
 
 SLOTS = "select count(*) from run_slots where run_id = :i"
+
+
+def CONFIRMED(admin: uuid.UUID) -> tuple[Any, ...]:  # noqa: N802
+    """The audit entry of the command's confirmation by its operator (task 6), before the leader's."""
+    return ("operator.command.confirmed", admin, None)
+
+
 REASONS = "select count(*) from recovery_items where item_id = :i"
 
 
@@ -137,7 +148,10 @@ async def test_a_lost_runs_command_records_history_lost_closes_its_steps_and_rel
                        f"and error_code = '{OUTCOME_UNCONFIRMED}'", item) == 1  # fmt: skip
     assert (await count(owner_sessionmaker, SLOTS, item), await count(owner_sessionmaker, REASONS, item)) == (0, 0)
     assert await decided(owner_sessionmaker, command) == ("applied", commands.HISTORY_LOST, True)
-    assert await audited(owner_sessionmaker, command) == [("operator.command.applied", admin, commands.HISTORY_LOST)]
+    assert await audited(owner_sessionmaker, command) == [
+        CONFIRMED(admin),
+        ("operator.command.applied", admin, commands.HISTORY_LOST),
+    ]
     assert await commands.commands_once(dispatch_sessionmaker, GONE) == {}  # decided once
 
 
@@ -222,7 +236,10 @@ async def test_a_command_that_cant_be_carried_out_safely_is_refused_with_why_cha
         await sql(owner_sessionmaker, "update runs set status = 'succeeded', ended_at = now() where id = :i", i=item)
     assert await commands.commands_once(dispatch_sessionmaker, client) == {outcome: 1}
     assert await decided(owner_sessionmaker, command) == ("refused", outcome, True)
-    assert await audited(owner_sessionmaker, command) == [("operator.command.refused", admin, outcome)]
+    assert await audited(owner_sessionmaker, command) == [
+        CONFIRMED(admin),
+        ("operator.command.refused", admin, outcome),
+    ]
     expected = ("succeeded", None, True) if case == "ended_meanwhile" else ("running", None, False)
     assert await ended(owner_sessionmaker, item) == expected
     assert await count(owner_sessionmaker, SLOTS, item) == 1
@@ -260,7 +277,10 @@ async def test_a_command_an_unexpected_error_stops_is_refused_once_never_retried
     monkeypatch.setattr(commands, "_asked", bug)
     assert await commands.commands_once(dispatch_sessionmaker, GONE) == {commands.INTERNAL_ERROR: 1}
     assert await decided(owner_sessionmaker, command) == ("refused", commands.INTERNAL_ERROR, True)
-    assert await audited(owner_sessionmaker, command) == [("operator.command.refused", admin, commands.INTERNAL_ERROR)]
+    assert await audited(owner_sessionmaker, command) == [
+        CONFIRMED(admin),
+        ("operator.command.refused", admin, commands.INTERNAL_ERROR),
+    ]
 
 
 class Completed:

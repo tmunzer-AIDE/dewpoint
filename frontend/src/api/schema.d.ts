@@ -88,6 +88,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/recovery/unresolved-sends/counts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Unresolved Counts
+         * @description Unresolved sends, counted (task 9): per state, with open sends and the oldest, and the erasures they hold. The
+         *     database checks the caller's session itself (`admin_session`) and returns no identifier.
+         */
+        get: operations["unresolved_counts_api_v1_admin_recovery_unresolved_sends_counts_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/tenants/{tenant_id}/commands": {
         parameters: {
             query?: never;
@@ -203,7 +224,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Release */
+        /**
+         * Release
+         * @description A held item's release, recorded as a command with the hold it shows; released once its operator confirms it.
+         */
         post: operations["release_api_v1_admin_tenants__tenant_id__held_release_post"];
         delete?: never;
         options?: never;
@@ -222,9 +246,9 @@ export interface paths {
         put?: never;
         /**
          * Release Many
-         * @description A bulk release (the owner's rulings on the M3 checkpoints): bounded by tenant, kind, `held_before` and `max`,
-         *     never all of them across tenants; audited in its own transaction with the exact items it released, oldest first,
-         *     `AUDITED_IDS` an entry (the count previewed may have changed meanwhile); what's still held answered.
+         * @description A bulk release (the owner's rulings on the M3 checkpoints), bounded by tenant, kind, `held_before` and `max`,
+         *     never all of them across tenants: recorded as a command with the holds it shows, oldest first, released once its
+         *     operator confirms it, those alone (task 8).
          */
         post: operations["release_many_api_v1_admin_tenants__tenant_id__held_release_many_post"];
         delete?: never;
@@ -1406,6 +1430,32 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * AbandonEvidence
+         * @description An abandonment's evidence (task 10): the identifiers (the leader checks each against the record), the Temporal
+         *     response its operator saw, their rationale, and a visibility result if any (recorded, never proof).
+         */
+        AbandonEvidence: {
+            /** Rationale */
+            rationale: string;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            request_id: string;
+            /** Start Request Id */
+            start_request_id: string | null;
+            temporal_response: components["schemas"]["TemporalResponse"];
+            /**
+             * Tenant Id
+             * Format: uuid
+             */
+            tenant_id: string;
+            /** Visibility */
+            visibility?: string | null;
+            /** Workflow Id */
+            workflow_id: string;
+        };
         /** ActivateIn */
         ActivateIn: {
             /**
@@ -1487,6 +1537,7 @@ export interface components {
         };
         /** CommandIn */
         CommandIn: {
+            abandon?: components["schemas"]["AbandonEvidence"] | null;
             /**
              * Evidence
              * @default
@@ -1503,7 +1554,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "record_lost_run" | "record_lost_subrun" | "release_lost_slot" | "settle_ended";
+            kind: "record_lost_run" | "record_lost_subrun" | "release_lost_slot" | "settle_ended" | "inspect_unresolved_send" | "abandon_start";
         };
         /** ConnectionCreateIn */
         ConnectionCreateIn: {
@@ -1844,6 +1895,8 @@ export interface components {
         };
         /** ReleaseIn */
         ReleaseIn: {
+            /** Idempotency Key */
+            idempotency_key?: string | null;
             /**
              * Item Id
              * Format: uuid
@@ -1865,6 +1918,8 @@ export interface components {
              * Format: date-time
              */
             held_before: string;
+            /** Idempotency Key */
+            idempotency_key?: string | null;
             /**
              * Kind
              * @enum {string}
@@ -2003,6 +2058,23 @@ export interface components {
              * @enum {string}
              */
             state: "mfa_pending" | "enroll_required" | "active";
+        };
+        /**
+         * TemporalResponse
+         * @description The Temporal response an operator saw, exactly, and when.
+         */
+        TemporalResponse: {
+            /** Call */
+            call: string;
+            /** Message */
+            message: string;
+            /**
+             * Observed At
+             * Format: date-time
+             */
+            observed_at: string;
+            /** Status */
+            status: string;
         };
         /** TenantIn */
         TenantIn: {
@@ -2315,6 +2387,28 @@ export interface operations {
             };
         };
     };
+    unresolved_counts_api_v1_admin_recovery_unresolved_sends_counts_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
     ask_api_v1_admin_tenants__tenant_id__commands_post: {
         parameters: {
             query?: never;
@@ -2574,7 +2668,7 @@ export interface operations {
         };
         responses: {
             /** @description Successful Response */
-            200: {
+            202: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2611,7 +2705,7 @@ export interface operations {
         };
         responses: {
             /** @description Successful Response */
-            200: {
+            202: {
                 headers: {
                     [name: string]: unknown;
                 };

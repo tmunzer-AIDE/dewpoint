@@ -13,10 +13,18 @@ alerts on:
 - `audit_monitor_state_lost`: no state at all, other than when it's first set up (D6.11).
 
 A new scope (a new tenant's) is adopted as it's seen. A mark only moves up, so a rollback stays alerted on until
-it's explained. This module only decides; `dewpoint audit monitor` reads the inputs, writes the state and alerts."""
+it's explained.
+
+It alerts on the database's administration too (`drift`; 2b-4b M4 recovery, task 7; design revision 9 §1, narrowed
+by revision 10 §3): what the catalog shows of the recovery logins and the schema's revision, with no record off the
+host to explain it. Its limit: it compares snapshots, so a privileged change made and reverted between two reads
+isn't seen, and a record covers a prescribed path's action only, never every bypass.
+
+This module only decides; `dewpoint audit monitor` reads the inputs, writes the state and alerts."""
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from typing import Any
 
 Alert = tuple[str, str, str]  # (event, scope, what)
 
@@ -67,3 +75,71 @@ def watch(roster: Roster, state: dict[str, int] | None, database: dict[str, Scop
                 alerts.append(("audit_anchor_overdue", scope,
                                f"seq {seen.newest} unanchored for more than {minutes} minutes"))  # fmt: skip
     return alerts, marks
+
+
+@dataclass(frozen=True)
+class Login:
+    """A recovery login's attributes, as the catalog shows them."""
+
+    can_login: bool
+    superuser: bool = False
+    create_db: bool = False
+    create_role: bool = False
+    replication: bool = False
+    bypass_rls: bool = False
+
+    def elevated(self) -> list[str]:
+        names = ("superuser", "create_db", "create_role", "replication", "bypass_rls")
+        return [name for name in names if getattr(self, name)]
+
+
+@dataclass(frozen=True)
+class Catalog:
+    """What the database shows of its administration."""
+
+    members: frozenset[str]  # `dewpoint_recovery`'s members
+    mappings: dict[str, bool]  # each login `recovery_operators` maps: whether it's revoked
+    logins: dict[str, Login]  # every recovery login: mapped, a member, or named `rcv_`
+    revision: str | None  # `alembic_version`'s
+
+
+def _succeeded(records: list[dict[str, Any]], action: str) -> list[dict[str, Any]]:
+    return [r for r in records if r.get("action") == action and r.get("phase") == "outcome"
+            and r.get("status") == "succeeded"]  # fmt: skip
+
+
+def drift(records: list[dict[str, Any]], catalog: Catalog) -> list[Alert]:
+    """The administration the catalog shows that no record explains:
+
+    - `admin_membership_unrecorded`: a member of `dewpoint_recovery` that isn't an unrevoked login provisioned on the
+      record;
+    - `admin_mapping_unrecorded`: a mapping no provisioning recorded, or a revocation the records and the mapping
+      disagree on;
+    - `admin_login_altered`: a provisioned login with an attribute it's never given, or any other recovery login able
+      to sign in;
+    - `admin_revision_unrecorded`: a schema revision other than the last a recorded migration reached."""
+    added = {str(r.get("login")) for r in _succeeded(records, "recovery.operator.add")}
+    revoked = {str(r.get("login")) for r in _succeeded(records, "recovery.operator.revoke")}
+    active = {login for login, gone in catalog.mappings.items() if not gone and login in added - revoked}
+    alerts: list[Alert] = []
+    for member in sorted(catalog.members - active):
+        alerts.append(("admin_membership_unrecorded", member, "a member of dewpoint_recovery no record explains"))
+    for login, gone in sorted(catalog.mappings.items()):
+        if login not in added:
+            alerts.append(("admin_mapping_unrecorded", login, "mapped with no recorded provisioning"))
+        elif gone and login not in revoked:
+            alerts.append(("admin_mapping_unrecorded", login, "revoked with no recorded revocation"))
+        elif not gone and login in revoked:
+            alerts.append(("admin_mapping_unrecorded", login, "mapped again after its recorded revocation"))
+    for login, attributes in sorted(catalog.logins.items()):
+        elevated = attributes.elevated()
+        if elevated:
+            alerts.append(("admin_login_altered", login, f"given {', '.join(elevated)}"))
+        if attributes.can_login and login not in active:
+            alerts.append(("admin_login_altered", login, "able to sign in, not an unrevoked provisioned login"))
+    migrations = sorted(_succeeded(records, "migration"), key=lambda r: str(r.get("at")))
+    reached = str(migrations[-1].get("to")) if migrations else None
+    if catalog.revision != reached:
+        what = f"the schema is at {catalog.revision}, the last recorded migration reached {reached}"
+        alerts.append(("admin_revision_unrecorded", "", what))
+    return alerts

@@ -16,7 +16,11 @@ from sqlalchemy.engine import Connection
 from tests.migrations.state_0053 import GRANTED, SERVICE_ROLES, UNTRUSTED, effective, holders
 from tests.migrations.support import autocommitted
 
-RECOVERY_FUNCTIONS: tuple[str, ...] = ()  # none yet: the recovery functions come with their own tasks
+RECOVERY_FUNCTIONS = (  # each with its task: the confirmation (task 6)
+    "recovery.operator_command_show(command_id uuid)",
+    "recovery.operator_command_confirm(command_id uuid, digest bytea)",
+    "recovery.unresolved_send_reveal(command_id uuid)",  # the reveal (task 9)
+)
 
 
 @pytest.fixture

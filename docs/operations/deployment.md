@@ -458,6 +458,26 @@ database of their own (a project's own volume), with synthetic data only:
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 ```
 
+**The migration's record, off this host (2b-4b M4 recovery).** `migrate` runs `dewpoint deployment migrate`: it records
+its intent in D6's bucket, runs `alembic upgrade head`, then records its outcome, under
+`<DEWPOINT_AUDIT_S3_PREFIX>database-administration/`. The administrator and the migration run are trusted, so their
+record has to live outside the database they control. **A production deployment refuses to migrate without it:**
+`migrate` exits 2, and no other service starts, since each waits for it. Set in `.env`:
+
+- `DEWPOINT_AUDIT_S3_BUCKET`, D6's bucket (Object Lock, compliance mode). Set `DEWPOINT_AUDIT_S3_PREFIX` if it isn't
+  `dewpoint/`, and `DEWPOINT_AUDIT_S3_ENDPOINT_URL` and `DEWPOINT_AUDIT_S3_REGION` for another S3-compatible server.
+- `DEWPOINT_ADMINISTRATION_AWS_ACCESS_KEY_ID` and `DEWPOINT_ADMINISTRATION_AWS_SECRET_ACCESS_KEY`: an identity of its
+  own, allowed `s3:PutObject` on `<prefix>database-administration/*` and nothing else. It isn't the anchor writer's.
+  Compose gives it to `migrate` alone, as `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`.
+
+Before migrating, check what Compose passes: `docker compose config migrate` shows that service's environment, its
+secret included, so run it where only you see it. The development override migrates without the bucket, and says it
+keeps no record off the host.
+
+`dewpoint deployment migrate` covers this prescribed path only. An administrator who runs Alembic directly is the
+trusted exception: `audit monitor` sees it only as drift (`admin_revision_unrecorded`), and only if it persists between
+two reads.
+
 **Schedules need the inventory's cutover recorded** (above): until then the API creates none. On a fresh Compose
 deployment, once `up` is done and Temporal answers, record it as the key admin (CI does the same):
 

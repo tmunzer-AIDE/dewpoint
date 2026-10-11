@@ -26,7 +26,8 @@ UNFENCED = {"audit_log", "retention_sweep_tenants", "tenant_erasures", "tenant_e
             "unresolved_sends"}  # fmt: skip
 FENCED_TABLES = (
     "claim_grants", "connections", "csv_mappings", "csv_uploads", "data_keys", "egress_allowlist", "execution_evidence",
-    "inbound_events", "ingress_outstanding", "memberships", "operator_commands", "plugin_calls", "rate_buckets",
+    "inbound_events", "ingress_outstanding", "memberships", "operator_command_holds", "operator_commands",
+    "plugin_calls", "rate_buckets",
     "rate_scope_keys", "recovery_items", "run_inputs", "run_requests",
     "run_secret_index", "run_slots", "run_steps", "runs", "schedule_firings", "schedule_incarnations",
     "schedule_intervals", "schedules", "step_outputs", "tenant_event_counters", "tenant_event_keys", "tenant_retention",

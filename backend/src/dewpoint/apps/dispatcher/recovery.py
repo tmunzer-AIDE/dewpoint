@@ -23,6 +23,7 @@ SLOT_HISTORY_MISSING, SUBRUN_HISTORY_MISSING = "slot_history_missing", "subrun_h
 # limit (cleared once its run ends: `work_settled_clear`); a root execution of an ended request, terminated on the exact
 # match, or one whose first run carries another id, never terminated (both an operator's)
 START_OVER_LIMIT, LATE_START, LATE_START_UNMATCHED = "start_over_limit", "late_start", "late_start_unmatched"
+START_ABANDONED = "start_abandoned"  # an operator ended its request (task 10, 0059): theirs, no pass clears it
 # A request's: any phase of its reconciliation settling resolves them all
 REQUEST = (START_AFTER_END, START_HISTORY_MISSING, START_UNRESOLVED, RUN_HISTORY_MISSING, SLOT_HISTORY_MISSING)
 

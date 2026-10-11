@@ -184,10 +184,11 @@ async def test_a_commands_shape_is_kept(owner_sessionmaker, change: str, constra
 
 
 async def test_a_commands_evidence_is_bounded(owner_sessionmaker) -> None:
+    """4,000 characters (0059: an abandonment's evidence is structured); the API bounds the M3 kinds' at 500."""
     tenant = await a_tenant(owner_sessionmaker)
-    await rows(owner_sessionmaker, tenant, uuid.uuid4(), evidence="x" * 500)
+    await rows(owner_sessionmaker, tenant, uuid.uuid4(), evidence="x" * 4000)
     with pytest.raises(DBAPIError, match="too long"):
-        await rows(owner_sessionmaker, tenant, uuid.uuid4(), key="other", evidence="x" * 501)
+        await rows(owner_sessionmaker, tenant, uuid.uuid4(), key="other", evidence="x" * 4001)
 
 
 @pytest.mark.parametrize(
@@ -286,34 +287,25 @@ async def held(owner: Any, tenant: uuid.UUID, kind: str, item: uuid.UUID, *, hol
                         {"t": tenant, "k": kind, "i": item, "h": hold})  # fmt: skip
 
 
-async def test_the_api_releases_a_held_item_only_for_the_kind_it_names_in_its_tenant(
-    owner_sessionmaker, api_sessionmaker
-) -> None:  # fmt: skip
-    """The owner's ruling (rev 2): a guarded function, never a write grant; a release never clears another kind's
-    hold, a count not held, or another tenant's."""
-    a, b, item, counting = (
-        await a_tenant(owner_sessionmaker),
-        await a_tenant(owner_sessionmaker),
-        uuid.uuid4(),
-        uuid.uuid4(),
-    )
-    for tenant, kind, i, hold in ((a, "dispatch", item, True), (a, "cancel", item, True), (a, "match", counting, False),
-                                  (b, "dispatch", item, True)):  # fmt: skip
-        await held(owner_sessionmaker, tenant, kind, i, hold=hold)
-    released = "select work_failure_release(:k, :i)"
-    async with api_sessionmaker() as s, s.begin():
-        await tenant_scope(s, a)
-        assert (await s.execute(text(released), {"k": "dispatch", "i": item})).scalar_one() is True
-        assert (await s.execute(text(released), {"k": "dispatch", "i": item})).scalar_one() is False  # once
-        assert (await s.execute(text(released), {"k": "match", "i": counting})).scalar_one() is False  # not held
-    with pytest.raises(DBAPIError, match="permission denied"):
-        async with api_sessionmaker() as s, s.begin():
-            await tenant_scope(s, a)
-            await s.execute(text("delete from work_failures"))
+async def test_the_api_releases_nothing_itself(owner_sessionmaker, api_sessionmaker) -> None:
+    """The owner's ruling on design revision 6 (2b-4b M4 recovery, task 8): a held item's release is a command its
+    operator confirms; the API's role has no release function left (0057 dropped them) and no write on the table. The
+    leader's exact release never clears another kind's hold, nor another tenant's (test_release_exact.py)."""
+    a, item = await a_tenant(owner_sessionmaker), uuid.uuid4()
+    await held(owner_sessionmaker, a, "dispatch", item)
+    for statement, refused in (
+        ("select work_failure_release('dispatch', :i)", "does not exist"),
+        ("select * from work_failures_release_many('dispatch', now(), 10)", "does not exist"),
+        ("delete from work_failures where item_id = :i", "permission denied"),
+        ("select * from work_failures_release_exact(gen_random_uuid())", "permission denied"),
+    ):
+        with pytest.raises(DBAPIError, match=refused):
+            async with api_sessionmaker() as s, s.begin():
+                await tenant_scope(s, a)
+                await s.execute(text(statement), {"i": item})
     async with owner_sessionmaker() as s:
-        left = (await s.execute(text("select tenant_id, kind from work_failures where item_id = any(:i)"),
-                                {"i": [item, counting]})).all()  # fmt: skip
-    assert sorted(left) == sorted([(a, "cancel"), (a, "match"), (b, "dispatch")])
+        assert (await s.execute(text("select count(*) from work_failures where item_id = :i"),
+                                {"i": item})).scalar_one() == 1  # fmt: skip
 
 
 async def test_the_api_lists_held_items_and_recovery_reasons_across_tenants_as_metadata(
@@ -331,7 +323,7 @@ async def test_the_api_lists_held_items_and_recovery_reasons_across_tenants_as_m
         reasons = (await s.execute(text("select * from recovery_items_listed(100) where tenant_id = any(:t)"),
                                    {"t": [a, b]})).mappings().all()  # fmt: skip
     assert {(r["tenant_id"], r["kind"], r["item_id"]) for r in listed} == {(a, "cancel", first), (b, "match", second)}
-    assert set(listed[0].keys()) == {"tenant_id", "kind", "item_id", "errors", "last_error", "held_at"}
+    assert set(listed[0].keys()) == {"tenant_id", "kind", "item_id", "errors", "last_error", "held_at", "hold_id"}
     assert [(r["tenant_id"], r["reason"], r["item_id"]) for r in reasons] == [(b, "run_history_missing", second)]
     assert set(reasons[0].keys()) == {"tenant_id", "reason", "item_id", "since", "last_seen_at"}
     for listing in ("work_failures_held(1)", "recovery_items_listed(1)"):
@@ -346,8 +338,13 @@ async def test_the_dispatcher_finds_pending_commands_and_rechecks_their_operator
     from dewpoint.core.auth.users import create_user
 
     tenant = await a_tenant(owner_sessionmaker)
-    older, newer, decided = [await rows(owner_sessionmaker, tenant, uuid.uuid4(), key=k) for k in ("a", "b", "c")]
+    older, newer, decided, waiting = [await rows(owner_sessionmaker, tenant, uuid.uuid4(), key=k)
+                                      for k in ("a", "b", "c", "d")]  # fmt: skip
     async with owner_sessionmaker() as s, s.begin():
+        # confirmed by their operators but `waiting`, asked within the hour: the leader picks those alone (0056)
+        await s.execute(text("insert into operator_confirmations (command_id, login, user_id, digest, confirmed_at) "
+                             "select id, 'rcv_t_x', actor_id, '\\x00', now() from operator_commands "
+                             "where id = any(:c)"), {"c": [older, newer, decided]})  # fmt: skip
         await s.execute(text("update operator_commands set requested_at = now() - interval '1 minute' where id = :c"),
                         {"c": older})  # fmt: skip
         await s.execute(text("update operator_commands set status = 'applied', outcome = 'history_lost', "

@@ -1,6 +1,70 @@
 {
   "components": {
     "schemas": {
+      "AbandonEvidence": {
+        "description": "An abandonment's evidence (task 10): the identifiers (the leader checks each against the record), the Temporal\nresponse its operator saw, their rationale, and a visibility result if any (recorded, never proof).",
+        "properties": {
+          "rationale": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Rationale",
+            "type": "string"
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "start_request_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Request Id"
+          },
+          "temporal_response": {
+            "$ref": "#/components/schemas/TemporalResponse"
+          },
+          "tenant_id": {
+            "format": "uuid",
+            "title": "Tenant Id",
+            "type": "string"
+          },
+          "visibility": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Visibility"
+          },
+          "workflow_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tenant_id",
+          "request_id",
+          "workflow_id",
+          "start_request_id",
+          "temporal_response",
+          "rationale"
+        ],
+        "title": "AbandonEvidence",
+        "type": "object"
+      },
       "ActivateIn": {
         "properties": {
           "version_id": {
@@ -221,6 +285,16 @@
       },
       "CommandIn": {
         "properties": {
+          "abandon": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AbandonEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "evidence": {
             "default": "",
             "maxLength": 500,
@@ -243,7 +317,9 @@
               "record_lost_run",
               "record_lost_subrun",
               "release_lost_slot",
-              "settle_ended"
+              "settle_ended",
+              "inspect_unresolved_send",
+              "abandon_start"
             ],
             "title": "Kind",
             "type": "string"
@@ -1198,6 +1274,19 @@
       },
       "ReleaseIn": {
         "properties": {
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Idempotency Key"
+          },
           "item_id": {
             "format": "uuid",
             "title": "Item Id",
@@ -1231,6 +1320,19 @@
             "format": "date-time",
             "title": "Held Before",
             "type": "string"
+          },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Idempotency Key"
           },
           "kind": {
             "enum": [
@@ -1621,6 +1723,42 @@
           "csrf_token"
         ],
         "title": "StateOut",
+        "type": "object"
+      },
+      "TemporalResponse": {
+        "description": "The Temporal response an operator saw, exactly, and when.",
+        "properties": {
+          "call": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Call",
+            "type": "string"
+          },
+          "message": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "status": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "call",
+          "status",
+          "message",
+          "observed_at"
+        ],
+        "title": "TemporalResponse",
         "type": "object"
       },
       "TenantIn": {
@@ -2194,6 +2332,30 @@
         ]
       }
     },
+    "/api/v1/admin/recovery/unresolved-sends/counts": {
+      "get": {
+        "description": "Unresolved sends, counted (task 9): per state, with open sends and the oldest, and the erasures they hold. The\ndatabase checks the caller's session itself (`admin_session`) and returns no identifier.",
+        "operationId": "unresolved_counts_api_v1_admin_recovery_unresolved_sends_counts_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Unresolved Counts Api V1 Admin Recovery Unresolved Sends Counts Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Unresolved Counts",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/api/v1/admin/tenants/{tenant_id}/commands": {
       "post": {
         "operationId": "ask_api_v1_admin_tenants__tenant_id__commands_post",
@@ -2568,6 +2730,7 @@
     },
     "/api/v1/admin/tenants/{tenant_id}/held/release": {
       "post": {
+        "description": "A held item's release, recorded as a command with the hold it shows; released once its operator confirms it.",
         "operationId": "release_api_v1_admin_tenants__tenant_id__held_release_post",
         "parameters": [
           {
@@ -2592,7 +2755,7 @@
           "required": true
         },
         "responses": {
-          "200": {
+          "202": {
             "content": {
               "application/json": {
                 "schema": {
@@ -2623,7 +2786,7 @@
     },
     "/api/v1/admin/tenants/{tenant_id}/held/release-many": {
       "post": {
-        "description": "A bulk release (the owner's rulings on the M3 checkpoints): bounded by tenant, kind, `held_before` and `max`,\nnever all of them across tenants; audited in its own transaction with the exact items it released, oldest first,\n`AUDITED_IDS` an entry (the count previewed may have changed meanwhile); what's still held answered.",
+        "description": "A bulk release (the owner's rulings on the M3 checkpoints), bounded by tenant, kind, `held_before` and `max`,\nnever all of them across tenants: recorded as a command with the holds it shows, oldest first, released once its\noperator confirms it, those alone (task 8).",
         "operationId": "release_many_api_v1_admin_tenants__tenant_id__held_release_many_post",
         "parameters": [
           {
@@ -2648,7 +2811,7 @@
           "required": true
         },
         "responses": {
-          "200": {
+          "202": {
             "content": {
               "application/json": {
                 "schema": {

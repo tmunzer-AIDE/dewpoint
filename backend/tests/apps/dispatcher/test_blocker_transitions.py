@@ -7,6 +7,7 @@ key's retirement (none of them writes the store). `gone` removes only an `identi
 no send open; the dispatcher never calls it."""
 
 import ast
+import re
 import uuid
 from datetime import timedelta
 from pathlib import Path
@@ -149,11 +150,12 @@ async def test_the_requests_end_a_not_found_and_time_leave_the_blocker_as_it_is(
 
 
 def test_only_the_store_module_writes_the_store() -> None:
-    """A key's retirement, the erasure, retention, the API: none writes `unresolved_sends` or `start_sends`."""
+    """A key's retirement, the erasure, retention, the API: none writes `unresolved_sends` or `start_sends`. (The API
+    reads counts through `unresolved_sends_counts`, a function of its own name, task 9: never the tables.)"""
     writers = []
+    tables = re.compile(r"\b(unresolved_sends|start_sends)\b")
     for path in sorted(SRC.rglob("*.py")):
-        source = path.read_text()
-        if ("unresolved_sends" in source or "start_sends" in source) and path.name != "blockers.py":
+        if tables.search(path.read_text()) and path.name != "blockers.py":
             writers.append(str(path.relative_to(SRC)))
     assert writers == []
 

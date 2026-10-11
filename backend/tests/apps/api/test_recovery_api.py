@@ -5,7 +5,8 @@ admin's: on an active MFA session, and for every change a second factor proven w
 The API records a command, pending, for the dispatcher's leader to carry out (it has no Temporal client), only on an
 item whose reason is recorded, with the operator's evidence where the item's history is gone; an operator's key
 returns the same command again, and an item has one pending command of a kind. It releases a held item for the kind it
-names, at once. Each change is audited with the operator, in its own transaction. It lists held items and recovery
+names, through a command its operator confirms (2b-4b M4 recovery, task 8: `test_recovery_release.py`). Each change
+is audited with the operator, in its own transaction. It lists held items and recovery
 reasons across tenants: ids, kinds, reasons and times."""
 
 import uuid
@@ -130,31 +131,6 @@ async def test_every_change_needs_a_platform_admin_with_a_fresh_second_factor(
         assert (await s.execute(text("select count(*) from work_failures"))).scalar_one() == 1
 
 
-async def test_a_release_clears_the_hold_of_the_kind_it_names_alone_audited(
-    app, owner_sessionmaker, api_settings
-) -> None:  # fmt: skip
-    admin, admin_id = await admin_of(app, owner_sessionmaker, api_settings)
-    tenant, _ = await tenant_of(app, owner_sessionmaker, api_settings)
-    item, counting = uuid.uuid4(), uuid.uuid4()
-    await held(owner_sessionmaker, tenant, "dispatch", item)
-    await held(owner_sessionmaker, tenant, "cancel", item)
-    await held(owner_sessionmaker, tenant, "match", counting, hold=False)
-    async with admin:
-        freed = await admin.post(url(tenant, "held/release"), json={"kind": "dispatch", "item_id": str(item)})
-        assert (freed.status_code, freed.json()) == (200, {"released": True, "kind": "dispatch", "item_id": str(item)})
-        again = await admin.post(url(tenant, "held/release"), json={"kind": "dispatch", "item_id": str(item)})
-        assert (again.status_code, again.json()) == (404, {"error": "not_held"})
-        unheld = await admin.post(url(tenant, "held/release"), json={"kind": "match", "item_id": str(counting)})
-        assert (unheld.status_code, unheld.json()) == (404, {"error": "not_held"})  # counting, not held
-    async with owner_sessionmaker() as s:
-        left = (await s.execute(text("select kind from work_failures where tenant_id = :t order by kind"),
-                                {"t": tenant})).scalars().all()  # fmt: skip
-    assert left == ["cancel", "match"]
-    assert await audited(owner_sessionmaker, "work_failure.release") == [
-        (admin_id, str(item), {"kind": "dispatch", "item_id": str(item)})
-    ]
-
-
 async def test_the_listings_show_held_items_and_recovery_reasons_across_tenants(
     app, owner_sessionmaker, api_settings
 ) -> None:  # fmt: skip
@@ -172,7 +148,7 @@ async def test_the_listings_show_held_items_and_recovery_reasons_across_tenants(
     assert {(i["tenant_id"], i["kind"], i["item_id"]) for i in listed} == {
         (str(a), "cancel", str(first)), (str(b), "reconcile_open", str(second)),
     }  # fmt: skip
-    assert set(listed[0]) == {"tenant_id", "kind", "item_id", "errors", "last_error", "held_at"}
+    assert set(listed[0]) == {"tenant_id", "kind", "item_id", "errors", "last_error", "held_at", "hold_id"}
     assert [(r["tenant_id"], r["reason"], r["item_id"]) for r in reasons] == [
         (str(b), "run_history_missing", str(second))
     ]
@@ -238,42 +214,6 @@ async def aged(owner: Any, tenant: uuid.UUID, kind: str, minutes: int, n: int = 
     return items
 
 
-async def test_held_items_are_released_in_bulk_by_kind_and_held_before_counted_first_bounded_audited(
-    app, owner_sessionmaker, api_settings
-) -> None:  # fmt: skip
-    """The owner's ruling on the M3 checkpoint (after a bad deploy holds many items): a tenant's held items of one kind,
-    held before a time, counted first, then released oldest first, at most `max` a request (1,000 at most), in one
-    audited change; never another kind's, a newer hold, a count not held, or another tenant's."""
-    from datetime import UTC, datetime, timedelta
-
-    admin, admin_id = await admin_of(app, owner_sessionmaker, api_settings)
-    (tenant, _), (other, _) = [await tenant_of(app, owner_sessionmaker, api_settings) for _ in range(2)]
-    old = await aged(owner_sessionmaker, tenant, "cancel", 120, n=5)
-    newer = await aged(owner_sessionmaker, tenant, "cancel", 5)
-    another_kind = await aged(owner_sessionmaker, tenant, "dispatch", 120)
-    theirs = await aged(owner_sessionmaker, other, "cancel", 120)
-    await held(owner_sessionmaker, tenant, "cancel", uuid.uuid4(), hold=False)  # counting, not held
-    before = (datetime.now(UTC) - timedelta(minutes=60)).isoformat()
-    query = {"kind": "cancel", "held_before": before}
-    async with admin:
-        counted = await admin.get(url(tenant, "held/count"), params=query)
-        assert (counted.status_code, counted.json()) == (200, {"kind": "cancel", "held_before": before, "held": 5})
-        first = await admin.post(url(tenant, "held/release-many"), json=query | {"max": 3})
-        assert (first.status_code, first.json()) == (200, {"kind": "cancel", "held_before": before, "released": 3,
-                                                           "held": 2})  # fmt: skip
-        rest = await admin.post(url(tenant, "held/release-many"), json=query | {"max": 1000})
-        assert rest.json()["released"] == 2
-        too_many = await admin.post(url(tenant, "held/release-many"), json=query | {"max": 1001})
-        no_kind = await admin.post(url(tenant, "held/release-many"), json={"held_before": before, "max": 10})
-        assert (too_many.status_code, no_kind.status_code) == (422, 422)
-    async with owner_sessionmaker() as s:
-        left = set((await s.execute(text("select item_id from work_failures"))).scalars())
-    assert left & set(old) == set() and {*newer, *another_kind, *theirs} <= left
-    assert [(a, t, d["released"]) for a, t, d in await audited(owner_sessionmaker, "work_failure.release_many")] == [
-        (admin_id, str(tenant), 3), (admin_id, str(tenant), 2),
-    ]  # fmt: skip
-
-
 async def test_a_bulk_release_needs_a_fresh_factor_and_an_active_tenant(app, owner_sessionmaker, api_settings) -> None:
     stale, _ = await admin_of(app, owner_sessionmaker, api_settings, fresh=False)
     admin, _ = await admin_of(app, owner_sessionmaker, api_settings)
@@ -288,34 +228,6 @@ async def test_a_bulk_release_needs_a_fresh_factor_and_an_active_tenant(app, own
     async with admin:
         erasing = await admin.post(url(tenant, "held/release-many"), json=query)
         assert (erasing.status_code, erasing.json()) == (409, {"error": "tenant_erasing"})
-
-
-async def test_a_bulk_release_audits_the_items_it_released_oldest_first_in_bounded_entries(
-    app, owner_sessionmaker, api_settings, monkeypatch
-) -> None:  # fmt: skip
-    """The owner's ruling on the M3 checkpoint 2: the audit says what happened (the count previewed may change before
-    the release): the exact items released, oldest first, at most `AUDITED_IDS` an entry, in the release's own
-    transaction."""
-    from datetime import UTC, datetime, timedelta
-
-    from dewpoint.apps.api.routes import recovery as routes
-
-    monkeypatch.setattr(routes, "AUDITED_IDS", 2)
-    admin, admin_id = await admin_of(app, owner_sessionmaker, api_settings)
-    tenant, _ = await tenant_of(app, owner_sessionmaker, api_settings)
-    items = [(await aged(owner_sessionmaker, tenant, "cancel", 120 - n))[0] for n in range(5)]  # the first oldest
-    before = (datetime.now(UTC) - timedelta(minutes=60)).isoformat()
-    async with admin:
-        released = await admin.post(url(tenant, "held/release-many"),
-                                    json={"kind": "cancel", "held_before": before, "max": 4})  # fmt: skip
-        assert (released.status_code, released.json()["released"]) == (200, 4)
-    entries = await audited(owner_sessionmaker, "work_failure.release_many")
-    assert [(a, d["released"], d["part"], d["parts"], d["item_ids"]) for a, _, d in entries] == [
-        (admin_id, 4, 1, 2, [str(items[0]), str(items[1])]),
-        (admin_id, 4, 2, 2, [str(items[2]), str(items[3])]),
-    ]
-    async with owner_sessionmaker() as s:
-        assert list((await s.execute(text("select item_id from work_failures"))).scalars()) == [items[4]]
 
 
 async def test_held_before_needs_its_offset_and_is_answered_and_audited_in_utc(
@@ -340,7 +252,7 @@ async def test_held_before_needs_its_offset_and_is_answered_and_audited_in_utc(
             assert (counted.status_code, released.status_code) == (422, 422), bad
         counted = await admin.get(url(tenant, "held/count"), params={"kind": "cancel", "held_before": local})
         assert counted.json() == {"kind": "cancel", "held_before": utc, "held": 1}
-        released = await admin.post(url(tenant, "held/release-many"),
+        recorded = await admin.post(url(tenant, "held/release-many"),
                                     json={"kind": "cancel", "held_before": local, "max": 1})  # fmt: skip
-        assert (released.json()["held_before"], released.json()["released"]) == (utc, 1)
-    assert [d["held_before"] for *_, d in await audited(owner_sessionmaker, "work_failure.release_many")] == [utc]
+        assert (recorded.json()["held_before"], len(recorded.json()["holds"])) == (utc, 1)  # a command (task 8)
+    assert [d["held_before"] for *_, d in await audited(owner_sessionmaker, "operator.command.request")] == [utc]

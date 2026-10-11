@@ -8,18 +8,23 @@ server is D6's proof."""
 import asyncio
 import base64
 import json
+import uuid
 from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
+from sqlalchemy import text
 from typer.testing import CliRunner
 
 from dewpoint.apps.cli import main as cli
 from dewpoint.apps.cli.main import app
+from dewpoint.core.audit.administration import ADMINISTRATION, AdministrationSink, recorded
 from dewpoint.core.audit.s3 import anchor_key
+from dewpoint.core.db import make_engine, make_sessionmaker
 from tests.apps.cli.test_audit_cli import _env, _seed
 from tests.conftest import _url_for
 from tests.core.audit.fake_s3 import FakeS3
+from tests.support.recovery import PREFIX as RCV_PREFIX
 
 BUCKET = "audit-anchors"
 
@@ -74,6 +79,7 @@ def test_the_monitor_is_set_up_stays_quiet_when_healthy_and_alerts(pg_url, _test
     bucket, runner = FakeS3(), CliRunner()
     configured(monkeypatch, pg_url, bucket, DEWPOINT_AUDIT_SIGNING_KEY_B64=signing)
     assert runner.invoke(app, ["audit", "anchor"]).exit_code == 0
+    migrated(bucket, pg_url)  # its schema reached on the prescribed path (task 7): no administration drift
     roster, state = tmp_path / "roster.json", tmp_path / "state.json"
     roster.write_text(json.dumps({"default_cadence_minutes": 30, "scopes": {}}))
     configured(monkeypatch, pg_url, bucket, DEWPOINT_AUDIT_PUBLIC_KEYS=json.dumps({"audit-1": public}))
@@ -81,7 +87,7 @@ def test_the_monitor_is_set_up_stays_quiet_when_healthy_and_alerts(pg_url, _test
     first = runner.invoke(app, [*watched, "--init"])
     assert first.exit_code == 0 and state.exists(), first.output
     assert runner.invoke(app, watched).exit_code == 0
-    [anchor] = bucket.versions
+    [anchor] = [v for v in bucket.versions if "/anchors/" in v.key]
     bucket.delete_object(Bucket=BUCKET, Key=anchor.key)
     alerted = runner.invoke(app, watched)
     assert alerted.exit_code == 1 and f"ALERT audit_verify_failed: {anchor.key}: deleted" in alerted.output
@@ -92,6 +98,54 @@ def test_the_monitor_is_set_up_stays_quiet_when_healthy_and_alerts(pg_url, _test
     assert not state.exists()
     still = runner.invoke(app, watched)
     assert still.exit_code == 1 and "ALERT audit_monitor_state_lost" in still.output
+
+
+def migrated(bucket: FakeS3, pg_url: str) -> None:
+    """The database's revision reached by a recorded migration (`deployment migrate`), in the bucket."""
+
+    async def revision() -> str:
+        engine = make_engine(pg_url)
+        try:
+            async with make_sessionmaker(engine)() as s:
+                return str((await s.execute(text("select version_num from alembic_version"))).scalar_one())
+        finally:
+            await engine.dispose()
+
+    sink, action = AdministrationSink(bucket, BUCKET, "dewpoint/" + ADMINISTRATION), uuid.uuid4()
+    sink.write(recorded("migration", "intent", action, target="head"))
+    sink.write(recorded("migration", "outcome", action, status="succeeded", to=asyncio.run(revision())))
+
+
+def test_the_monitor_alerts_on_a_recovery_membership_no_record_explains(
+    pg_url, _test_users, monkeypatch, tmp_path: Path
+) -> None:  # fmt: skip
+    """Administration drift (task 7): a login added to `dewpoint_recovery` other than by `recovery operator add`."""
+    asyncio.run(_seed(_url_for(pg_url, "dewpoint_api")))
+    signing, public = keys()
+    bucket, runner = FakeS3(), CliRunner()
+    configured(monkeypatch, pg_url, bucket, DEWPOINT_AUDIT_SIGNING_KEY_B64=signing)
+    assert runner.invoke(app, ["audit", "anchor"]).exit_code == 0
+    migrated(bucket, pg_url)
+    roster, state = tmp_path / "roster.json", tmp_path / "state.json"
+    roster.write_text(json.dumps({"default_cadence_minutes": 30, "scopes": {}}))
+    configured(monkeypatch, pg_url, bucket, DEWPOINT_AUDIT_PUBLIC_KEYS=json.dumps({"audit-1": public}))
+    watched = ["audit", "monitor", "--roster", str(roster), "--state", str(state)]
+    assert runner.invoke(app, [*watched, "--init"]).exit_code == 0
+    quiet = runner.invoke(app, watched)
+    assert quiet.exit_code == 0, quiet.output
+    login = f"{RCV_PREFIX}{uuid.uuid4().hex[:12]}"
+
+    async def added() -> None:
+        engine = make_engine(pg_url)
+        try:
+            async with engine.begin() as c:
+                await c.execute(text(f"CREATE ROLE {login} LOGIN IN ROLE dewpoint_recovery"))
+        finally:
+            await engine.dispose()
+
+    asyncio.run(added())
+    alerted = runner.invoke(app, watched)
+    assert alerted.exit_code == 1 and f"ALERT admin_membership_unrecorded {login}:" in alerted.output, alerted.output
 
 
 def test_the_monitor_needs_the_bucket(pg_url, _test_users, monkeypatch, tmp_path: Path) -> None:

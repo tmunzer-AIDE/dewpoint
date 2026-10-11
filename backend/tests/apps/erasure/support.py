@@ -28,7 +28,7 @@ async def populated(owner: Any, ingress: Any) -> dict[str, Any]:
     await record(ingress, endpoint_id, [(key(1), digest(1), b"one")])
     run_tree = await tree(owner, ctx, OLD)
     queued = await request(owner, ctx, "queued", None)
-    schedule_id = uuid.uuid4()
+    schedule_id, release = uuid.uuid4(), uuid.uuid4()  # a release command (0057) and its snapshot
     for statement, params in (
         ("insert into memberships (tenant_id, user_id, role) values (:t, :u, 'owner')", {}),
         ("insert into connections (id, tenant_id, type, name, config) values (:i, :t, 'http', 'c', '{}')",
@@ -66,6 +66,10 @@ async def populated(owner: Any, ingress: Any) -> dict[str, Any]:
         ("insert into operator_commands (id, tenant_id, kind, item_id, reason, incident_since, actor_id, "
          "idempotency_key, status) values (:i, :t, 'record_lost_run', :r, 'run_history_missing', now(), :u, 'k', "
          "'pending')", {"i": uuid.uuid4(), "r": uuid.uuid4()}),
+        ("insert into operator_commands (id, tenant_id, kind, item_id, work_kind, actor_id, idempotency_key) "  # 0057's
+         "values (:i, :t, 'release_held', :r, 'dispatch', :u, 'release')", {"i": release, "r": uuid.uuid4()}),
+        ("insert into operator_command_holds (command_id, tenant_id, kind, item_id, hold_id) "
+         "values (:c, :t, 'dispatch', :r, 1)", {"c": release, "r": uuid.uuid4()}),
     ):  # fmt: skip
         await sql(owner, statement, t=tenant, w=workflow_id, v=version_id, u=user, **params)
     return {**ctx, "endpoint": endpoint_id, "tree": run_tree, "queued": queued, "schedule": schedule_id}

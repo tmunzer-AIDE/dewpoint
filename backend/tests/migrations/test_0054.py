@@ -242,3 +242,168 @@ async def test_0055s_downgrade_never_drops_a_record_written_while_it_checks(db: 
     assert isinstance(outcome, Exception) and "0055 refused" in str(outcome), outcome
     assert await _rows(db, "SELECT version_num FROM alembic_version") == [("0055",)]
     assert await _rows(db, kept) == [(1,)]
+
+
+# 0056 (task 6): confirmations, on the same cluster. Its downgrade restores 0050's pick exactly, and refuses while a
+# login's mapping, a confirmation or a pending command is kept (before 0056 a pending command runs unconfirmed).
+PICK = "SELECT pg_get_functiondef('pending_commands(integer)'::regprocedure)"
+CONFIRMING = """SELECT to_regclass('public.recovery_operators'), to_regclass('public.operator_confirmations'),
+                       to_regprocedure('recovery.operator_command_confirm(uuid, bytea)')"""
+KEPT = {  # what 0056's downgrade refuses to drop, each written as its writer would
+    "a login's mapping": "INSERT INTO recovery_operators (login, user_id, provisioned_by, provisioned_at) "
+                         "VALUES ('rcv_alice', gen_random_uuid(), 'admin', now())",
+    "a pending command": "INSERT INTO operator_commands (tenant_id, kind, item_id, reason, incident_since, actor_id, "
+                         "idempotency_key) SELECT tenant_id, 'record_lost_run', id, 'run_history_missing', now(), "
+                         "gen_random_uuid(), 'k' FROM run_requests LIMIT 1",
+}  # fmt: skip
+
+
+async def test_0056_and_back_restores_0055s_pick_exactly(db: str) -> None:
+    await asyncio.to_thread(upgrade, db, "0055")
+    before = await _rows(db, PICK)
+    await asyncio.to_thread(upgrade, db, "0056")
+    assert "operator_confirmations" in str((await _rows(db, PICK))[0][0])
+    assert None not in (await _rows(db, CONFIRMING))[0]
+    await asyncio.to_thread(downgrade, db, "0055")
+    assert await _rows(db, PICK) == before
+    assert await _rows(db, CONFIRMING) == [(None, None, None)]
+
+
+@pytest.mark.parametrize("kept", KEPT)
+async def test_0056s_downgrade_refuses_while_a_mapping_or_a_pending_command_is_kept(db: str, kept: str) -> None:
+    await asyncio.to_thread(upgrade, db, "0056")
+    await _sql(db, KEPT[kept])
+    with pytest.raises(Exception, match="0056 refused"):
+        await asyncio.to_thread(downgrade, db, "0055")
+    assert await _rows(db, "SELECT version_num FROM alembic_version") == [("0056",)]
+
+
+@pytest.mark.parametrize("kept", KEPT)
+async def test_0056s_downgrade_never_drops_what_is_written_while_it_checks(db: str, kept: str) -> None:
+    await asyncio.to_thread(upgrade, db, "0056")
+    [outcome] = await _while_written(db, KEPT[kept], "0055")
+    assert isinstance(outcome, Exception) and "0056 refused" in str(outcome), outcome
+    assert await _rows(db, "SELECT version_num FROM alembic_version") == [("0056",)]
+
+
+# 0057 (task 8): releases bound to the holds shown, on the same cluster. Its downgrade restores 0050's direct releases,
+# 0056's canonical text, the columns, checks and grants exactly, and refuses while a release command is kept.
+def _function(signature: str) -> str:
+    return (f"(SELECT pg_get_functiondef(p) || coalesce(proacl::text, '') FROM pg_proc, "
+            f"to_regprocedure('{signature}') p WHERE pg_proc.oid = p)")  # fmt: skip
+
+
+RELEASES_STATE = f"""SELECT {_function("work_failure_release(text, uuid)")},
+  {_function("work_failures_release_many(text, timestamptz, integer)")}, {_function("work_failures_held(integer)")},
+  {_function("operator_command_canonical(uuid)")},
+  (SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'operator_commands_kind'),
+  (SELECT string_agg(attname || ':' || attnotnull || ':' || coalesce(attacl::text, ''), ',' ORDER BY attnum)
+     FROM pg_attribute WHERE attrelid = 'public.operator_commands'::regclass AND attnum > 0 AND NOT attisdropped),
+  (SELECT string_agg(attname, ',' ORDER BY attnum) FROM pg_attribute
+    WHERE attrelid = 'public.work_failures'::regclass AND attnum > 0 AND NOT attisdropped),
+  to_regclass('public.work_hold_ids'), to_regclass('public.operator_command_holds')"""
+RELEASE = ("INSERT INTO operator_commands (tenant_id, kind, work_kind, item_id, actor_id, idempotency_key) "
+           "SELECT tenant_id, 'release_held', 'dispatch', id, gen_random_uuid(), 'k' "
+           "FROM run_requests LIMIT 1")  # fmt: skip
+
+
+async def test_0057_and_back_restores_0056s_functions_columns_checks_and_grants_exactly(db: str) -> None:
+    await asyncio.to_thread(upgrade, db, "0056")
+    before = await _rows(db, RELEASES_STATE)
+    await asyncio.to_thread(upgrade, db, "0057")
+    after = (await _rows(db, RELEASES_STATE))[0]
+    assert after[0] is None and after[1] is None and "hold_id" in str(after[2]) and "holds" in str(after[3])
+    assert "max_holds" in str(after[5]) and "hold_id" in str(after[6]) and None not in after[7:]
+    await asyncio.to_thread(downgrade, db, "0056")
+    assert await _rows(db, RELEASES_STATE) == before
+
+
+async def test_0057s_downgrade_refuses_while_a_release_command_is_kept(db: str) -> None:
+    await asyncio.to_thread(upgrade, db, "0057")
+    await _sql(db, RELEASE)
+    with pytest.raises(Exception, match="0057 refused"):
+        await asyncio.to_thread(downgrade, db, "0056")
+    assert await _rows(db, "SELECT version_num FROM alembic_version") == [("0057",)]
+
+
+async def test_0057s_downgrade_never_drops_a_release_recorded_while_it_checks(db: str) -> None:
+    await asyncio.to_thread(upgrade, db, "0057")
+    [outcome] = await _while_written(db, RELEASE, "0056")
+    assert isinstance(outcome, Exception) and "0057 refused" in str(outcome), outcome
+    assert await _rows(db, "SELECT version_num FROM alembic_version") == [("0057",)]
+
+
+# 0058 (task 9): the counts and the reveal, on the same cluster. Its downgrade restores 0056's pick and 0057's checks
+# exactly, and refuses while an inspection is kept.
+REVEAL_STATE = f"""SELECT {_function("pending_commands(integer)")},
+  (SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'operator_commands_kind'),
+  (SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'operator_commands_fields'),
+  to_regprocedure('admin_session(text)'), to_regprocedure('unresolved_sends_counts(text)'),
+  to_regprocedure('recovery.unresolved_send_reveal(uuid)')"""
+INSPECTION = ("INSERT INTO operator_commands (tenant_id, kind, item_id, actor_id, idempotency_key) "
+              "SELECT tenant_id, 'inspect_unresolved_send', id, gen_random_uuid(), 'k' "
+              "FROM run_requests LIMIT 1")  # fmt: skip
+
+
+async def test_0058_and_back_restores_0057s_pick_and_checks_exactly(db: str) -> None:
+    await asyncio.to_thread(upgrade, db, "0057")
+    before = await _rows(db, REVEAL_STATE)
+    await asyncio.to_thread(upgrade, db, "0058")
+    after = (await _rows(db, REVEAL_STATE))[0]
+    assert "inspect_unresolved_send" in str(after[0]) and "inspect_unresolved_send" in str(after[1])
+    assert None not in after[3:]
+    await asyncio.to_thread(downgrade, db, "0057")
+    assert await _rows(db, REVEAL_STATE) == before
+
+
+async def test_0058s_downgrade_refuses_while_an_inspection_is_kept(db: str) -> None:
+    await asyncio.to_thread(upgrade, db, "0058")
+    await _sql(db, INSPECTION)
+    with pytest.raises(Exception, match="0058 refused"):
+        await asyncio.to_thread(downgrade, db, "0057")
+    assert await _rows(db, "SELECT version_num FROM alembic_version") == [("0058",)]
+
+
+async def test_0058s_downgrade_never_drops_an_inspection_recorded_while_it_checks(db: str) -> None:
+    await asyncio.to_thread(upgrade, db, "0058")
+    [outcome] = await _while_written(db, INSPECTION, "0057")
+    assert isinstance(outcome, Exception) and "0058 refused" in str(outcome), outcome
+
+
+# 0059 (task 10): abandon_start, on the same cluster. Its downgrade restores 0055's settled entries, the checks and the
+# evidence's width exactly, and refuses while an abandonment or its record is kept.
+ABANDON_STATE = f"""SELECT {_function("work_settled_clear(integer)")},
+  (SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'operator_commands_kind'),
+  (SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'operator_commands_reason'),
+  (SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'recovery_items_reason'),
+  (SELECT format_type(atttypid, atttypmod) FROM pg_attribute
+    WHERE attrelid = 'public.operator_commands'::regclass AND attname = 'evidence')"""
+ABANDONED = ("INSERT INTO recovery_items (tenant_id, reason, item_id) "
+             "SELECT tenant_id, 'start_abandoned', id FROM run_requests LIMIT 1")  # fmt: skip
+
+
+async def test_0059_and_back_restores_0058s_functions_checks_and_width_exactly(db: str) -> None:
+    await asyncio.to_thread(upgrade, db, "0058")
+    before = await _rows(db, ABANDON_STATE)
+    await asyncio.to_thread(upgrade, db, "0059")
+    after = (await _rows(db, ABANDON_STATE))[0]
+    assert (
+        "start_abandoned" in str(after[0]) and "abandon_start" in str(after[1]) and "start_abandoned" in str(after[3])
+    )
+    assert after[4] == "character varying(4000)"
+    await asyncio.to_thread(downgrade, db, "0058")
+    assert await _rows(db, ABANDON_STATE) == before
+
+
+async def test_0059s_downgrade_refuses_while_an_abandonments_record_is_kept(db: str) -> None:
+    await asyncio.to_thread(upgrade, db, "0059")
+    await _sql(db, ABANDONED)
+    with pytest.raises(Exception, match="0059 refused"):
+        await asyncio.to_thread(downgrade, db, "0058")
+    assert await _rows(db, "SELECT version_num FROM alembic_version") == [("0059",)]
+
+
+async def test_0059s_downgrade_never_drops_a_record_written_while_it_checks(db: str) -> None:
+    await asyncio.to_thread(upgrade, db, "0059")
+    [outcome] = await _while_written(db, ABANDONED, "0058")
+    assert isinstance(outcome, Exception) and "0059 refused" in str(outcome), outcome

@@ -179,6 +179,12 @@ async def clean_db(owner_sessionmaker: async_sessionmaker[AsyncSession]) -> Asyn
             await s.execute(text("SET LOCAL session_replication_role = replica"))  # bypass audit triggers
             await s.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
             await s.execute(text("UPDATE ingress_budget SET outstanding = 0, active = 0"))
+        # the recovery logins a test made (tests/support/recovery.py): roles are the cluster's, not the database's
+        drops = await s.execute(
+            text(r"select format('DROP ROLE %I', rolname) from pg_roles where rolname like 'rcv\_t\_%'")
+        )
+        for drop in drops.scalars().all():
+            await s.execute(text(drop))
 
 
 @pytest.fixture(scope="session")

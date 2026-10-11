@@ -41,11 +41,14 @@ services:
     # development setup opts in with its own database and Temporal namespace. Every later run checks the same values.
     # Then a data key for any tenant without one (created before 2b-1a): the payload codec only reads keys (§6.3). The
     # key admin lists every tenant under row-level security (migration 0013), so it needs no role that bypasses it.
+    # The schema goes through `dewpoint deployment migrate` (2b-4b M4 recovery): its intent and outcome recorded off this
+    # host first and last, in D6's bucket under database-administration/. In production it refuses to run without that
+    # bucket (DEWPOINT_AUDIT_S3_BUCKET) and its own put-only credentials, given to this step alone.
     command:
       - sh
       - -c
       - >-
-        set -e; alembic upgrade head; dewpoint platform init-environment;
+        set -e; dewpoint deployment migrate; dewpoint platform init-environment;
         DEWPOINT_DATABASE_URL=$$DEWPOINT_ADMIN_DATABASE_URL dewpoint keys ensure-tenants
     environment:
       <<: *appenv
@@ -57,6 +60,15 @@ services:
       DEWPOINT_ENVIRONMENT: ${DEWPOINT_ENVIRONMENT:-production}
       # The operator's word, for an upgrade with the application connected: docs/operations/deployment.md
       DEWPOINT_UPGRADE_SETTINGS_ATTESTED: ${DEWPOINT_UPGRADE_SETTINGS_ATTESTED:-}
+      # The administration sink (2b-4b M4 recovery): D6's bucket, where `dewpoint deployment migrate` records its intent
+      # and outcome under <prefix>database-administration/, with this step's own identity, put-only on that prefix and
+      # given to no other service. Production refuses to migrate without them (docs/operations/deployment.md).
+      DEWPOINT_AUDIT_S3_BUCKET: ${DEWPOINT_AUDIT_S3_BUCKET:-}
+      DEWPOINT_AUDIT_S3_PREFIX: ${DEWPOINT_AUDIT_S3_PREFIX:-dewpoint/}
+      DEWPOINT_AUDIT_S3_ENDPOINT_URL: ${DEWPOINT_AUDIT_S3_ENDPOINT_URL:-}
+      DEWPOINT_AUDIT_S3_REGION: ${DEWPOINT_AUDIT_S3_REGION:-}
+      AWS_ACCESS_KEY_ID: ${DEWPOINT_ADMINISTRATION_AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${DEWPOINT_ADMINISTRATION_AWS_SECRET_ACCESS_KEY:-}
     depends_on: { postgres: { condition: service_healthy } }
     restart: "no"
 

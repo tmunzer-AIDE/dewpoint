@@ -3,6 +3,7 @@ import asyncio
 import base64
 import json
 import os
+import subprocess
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -21,6 +22,8 @@ from temporalio.api.workflowservice.v1 import DescribeNamespaceRequest
 from temporalio.client import Client
 
 from dewpoint.apps import admission, dev_run, tick_contract
+from dewpoint.apps.cli import recovery as recovery_commands
+from dewpoint.apps.cli.recovery import recovery_cli
 from dewpoint.apps.codec import KeyringKeys, data_converter
 from dewpoint.apps.dispatcher import evidence
 from dewpoint.apps.dispatcher.dispatch import START_DEADLINE
@@ -33,8 +36,9 @@ from dewpoint.apps.worker.health import WorkerUnhealthyError
 from dewpoint.apps.worker.main import run as run_worker
 from dewpoint.core import logs
 from dewpoint.core.audit import service as audit_log
+from dewpoint.core.audit.administration import ADMINISTRATION, read_records, recorded
 from dewpoint.core.audit.anchor import AnchorSink, FileAnchorSink, anchor_all, anchor_freshness, verify_anchors
-from dewpoint.core.audit.monitor import Roster, Scope, watch
+from dewpoint.core.audit.monitor import Catalog, Login, Roster, Scope, drift, watch
 from dewpoint.core.audit.s3 import S3AnchorSink, bucket_problems, read_anchors
 from dewpoint.core.auth.sessions import SESSION_COOKIE
 from dewpoint.core.auth.users import PasswordPolicyError, create_user
@@ -111,6 +115,7 @@ temporal_cli = typer.Typer(help="Temporal, as this deployment reaches it (2b-4b 
 app.add_typer(temporal_cli, name="temporal")
 schedules_cli = typer.Typer(no_args_is_help=True)
 app.add_typer(schedules_cli, name="schedules")
+app.add_typer(recovery_cli, name="recovery")  # an operator's, under their own recovery login
 
 
 async def _init(email: str, password: str) -> None:
@@ -279,6 +284,22 @@ _SCOPES = text(
     " kept group by scope"
 )
 _UNANCHORED = text("select min(created_at) from audit_log where scope = :s and seq > :after")
+# The database's administration, as the auditor reads it (task 7): the recovery group's members, the mappings, every
+# recovery login's attributes, the schema's revision
+_MEMBERS = text("select m.rolname from pg_auth_members a join pg_roles g on g.oid = a.roleid "
+                "join pg_roles m on m.oid = a.member where g.rolname = 'dewpoint_recovery'")  # fmt: skip
+_MAPPINGS = text("select login, revoked_at is not null from recovery_operators")
+_LOGINS = text(r"select rolname, rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls "
+               r"from pg_roles where rolname like 'rcv\_%' or rolname = any(:names)")  # fmt: skip
+_REVISION = text("select version_num from alembic_version")
+
+
+async def _catalog(s: AsyncSession) -> Catalog:
+    members = frozenset(str(row[0]) for row in (await s.execute(_MEMBERS)).all())
+    mappings = {str(login): bool(gone) for login, gone in (await s.execute(_MAPPINGS)).all()}
+    found = await s.execute(_LOGINS, {"names": sorted(members | mappings.keys())})
+    logins = {str(row[0]): Login(*(bool(v) for v in row[1:])) for row in found.all()}
+    return Catalog(members, mappings, logins, (await s.execute(_REVISION)).scalar())
 
 
 @audit.command("monitor")
@@ -315,19 +336,24 @@ def audit_monitor(
         newest[str(entry["scope"])] = max(newest.get(str(entry["scope"]), 0), int(entry["seq"]))
     keys = _public_keys(settings)
 
-    async def _run() -> tuple[list[str], dict[str, Scope], datetime]:
+    records = read_records(client, settings.audit_s3_bucket, settings.audit_s3_prefix + ADMINISTRATION)
+
+    async def _run() -> tuple[list[str], dict[str, Scope], datetime, Catalog]:
         async with _auditing() as s:
             problems = await verify_anchors(s, listing.entries, keys)
+            catalog = await _catalog(s)
             now: datetime = (await s.execute(text("select statement_timestamp()"))).scalar_one()  # the entries' clock
             database: dict[str, Scope] = {}
             for scope, top in (await s.execute(_SCOPES)).all():
                 oldest = (await s.execute(_UNANCHORED, {"s": scope, "after": newest.get(scope, 0)})).scalar()
                 database[str(scope)] = Scope(newest=int(top), oldest_unanchored=oldest)
-            return problems, database, now
+            return problems, database, now, catalog
 
-    problems, database, now = asyncio.run(_run())
+    problems, database, now, catalog = asyncio.run(_run())
     alerts, updated = watch(rostered, marks, database, newest, now, init=init)
     alerts = [("audit_verify_failed", "", problem) for problem in found + problems] + alerts
+    alerts += [("admin_record_problem", "", problem) for problem in records.problems]
+    alerts += drift(records.entries, catalog)  # the administration no record off the host explains
     if marks is not None or init:  # a lost state isn't made afresh: it stays alerted on until set up knowingly (--init)
         written = state.with_name(state.name + ".new")
         written.write_text(json.dumps(updated, sort_keys=True))
@@ -1315,6 +1341,43 @@ def platform_set_ingress_capacity(
     typer.echo(f"ingress capacity: {now['starts_per_s']} starts a second measured, {now['headroom']} of them for "
                f"ingress, a {now['queue_wait_s']} s wait: the deployment's outstanding work at most {now['limit']} "
                "requests")  # fmt: skip
+
+
+def _alembic_upgrade() -> int:
+    """`alembic upgrade head`, run as Compose's migrate step ran it: its exit code."""
+    return subprocess.run(["alembic", "upgrade", "head"], check=False).returncode  # noqa: S607 (the image's alembic)
+
+
+async def _revision(url: str) -> str | None:
+    """The schema's revision; None before the first migration."""
+    engine = make_engine(url)
+    try:
+        async with make_sessionmaker(engine)() as s:
+            if (await s.execute(text("select to_regclass('public.alembic_version')"))).scalar() is None:
+                return None
+            found = (await s.execute(text("select version_num from alembic_version"))).scalar()
+            return None if found is None else str(found)
+    finally:
+        await engine.dispose()
+
+
+@deployment_cli.command("migrate")
+def deployment_migrate() -> None:
+    """The schema migrated to head on the prescribed path (2b-4b M4 recovery, the plan's ruling 7): its intent recorded
+    off the database host first, then `alembic upgrade head`, then its outcome. It refuses in production without the
+    administration sink. It claims nothing about an administrator who runs Alembic directly: that's the trusted
+    exception, which the monitor sees only as persistent drift (`admin_revision_unrecorded`)."""
+    settings = get_settings()
+    sink = recovery_commands.required_sink(settings)
+    action = uuid.uuid4()
+    if sink is not None:  # its failure stops the migration before it starts
+        sink.write(recorded("migration", "intent", action, target="head",
+                            **{"from": asyncio.run(_revision(settings.database_url))}))  # fmt: skip
+    code = _alembic_upgrade()
+    if sink is not None:
+        sink.write(recorded("migration", "outcome", action, status="succeeded" if code == 0 else "failed", exit=code,
+                            to=asyncio.run(_revision(settings.database_url))))  # fmt: skip
+    raise typer.Exit(code)
 
 
 @deployment_cli.command("set-current")
