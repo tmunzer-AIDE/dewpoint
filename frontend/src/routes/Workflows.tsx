@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // The workflows list (screen 1a; 4b rulings 4-7): each workflow's state at a glance, filters, the enable switch for
-// publishers, and export. No delete: no route deletes a workflow.
+// publishers, and export. No delete: no route deletes a workflow. 4c-3b adds the Trigger column (ruling 68: what starts
+// it besides a person) and, under a workflow's name, why it needs attention.
 import * as Dropdown from "@radix-ui/react-dropdown-menu";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
@@ -15,6 +16,7 @@ import { announce } from "../lib/announce";
 import { ApiError, client, ok } from "../lib/client";
 import { downloadJson, fileName } from "../lib/download";
 import { useDocumentTitle } from "../lib/title";
+import { attentionWords, triggerColumn } from "../lib/triggers";
 import { canEdit, canPublish, notPortable, since, tenantQuery, workflowsQuery, type PortableProblem, type WorkflowRow } from "../lib/workflows";
 import { NewWorkflow } from "./NewWorkflow";
 
@@ -160,7 +162,7 @@ export function WorkflowsPage({ tenantId, startNew = false }: { tenantId: string
         <Table label="Workflows">
           <thead>
             <tr>
-              <Th>Name</Th><Th>Version</Th><Th>Last run</Th><Th>Last 24 h</Th><Th>Enabled</Th>
+              <Th>Name</Th><Th>Trigger</Th><Th>Version</Th><Th>Last run</Th><Th>Last 24 h</Th><Th>Enabled</Th>
               <Th><span className="sr-only">Actions</span></Th>
             </tr>
           </thead>
@@ -168,10 +170,14 @@ export function WorkflowsPage({ tenantId, startNew = false }: { tenantId: string
             {shown.map((w) => (
               <tr key={w.id}>
                 <Td>
-                  <Link to="/t/$tenantId/workflows/$workflowId" params={{ tenantId, workflowId: w.id }} className="font-medium text-accent-ink">
-                    {w.name}
-                  </Link>
+                  <span className="flex flex-col gap-0.5">
+                    <Link to="/t/$tenantId/workflows/$workflowId" params={{ tenantId, workflowId: w.id }} className="font-medium text-accent-ink">
+                      {w.name}
+                    </Link>
+                    {attentionWords(w.needs_attention) && <span className="text-small text-danger">{attentionWords(w.needs_attention)}</span>}
+                  </span>
                 </Td>
+                <Td className="text-small">{triggerColumn(w.triggers)}</Td>
                 <Td><Version w={w} /></Td>
                 <Td><LastRun w={w} /></Td>
                 <Td className="font-mono text-small">
@@ -217,13 +223,16 @@ export function WorkflowsPage({ tenantId, startNew = false }: { tenantId: string
             ))}
             {list.data && shown.length === 0 && (
               <tr>
-                <Td colSpan={6} className="text-muted">{rows.length === 0 ? "No workflows yet." : "No workflow matches."}</Td>
+                <Td colSpan={7} className="text-muted">{rows.length === 0 ? "No workflows yet." : "No workflow matches."}</Td>
               </tr>
             )}
           </tbody>
         </Table>
       )}
-      <p className="text-small text-muted">A disabled workflow keeps its versions and its history; nothing starts it.</p>
+      <p className="text-small text-muted">
+        By hand is always possible once published; the Trigger column names what else starts it. A disabled workflow keeps its versions and its
+        history; nothing starts it.
+      </p>
       {/* Asked for by the address (?new) too: opened only once the role is known to create one. */}
       {creating && canEdit(tenant.data?.role) && <NewWorkflow tenantId={tenantId} onClose={closeNew} />}
     </section>

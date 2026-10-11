@@ -13,6 +13,7 @@ import { EditorPage } from "./Editor";
 import { DELAY, IF, LOOP, REMOTE, SWITCH, TRANSFORM, typeWith } from "../../test/nodeTypes";
 import { formula } from "../../lib/config";
 import { STALE } from "../../lib/unapplied";
+import { SCHEDULE } from "../../test/triggers";
 
 // Every document the stand-in canvas was handed: what was drawn, and what never was.
 const { drawn } = vi.hoisted(() => ({ drawn: [] as { doc: GraphDoc; editable: boolean }[] }));
@@ -40,7 +41,8 @@ vi.mock("./Canvas", async () => {
           data-problem-steps={[...props.problems.keys()].join(",")}
           data-conditional={[...props.conditional].join(",")}
         >
-          <button data-item="start" onClick={() => props.onItem({ kind: "after", from: null })}>Start</button>
+          <button data-item="start" data-summary={props.start.summary} aria-expanded={props.start.open} onClick={props.start.onOpen}>Start</button>
+          <button onClick={() => props.onItem({ kind: "after", from: null })}>Add the first step</button>
           {(props.doc.nodes ?? []).map((n) => (
             <span key={n.id}>
               <button data-item={`node:${n.id}`} onClick={() => props.onItem({ kind: "open", node: n.id })}>{n.key}</button>
@@ -69,6 +71,7 @@ const WORKFLOW = {
   id: "w1", name: "Nightly", enabled: true, draft_revision: 1, active_version_id: null, active_version_number: null,
   executable: null, blocked_by: [], created_at: "", updated_at: "", unpublished_changes: true, draft_graph_hash: "h1",
   last_run: null, last_simulation: null, runs_24h: { live: 0, simulate: 0 }, needs_attention: [], draft: draftWith(),
+  triggers: { schedules: 0, schedules_enabled: 0, webhook_bindings: 0, csv: false },
 };  // prettier-ignore
 const BASE = "/api/v1/t/t1/workflows/w1";
 type Answer = () => Response | Promise<Response>;
@@ -148,7 +151,7 @@ it("heads the editor with the way back and the workflow's name", async () => {
 
 it("adds a first step from the start card, then one after it, through the picker", async () => {
   await show();
-  await userEvent.click(screen.getByRole("button", { name: "Start" }));
+  await userEvent.click(screen.getByRole("button", { name: "Add the first step" }));
   await userEvent.click(await screen.findByRole("option", { name: /flow\.transform@1/ }));
   await userEvent.click(await screen.findByRole("button", { name: "after transform" }));
   await userEvent.click(await screen.findByRole("option", { name: /flow\.transform@1/ }));
@@ -175,7 +178,7 @@ it("offers a viewer no Add step", async () => {
 
 async function withTwoSteps() {
   await show();
-  await userEvent.click(screen.getByRole("button", { name: "Start" }));
+  await userEvent.click(screen.getByRole("button", { name: "Add the first step" }));
   await userEvent.click(await screen.findByRole("option", { name: /flow\.transform@1/ }));
   await userEvent.click(await screen.findByRole("button", { name: "after transform" }));
   await userEvent.click(await screen.findByRole("option", { name: /flow\.transform@1/ }));
@@ -421,7 +424,7 @@ it("undoes the edit and its edges together", async () => {
 const steps = () => screen.getByRole("group", { name: "Workflow steps" });
 
 async function addTransform() {
-  await userEvent.click(screen.getByRole("button", { name: "Start" }));
+  await userEvent.click(screen.getByRole("button", { name: "Add the first step" }));
   await userEvent.click(await screen.findByRole("option", { name: /flow\.transform@1/ }));
   await screen.findByRole("button", { name: "transform" });
 }
@@ -1043,7 +1046,7 @@ describe("focus when editing stops under it", () => {
 describe("navigations that keep the editor", () => {
   it.each([
     { what: "a hash", to: { hash: "notes" } },
-    { what: "a query", to: { search: { panel: "versions" } } },
+    { what: "a query", to: { search: { triggers: true as const } } },
   ])("leave it editable when only $what changes", async ({ to }) => {
     const { router } = await show();
     await addTransform();
@@ -1945,4 +1948,98 @@ it("lands on Versions when Declassify closes after its last entry is removed (th
   await userEvent.click(within(panel).getByRole("button", { name: /^Remove / }));
   await userEvent.click(within(panel).getByRole("button", { name: "Close" }));
   await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Versions" })));
+});
+
+describe("the Triggers panel (4c-3b)", () => {
+  const settings = () => drawn.at(-1)!.doc.settings;
+  beforeEach(() => {
+    answers.set(`GET ${BASE}/schedules`, () => json({ schedules: [] }));
+    answers.set(`GET ${BASE}/webhook-bindings`, () => json({ bindings: [] }));
+    answers.set("GET /api/v1/trigger-types", () => json([]));
+  });
+
+  it("opens from the start card, its heading focused, and gives focus back to the card when it closes", async () => {
+    await show();
+    const start = screen.getByRole("button", { name: "Start" });
+    await userEvent.click(start);
+    expect(start.getAttribute("aria-expanded")).toBe("true");
+    const panel = screen.getByRole("complementary", { name: "Triggers" });
+    await vi.waitFor(() => expect(document.activeElement).toBe(within(panel).getByRole("heading", { name: "Triggers" })));
+    await userEvent.click(within(panel).getByRole("button", { name: "Close" }));
+    await vi.waitFor(() => expect(document.activeElement).toBe(start));
+    expect(start.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("sums up what starts a run on the start card: the workflow's own counts, then the live rows", async () => {
+    answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, triggers: { schedules: 1, schedules_enabled: 1, webhook_bindings: 1, csv: false } }));
+    answers.set(`GET ${BASE}/schedules`, () => json({ schedules: [SCHEDULE, { ...SCHEDULE, id: "s2" }] }));
+    answers.set(`GET ${BASE}/webhook-bindings`, () => json({ bindings: [] }));
+    await show();
+    await vi.waitFor(() => expect(screen.getByRole("button", { name: "Start" }).dataset.summary).toBe("By hand · 2 schedules"));
+  });
+
+  it("writes the input to the draft through undo, a field's typing one step", async () => {
+    await show();
+    await userEvent.click(screen.getByRole("button", { name: "Start" }));
+    const panel = screen.getByRole("complementary", { name: "Triggers" });
+    await userEvent.click(within(panel).getByRole("button", { name: "＋ Field" }));
+    expect(settings()?.input_schema).toEqual({ type: "object", properties: { field_1: { type: "string" } } });
+    await userEvent.type(within(panel).getByRole("textbox", { name: "Label" }), "Site");
+    expect(settings()?.input_schema).toMatchObject({ properties: { field_1: { type: "string", title: "Site" } } });
+    await userEvent.click(within(panel).getByRole("heading", { name: "Triggers" })); // focus leaves the field
+    await userEvent.keyboard("{Control>}z{/Control}");
+    expect(settings()?.input_schema).toEqual({ type: "object", properties: { field_1: { type: "string" } } }); // the label's typing, whole
+    await userEvent.keyboard("{Control>}z{/Control}");
+    expect(settings()?.input_schema).toBeUndefined();
+  });
+
+  it("keeps JSON it can't save as an edit not applied: counted, listed as Triggers', and gone to in the panel", async () => {
+    await show();
+    await userEvent.click(screen.getByRole("button", { name: "Start" }));
+    const panel = screen.getByRole("complementary", { name: "Triggers" });
+    await userEvent.click(within(panel).getByRole("button", { name: "Edit as JSON" }));
+    const box = within(panel).getByRole("textbox", { name: "The input's schema and CSV columns" });
+    await userEvent.clear(box);
+    await userEvent.type(box, "{{");
+    expect(panel.textContent).toContain("This isn't valid JSON, so it isn't saved.");
+    await userEvent.click(screen.getByRole("button", { name: "1 edit not applied" }));
+    const list = screen.getByRole("complementary", { name: "Edits not applied" });
+    expect(list.textContent).toContain("Triggers · The input as JSON");
+    await userEvent.click(within(list).getByRole("button", { name: "Go to it: Triggers · The input as JSON" }));
+    const back = screen.getByRole("complementary", { name: "Triggers" });
+    expect(within(back).getByRole<HTMLTextAreaElement>("textbox", { name: "The input's schema and CSV columns" }).value).toBe("{");
+  });
+
+  it("never writes JSON typed over an input an undo changed since, until Apply here", async () => {
+    // The review of revision 1, through the editor's own actions: its stale check, and Apply here.
+    await show();
+    await userEvent.click(screen.getByRole("button", { name: "Start" }));
+    const panel = screen.getByRole("complementary", { name: "Triggers" });
+    await userEvent.click(within(panel).getByRole("button", { name: "＋ Field" }));
+    await userEvent.click(within(panel).getByRole("button", { name: "Done" }));
+    await userEvent.click(within(panel).getByRole("button", { name: "Edit as JSON" }));
+    const box = within(panel).getByRole("textbox", { name: "The input's schema and CSV columns" });
+    await userEvent.clear(box);
+    await userEvent.paste("{");
+    await userEvent.click(within(panel).getByRole("heading", { name: "Triggers" })); // focus leaves the text
+    await userEvent.keyboard("{Control>}z{/Control}"); // the field's addition undone, under the JSON
+    expect(settings()?.input_schema).toBeUndefined();
+    await userEvent.click(box);
+    await userEvent.paste('"input_schema": {"type": "object"}}');
+    expect(settings()?.input_schema).toBeUndefined();
+    expect(panel.textContent).toContain(STALE);
+    await userEvent.click(within(panel).getByRole("button", { name: "Apply here: The input as JSON" }));
+    expect(settings()?.input_schema).toEqual({ type: "object" });
+  });
+
+  it("shows a viewer the triggers read only, and says why", async () => {
+    role = "viewer";
+    await show();
+    await userEvent.click(screen.getByRole("button", { name: "Start" }));
+    const panel = screen.getByRole("complementary", { name: "Triggers" });
+    expect(panel.textContent).toContain("You can see this workflow's triggers; changing them needs the editor role.");
+    expect(within(panel).queryByRole("button", { name: "＋ Field" })).toBeNull();
+    expect(within(panel).queryByRole("button", { name: "＋ Schedule" })).toBeNull();
+    expect(within(panel).getByRole("button", { name: "Show as JSON" })).toBeTruthy();
+  });
 });

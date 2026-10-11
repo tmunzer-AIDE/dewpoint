@@ -5,22 +5,29 @@
 // with its reason, while it can't.
 import {
   admission, formula, formulaProblem, keyProblem, literal, parseJson, renameEntry, renameKey, renamePort, rootOf,
-  setConfig, setOptions, valueAt, type Changed,
+  setAt, setConfig, setOptions, valueAt, type Changed,
 } from "./config";  // prettier-ignore
+import { csvOf, csvProblem, rowsLimit, sizeLimit, textProblem } from "./csv";
 import { findNode, idKey, portOf, sameId } from "./graph";
 import { isGroup, valueProblem, write, type Condition } from "./builder";
+import { inputOf, nameProblem, renameField, setSettings } from "./input";
+import { readInput } from "./inputJson";
 import { valueOf, type Segments } from "./pills";
 import { isObject, type Path } from "./schemaForm";
 import type { GraphDoc, GraphEdge, GraphNode, NodeType } from "./workflows";
+
+/** The Triggers panel's edits are the editor's too (4c-3b; ruling 113): kept under this name where a step's id goes,
+ * at a pointer into the draft's settings (`/settings/csv/columns/1/default`), their path the same from `settings`. */
+export const TRIGGERS = "triggers";
 
 export type UnappliedKind =
   | "text" | "template" | "condition" | "json" | "number" | "formula" | "port" | "name" | "key" | "limit";  // prettier-ignore
 
 export interface Unapplied {
   id: string; // unappliedId(node, kind, pointer)
-  node: string; // the step's id, as the draft writes it
+  node: string; // the step's id, as the draft writes it; TRIGGERS for the Triggers panel's
   kind: UnappliedKind;
-  pointer: string; // where it goes: in the step's config; "/options/<name>" for a limit; "" for the key
+  pointer: string; // where it goes: in the step's config; "/options/<name>" for a limit; "" for the key; "/settings/…"
   path: Path; // the same as a path: a limit's is [its name]; a name's is its map's; the key's is []
   label: string; // the field's label, for the question that lists it
   text: string;
@@ -56,6 +63,12 @@ export const STALE = "Not applied: what's here changed since this was typed (an 
  * a port's or the key's name, a limit; for an entry's name, whether the entry is still there. Its place is a pointer,
  * and an undo can put another item there: an edit is applied only where its base still is (the review of revision 3). */
 export function baseOf(doc: GraphDoc, u: Pick<Unapplied, "node" | "kind" | "path" | "from">): string {
+  if (u.node === TRIGGERS) {
+    const at = valueAt(doc.settings ?? {}, u.path);
+    if (u.kind === "name") return JSON.stringify(isObject(at) && Object.hasOwn(at, u.from ?? ""));
+    if (u.kind === "json") return JSON.stringify([inputOf(doc), csvOf(doc)]);
+    return JSON.stringify(at) ?? "undefined";
+  }
   const node = findNode(doc, u.node);
   if (!node) return "gone";
   if (u.kind === "key") return JSON.stringify(node.key);
@@ -69,9 +82,8 @@ export function baseOf(doc: GraphDoc, u: Pick<Unapplied, "node" | "kind" | "path
  * item's. Equal values in two items, or a list rebuilt by a move, give other roots (the review of revision 4); an edit
  * in place beside it, which keeps them, doesn't. Maps are keyed by name, so they aren't part of it. */
 export function lineageOf(doc: GraphDoc, u: Pick<Unapplied, "node" | "path">): unknown[] {
-  const node = findNode(doc, u.node);
   const out: unknown[] = [];
-  let at: unknown = node?.config ?? {};
+  let at: unknown = u.node === TRIGGERS ? (doc.settings ?? {}) : (findNode(doc, u.node)?.config ?? {});
   for (const key of u.path) {
     if (typeof key === "number" && Array.isArray(at)) {
       const item = (at as unknown[])[key];
@@ -186,8 +198,56 @@ function attempt(doc: GraphDoc, node: GraphNode, u: Unapplied, type: NodeType | 
   }
 }
 
+const GONE = "Not applied: what it was typed in is no longer in the input.";
+
+/** A Triggers panel edit applied to the draft's settings, or why it can't be. What it was typed in must still be
+ * there: written into a field or a column that went, it would make one up. */
+function attemptSettings(doc: GraphDoc, u: Unapplied): Applied | { problem: string } {
+  const settings = doc.settings ?? {};
+  if (u.kind !== "json" && !isObject(valueAt(settings, u.path.slice(0, -1)))) return { problem: GONE };
+  const at = (value: unknown): Applied => ({ doc: { ...doc, settings: setAt(settings, u.path, value) as GraphDoc["settings"] }, dropped: [], said: null, note: null });
+  const made = (next: GraphDoc): Applied => ({ doc: next, dropped: [], said: null, note: null });
+  switch (u.kind) {
+    case "json": {
+      const read = readInput(u.text);
+      if ("problem" in read) return { problem: read.line === null ? read.problem : `Line ${read.line}: ${read.problem}` };
+      return made(setSettings(doc, { input_schema: read.value.input_schema, csv: read.value.csv }));
+    }
+    case "name": {
+      const schema = inputOf(doc);
+      if (!isObject(schema.properties) || !Object.hasOwn(schema.properties, u.from ?? "")) return { problem: GONE };
+      const to = u.text.trim();
+      const problem = nameProblem(schema, u.from ?? null, to);
+      return problem ? { problem } : made(setSettings(doc, { input_schema: renameField(schema, u.from ?? "", to) }));
+    }
+    case "number": {
+      const parsed = parseNumber(u.text, u.whole ?? false);
+      return "problem" in parsed ? parsed : at(parsed.value);
+    }
+    case "text": { // a CSV column's header or name
+      const key = u.path.at(-1);
+      if (key !== "header" && key !== "name") return { problem: GONE };
+      const problem = textProblem(key, u.text);
+      return problem ? { problem } : at(u.text);
+    }
+    case "limit": { // a CSV file's most rows, or its largest file in MB; empty leaves it to the platform's
+      const read = u.path.at(-1) === "max_bytes" ? sizeLimit(u.text) : rowsLimit(u.text);
+      return "problem" in read ? read : at(read.value);
+    }
+    default:
+      return { problem: GONE };
+  }
+}
+
 /** The draft with the edit applied, or why it can't be: its own rule, or the graph's admission (ruling 7). */
 export function applyUnapplied(doc: GraphDoc, u: Unapplied, type: NodeType | undefined): Applied | { problem: string } {
+  if (u.node === TRIGGERS) {
+    if (isStale(doc, u)) return { problem: STALE };
+    const result = attemptSettings(doc, u);
+    if ("problem" in result) return result;
+    const refused = admission(result.doc) ?? csvProblem(result.doc.settings?.csv);
+    return refused === null ? result : { problem: refused };
+  }
   const node = findNode(doc, u.node);
   if (!node) return { problem: "Its step is no longer in the draft." };
   if (isStale(doc, u)) return { problem: STALE };

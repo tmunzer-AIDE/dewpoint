@@ -1,18 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
-// "New workflow" (screen 1b; 4b ruling 1): a name, then Blank or Import from file. The trigger step ("What starts
-// it?") comes with 4c's trigger setup, "Describe it" with sub-project 5; "From template" waits for curated templates
-// (D9). A native modal dialog (D23): focus moves in and back, Escape closes.
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "@tanstack/react-router";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+// "New workflow" (screen 1b; 4b ruling 1; 4c-3b's "What starts it?", the NewWorkflow board): what starts it, then
+// Blank or Import from file, then a name. What starts it seeds the draft and opens the new workflow on its Triggers: a
+// Mist webhook gives the input its topic's shape and binds the endpoint at once; a CSV file declares one column to
+// define; a schedule waits for a first version. An imported file keeps its own input (the owner's ruling), its webhook
+// still bound. "Describe it" comes with sub-project 5; "From template" waits for curated templates (D9). A native modal
+// dialog (D23): focus moves in and back, Escape closes.
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link, useNavigate } from "@tanstack/react-router";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Button } from "../components/Button";
-import { Field } from "../components/Field";
+import { Field, Select } from "../components/Field";
 import { announce } from "../lib/announce";
 import { ApiError, client, ok } from "../lib/client";
-import type { WorkflowDocument } from "../lib/workflows";
+import { newCsv } from "../lib/csv";
+import { asGraph } from "../lib/graph";
+import { setSettings } from "../lib/input";
+import { createBinding, endpointsQuery, possessive, senderName, triggerTypesQuery } from "../lib/triggers";
+import type { WorkflowDetail, WorkflowDocument } from "../lib/workflows";
 import { ImportBindings, UNBOUND, useBindingChoices, type Chosen } from "./ImportBindings";
 
 type Start = "blank" | "import";
+type Trigger = "hand" | "schedule" | "webhook" | "csv";
 
 // The API's `WorkflowDocument`, `Binding` and `BindingSite` (Task 5), mirrored: a file that passes here passes the
 // model there, and the API's own refusals are about the graph and the bindings, not the envelope.
@@ -95,21 +103,38 @@ function explain(e: unknown, doc: WorkflowDocument | null): string {
 const bound = (chosen: Chosen): Record<string, string> =>
   Object.fromEntries(Object.entries(chosen).filter(([, value]) => value !== UNBOUND));
 
-const CHOICE = "flex cursor-pointer flex-col gap-1 rounded-lg border border-line-strong bg-surface p-4 has-[:checked]:border-accent has-[:checked]:bg-accent-soft";
+const CHOICE = "flex cursor-pointer flex-col gap-1 rounded-lg border border-line-strong bg-surface p-4 has-[:checked]:border-accent has-[:checked]:bg-accent-soft has-[:disabled]:cursor-not-allowed";
+/** A choice with controls of its own: the box around them, the label naming the radio alone (the final review). */
+const CHOICE_BOX = "flex flex-col gap-1 rounded-lg border border-line-strong bg-surface p-4 has-[:checked]:border-accent has-[:checked]:bg-accent-soft";
+
+/** A workflow made, and what of its triggers wasn't: the dialog stays to say so, with the way to open it. */
+type Partly = { wf: WorkflowDetail; missed: string };
 
 export function NewWorkflow({ tenantId, onClose }: { tenantId: string; onClose: () => void }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const qc = useQueryClient();
   const navigate = useNavigate();
   const [name, setName] = useState("");
+  const [trigger, setTrigger] = useState<Trigger>("hand");
   const [start, setStart] = useState<Start>("blank");
   const [doc, setDoc] = useState<WorkflowDocument | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
   const [chosen, setChosen] = useState<Chosen>({});
   const [error, setError] = useState<string | null>(null);
+  const [partly, setPartly] = useState<Partly | null>(null);
   const choices = useBindingChoices(tenantId, doc?.bindings ?? []);
   const [reading, setReading] = useState(false);
   const selection = useRef(0); // the latest file chosen: an earlier one's read, answering late, changes nothing
+  // The webhook trigger plugins declare (Mist's), and this tenant's endpoints made for it.
+  const types = useQuery(triggerTypesQuery);
+  const endpoints = useQuery(endpointsQuery(tenantId));
+  const webhook = (types.data ?? []).find((t) => Object.keys(t.topics).length > 0);
+  const senders = (endpoints.data?.endpoints ?? []).filter((e) => webhook && e.trigger === webhook.key);
+  const [endpointId, setEndpointId] = useState<string | null>(null);
+  const [topic, setTopic] = useState<string | null>(null);
+  const endpoint = senders.find((e) => e.id === endpointId) ?? senders[0] ?? null;
+  const topics = webhook ? Object.keys(webhook.topics) : [];
+  const shownTopic = topic ?? topics[0] ?? null;
   // Whether this dialog still speaks for the screen. Once it's dismissed, or gone with its tenant's screen, a creation
   // that answers late refreshes that tenant's list but neither opens the workflow nor announces it. Dismissing never
   // cancels the request: the server may still create the workflow (the owner's review of milestone 3).
@@ -125,24 +150,60 @@ export function NewWorkflow({ tenantId, onClose }: { tenantId: string; onClose: 
     const d = dialog.current;
     if (d && !d.open) {
       d.showModal();
-      d.querySelector<HTMLInputElement>("input[name='name']")?.focus();
+      d.querySelector<HTMLInputElement>("input[name='trigger']:checked")?.focus();
     }
   }, []);
 
+  const open = (wf: WorkflowDetail) =>
+    navigate({ to: "/t/$tenantId/workflows/$workflowId", params: { tenantId, workflowId: wf.id }, search: { triggers: true } });
+
+  /** The new draft seeded with what starts it: a webhook topic's shape, or a CSV file of one column. An import keeps
+   * its own input. */
+  async function seed(wf: WorkflowDetail) {
+    if (start !== "blank" || (trigger !== "webhook" && trigger !== "csv")) return;
+    const draft = asGraph(wf.draft);
+    const next = trigger === "csv" ? setSettings(draft, { csv: newCsv() }) : setSettings(draft, { input_schema: webhook!.topics[shownTopic!] });
+    await ok(
+      client.PUT("/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft", {
+        params: { path: { tenant_id: tenantId, workflow_id: wf.id }, header: { "If-Match": String(wf.draft_revision) } },
+        body: next,
+      }),
+    );
+  }
+
   const create = useMutation({
-    mutationFn: () => {
+    mutationFn: async () => {
       const path = { params: { path: { tenant_id: tenantId } } };
-      return start === "blank"
-        ? ok(client.POST("/api/v1/t/{tenant_id}/workflows", { ...path, body: { name: name.trim() } }))
-        : ok(client.POST("/api/v1/t/{tenant_id}/workflows/import", { ...path, body: { name: name.trim(), document: doc!, bind: bound(chosen) } }));
+      const wf = start === "blank"
+        ? await ok(client.POST("/api/v1/t/{tenant_id}/workflows", { ...path, body: { name: name.trim() } }))
+        : await ok(client.POST("/api/v1/t/{tenant_id}/workflows/import", { ...path, body: { name: name.trim(), document: doc!, bind: bound(chosen) } }));  // prettier-ignore
+      // Made: what follows can fail without unmaking it, and says so (the dialog stays, with the way to open it).
+      try {
+        await seed(wf);
+      } catch {
+        return { wf, missed: trigger === "csv" ? "its CSV file wasn't added" : `its input wasn't given ${possessive(shownTopic ?? "the topic")} shape` };
+      }
+      if (trigger === "webhook" && endpoint && webhook && shownTopic) {
+        try {
+          await createBinding(tenantId, endpoint.id, { workflow_id: wf.id, filter: [{ pointer: webhook.topic_pointer, value: shownTopic }] });
+        } catch {
+          return { wf, missed: `its webhook from ${endpoint.name} wasn't added` };
+        }
+      }
+      return { wf, missed: null };
     },
     onMutate: () => setError(null),
-    onSuccess: async (wf) => {
+    onSuccess: async ({ wf, missed }) => {
       await qc.invalidateQueries({ queryKey: ["workflows", tenantId] });
       if (!live.current) return;
+      if (missed) {
+        setPartly({ wf, missed });
+        announce(`Created ${wf.name}, but ${missed}`);
+        return;
+      }
       announce(`Created ${wf.name}`);
       dialog.current?.close();
-      await navigate({ to: "/t/$tenantId/workflows/$workflowId", params: { tenantId, workflowId: wf.id } });
+      await open(wf);
     },
     onError: (e) => setError(explain(e, doc)),
   });
@@ -181,9 +242,38 @@ export function NewWorkflow({ tenantId, onClose }: { tenantId: string; onClose: 
   }
 
   // An import waits for what its bindings are chosen from, and for a choice for each: unbound is chosen, never the
-  // default, nor a lookup that failed (ruling 28).
+  // default, nor a lookup that failed (ruling 28). A webhook waits for its endpoint and topic.
   const chosenAll = doc !== null && doc.bindings.every((b) => chosen[b.id] !== undefined);
-  const ready = name.trim().length > 0 && (start === "blank" || (chosenAll && choices.state === "ready"));
+  const webhookReady = trigger !== "webhook" || (endpoint !== null && shownTopic !== null);
+  const ready = name.trim().length > 0 && webhookReady && (start === "blank" || (chosenAll && choices.state === "ready"));
+  const sender = webhook ? senderName(webhook) : null;
+  const opens =
+    trigger === "webhook" && endpoint && shownTopic
+      ? start === "blank"
+        ? `It opens on its Triggers: the input is ${possessive(shownTopic)} shape, and the webhook is bound to ${endpoint.name}.`
+        : `It opens on its Triggers, its webhook bound to ${endpoint.name}; the file's input stays as it is.`
+      : trigger === "csv" ? "It opens on its Triggers, with a CSV file of one column to define."
+      : trigger === "schedule" ? "It opens on its Triggers: a schedule can be added once a first version is published."
+      : "It opens on its Triggers: by hand, its input is the run's form.";  // prettier-ignore
+
+  const named = (value: Trigger, label: string, hint: string, disabled: boolean, className: string) => (
+    <label className={className}>
+      <span className="flex items-center gap-2">
+        <input type="radio" name="trigger" value={value} checked={trigger === value} disabled={disabled} onChange={() => setTrigger(value)} />
+        <span className="font-semibold">{label}</span>
+      </span>
+      <span className="text-small text-muted">{hint}</span>
+    </label>
+  );  // prettier-ignore
+  const radio = (value: Trigger, label: string, hint: string, disabled = false) => named(value, label, hint, disabled, CHOICE);
+  /** A choice whose controls sit beside its label, never inside it: a label names its radio alone, and the box is the
+   * same whether they show or not, so the radio keeps its focus (the final review). */
+  const boxed = (value: Trigger, label: string, hint: string, disabled: boolean, extra: ReactNode) => (
+    <div className={CHOICE_BOX}>
+      {named(value, label, hint, disabled, `flex flex-col gap-1 ${disabled ? "cursor-not-allowed" : "cursor-pointer"}`)}
+      {extra}
+    </div>
+  );  // prettier-ignore
 
   return (
     <dialog
@@ -197,9 +287,31 @@ export function NewWorkflow({ tenantId, onClose }: { tenantId: string; onClose: 
     >
       <form onSubmit={submit} className="flex flex-col gap-5">
         <h2 id="new-workflow-title" className="text-h3 font-semibold">New workflow</h2>
-        <Field label="Name" name="name" required maxLength={100} value={name} onChange={(e) => setName(e.target.value)} />
         <fieldset className="flex flex-col gap-2">
-          <legend className="mb-1 text-small font-semibold">How do you want to start?</legend>
+          <legend className="mb-1 text-small font-semibold">What starts it?</legend>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            {radio("hand", "By hand", "Someone starts it, filling in a form.")}
+            {radio("schedule", "On a schedule", "Set once a first version is published.")}
+            {boxed(
+              "webhook", sender ? `A ${sender} webhook` : "A webhook",
+              senders.length > 0 ? `Runs for each event of a topic ${sender ?? "it"} sends.` : "No endpoint for it yet: Settings › Webhook endpoints makes one.",
+              senders.length === 0,
+              trigger === "webhook" && senders.length > 0 && (
+                <span className="flex flex-col gap-2 pt-1">
+                  <Select label="Endpoint" value={endpoint?.id ?? ""} onChange={(e) => setEndpointId(e.target.value)}>
+                    {senders.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                  </Select>
+                  <Select label="Topic" value={shownTopic ?? ""} onChange={(e) => setTopic(e.target.value)}>
+                    {topics.map((t) => <option key={t} value={t}>{t}</option>)}
+                  </Select>
+                </span>
+              ),
+            )}
+            {radio("csv", "A CSV file", "Someone starts it with a file: one run reads its rows.")}
+          </div>
+        </fieldset>
+        <fieldset className="flex flex-col gap-2">
+          <legend className="mb-1 text-small font-semibold">Then</legend>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <label className={CHOICE}>
               <span className="flex items-center gap-2">
@@ -215,7 +327,10 @@ export function NewWorkflow({ tenantId, onClose }: { tenantId: string; onClose: 
                 <input type="radio" name="start" value="import" checked={start === "import"} onChange={() => setStart("import")} />
                 <span className="font-semibold">Import from file</span>
               </span>
-              <span className="text-small text-muted">A workflow exported from Dewpoint. Its connections are bound to yours.</span>
+              <span className="text-small text-muted">
+                A workflow exported from Dewpoint. Its connections are bound to yours.
+                {trigger === "webhook" && " An imported workflow keeps its own input; its Triggers say if the webhook's events don't fit it."}
+              </span>
             </label>
           </div>
         </fieldset>
@@ -230,14 +345,32 @@ export function NewWorkflow({ tenantId, onClose }: { tenantId: string; onClose: 
             {doc && <ImportBindings bindings={doc.bindings} choices={choices} chosen={chosen} onChange={setChosen} />}
           </div>
         )}
+        <Field label="Name" name="name" required maxLength={100} value={name} onChange={(e) => setName(e.target.value)} />
+        <p className="text-small text-muted">{opens}</p>
+        {trigger === "webhook" && senders.length === 0 && (
+          <p className="text-small">
+            <Link to="/t/$tenantId/settings/webhooks" params={{ tenantId }} className="text-accent-ink underline">Settings › Webhook endpoints</Link> makes one.
+          </p>
+        )}
         {error && <p role="alert" className="text-body text-danger">{error}</p>}
+        {partly && (
+          <div role="alert" className="flex flex-wrap items-center gap-3 text-body text-danger">
+            <span>Created {partly.wf.name}, but {partly.missed}: open it, and add it in its Triggers.</span>
+            <Button size="sm" onClick={() => {
+              dialog.current?.close();
+              void open(partly.wf);
+            }}>
+              Open {partly.wf.name}
+            </Button>
+          </div>
+        )}
         <div className="flex justify-end gap-2">
           <Button onClick={() => dialog.current?.close()}>Cancel</Button>
-          <Button variant="primary" type="submit" disabled={!ready || create.isPending}>
+          <Button variant="primary" type="submit" disabled={!ready || create.isPending || partly !== null}>
             {start === "blank" ? "Create and open" : "Import and open"}
           </Button>
         </div>
       </form>
     </dialog>
-  );
+  );  // prettier-ignore
 }

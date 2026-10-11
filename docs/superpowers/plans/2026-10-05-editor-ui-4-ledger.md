@@ -2387,3 +2387,243 @@ Test first: the chain test expecting 0070 failed (the head was 0054), then passe
 test (which runs Alembic) and the webhook API tests: 951 passed; ruff and mypy clean.
 
 For the owner: 2b-4b's branch also names 0048 and 0049, which this ledger's slot table reserves for B4b and B8.
+
+### 4c-3b plan accepted (2026-10-11, in chat)
+
+`docs/superpowers/plans/2026-10-11-editor-ui-4c3b-triggers-ui.md`, revision 6. Reviews pasted in chat held revision 1
+for six P2 findings, revision 2 for four, revision 3 for three, revision 4 for one and revision 5 for one; each revision
+answered them with a test that fails on the previous revision's code, and a pasted review signed off revision 6 on the
+review side (no rulings accepted by it). The owner, asked in chat, accepted revision 6 and adopted its rulings 1–12,
+which join this ledger as 147–158, copied as ruled; chose inline execution with the milestone pauses (after Milestone
+2, the panel's screenshots; a fresh review at the end); the branch `feat/editor-4c3b` from origin/main (b1183473), the
+plan's docs branch merged in; the frontend's locked offline install. The owner gave the go to commit as the plan says.
+Push and a PR stay the owner's decisions.
+
+147. **Accepted. The start card opens Triggers** (Task 7).
+     - A click or Enter opens the Triggers panel, for every role; the card says `aria-expanded`.
+     - It sums up what starts a run: "By hand · 2 schedules · 1 webhook", "By hand, with a CSV file" (the draft's
+       file, the live rows; the workflow's own counts until they're read). Its name starts with that: "Start: by hand, 2
+       schedules. Open its triggers".
+     - Its "+" stays the empty canvas's alone, as now, named "Add the first step" as now: the Main board's "+" under a
+       card with steps would sit on the entry edge's own "+". A step beside the first ones is `A` on the card, or the
+       toolbar's ＋ Add step with the card focused: its full-size form (WCAG 2.5.8), amending M32.
+     - Why: the owner's design (the start card opens Triggers). Cost: the 4b flows that added a step by pressing Enter
+       on the card press `A` (their browser flows change).
+148. **Accepted. The Triggers panel** (Tasks 7, 9, 11). A side panel, as Declassify: Input, Schedules and Webhooks in
+     one column; Close and Escape give focus back to the start card. A viewer or an operator sees it all, read only, and
+     one line says why (the ReadOnly board); so does a version's view, its input the version's. A new workflow opens on
+     it (`?triggers`). Why: the Main board. Cost: none known.
+149. **Accepted. The input as form fields** (Task 7).
+     - `settings.input_schema`'s own fields of a plain type (Text, Whole number, Number, Yes or no, Choice, Date and
+       time) are rows a field editor changes; any other (a list, an object of fields, one with rules of its own) is a
+       row the list shows read only, and Edit as JSON changes.
+     - Each control writes as it changes, a control's typing one undo step (ruling 8's marks). A name is held while it's
+       typed and applied when focus leaves it or Enter is pressed; the list writes identifier names only (JSON writes
+       any). A number's default is held while it doesn't parse.
+     - A sensitive field has no default and can't be a Choice (the server's `sensitive.default`, `sensitive.literal`):
+       the editor takes the default away and says why, as the boards do.
+     - Focus goes back to what opened a part once it closes (WCAG 2.4.3): to a field's or a column's Edit, to ＋ Field
+       or ＋ Column once it's removed, to Edit as JSON, to "Use a Mist event…"; an editor opened takes it on its
+       first control, and the JSON on its text. A rename keeps the field's editor as it is: focus where it went, a click
+       in it landing.
+     - Why: the InputFields board. Cost: a field with a rule the list doesn't know is edited as JSON.
+150. **Accepted. The panel's held text is the editor's** (Task 5): ruling 113, for workflow settings. JSON being typed,
+     a field's name, a column's header or name, a number, a CSV file's limits: held under the editor's `TRIGGERS`
+     ("triggers") at a pointer into the settings; counted in the toolbar, listed as "Triggers · …", "Go to it"
+     opening the panel there, applied at every exit as a step's, never into a field or a column that went, and stale
+     once a removal moved the columns. Typed over what has since changed (an undo, another edit, a column removed before
+     it), it's never written as it's typed, whatever the type of what's now there: it stays held, said stale, until
+     Apply here or Discard, as a step's does (ruling 18). Why: ruling 113 says what counts, not where. Cost: one more
+     kind of place in the held edits' code.
+151. **Accepted. Nothing a save would refuse is written** (Tasks 4, 5, 7). A draft's save parses the whole graph
+     strictly (engine/graph/model.py's `CsvSettings`, `CsvColumn`), so a CSV declaration outside its bounds would fail
+     the save whole: `csvProblem` holds the panel's writes to them (1 to 200 columns; a header of 1 to 200 characters
+     and a name of 1 to 63; a known type; at most 200 values of at most 200 characters; 1 to 10,000 rows; 1 byte to 5
+     MB), as `admission` holds a step's writes to the graph's. Every other rule (unique headers, an identifier name, a
+     required column's default) is the server's to say, at its field. Why: D19. Cost: two copies of the bounds, the
+     server's and this one, kept equal by hand.
+152. **Accepted. A Mist event's shape** (Task 8). "Use a Mist event…" copies a topic's schema from `/trigger-types`
+     into the draft whole, one undo step. While the input is a topic's shape (equal, keys' order aside), it shows as
+     that event's shape, read only: its own fields, then one event's, "may be missing" where not required. "Use form
+     fields instead" gives an empty list. Why: the InputMist board. Cost: an input edited away from the shape by one key
+     shows as fields.
+153. **Accepted. The CSV file** (Task 8). "＋ CSV file" declares one text column ("Column 1", `column_1`): a
+     declaration has one at least, so its last column can't be removed (the file can). A column is edited in its row; a
+     required column's default shows the server's problem with "Clear the default" and "Make it optional" (the InputEdit
+     board). Why: the boards. Cost: none known.
+154. **Accepted. Schedules** (Task 9).
+     - Each says its timing in words ("Every day at 07:00", "At 0 */6 * * 1-5"), its zone where one applies (a cron's),
+       its mode, off, custom, synced; then what its sync proves (4c-3a ruling 6): failed (its previous time may still
+       fire; never confirmed, it may already fire, or isn't running yet when nothing ever unpaused it), saved but not
+       yet confirmed; and the firings it missed, as counted.
+     - Its form's When writes a cron in the schedule's zone (Every day at, Weekdays at, Custom) or an interval counted
+       in UTC (Every N minutes, Every N hours); a cron no preset says opens as Custom. An interval no preset says back
+       exactly (not whole minutes, a first run past the first day) opens as itself, "Every 90 seconds, as it is", kept
+       until another When is chosen; an edit sends the timing only when it changed here. The time zone is the browser's
+       list (its own zone first), the server checking it. Each refusal of the timing (`schedule_invalid`'s codes) is
+       said at its field, in the boards' words.
+     - Its input is entered on the published version's start form, a required field checked before anything is sent: a
+       field the simple controls can't hold (a list, an object, several types or none) as JSON, its value's type kept; a
+       choice's value keeps its type; what isn't given is left out. An input whose rules the fields can't show (any
+       keyword at its root but its properties, required and annotations: `allOf`, `$ref`, `if`…) is entered whole, as
+       JSON, an object; so is any input, on request ("Enter it as JSON"). How it's entered is settled before anything is
+       typed; what's typed goes with a switch either way, but a value no field shows as written (an empty text: an empty
+       control is "not given"; a line break: a one-line field drops it) stays JSON; JSON a parse would change is
+       refused; every key is kept as typed, `__proto__` too. Editing one keeps its stored input unless "Replace the
+       input…" replaces it whole; only what changed is sent.
+     - ＋ Schedule is disabled, with why, before a first publish and while the published version takes a CSV file.
+     - Why: the Schedules, ScheduleForm, ScheduleWhen and Rules boards. Cost: a timing no preset says is kept, not
+       edited (choosing a preset replaces it); a structured input is typed as JSON.
+155. **Accepted. Settings → Webhook endpoints** (Task 10).
+     - A tab and a page (`/t/$tenantId/settings/webhooks`), and a palette item. Each endpoint's name, sender, proof,
+       workflows, waiting events, on or off and path; at 320 px, stacked rows. Its details: the workflows it starts
+       (with their topics), its path "on your Dewpoint webhook address", Copy the path, Edit, Rotate….
+     - A Mist endpoint is made from its name (and optional limits); another sender's says its proof, where its events
+       are and where their ids are, each fixed once made, and the form says what will be fixed before Create.
+     - A token or a signing secret is shown once, in a status region; rotating asks first. Turned off, never deleted.
+     - "This deployment doesn't receive webhooks yet: only development deployments do, for now." outside a development
+       deployment.
+     - The Workflows count reads each endpoint's bindings: one request an endpoint.
+     - Why: the Endpoints, EndpointNew and EndpointOther boards. Cost: a tenant with many endpoints makes as many reads.
+156. **Accepted. Webhooks** (Task 11).
+     - Each binding with its endpoint, its sender and when it runs (B13). A Mist binding is compared with the published
+       version's input: when that isn't the topic's shape, "Version 3's input isn't device-events' shape: events it
+       doesn't fit are refused", never that they don't fit (a looser input may take them); "Use device-events' shape for
+       the input" changes the draft, then "In the draft: it applies once published". Another sender's: "Its events have
+       no known shape: the input must fit them, or each is refused". Before a first publish: its events are refused.
+     - Its form: an endpoint (one that already starts this workflow can't be picked), then a Mist topic and "Use this
+       topic's shape for the input", or another sender's conditions (8 at most; a value as written: 1 a number, true a
+       yes, "1" in quotes text).
+     - **Editing one** isn't on a board: the same form, its endpoint fixed, with Save and "Remove the webhook…" asked
+       first, as a schedule's delete is. A binding shows by its topic only when its filter is that topic alone; any
+       other filter shows as its conditions, kept as they are; nothing shows before the endpoint's sender is known, and
+       when that can't be loaded the form says so, with Try again, and adds nothing for that endpoint. Each value shows
+       so that reading it again gives it back exactly: `" HQ "` keeps its spaces, text in quotes is JSON text.
+     - Why: the Webhooks and Rules boards, and the owner's ruling (warned at the binding). Cost: editing is the boards'
+       form, extrapolated.
+157. **Accepted. New workflow: "What starts it?"** (Task 12). By hand, On a schedule, A Mist webhook (an endpoint made
+     for it and a topic; disabled, saying where one's made, while there's none), A CSV file; then Blank or Import from
+     file; then the name, in the board's order, focus starting on what starts it.
+     - Blank with a Mist webhook gives the input the topic's shape; with a CSV file, a file of one column; an import
+       keeps the file's input (the owner's ruling), its webhook still bound. It opens on its Triggers.
+     - What fails once the workflow is made (the draft's seed, the binding) is said in the dialog, with "Open <name>".
+     - Why: the NewWorkflow board and the owner's choices. Cost: a workflow can be made without its webhook, said.
+158. **Accepted. The list's Trigger column** (Task 13): after Name, from the summary's `triggers` (4c-3a ruling 141):
+     "Webhook", "2 schedules · 1 webhook", "CSV file" (the published version's), "By hand"; why a workflow needs
+     attention, under its name. Ruling 71's filters and columns stay: the board's On and Off filters aren't adopted, and
+     "Not published" stays the Version column's. Why: the WorkflowsList board within ruling 71. Cost: none known.
+
+Mid-slice rulings, where the code base differs from a step: M80 onward.
+
+### 4c-3b, milestone 1 (2026-10-11)
+
+Built inline on `feat/editor-4c3b` (worktree `scratchpad/ui4c3b/build`, from origin/main b1183473 with the plan merged,
+5517bf80; the frontend's locked offline install), test-first, each test seen failing as the plan's step says before its
+code:
+- Task 1 (d9359e96): this ledger: the plan accepted (rulings 147–158).
+- Task 2 (eadf159e): a schedule's timing; `./timing` missing, then 11 passed.
+- Task 3 (ba83991c): the trigger routes and their words; `./triggers` missing, then 15 passed.
+- Task 4 (2da308e3): the input as fields, and the CSV file; `./csv`, `./input` missing, then 18 passed.
+- Task 5 (464cb1a8): the input as JSON, and the panel's held edits; 5 failed, then 30 passed.
+- Task 6 (adcab07f): webhook endpoints in words; `./endpoints` missing, then 8 passed.
+
+The unit suite 891 passed (68 files); typecheck and lint clean. No mid-slice ruling: the code is the plan's, as written.
+
+### 4c-3b, milestone 2 (2026-10-11)
+
+- Task 7 (d7a11a87): the start card and the Triggers panel, its input as fields and as JSON; every `Editor.test.tsx`
+  test failed on the stand-in canvas's `start` (139) and `InputSection.test.tsx` couldn't import the panel, then the
+  editor's tests 336 passed (24 files).
+- Task 8 (c39a51fd): a Mist event's shape, and the CSV file; 8 failed, then the panel's tests 21 passed.
+
+The unit suite 918 passed (69 files); typecheck, lint and build clean. On the isolated stack, reset from this branch:
+the foundations' and the gate's checks (the CSP, the console, axe) 8 passed; the start card and the panel's input
+(its fields, a field edited, a Mist event's shape, a CSV file with a column edited, JSON held) drawn light and dark at
+1280 and 320 px, 24 screens, no console error, for the owner's review. No mid-slice ruling: the code is the plan's, as
+written. Paused for the owner before Task 9.
+
+### 4c-3b, milestone 3 (2026-10-11)
+
+Begun on the owner's word after the Milestone 2 review ("let's start it").
+- Task 9 (84825aac): schedules; 22 failed, then the panel's tests 43 passed (2 files).
+- Task 10 (58b70393): Settings → Webhook endpoints; `./WebhookEndpoints` missing and 2 failed, then 30 passed (3
+  files).
+- Task 11 (c65f246e): webhooks; 10 failed, then the panel's tests 53 passed (3 files).
+
+The unit suite 962 passed (72 files); typecheck and lint clean. No mid-slice ruling: the code is the plan's, as
+written.
+
+### 4c-3b, milestone 4 (2026-10-11)
+
+- Task 12 (ce7e443b): New workflow's "What starts it?"; 6 failed, then New workflow's, the editor's and the router's
+  tests 184 passed (3 files).
+- Task 13 (e0d83e63): the list's Trigger column; 1 failed, then the list's tests 10 passed.
+
+The unit suite 968 passed (72 files), as the plan's dry run counted; typecheck and lint clean. No mid-slice ruling:
+the code is the plan's, as written.
+
+### 4c-3b, milestone 5 and the final checkpoint (2026-10-11)
+
+- Task 9 (84825aac), Task 10 (58b70393), Task 11 (c65f246e): milestone 3, above.
+- Task 12 (ce7e443b), Task 13 (e0d83e63): milestone 4, above.
+- Task 14 (39b23e4b): the browser flows, the trigger flows and the 4b flows following the start card.
+
+Checks as run at 39b23e4b: the unit suite 968 passed (72 files); typecheck, lint, check:api (no OpenAPI change) and
+build clean; the browser gate on the isolated stack, reset from this branch, 43 passed (1.6 min, 201 s with the reset:
+the 6 trigger flows, the 29 workflow flows, the foundations' 2 and the gate's 6); local CodeQL, CI's versions, 0
+findings in python and 0 in javascript-typescript. The screens, after another reset: the Triggers panel's schedules
+(four made through the API: daily and live, every 15 minutes and simulated, a custom cron turned off, every 90
+seconds), a new schedule's form, the 90-second one's form ("as it is"), the webhooks (a Mist binding with its warning,
+another sender's), Settings → Webhook endpoints (the table, the details, a new endpoint of each kind, a token shown
+once), New workflow and the list; light and dark at 1280 and 320 px, 44 screens, no console error.
+
+Mid-slice ruling:
+
+M80. **Task 14's browser flows get a commit of their own** (39b23e4b), made once the browser gate passed: the plan's
+     Task 14 commits only its ledger section. Cost if wrong: one extra commit.
+
+Deferred: at 320 px the CSV column editor's autofocus scrolls the columns table 22 px, clipping its first header
+("eader"); P3 polish, as the Milestone 2 review graded it. A fresh review of the whole branch follows.
+
+### 4c-3b, after the final review (2026-10-11)
+
+A fresh review (fable) of b1183473..dd61faa0: no critical finding, three important, nine minor; ready with fixes.
+Re-graded by what a person gets, three minors became important: New workflow's nested labels, a filter value with a
+line break, refusals not describing their controls. The six were fixed in one pass (a7537698), each with a test that
+failed first:
+
+M81. **A decimal is kept as it's typed** in a CSV number column's default and in the file's limits: the control keeps
+     its own text while it still means the value, as a field's default does ("2.5" was written as 25; 1.5 MB was
+     refused). Task 8's blocks, a plan defect.
+M82. **Focus goes back where a person carries on** once a form closes: an edited schedule's Edit; a made or rotated
+     endpoint's token; an edited endpoint's Details, the one on screen. Tasks 9 and 10's blocks, a plan defect.
+M83. **A sender is named by its key while the trigger types are loading or couldn't be read**, never "An unknown
+     sender", which stays for a list that lacks it.
+M84. **A filter value with a line break is shown as JSON text**, which a one-line field keeps.
+M85. **A refused condition and a refused allowlist describe their controls** (`aria-describedby`).
+M86. **New workflow's webhook choice names its radio alone**: its endpoint and topic sit beside its label, in a box
+     that stays the same whether they show or not, so the radio keeps its focus.
+
+The unit suite 979 passed (72 files), three runs; typecheck, lint, check:api and build clean; the browser gate 43
+passed (1.7 min, 211 s); local CodeQL 0 findings in both languages, at a7537698.
+
+Deferred (minor): an unterminated string could run `pointerLines` past the text (unreachable today); Escape in the Mist
+topic picker closes the whole panel; "Go to it" doesn't focus a held CSV limit, and focuses a field's Name rather than
+its held Default; an interval schedule's PATCH carries `time_zone: "UTC"` when the stored zone differs (harmless); a
+schedule's Edit is disabled without its reason when the published form can't be read; the endpoints table shows "–"
+both while bindings load and when their read failed; the 320 px CSV column editor's table scroll (P3, Milestone 2).
+The review's set-aside lines stand as ruled in the execution ledger.
+
+### 4c-3b, after the review of the final head (2026-10-11)
+
+A review pasted in chat held 9c25ef89 for three findings, each fixed with a test that failed first (2056acd8):
+
+M87. **A condition's field with a line break is shown as JSON text**, which a one-line field keeps, and read back
+     exactly; a pointer never starts with a quote, so nothing typed reads two ways. Its row says it so too.
+M88. **A refusal is never folded away**: a Mist endpoint's optional settings open when the server refuses one of them,
+     and the first refused control takes focus.
+M89. **The list's pointer, the id's pointer and the id's header are described by their refusals**
+     (`aria-describedby`), as the conditions and the allowlist are.
+
+The unit suite 983 passed (72 files), two runs; typecheck, lint, check:api and build clean; the browser gate 43 passed
+(1.7 min, 204 s); local CodeQL 0 findings in both languages, at 2056acd8.

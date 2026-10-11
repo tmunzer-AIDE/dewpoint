@@ -13,6 +13,7 @@ import { MfaPage } from "./routes/Mfa";
 import { SecurityPage } from "./routes/Security";
 import { SettingsLayout } from "./routes/Settings";
 import { TenantsPage } from "./routes/Tenants";
+import { WebhookEndpointsPage } from "./routes/WebhookEndpoints";
 import { WorkflowsPage } from "./routes/Workflows";
 
 declare module "@tanstack/react-router" {
@@ -57,7 +58,8 @@ function Workflows() {
 
 function Editor() {
   const { tenantId, workflowId } = useParams({ from: "/app/t/$tenantId/workflows/$workflowId" });
-  return <LazyEditor key={`${tenantId}:${workflowId}`} tenantId={tenantId} workflowId={workflowId} />;
+  const search = editorRoute.useSearch();
+  return <LazyEditor key={`${tenantId}:${workflowId}`} tenantId={tenantId} workflowId={workflowId} openTriggers={search.triggers === true} />;
 }
 
 function Connections() {
@@ -78,6 +80,11 @@ function SettingsIndex() {
 function Members() {
   const { tenantId } = useParams({ from: "/app/t/$tenantId/settings/members" });
   return <MembersPage key={tenantId} tenantId={tenantId} />;
+}
+
+function WebhookEndpoints() {
+  const { tenantId } = useParams({ from: "/app/t/$tenantId/settings/webhooks" });
+  return <WebhookEndpointsPage key={tenantId} tenantId={tenantId} />;
 }
 
 const rootRoute = createRootRoute({ component: Outlet });
@@ -101,6 +108,9 @@ const editorRoute = createRoute({
   path: "/t/$tenantId/workflows/$workflowId",
   component: Editor,
   staticData: { compactRail: true },
+  // A new workflow opens on its Triggers (4c-3b, 1b's "What starts it?").
+  validateSearch: (search: Record<string, unknown>): { triggers?: true } =>
+    search.triggers === true || search.triggers === "true" ? { triggers: true } : {},
 });
 const connectionsRoute = createRoute({
   getParentRoute: () => appRoute,
@@ -111,6 +121,7 @@ const connectionsRoute = createRoute({
 const settingsRoute = createRoute({ getParentRoute: () => appRoute, path: "/t/$tenantId/settings", component: Settings });
 const settingsIndexRoute = createRoute({ getParentRoute: () => settingsRoute, path: "/", component: SettingsIndex });
 const membersRoute = createRoute({ getParentRoute: () => settingsRoute, path: "members", component: Members });
+const webhooksRoute = createRoute({ getParentRoute: () => settingsRoute, path: "webhooks", component: WebhookEndpoints });
 
 /** The app's routes; the router below serves them from the browser's history (tests serve them from memory). */
 export const routeTree = rootRoute.addChildren([
@@ -125,7 +136,7 @@ export const routeTree = rootRoute.addChildren([
     workflowsRoute,
     editorRoute,
     connectionsRoute,
-    settingsRoute.addChildren([settingsIndexRoute, membersRoute]),
+    settingsRoute.addChildren([settingsIndexRoute, membersRoute, webhooksRoute]),
   ]),
 ]);
 

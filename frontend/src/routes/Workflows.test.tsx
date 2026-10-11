@@ -11,7 +11,7 @@ const row = (over: Record<string, unknown>) => ({
   id: "w1", name: "Nightly", enabled: true, draft_revision: 3, active_version_id: "v2", active_version_number: 2,
   executable: true, blocked_by: [], created_at: "2026-10-01T00:00:00Z", updated_at: "2026-10-06T10:00:00Z",
   unpublished_changes: false, last_run: { status: "succeeded", at: "2026-10-06T11:48:00Z" }, last_simulation: null,
-  runs_24h: { live: 4, simulate: 0 }, needs_attention: [], ...over,
+  runs_24h: { live: 4, simulate: 0 }, needs_attention: [], triggers: { schedules: 0, schedules_enabled: 0, webhook_bindings: 0, csv: false }, ...over,
 });  // prettier-ignore
 const ROWS = [
   row({}),
@@ -40,6 +40,8 @@ beforeEach(() => {
     sent.push({ method: request.method, path, body: text ? JSON.parse(text) : null });
     if (request.method === "PATCH") return patchAnswer ?? new Response(JSON.stringify({ ...ROWS[0], enabled: false, warnings: [] }));
     if (path === "/api/v1/t/t1") return new Response(JSON.stringify({ id: "t1", name: "Acme", slug: "acme", require_passkey: false, role }));
+    if (path === "/api/v1/trigger-types") return new Response("[]"); // what New workflow offers to start it
+    if (path === "/api/v1/t/t1/webhook-endpoints") return new Response(JSON.stringify({ endpoints: [] }));
     if (path === "/api/v1/t/t1/workflows/w2/export") return exportAnswer ?? new Response(JSON.stringify({ format: "dewpoint.workflow", format_version: 1, name: "Triage", graph: {}, bindings: [] }));
     return new Response(JSON.stringify(ROWS));
   });
@@ -156,4 +158,25 @@ it("offers no New workflow to a viewer", async () => {
   await show();
   await screen.findByRole("link", { name: "Nightly" });
   expect(screen.queryByRole("button", { name: "New workflow" })).toBeNull();
+});
+
+it("names what starts each workflow besides a person, and says why one needs attention, as the WorkflowsList board does", async () => {
+  vi.mocked(globalThis.fetch).mockImplementation((input) => {
+    const request = input as Request;
+    const path = new URL(request.url).pathname;
+    if (path === "/api/v1/t/t1") return Promise.resolve(new Response(JSON.stringify({ id: "t1", name: "Acme", slug: "acme", require_passkey: false, role })));
+    return Promise.resolve(new Response(JSON.stringify([
+      row({ triggers: { schedules: 0, schedules_enabled: 0, webhook_bindings: 1, csv: false } }),
+      row({ id: "w2", name: "Triage", needs_attention: ["last_run_failed"], triggers: { schedules: 2, schedules_enabled: 2, webhook_bindings: 1, csv: false } }),
+      row({ id: "w3", name: "Audit", needs_attention: ["schedule_sync_failed"], triggers: { schedules: 1, schedules_enabled: 1, webhook_bindings: 0, csv: false } }),
+      row({ id: "w4", name: "Rename", triggers: { schedules: 0, schedules_enabled: 0, webhook_bindings: 0, csv: true } }),
+    ])));
+  });
+  await show();
+  expect(screen.getAllByRole("columnheader").map((h) => h.textContent)).toEqual(["Name", "Trigger", "Version", "Last run", "Last 24 h", "Enabled", "Actions"]);
+  expect(rowOf("Nightly").cells[1]!.textContent).toBe("Webhook");
+  expect(rowOf("Triage").cells[1]!.textContent).toBe("2 schedules · 1 webhook");
+  expect(rowOf("Triage").cells[0]!.textContent).toContain("Needs attention: its last run failed.");
+  expect(rowOf("Audit").cells[0]!.textContent).toContain("Needs attention: a schedule couldn't be synced.");
+  expect(rowOf("Rename").cells[1]!.textContent).toBe("CSV file");
 });

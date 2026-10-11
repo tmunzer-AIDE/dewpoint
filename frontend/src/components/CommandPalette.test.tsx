@@ -143,3 +143,10 @@ it("opens a tenant on its workflows", async () => {
   await userEvent.click(await screen.findByRole("option", { name: /Acme Lab/ }));
   expect(router.state.location.pathname).toBe("/t/t2/workflows");
 });
+
+it("goes to a tenant's webhook endpoints (4c-3b)", async () => {
+  const router = await renderAt("/t/t1/connections");
+  fireEvent.keyDown(document, { key: "k", metaKey: true });
+  await userEvent.click(await screen.findByRole("option", { name: "Webhook endpoints" }));
+  expect(router.state.location.pathname).toBe("/t/t1/settings/webhooks");
+});

@@ -10,6 +10,7 @@ import { LoadError } from "../../components/LoadError";
 import { announce } from "../../lib/announce";
 import { ApiError, client, ok } from "../../lib/client";
 import { admission, declassify, setConfig, setOptions, undeclassify, unlisted, unlistedNote, valueAt, type Changed } from "../../lib/config";
+import { csvOf, csvProblem } from "../../lib/csv";
 import { downloadJson, fileName } from "../../lib/download";
 import { ConflictError, DraftSync, type SyncState } from "../../lib/draftSync";
 import {
@@ -21,8 +22,9 @@ import { CARD, layout } from "../../lib/layout";
 import { guardLeaving } from "../../lib/leaving";
 import type { Path } from "../../lib/schemaForm";
 import { useDocumentTitle } from "../../lib/title";
+import { schedulesQuery, startSummary, workflowBindingsQuery } from "../../lib/triggers";
 import {
-  STALE, applyAll, applyUnapplied, baseOf, droppedWhy, isStale, lineageOf, unappliedFile, unappliedId, within,
+  STALE, TRIGGERS, applyAll, applyUnapplied, baseOf, droppedWhy, isStale, lineageOf, unappliedFile, unappliedId, within,
   type Unapplied, type UnappliedKind,
 } from "../../lib/unapplied";  // prettier-ignore
 import {
@@ -42,14 +44,19 @@ import { ProblemsPanel, type PublishProblems } from "./ProblemsPanel";
 import { SaveState } from "./SaveState";
 import { type Problems } from "./StepCard";
 import { StepPicker, type PickMode } from "./StepPicker";
+import { READ_ONLY, type PanelActions } from "./triggers/context";
+import { TriggersPanel } from "./triggers/TriggersPanel";
 import { UnappliedPanel } from "./UnappliedPanel";
 import { VersionsPanel } from "./VersionsPanel";
 import { Toolbar } from "./Toolbar";
 
 type Opened = { workflow: WorkflowDetail; types: NodeType[]; role: string | null };
 
-/** The editor's right column: a step's panel, the problems, or the versions (Task 15). */
-type Side = { kind: "step"; node: string; field?: { pointer: string; kind?: UnappliedKind; n: number } } | { kind: "problems" } | { kind: "versions" } | { kind: "unapplied" } | { kind: "declassify" } | null;
+/** The editor's right column: a step's panel, the problems, the versions, the edits not applied, Declassify, or the
+ * Triggers panel (4c-3b), at a place in it when "Go to it" sent it there. */
+type Side =
+  | { kind: "step"; node: string; field?: { pointer: string; kind?: UnappliedKind; n: number } } | { kind: "problems" } | { kind: "versions" }
+  | { kind: "unapplied" } | { kind: "declassify" } | { kind: "triggers"; at?: { pointer: string; n: number } } | null;  // prettier-ignore
 const NO_DIAGNOSTICS: Diagnostic[] = []; // one empty list, so a memo over it holds
 const NO_STEPS: ReadonlySet<string> = new Set();
 
@@ -95,7 +102,7 @@ const VERSION_ACTIONS: DrawerActions = {
   restructure: () => CANT,
 };
 
-export function EditorPage({ tenantId, workflowId }: { tenantId: string; workflowId: string }) {
+export function EditorPage({ tenantId, workflowId, openTriggers = false }: { tenantId: string; workflowId: string; openTriggers?: boolean }) {
   const qc = useQueryClient();
   // A draft cached from an earlier visit would conflict on the first edit (4b ruling 23): the editor waits for the read
   // made after this page mounted. Once open it owns its document and keeps what it opened with: a later read, a
@@ -138,16 +145,17 @@ export function EditorPage({ tenantId, workflowId }: { tenantId: string; workflo
       types={types.data ?? opened.types}
       role={opened.role}
       trouble={trouble}
+      openTriggers={openTriggers && loads === 0}
       onReload={() => void reload()}
     />
   );
 }
 
 function Editor({
-  tenantId, workflow, types, role, trouble, onReload,
+  tenantId, workflow, types, role, trouble, openTriggers, onReload,
 }: {
   tenantId: string; workflow: WorkflowDetail; types: NodeType[]; role: string | null; trouble: string | null;
-  onReload: () => void;
+  openTriggers: boolean; onReload: () => void;
 }) {  // prettier-ignore
   const typeMap = useMemo(() => new Map(types.map((t) => [t.ref, t])), [types]);
   const [history, setHistory] = useState<History<GraphDoc>>(() => begin(asGraph(workflow.draft)));
@@ -305,7 +313,7 @@ function Editor({
   const [trail, setTrail] = useState<string[] | null>(null); // the path the keys came by to the focused item
   const [picker, setPicker] = useState<PickMode | null>(null);
   // Steps by identity (`idKey`, `findNode`): an item names a step's canonical id, the document its authored one.
-  const keyOf = (id: string) => findNode(doc, id)?.key ?? "a step";
+  const keyOf = (id: string) => (id === TRIGGERS ? "Triggers" : (findNode(doc, id)?.key ?? "a step"));
 
   const portMap = useMemo(
     () => new Map(nodesOf(shownDoc).map((n) => [idKey(n.id), portsOf(n, typeMap.get(n.type))])),
@@ -348,7 +356,7 @@ function Editor({
     return [rename, lost > 0 ? unlistedNote(lost) : null].filter((s) => s !== null).join(" ") || null;
   };
   const typeOf = (n: GraphNode) => typeMap.get(n.type);
-  const [side, setSide] = useState<Side>(null); // the right column's one panel
+  const [side, setSide] = useState<Side>(() => (openTriggers ? { kind: "triggers" } : null)); // the right column's one panel
   // Where focus lands when what held it goes: a panel's Close, or a confirmation whose button an action removed or
   // disabled (the final checkpoint's review, WCAG 2.4.3). A native dialog returns focus to its opener only while that
   // opener can take it, and a modal one keeps it from anything else until it closes: the editor places it, after.
@@ -359,7 +367,7 @@ function Editor({
   const declassifyButton = useRef<HTMLButtonElement>(null);
   const jumps = useRef(0); // each "Go to" a field, so the same one twice still focuses it
   const [landing, setLanding] = useState<{
-    on: "problems" | "versions" | "publish" | "problems-panel" | "versions-panel" | "unapplied" | "unapplied-panel" | "declassify" | "declassify-panel";
+    on: "problems" | "versions" | "publish" | "problems-panel" | "versions-panel" | "unapplied" | "unapplied-panel" | "declassify" | "declassify-panel" | "triggers-panel";
     n: number;
   } | null>(null);
   const land = (on: NonNullable<typeof landing>["on"]) => setLanding((l) => ({ on, n: (l?.n ?? 0) + 1 }));
@@ -378,6 +386,7 @@ function Editor({
         // The toolbar's Declassify goes once nothing is left to decide or listed: Versions, beside it, then.
         declassify: () => usable(declassifyButton.current) ?? usable(versionsButton.current),
         "declassify-panel": () => document.getElementById("declassify-title") ?? usable(declassifyButton.current),
+        "triggers-panel": () => document.getElementById("triggers-title"),
       }[landing.on]();
       target?.focus();
     });
@@ -443,6 +452,13 @@ function Editor({
   const [placing, setPlacing] = useState<string | null>(null); // the step the next click on the canvas puts there
   const qc = useQueryClient();
   const versions = useQuery(versionsQuery(tenantId, workflow.id));
+  const schedules = useQuery(schedulesQuery(tenantId, workflow.id));
+  const bindings = useQuery(workflowBindingsQuery(tenantId, workflow.id));
+  const summary = startSummary({
+    csv: csvOf(shownDoc) !== null,
+    schedules: schedules.data?.schedules.length ?? workflow.triggers.schedules,
+    webhooks: bindings.data?.bindings.length ?? workflow.triggers.webhook_bindings,
+  });
   // The newest version's number: what a publish expects (4b ruling 17). Unknown while the list loads or refreshes.
   const latest = versions.isSuccess && !versions.isFetching ? (versions.data[0]?.number ?? 0) : null; // newest first
   const [confirm, setConfirm] = useState<Confirm | null>(null);
@@ -485,6 +501,7 @@ function Editor({
   /** The lists that show versions: refreshed after a change, their failure changing no outcome. */
   const refresh = () => {
     void qc.invalidateQueries({ queryKey: ["workflows", tenantId] });
+    void qc.invalidateQueries({ queryKey: ["start-form", tenantId, workflow.id] }); // what a schedule's input is entered on
     return qc.invalidateQueries({ queryKey: ["versions", tenantId, workflow.id] }).catch(() => undefined);
   };
 
@@ -815,6 +832,40 @@ function Editor({
         if (u) keep({ ...u, base: baseOf(draftNow(), u), lineage: lineageOf(draftNow(), u), why: null });
       },
       restructure: (pointer, then) => restructureStep(nodeId, pointer, then),
+    };
+  }
+
+  /** What the Triggers panel may do to the draft (4c-3b): every write through `change`, so through 4b's guards; never one
+   * a save would refuse (the graph's admission, its CSV declaration); what can't be written yet is held as a step's is
+   * (ruling 113). */
+  function triggersActions(): PanelActions {
+    if (viewing || !canEdit(role)) return READ_ONLY;
+    const id = (kind: UnappliedKind, pointer: string) => unappliedId(TRIGGERS, kind, pointer);
+    return {
+      update: (make, said = null, mark) => {
+        const now = draftNow();
+        const next = make(now);
+        if (next === now) return null;
+        const refused = csvProblem(next.settings?.csv);
+        return refused ?? writeDraft({ doc: next, dropped: [] }, { mark, said });
+      },
+      held: (kind, pointer) => unapplied.get(id(kind, pointer)),
+      hold: (kind, pointer, holding) => {
+        const was = unappliedRef.current.get(id(kind, pointer));
+        const u: Unapplied = { ...holding, id: id(kind, pointer), node: TRIGGERS, kind, pointer, base: "", lineage: [] };
+        keep({ ...u, base: was?.base ?? baseOf(draftNow(), u), lineage: was?.lineage ?? lineageOf(draftNow(), u) });
+      },
+      release: (kind, pointer) => drop([id(kind, pointer)]),
+      apply: (kind, pointer) => applyEdit(id(kind, pointer)),
+      discard: (pointer) => drop([...unappliedRef.current.values()].filter(within(TRIGGERS, pointer)).map((u) => u.id)),
+      stale: (kind, pointer) => {
+        const u = unappliedRef.current.get(id(kind, pointer));
+        return u !== undefined && isStale(draftNow(), u);
+      },
+      rebase: (kind, pointer) => {
+        const u = unappliedRef.current.get(id(kind, pointer));
+        if (u) keep({ ...u, base: baseOf(draftNow(), u), lineage: lineageOf(draftNow(), u), why: null });
+      },
     };
   }
 
@@ -1200,6 +1251,11 @@ function Editor({
           placing={editable && placing !== null}
           onPlace={place}
           overview={side === null}
+          start={{
+            summary,
+            open: side?.kind === "triggers",
+            onOpen: () => setSide(side?.kind === "triggers" ? null : { kind: "triggers" }),
+          }}
           />
         </div>
         {open && (
@@ -1239,9 +1295,14 @@ function Editor({
         {side?.kind === "unapplied" && (
           <UnappliedPanel
             edits={[...unapplied.values()]}
-            keyOf={(id) => findNode(doc, id)?.key ?? null}
+            keyOf={(id) => (id === TRIGGERS ? "Triggers" : (findNode(doc, id)?.key ?? null))}
             reason={(u) => (isStale(draftNow(), u) ? STALE : (u.why ?? "Still being typed."))}
-            onGo={(u) => setSide({ kind: "step", node: u.node, field: { pointer: u.pointer, kind: u.kind, n: ++jumps.current } })}
+            onGo={(u) =>
+              setSide(
+                u.node === TRIGGERS ? { kind: "triggers", at: { pointer: u.pointer, n: ++jumps.current } }
+                : { kind: "step", node: u.node, field: { pointer: u.pointer, kind: u.kind, n: ++jumps.current } },
+              )
+            }
             onDiscard={(u) => {
               drop([u.id]);
               land("unapplied-panel"); // its entry is gone, and with the last one the count: the list's heading takes focus
@@ -1288,6 +1349,23 @@ function Editor({
             onClose={() => {
               setSide(null);
               land("declassify");
+            }}
+          />
+        )}
+        {side?.kind === "triggers" && (
+          <TriggersPanel
+            value={{
+              tenantId, workflowId: workflow.id, name: workflow.name, doc: shownDoc, editable, viewer: !canEdit(role),
+              manage: canEdit(role) && viewing === null,
+              // The active version as the editor last knew it; when an answer was lost, as the versions say.
+              activeNumber: typeof sync.activeNumber === "number" ? sync.activeNumber : (versions.data?.find((v) => v.active)?.number ?? null),
+              activeVersionId: versions.data?.find((v) => v.active)?.id ?? workflow.active_version_id,
+              check: viewing ? null : trusted, actions: triggersActions(),
+            }}
+            focusAt={side.at ?? null}
+            onClose={() => {
+              setSide(null);
+              focus(START);
             }}
           />
         )}

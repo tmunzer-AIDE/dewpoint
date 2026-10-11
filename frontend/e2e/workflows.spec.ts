@@ -14,11 +14,20 @@ async function newWorkflow(page: Page, name: string): Promise<void> {
   await page.goto(`/t/${await tenantId(page)}/workflows`);
   await page.getByTestId("workflow-new").click();
   const dialog = page.getByRole("dialog", { name: "New workflow" });
-  await expect(dialog.getByLabel("Name")).toBeFocused();
+  await expect(dialog.getByRole("radio", { name: /^By hand/ })).toBeFocused(); // what starts it comes first (4c-3b)
   await expectAccessible(page, "new workflow");
   await dialog.getByLabel("Name").fill(name);
   await dialog.getByRole("button", { name: "Create and open" }).click();
-  await expect(page).toHaveURL(/\/workflows\/[0-9a-f-]{36}$/);
+  await expect(page).toHaveURL(/\/workflows\/[0-9a-f-]{36}\?triggers=true$/);
+  await openPlain(page);
+}
+
+/** A new workflow opens on its Triggers (4c-3b): these flows start from its canvas alone, fitted to the editor's whole
+ * width, as an existing workflow opens from its address. */
+async function openPlain(page: Page): Promise<void> {
+  await page.goto(new URL(page.url()).pathname);
+  await expect(page.getByRole("button", { name: /^Start: by hand/ })).toBeVisible();
+  await expect(page.getByRole("complementary", { name: "Triggers" })).toHaveCount(0);
 }
 
 test("a blank workflow takes its first steps with a pointer, under the CSP", async ({ page }) => {
@@ -26,7 +35,7 @@ test("a blank workflow takes its first steps with a pointer, under the CSP", asy
   await expect(page.getByRole("heading", { level: 1, name: "Workflows" })).toBeVisible();
   await expectAccessible(page, "workflows");
   await newWorkflow(page, "Pointer flow");
-  await expect(page.getByRole("button", { name: /^Start, where every run begins/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Start: by hand/ })).toBeVisible();
   await expectAccessible(page, "editor: blank");
   await page.getByRole("button", { name: "Add the first step" }).click();
   await page.getByRole("option", { name: /flow\.transform@1/ }).click();
@@ -46,9 +55,9 @@ test("a blank workflow takes its first steps with a pointer, under the CSP", asy
 
 test("a workflow built with the keyboard alone: Tab in, arrows along the edges, A, Delete, undo", async ({ page }) => {
   await newWorkflow(page, "Keyboard flow");
-  const start = page.getByRole("button", { name: /^Start, where every run begins/ });
+  const start = page.getByRole("button", { name: /^Start: by hand/ });
   await start.focus();
-  await page.keyboard.press("Enter");
+  await page.keyboard.press("a"); // A adds a first step; Enter opens the start card's Triggers (4c-3b)
   await page.keyboard.type("transform");
   await page.keyboard.press("Enter");
   const transform = page.getByRole("button", { name: /^transform, Transform/ });
@@ -130,12 +139,13 @@ async function importFile(page: Page, name: string, file: string): Promise<void>
   await expect(dialog.getByText("The file names no connection or workflow.")).toBeVisible();
   await expectAccessible(page, "new workflow: import");
   await dialog.getByRole("button", { name: "Import and open" }).click();
-  await expect(page).toHaveURL(/\/workflows\/[0-9a-f-]{36}$/);
+  await expect(page).toHaveURL(/\/workflows\/[0-9a-f-]{36}\?triggers=true$/);
+  await openPlain(page);
 }
 
 test("the keys reach every step of an imported cycle no entry leads into", async ({ page }) => {
   await importFile(page, "Cycle", "e2e/fixtures/cycle.dewpoint.json");
-  const start = page.getByRole("button", { name: /^Start, where every run begins/ });
+  const start = page.getByRole("button", { name: /^Start: by hand/ });
   await start.focus();
   await page.keyboard.press("ArrowDown");
   await expect(page.getByRole("button", { name: "Insert a step before entry" })).toBeFocused();
@@ -171,9 +181,9 @@ test("an edge spelling its steps' ids otherwise is drawn, walked and deleted wit
 
 test("undo and redo from the keyboard keep focus in the editor, never repaired by hand", async ({ page }) => {
   await newWorkflow(page, "Undo flow");
-  const start = page.getByRole("button", { name: /^Start, where every run begins/ });
+  const start = page.getByRole("button", { name: /^Start: by hand/ });
   await start.focus();
-  await page.keyboard.press("Enter");
+  await page.keyboard.press("a"); // A adds a first step; Enter opens the start card's Triggers (4c-3b)
   await page.keyboard.type("transform");
   await page.keyboard.press("Enter");
   const transform = page.getByRole("button", { name: /^transform, Transform/ });
@@ -223,7 +233,7 @@ test("the list and sign-in load without the editor's code, which loads when a wo
   expect([...login.keys()].filter((p) => EDITOR_CHUNK.test(p))).toEqual([]);
   const opened = await assetsFetched(page, async () => {
     await page.getByRole("link", { name: "Cycle" }).click();
-    await expect(page.getByRole("button", { name: /^Start, where every run begins/ })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^Start: by hand/ })).toBeVisible();
   });
   expect([...opened.keys()].filter((p) => EDITOR_CHUNK.test(p)).length).toBe(2); // its script and its stylesheet
   console.log(`first load: list ${total(list)} bytes, sign-in ${total(login)} bytes; the editor adds ${total(opened)} bytes`);
@@ -353,7 +363,7 @@ test("the minimap never hides what the keys reach, and gives way to a panel and 
   const far = page.getByRole("button", { name: /^far, Transform/ });
   await expect(minimap).toBeVisible();
   expect(overlaps((await far.boundingBox())!, (await minimap.boundingBox())!), "the fixture puts far under the minimap").toBe(true);
-  await page.getByRole("button", { name: /^Start, where every run begins/ }).focus();
+  await page.getByRole("button", { name: /^Start: by hand/ }).focus();
   await page.keyboard.press("ArrowDown");
   await page.keyboard.press("ArrowRight");
   await page.keyboard.press("ArrowDown");
