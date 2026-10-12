@@ -18,10 +18,11 @@ import structlog
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker
 from temporalio.api.workflowservice.v1 import DescribeNamespaceRequest
-from temporalio.client import Client, WorkflowExecutionStatus
+from temporalio.client import Client, WorkflowExecutionStatus, WorkflowFailureError
+from temporalio.exceptions import ApplicationError
 from temporalio.service import RPCError, RPCStatusCode
 
-from dewpoint.apps.dispatcher import dispatch
+from dewpoint.apps.dispatcher import budget, dispatch, failures, recovery
 from dewpoint.core.claims import service as claims
 from dewpoint.core.claims.cipher import ClaimCipher
 from dewpoint.core.config import Settings
@@ -39,10 +40,21 @@ GRACE = timedelta(seconds=30)  # longer than a start's own deadline (dispatch.ST
 RECHECK = timedelta(seconds=30)  # each request asked about at most once in this long
 ALERT_AFTER = timedelta(minutes=10)  # an uncertain start still unresolved this long after it was made: an error
 BATCH = 50  # requests per pass
+CALL_DEADLINE = timedelta(seconds=10)  # every call to Temporal here: the SDK sets none (the 2b-4b plan's M1b)
 MISSING_MAX = timedelta(days=1)  # a sub-run whose history is gone waits twice its last gap each time, up to this
 TERMINATED_MESSAGE = "The run's workflow was terminated outside Dewpoint."
 FAILED_MESSAGE = "The run's workflow failed outside its own code (engine 2b spec §7.6)."
+UNVERIFIED_COUNT = "Its iterations are as its interpreter last counted them, unverified."  # a bug failed it (2b-4b M2)
+UNKNOWN_COUNT = "The iterations it used are unknown."
 LIVE = (WorkflowExecutionStatus.RUNNING, WorkflowExecutionStatus.CONTINUED_AS_NEW)  # its successor is starting
+LOOK_MAX = timedelta(hours=1)  # a spent unresolved request's looks, paced: never further apart than this
+
+
+def next_look(previous: timedelta | None) -> timedelta:
+    """The gap before a spent unresolved request is described again (2b-4b M4 recovery, the design's paced observation):
+    RECHECK after it was noted, then twice the last gap, up to LOOK_MAX. `reconcile_candidates` applies it (0055),
+    reading the last gap from the rows; each look is one error, and resolves nothing."""
+    return RECHECK if previous is None else min(2 * previous, LOOK_MAX)
 
 
 class Leader:
@@ -99,21 +111,29 @@ async def reconcile_once(
             )
         ).all()
     counts: Counter[str] = Counter()
-    for tenant_id, request_id, kind in picked:
-        try:
-            if kind == "starting":
-                happened = await _starting(sessionmaker, client, keys, settings, tenant_id, request_id)
-            elif kind == "open":
-                happened = await _open(sessionmaker, client, tenant_id, request_id)
-            else:
-                happened = await _slot(sessionmaker, client, tenant_id, request_id)
-        except Exception as e:  # a bug or an outage: left as it was, asked about again after RECHECK
-            log.error("reconcile_failed", tenant_id=str(tenant_id), request_id=str(request_id), kind=kind,
-                      error=type(e).__name__)  # fmt: skip
-            counts["error"] += 1
-            await _checked_alone(sessionmaker, tenant_id, request_id)
-            continue
-        counts[happened] += 1
+    settled: list[tuple[uuid.UUID, uuid.UUID]] = []
+    with budget.passing("reconcile") as admitted:
+        for tenant_id, request_id, kind in admitted(picked, key=lambda row: row[1]):
+            try:
+                if kind == "starting":
+                    happened = await _starting(sessionmaker, client, keys, settings, tenant_id, request_id)
+                elif kind == "open":
+                    happened = await _open(sessionmaker, client, tenant_id, request_id)
+                else:
+                    happened = await _slot(sessionmaker, client, tenant_id, request_id)
+            except Exception as e:  # a bug or an outage: left as it was, asked about again after RECHECK
+                log.error("reconcile_failed", tenant_id=str(tenant_id), request_id=str(request_id), kind=kind,
+                          error=type(e).__name__)  # fmt: skip
+                counts["error"] += 1
+                await _checked_alone(sessionmaker, tenant_id, request_id)
+                await failures.failed(sessionmaker, tenant_id, failures.RECONCILE[kind], request_id, e)  # by phase
+                continue
+            if happened != "unresolved":  # an uncertain answer is neither: a bug's count goes on across it
+                settled.append((tenant_id, request_id))
+            counts[happened] += 1
+    await failures.cleared(sessionmaker, failures.RECONCILE.values(), settled)  # a phase settled: every phase's count
+    await recovery.resolved(sessionmaker, recovery.REQUEST, settled)  # Temporal answered: nothing left to recover
+    admitted.reported(counts, full=len(picked) >= BATCH)
     return dict(counts)
 
 
@@ -124,19 +144,22 @@ async def _starting(
     sessionmaker: async_sessionmaker[AsyncSession], client: Client, keys: KeySource, settings: Settings,
     tenant_id: uuid.UUID, request_id: uuid.UUID,
 ) -> str:  # fmt: skip
-    """A request still `starting` past its grace period: found and verified, `started`; absent from a namespace that
-    answers, back in the queue; anything else, left `starting`."""
+    """A request still `starting` past its grace period: found and verified, `started` (live, its owed slot reserved if
+    it had none); absent from a namespace that answers, back in the queue; anything else, left `starting`."""
     handle = client.get_workflow_handle(run_workflow_id(str(tenant_id), str(request_id)))
     try:
-        await handle.describe()
+        described = await handle.describe(rpc_timeout=CALL_DEADLINE)
     except RPCError as e:
         if e.status == RPCStatusCode.NOT_FOUND and await namespace_answers(client):
             ref = dispatch.Ref(request_id, tenant_id)
             happened = await dispatch.settle(sessionmaker, ref, dispatch.Outcome("absent"), audited=True)
+            if happened == "unresolved":  # its sends spent, an attempt unproven: observed again after RECHECK
+                await _checked_alone(sessionmaker, tenant_id, request_id)
+                return happened
             if happened != "history_missing":
                 return happened
             log.error("start_history_missing", request_id=str(request_id))  # its row ended: an operator recovers it
-            await _checked_alone(sessionmaker, tenant_id, request_id)
+            await _checked_alone(sessionmaker, tenant_id, request_id, recovery.START_HISTORY_MISSING)
             return "unresolved"
         return await _unresolved(sessionmaker, tenant_id, request_id, e.status.name)
     except Exception as e:  # a lost connection or a timeout: nothing is known
@@ -151,7 +174,8 @@ async def _starting(
     if outcome.kind == "uncertain":
         return await _unresolved(sessionmaker, tenant_id, request_id, outcome.detail)
     # Started: a closed execution's end is recorded by the next pass, which finds the row still `running`.
-    return await dispatch.settle(sessionmaker, expected, outcome, audited=True)
+    live = described.status is None or described.status in LIVE  # its owed slot, reserved in the same transaction
+    return await dispatch.settle(sessionmaker, expected, outcome, audited=True, live=live)
 
 
 async def _expected(
@@ -170,13 +194,16 @@ async def _expected(
         cipher = ClaimCipher(dispatch.KeyFailures(keys))
         envelope = await claims.read_envelope(s, cipher, tenant_id, request_id=request_id)
         start = dispatch.run_input(request, request.workflow_version_id, envelope, settings)
-    return dispatch.Starting(request_id, tenant_id, start)
+        recorded = request.start_request_id
+    return dispatch.Starting(request_id, tenant_id, start, recorded)
 
 
 async def namespace_answers(client: Client) -> bool:
     """Whether the namespace is reachable, so a NOT_FOUND is about the execution (§7.6). Any failure: it isn't known."""
     try:
-        await client.workflow_service.describe_namespace(DescribeNamespaceRequest(namespace=client.namespace))
+        await client.workflow_service.describe_namespace(
+            DescribeNamespaceRequest(namespace=client.namespace), timeout=CALL_DEADLINE
+        )
     except Exception:
         return False
     return True
@@ -191,6 +218,8 @@ async def _unresolved(
         since = select(text("statement_timestamp() - starting_at")).select_from(RunRequest)
         age = (await s.execute(since.where(RunRequest.id == request_id))).scalar()  # its slot may be gone already
         await _checked(s, request_id)
+        if isinstance(age, timedelta) and age >= ALERT_AFTER:
+            await recovery.noted(s, tenant_id, recovery.START_UNRESOLVED, request_id)
     if isinstance(age, timedelta) and age >= ALERT_AFTER:
         log.error("start_unresolved", request_id=str(request_id), detail=detail, age_s=int(age.total_seconds()))
     else:
@@ -206,7 +235,7 @@ class Ended:
     status: str
     error_code: str | None = None
     error_message: str | None = None
-    iterations: int = 0
+    iterations: int | None = None  # None: unknown, so the count recorded stays (never a zero for work used)
 
 
 async def _open(
@@ -216,15 +245,15 @@ async def _open(
     reports is recorded, and its slot released, in one transaction. Its own end write wins: never over an ended row."""
     handle = client.get_workflow_handle(run_workflow_id(str(tenant_id), str(run_id)), result_type=RunResult)
     try:
-        described = await handle.describe()  # no run id: the latest execution, past every continue-as-new
+        described = await handle.describe(rpc_timeout=CALL_DEADLINE)  # no run id: the latest, past continue-as-new
     except Exception as e:
-        await _missing_or_unanswered(client, e, run_id, "run_history_missing")
-        await _checked_alone(sessionmaker, tenant_id, run_id)
+        missing = await _missing_or_unanswered(client, e, run_id, recovery.RUN_HISTORY_MISSING)
+        await _checked_alone(sessionmaker, tenant_id, run_id, recovery.RUN_HISTORY_MISSING if missing else None)
         return "unresolved"
     if described.status is None or described.status in LIVE:
         await _checked_alone(sessionmaker, tenant_id, run_id)
         return "running"
-    ended = await _ended(handle, described.status, run_id)
+    ended = await reported_end(handle, described.status, run_id)
     async with sessionmaker() as s, s.begin():
         await tenant_scope(s, tenant_id)
         await runs.finish_run(
@@ -232,15 +261,16 @@ async def _open(
             error_code=ended.error_code, error_message=ended.error_message, iterations=ended.iterations,
             if_running=True,
         )  # fmt: skip
+        await runs.close_unconfirmed(s, run_id)  # an ended run has no step running (2b-4b M2)
         await dispatch.release(s, run_id)
         await _checked(s, run_id)
     return "ended"
 
 
-async def _ended(handle: Any, status: WorkflowExecutionStatus, run_id: uuid.UUID) -> Ended:
+async def reported_end(handle: Any, status: WorkflowExecutionStatus, run_id: uuid.UUID) -> Ended:
     """The end Temporal reports for a closed execution (§7.6)."""
     if status == WorkflowExecutionStatus.COMPLETED:
-        result: RunResult = await handle.result()  # the run's own end, which its end write should have recorded
+        result: RunResult = await handle.result(rpc_timeout=CALL_DEADLINE)  # its own end, as its end write had it
         error = result.error or {}
         return Ended(result.status, error.get("code"), error.get("message"), result.iterations)
     if status == WorkflowExecutionStatus.CANCELED:
@@ -248,7 +278,25 @@ async def _ended(handle: Any, status: WorkflowExecutionStatus, run_id: uuid.UUID
     if status == WorkflowExecutionStatus.TERMINATED:
         return Ended("failed", TERMINATED, TERMINATED_MESSAGE)
     log.error("run_execution_failed", run_id=str(run_id), status=status.name)  # Dewpoint sets no execution timeout
+    if status == WorkflowExecutionStatus.FAILED:  # its own bug, which names only its type (the 2b-4b M2 design)?
+        try:
+            await handle.result(rpc_timeout=CALL_DEADLINE)
+        except WorkflowFailureError as e:
+            own = e.cause
+            if isinstance(own, ApplicationError) and own.type == INTERNAL_ERROR and own.non_retryable:
+                counted = _counted(own.details)
+                note = UNKNOWN_COUNT if counted is None else UNVERIFIED_COUNT
+                return Ended("failed", INTERNAL_ERROR, f"{own.message} {note}", counted)
+        except Exception as e:  # unread: the end stands, with the general message
+            log.warning("run_failure_unread", run_id=str(run_id), error=type(e).__name__)
     return Ended("failed", INTERNAL_ERROR, FAILED_MESSAGE)
+
+
+def _counted(details: Any) -> int | None:
+    """The iterations a run's interpreter counted when its bug failed it, as its failure carries them: or None."""
+    first = details[0] if details else None
+    count = first.get("iterations") if isinstance(first, dict) else None
+    return count if isinstance(count, int) and not isinstance(count, bool) and count >= 0 else None
 
 
 async def _slot(
@@ -257,10 +305,11 @@ async def _slot(
     """A slot whose run's row has ended: released only once the logical run's latest execution is closed. Its history
     gone is an alert, never a release (the owner's ruling)."""
     try:
-        described = await client.get_workflow_handle(run_workflow_id(str(tenant_id), str(run_id))).describe()
+        handle = client.get_workflow_handle(run_workflow_id(str(tenant_id), str(run_id)))
+        described = await handle.describe(rpc_timeout=CALL_DEADLINE)
     except Exception as e:
-        await _missing_or_unanswered(client, e, run_id, "slot_history_missing")
-        await _checked_alone(sessionmaker, tenant_id, run_id)
+        missing = await _missing_or_unanswered(client, e, run_id, recovery.SLOT_HISTORY_MISSING)
+        await _checked_alone(sessionmaker, tenant_id, run_id, recovery.SLOT_HISTORY_MISSING if missing else None)
         return "unresolved"
     if described.status is None or described.status in LIVE:
         log.warning("slot_execution_live", run_id=str(run_id))  # its row ended, its execution didn't
@@ -290,11 +339,15 @@ async def _checked(s: AsyncSession, request_id: uuid.UUID) -> None:
 
 
 async def _checked_alone(
-    sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, request_id: uuid.UUID
-) -> None:
+    sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, request_id: uuid.UUID,
+    reason: str | None = None,
+) -> None:  # fmt: skip
+    """Asked about now; with the recovery `reason` it was left for, recorded with it (2b-4b M3)."""
     async with sessionmaker() as s, s.begin():
         await tenant_scope(s, tenant_id)
         await _checked(s, request_id)
+        if reason is not None:
+            await recovery.noted(s, tenant_id, reason, request_id)
 
 
 # --- sub-runs their root's end left running (the final review's M5) --------------------------------------------------
@@ -312,16 +365,24 @@ async def reconcile_subruns(sessionmaker: async_sessionmaker[AsyncSession], clie
             )
         ).all()
     counts: Counter[str] = Counter()
-    for tenant_id, run_id in picked:
-        try:
-            happened = await _subrun(sessionmaker, client, tenant_id, run_id)
-        except Exception as e:  # a bug or an outage: left as it was, asked about again after RECHECK
-            log.error("reconcile_failed", tenant_id=str(tenant_id), run_id=str(run_id), kind="subrun",
-                      error=type(e).__name__)  # fmt: skip
-            counts["error"] += 1
-            await _subrun_checked_alone(sessionmaker, tenant_id, run_id)
-            continue
-        counts[happened] += 1
+    settled: list[tuple[uuid.UUID, uuid.UUID]] = []
+    with budget.passing("subruns") as admitted:
+        for tenant_id, run_id in admitted(picked, key=lambda row: row[1]):
+            try:
+                happened = await _subrun(sessionmaker, client, tenant_id, run_id)
+            except Exception as e:  # a bug or an outage: left as it was, asked about again after RECHECK
+                log.error("reconcile_failed", tenant_id=str(tenant_id), run_id=str(run_id), kind="subrun",
+                          error=type(e).__name__)  # fmt: skip
+                counts["error"] += 1
+                await _subrun_checked_alone(sessionmaker, tenant_id, run_id)
+                await failures.failed(sessionmaker, tenant_id, failures.SUBRUN, run_id, e)  # bounded (D10)
+                continue
+            if happened != "unresolved":  # an uncertain answer is neither: a bug's count goes on across it
+                settled.append((tenant_id, run_id))
+            counts[happened] += 1
+    await failures.cleared(sessionmaker, [failures.SUBRUN], settled)
+    await recovery.resolved(sessionmaker, [recovery.SUBRUN_HISTORY_MISSING], settled)
+    admitted.reported(counts, full=len(picked) >= BATCH)
     return dict(counts)
 
 
@@ -332,15 +393,15 @@ async def _subrun(
     gone: an alert and no end, as for a root (the owner's ruling)."""
     handle = client.get_workflow_handle(run_workflow_id(str(tenant_id), str(run_id)), result_type=RunResult)
     try:
-        described = await handle.describe()
+        described = await handle.describe(rpc_timeout=CALL_DEADLINE)
     except Exception as e:
-        missing = await _missing_or_unanswered(client, e, run_id, "subrun_history_missing")
+        missing = await _missing_or_unanswered(client, e, run_id, recovery.SUBRUN_HISTORY_MISSING)
         await _subrun_checked_alone(sessionmaker, tenant_id, run_id, backoff=missing)
         return "unresolved"
     if described.status is None or described.status in LIVE:
         await _subrun_checked_alone(sessionmaker, tenant_id, run_id)
         return "running"
-    ended = await _ended(handle, described.status, run_id)
+    ended = await reported_end(handle, described.status, run_id)
     async with sessionmaker() as s, s.begin():
         await tenant_scope(s, tenant_id)
         await runs.finish_run(
@@ -348,6 +409,7 @@ async def _subrun(
             error_code=ended.error_code, error_message=ended.error_message, iterations=ended.iterations,
             if_running=True,
         )  # fmt: skip
+        await runs.close_unconfirmed(s, run_id)  # an ended run has no step running (2b-4b M2)
         await _subrun_checked(s, run_id)
     return "ended"
 
@@ -368,6 +430,9 @@ async def _subrun_checked(s: AsyncSession, run_id: uuid.UUID, *, backoff: bool =
 async def _subrun_checked_alone(
     sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, run_id: uuid.UUID, *, backoff: bool = False
 ) -> None:
+    """Asked about now; its history gone (`backoff`), its recovery reason recorded with it (2b-4b M3)."""
     async with sessionmaker() as s, s.begin():
         await tenant_scope(s, tenant_id)
         await _subrun_checked(s, run_id, backoff=backoff)
+        if backoff:
+            await recovery.noted(s, tenant_id, recovery.SUBRUN_HISTORY_MISSING, run_id)

@@ -75,6 +75,28 @@ async def test_an_editor_schedules_a_workflow_its_input_sealed_and_never_shown(
     assert (await viewer.get(schedule_url(ctx, body["id"]))).json()["id"] == body["id"]
 
 
+async def test_no_schedule_is_created_before_the_inventorys_cutover(
+    keyed_app, workflow, owner_sessionmaker, api_settings
+) -> None:
+    """The owner's review of checkpoint 4 (M5): on any installation, fresh or upgraded, Compose's or not, the API
+    creates no schedule before the inventory's cutover is recorded (`dewpoint schedules inventory-cutover`): one
+    created then would be captured as if from before migration 0040, its accounting incomplete for good. It refuses
+    (503, `schedule_inventory_not_cut_over`), and creates once the cutover is recorded."""
+    ctx, wf = workflow
+    editor = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "editor")
+    async with owner_sessionmaker() as s, s.begin():
+        kept = (await s.execute(text("delete from schedule_inventory_cutover returning at"))).scalar_one()
+    try:
+        refused = await editor.post(schedules_url(ctx, wf), json=BODY)
+        assert (refused.status_code, refused.json()) == (503, {"error": "schedule_inventory_not_cut_over"})
+        async with owner_sessionmaker() as s:
+            assert (await s.execute(text("select count(*) from schedules"))).scalar_one() == 0
+    finally:
+        async with owner_sessionmaker() as s, s.begin():
+            await s.execute(text("insert into schedule_inventory_cutover (at) values (:a)"), {"a": kept})
+    assert (await editor.post(schedules_url(ctx, wf), json=BODY)).status_code == 201
+
+
 async def test_writing_a_schedule_needs_trigger_manage(keyed_app, workflow, owner_sessionmaker, api_settings) -> None:
     ctx, wf = workflow
     for role in ("operator", "viewer"):
@@ -198,17 +220,14 @@ async def test_a_schedules_missed_firings_are_counted_only_when_certain_and_its_
     first = f"t:{ctx.tenant_id}:sched:{created['id']}~1"
     async with owner_sessionmaker() as s, s.begin():  # its first incarnation landed, its wait counted
         await s.execute(
-            text(
-                "update schedules set misses = 2, creation_misses = 3, "
-                "misses_checked_at = '2026-10-06T12:00:00Z' where id = :i"
-            ),
+            text("update schedules set misses = 2, creation_misses = 3 where id = :i"),
             {"i": created["id"]},
         )
         await s.execute(
             text(
                 "insert into schedule_incarnations (temporal_id, tenant_id, schedule_id, number, generation, "
-                "landed_generation, landed_row_generation, landed_at, landed_paused) "
-                "values (:f, :t, :i, 1, 1, 1, 1, now(), false)"
+                "landed_generation, landed_row_generation, landed_at, landed_paused, misses_checked_at) "
+                "values (:f, :t, :i, 1, 1, 1, 1, now(), false, now() - interval '1 minute')"
             ),
             {"f": first, "t": ctx.tenant_id, "i": created["id"]},
         )
@@ -220,9 +239,11 @@ async def test_a_schedules_missed_firings_are_counted_only_when_certain_and_its_
             ),
             {"f": first, "t": ctx.tenant_id, "i": created["id"]},
         )
+        read = (await s.execute(text("select misses_checked_at from schedule_incarnations where temporal_id = :f"),
+                                {"f": first})).scalar_one()  # fmt: skip  # its count read a minute ago (D16)
     shown = (await editor.get(schedule_url(ctx, created["id"]))).json()
     assert (shown["misses"], shown["missed_while_created"], shown["accounting_complete"]) == (5, 3, True)
-    assert (shown["uncounted_intervals"], shown["misses_read_at"]) == ([], "2026-10-06T12:00:00+00:00")
+    assert (shown["uncounted_intervals"], shown["misses_read_at"]) == ([], read.isoformat())
     async with owner_sessionmaker() as s, s.begin():
         await s.execute(text(
             "insert into schedule_intervals (tenant_id, schedule_id, temporal_id, kind, starts_at, ends_at, class, "

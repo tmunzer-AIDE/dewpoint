@@ -27,19 +27,27 @@ import contextlib
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import dataclass
+from datetime import datetime
 
-from sqlalchemy import select, text, update
+import structlog
+from sqlalchemy import exists, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.sql.elements import ColumnElement
 from temporalio.client import Client
 
 from dewpoint.apps.erasure import temporal
+from dewpoint.core import blockers
 from dewpoint.core.crypto.keyring import lock_scope
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.ingress import keys as event_keys
 from dewpoint.core.ingress.counters import release
+from dewpoint.core.models.blockers import UnresolvedSend
 from dewpoint.core.models.erasure import Stage, TenantErasureItem, TenantErasureKnown
+from dewpoint.core.models.runs import ExecutionEvidence
 from dewpoint.engine.runtime.ids import run_workflow_id
+
+log = structlog.get_logger("dewpoint.erasure")
 
 TENANT_ERASED = "tenant_erased"  # the reason a cancel records
 BATCH = 100
@@ -73,9 +81,36 @@ async def _found(s: AsyncSession, ctx: Context, step: Stage, kind: str, found: I
         await s.execute(insert(TenantErasureItem).values(rows[at : at + ITEMS_PER_STATEMENT]).on_conflict_do_nothing())
 
 
-async def _known(s: AsyncSession, ctx: Context, kind: str, workflow_id: str, run_id: str | None) -> None:
-    await s.execute(insert(TenantErasureKnown).values(tenant_id=ctx.tenant_id, kind=kind, workflow_id=workflow_id,
-                                                      run_id=run_id).on_conflict_do_nothing())  # fmt: skip
+def _provenance(item: TenantErasureItem) -> str:
+    """How the erasure knows an execution is gone, from its item's state before it's marked (2b-4b M4 recovery, design
+    revision 5 §5): `requested` (shown, deleted, now read back) is `gone`; `found` (never shown) is `run_not_found`
+    for an exact run, `absent` for an id alone."""
+    if item.state == "requested":
+        return "gone"
+    return "run_not_found" if item.run_id is not None else "absent"
+
+
+async def _known(s: AsyncSession, ctx: Context, kind: str, workflow_id: str, run_id: str | None,
+                 provenance: str | None = None, closed: tuple[datetime, datetime] | None = None) -> None:  # fmt: skip
+    """The id kept, its provenance with it. A conflicting insert never changes a row's provenance; a held one becomes
+    `gone` only here, when that exact id was shown, deleted and read back, in the transaction that records it. An id
+    alone whose workflow has a blocker stays `absent` while the blocker is kept: it's `gone` only with the blocker
+    (`_blocker_gone`; design revision 6 §6)."""
+    closed_at, closed_seen_at = closed or (None, None)
+    await s.execute(insert(TenantErasureKnown).values(
+        tenant_id=ctx.tenant_id, kind=kind, workflow_id=workflow_id, run_id=run_id, provenance=provenance,
+        closed_at=closed_at, closed_seen_at=closed_seen_at,
+    ).on_conflict_do_nothing())  # fmt: skip
+    if provenance == "gone":
+        same: ColumnElement[bool] = TenantErasureKnown.run_id == run_id
+        if run_id is None:
+            same = TenantErasureKnown.run_id.is_(None) & ~exists().where(
+                UnresolvedSend.tenant_id == ctx.tenant_id, UnresolvedSend.workflow_id == workflow_id
+            )
+        await s.execute(update(TenantErasureKnown).where(
+            TenantErasureKnown.tenant_id == ctx.tenant_id, TenantErasureKnown.kind == kind,
+            TenantErasureKnown.workflow_id == workflow_id, same, TenantErasureKnown.provenance != "gone",
+        ).values(provenance="gone"))  # fmt: skip
 
 
 async def _open(ctx: Context, step: Stage, after: int = 0) -> list[TenantErasureItem]:
@@ -116,11 +151,56 @@ async def _mark(ctx: Context, item: TenantErasureItem, state: str, *, known: str
             values["verified_at"] = text("statement_timestamp()")
         await s.execute(update(TenantErasureItem).where(TenantErasureItem.id == item.id).values(**values))
         if known is not None:
-            await _known(s, ctx, known, item.workflow_id, item.run_id)
+            provenance = _provenance(item) if known == "execution" else None
+            closed = await _closed(s, ctx, item) if provenance == "run_not_found" else None
+            await _known(s, ctx, known, item.workflow_id, item.run_id, provenance, closed)
+            if provenance == "gone" and item.run_id is not None:
+                await _blocker_gone(s, ctx, item)
+
+
+async def _closed(s: AsyncSession, ctx: Context, item: TenantErasureItem) -> tuple[datetime, datetime] | None:
+    """That exact run's close as the evidence cadence captured it from Temporal (0063), copied into the known row the
+    erasure writes `run_not_found` before step 80 sweeps the evidence: what `retained_out` rests on (task 15)."""
+    found = await s.execute(select(ExecutionEvidence.closed_at, ExecutionEvidence.closed_seen_at).where(
+        ExecutionEvidence.tenant_id == ctx.tenant_id, ExecutionEvidence.workflow_id == item.workflow_id,
+        ExecutionEvidence.run_id == item.run_id, ExecutionEvidence.closed_at.is_not(None),
+        ExecutionEvidence.closed_seen_at.is_not(None),
+    ).limit(1))  # fmt: skip
+    row = found.first()
+    return (row.closed_at, row.closed_seen_at) if row is not None else None
+
+
+async def _blocker_gone(s: AsyncSession, ctx: Context, item: TenantErasureItem) -> None:
+    """The run a blocker was identified with, deleted and read back (2b-4b M4 recovery, task 13; design revision 5 §2,
+    revision 6 §6): the blocker `gone` (its record audited, `blockers.gone`), and its workflow's known row with it, in
+    the transaction that verifies the run; with a send still open, `deleted_open`."""
+    found = await s.execute(select(UnresolvedSend.request_id).where(
+        UnresolvedSend.tenant_id == ctx.tenant_id, UnresolvedSend.workflow_id == item.workflow_id,
+        UnresolvedSend.state == "identified", UnresolvedSend.identified_run_id == item.run_id,
+    ))  # fmt: skip
+    request_id = found.scalar()
+    if request_id is None:
+        return
+    if await blockers.gone(s, request_id):
+        await _known(s, ctx, "execution", item.workflow_id, None, "gone")
+    else:
+        await blockers.deleted_open(s, request_id)
 
 
 async def _all_verified(ctx: Context, step: Stage) -> bool:
     return not await _open(ctx, step)
+
+
+async def _settled(ctx: Context, step: Stage) -> bool:
+    """No item `found` or `requested`: each `verified`, or `absent` (step 60's: 2b-4b M4 recovery, design revision 4
+    §3). An advance with an `absent` one claims no verification: what's unresolved holds the erasure (0061)."""
+    async with ctx.sessionmaker() as s:
+        await tenant_scope(s, ctx.tenant_id)
+        open_ = await s.execute(select(TenantErasureItem.id).where(
+            TenantErasureItem.tenant_id == ctx.tenant_id, TenantErasureItem.step == int(step),
+            TenantErasureItem.state.in_(("found", "requested")),
+        ).limit(1))  # fmt: skip
+        return open_.first() is None
 
 
 # 20
@@ -265,27 +345,83 @@ async def _enumerated(ctx: Context) -> None:
         firings: list[tuple[str, str | None]] = [  # again: a tick may record itself until the fence goes up
             (w, r) for w, r in await s.execute(text("SELECT workflow_id, run_id FROM schedule_firings"))
         ]
+        # a blocker's root (platform-scoped, no row security: the tenant named): `absent` until the blocker is gone
+        blocked = (await s.execute(select(UnresolvedSend.workflow_id, UnresolvedSend.identified_run_id).where(
+            UnresolvedSend.tenant_id == ctx.tenant_id
+        ))).all()  # fmt: skip
+        held: list[tuple[str, str | None]] = [(w, None) for w, _ in blocked] + [(w, r) for w, r in blocked if r]
         for source, found in (("runs", runs), ("requests", started), ("evidence", evidence), ("firing", firings),
-                              ("visibility", visible)):  # fmt: skip
+                              ("visibility", visible), ("blocker", held)):  # fmt: skip
             await _found(s, ctx, Stage.EXECUTIONS, "execution", found, source)
+        for w, _ in blocked:
+            await _known(s, ctx, "execution", w, None, "absent")
+
+
+async def _identity(ctx: Context, item: TenantErasureItem) -> None:
+    """Before a found run is terminated or deleted, the identity of its workflow's unidentified blocker (2b-4b M4
+    recovery, task 13; design revision 6 §6): its chain's first run's started request id, whichever run was sighted,
+    against the recorded start request id. A match identifies the blocker with that first run. A mismatch, or an
+    identity that can't be read (no recorded id to compare included), is alerted, naming the tenant and the blocker,
+    and changes nothing; the deletion still runs. A read that fails is raised: nothing is deleted after it."""
+    async with ctx.sessionmaker() as s:
+        found = await s.execute(select(UnresolvedSend.request_id, UnresolvedSend.start_request_id).where(
+            UnresolvedSend.tenant_id == ctx.tenant_id, UnresolvedSend.workflow_id == item.workflow_id,
+            UnresolvedSend.state.in_(("pending", "unresolved")),
+        ))  # fmt: skip
+        blocker = found.first()
+    if blocker is None or item.run_id is None:
+        return
+    request_id, recorded = blocker
+    first = None if recorded is None else await temporal.first_run_request_id(ctx.client, item.workflow_id, item.run_id)
+    if first is None:
+        log.error("start_identity_unread", tenant=str(ctx.tenant_id), request_id=str(request_id))
+    elif first.request_id != str(recorded):
+        log.error("start_identity_mismatch", tenant=str(ctx.tenant_id), request_id=str(request_id))
+    else:
+        async with _scoped(ctx) as s:
+            await blockers.identified(s, request_id, first.run_id)
+
+
+async def _current(ctx: Context, item: TenantErasureItem) -> TenantErasureItem | None:
+    """The item as it is now: an earlier item of the same page may have moved it (`_id_shown`)."""
+    async with ctx.sessionmaker() as s:
+        await tenant_scope(s, ctx.tenant_id)
+        return (await s.execute(select(TenantErasureItem).where(TenantErasureItem.id == item.id))).scalar_one_or_none()
+
+
+async def _id_shown(ctx: Context, workflow_id: str) -> None:
+    """A run of the workflow shown and deleted: its id alone was shown too, so it's `requested` and its NOT_FOUND then
+    reads the deletion back, whichever of them the pass reached first; never `absent` for good (the final review's
+    finding 1: a blocker's id alone, enumerated last, reached after its run was deleted)."""
+    async with _scoped(ctx) as s:
+        await s.execute(update(TenantErasureItem).where(
+            TenantErasureItem.tenant_id == ctx.tenant_id, TenantErasureItem.step == int(Stage.EXECUTIONS),
+            TenantErasureItem.kind == "execution", TenantErasureItem.workflow_id == workflow_id,
+            TenantErasureItem.run_id.is_(None), TenantErasureItem.state.in_(("found", "absent")),
+        ).values(state="requested"))  # fmt: skip
 
 
 async def executions(ctx: Context) -> bool:
     await _enumerated(ctx)
-    async for item in _each_open(ctx, Stage.EXECUTIONS):
+    async for listed in _each_open(ctx, Stage.EXECUTIONS):
+        item = await _current(ctx, listed)
+        if item is None or item.state == "verified":
+            continue
         if item.run_id is None:  # an id alone: its chain's latest run, if Temporal shows one
             shown = await temporal.execution(ctx.client, item.workflow_id, None)
-            if shown is None:
-                await _mark(ctx, item, "verified", known="execution")
-            else:
+            if shown is None:  # read back once shown (`gone`); never shown, `absent`, never verified (E1-c)
+                await _mark(ctx, item, "verified" if item.state == "requested" else "absent", known="execution")
+            else:  # shown: its run handed on, and the id `requested` (its later NOT_FOUND is a deletion read back)
                 async with _scoped(ctx) as s:
                     await _found(s, ctx, Stage.EXECUTIONS, "execution", [(item.workflow_id, shown.run_id)], "history")
+                await _mark(ctx, item, "requested")
             continue
         shown = await temporal.execution(ctx.client, item.workflow_id, item.run_id)
         if shown is None:
             await _mark(ctx, item, "verified", known="execution")
             continue
         if item.state == "found":
+            await _identity(ctx, item)  # before anything of it is terminated or deleted
             if shown.open:  # nothing more starts from it once terminated, so its history is then whole
                 await temporal.terminate(ctx.client, item.workflow_id, item.run_id)
             read = await temporal.read_run(ctx.client, item.workflow_id, item.run_id)
@@ -295,7 +431,8 @@ async def executions(ctx: Context) -> bool:
                 await _found(s, ctx, Stage.EXECUTIONS, "execution", read.children, "child")
         await temporal.delete_execution(ctx.client, item.workflow_id, item.run_id)  # again, if it's still there
         await _mark(ctx, item, "requested")
-    return await _all_verified(ctx, Stage.EXECUTIONS)
+        await _id_shown(ctx, item.workflow_id)
+    return await _settled(ctx, Stage.EXECUTIONS)
 
 
 # 70
@@ -314,6 +451,7 @@ async def keys(ctx: Context) -> bool:
 
 # What the sweep deletes, in an order no key refuses, each `(table, its key)`: a run's steps go with it.
 SWEPT: tuple[tuple[str, str], ...] = (
+    ("work_failures", "kind, item_id"), ("recovery_items", "reason, item_id"), ("operator_commands", "id"),  # 0050's
     ("claim_grants", "claim_id, run_id"), ("step_outputs", "id"), ("run_secret_index", "root_run_id"),
     ("run_slots", "run_id"), ("execution_evidence", "id"), ("schedule_firings", "workflow_id, run_id"),
     ("schedule_incarnations", "temporal_id"), ("schedule_intervals", "id"), ("runs", "root_run_id"),

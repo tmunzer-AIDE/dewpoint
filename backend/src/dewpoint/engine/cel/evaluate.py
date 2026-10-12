@@ -17,6 +17,7 @@ EVALUATION_ERROR = "evaluation_error"  # any other CEL runtime error: missing ke
 NON_JSON = "non_json_value"
 OUTPUT_TOO_LARGE = "output_too_large"
 INPUT_TOO_LARGE = "input_too_large"
+HISTORY_TOO_LARGE = "history_too_large"  # never sent: the run's history would pass Temporal's limit (#26's backstop)
 MEMORY_LIMIT = "memory_limit"
 CPU_LIMIT = "cpu_limit"
 TIMEOUT = "timeout"

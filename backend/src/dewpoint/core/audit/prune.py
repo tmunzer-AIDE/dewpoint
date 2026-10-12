@@ -6,7 +6,7 @@ which checks all of it again and refuses outside a development deployment until 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from dewpoint.core.audit.anchor import FileAnchorSink
+from dewpoint.core.audit.anchor import AnchorSink
 
 
 class PruningDisabledError(Exception):
@@ -19,7 +19,7 @@ _DUE = text(
 )
 
 
-async def prune(s: AsyncSession, sink: FileAnchorSink, *, older_than_days: int) -> dict[str, int]:
+async def prune(s: AsyncSession, sink: AnchorSink, *, older_than_days: int) -> dict[str, int]:
     """How many entries each scope lost. Raises PruningDisabledError before anything is anchored or deleted."""
     if not (await s.execute(text("SELECT audit_pruning_enabled()"))).scalar_one():
         raise PruningDisabledError

@@ -49,8 +49,8 @@ async def _rows(owner: Any) -> uuid.UUID:
                         {"t": tenant, "u": uuid.uuid4()})  # fmt: skip
         await s.execute(text("insert into tenant_erasure_items (tenant_id, step, kind, workflow_id, source) "
                              "values (:t, 50, 'run', :w, 'runs')"), {"t": tenant, "w": str(workflow)})  # fmt: skip
-        await s.execute(text("insert into tenant_erasure_known (tenant_id, kind, workflow_id) "
-                             "values (:t, 'execution', :w)"), {"t": tenant, "w": str(workflow)})  # fmt: skip
+        await s.execute(text("insert into tenant_erasure_known (tenant_id, kind, workflow_id, provenance) "
+                             "values (:t, 'execution', :w, 'gone')"), {"t": tenant, "w": str(workflow)})  # fmt: skip
         sweep = (await s.execute(text("insert into retention_sweeps default values returning id"))).scalar_one()
         await s.execute(text("insert into retention_sweep_tenants (sweep_id, tenant_id) values (:s, :t)"),
                         {"s": sweep, "t": tenant})  # fmt: skip

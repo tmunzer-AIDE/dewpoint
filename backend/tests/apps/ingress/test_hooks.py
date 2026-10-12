@@ -210,3 +210,27 @@ def test_a_declared_length_is_compared_without_converting_an_unbounded_string() 
     )
     for odd in ("", "1²", "-1", "+5", " 5", "1e9", "١٢"):  # not a length: the bytes are counted as they arrive
         assert not declared_over(odd, cap), odd
+
+
+async def test_behind_a_proxy_with_no_trusted_proxies_every_caller_is_the_proxy(make_app, owner_sessionmaker) -> None:
+    """D10's second item: behind a proxy, `DEWPOINT_INGRESS_TRUSTED_PROXIES` left empty never identifies the caller:
+    the address the allowlist and the failure limit see is the proxy's (the peer), whatever `X-Forwarded-For` the
+    proxy writes. So an allowlist naming the callers refuses them all, one naming the proxy admits every caller behind
+    it, and one caller's failures limit every other caller behind the same proxy. The guide warns of it."""
+    proxy, caller, other = "198.51.100.7", "203.0.113.5", "203.0.113.9"
+    _, fenced = await hmac_endpoint(owner_sessionmaker, allowlist=["203.0.113.0/24"])
+    _, open_to_proxy = await hmac_endpoint(owner_sessionmaker, allowlist=["198.51.100.0/24"])
+    app = make_app(ingress_address_failures=3)  # no trusted proxies: the default
+    async with client(app, address=(proxy, 40000)) as c:
+        forwarded = signed(BODY) | {"x-forwarded-for": caller}
+        assert (await c.post(f"/hooks/{fenced}", content=BODY, headers=forwarded)).status_code == 401
+        assert _authenticated(await c.post(f"/hooks/{open_to_proxy}", content=BODY, headers=forwarded))
+        for _ in range(2):  # one caller's failures, behind the proxy: with its refusal above, the limit's three
+            failed = await c.post(
+                f"/hooks/{uuid.uuid4()}", content=BODY, headers=signed(BODY) | {"x-forwarded-for": caller}
+            )
+            assert failed.status_code == 401
+        limited = await c.post(
+            f"/hooks/{open_to_proxy}", content=BODY, headers=signed(BODY) | {"x-forwarded-for": other}
+        )
+    assert limited.status_code == 429  # another caller, limited for them: the limit is the proxy's

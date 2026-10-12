@@ -6,10 +6,10 @@ nothing of the engine. Every write is idempotent, so a retried projection change
 import math
 import re
 import uuid
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Protocol
 
 from sqlalchemy import delete, func, literal, null, or_, select, text, tuple_, union_all, update
 from sqlalchemy.dialects.postgresql import insert
@@ -34,6 +34,46 @@ STEP_FIELDS = (
     "outcome",
     "cel_mode",
 )
+
+
+# A step whose outcome no one recorded (the owner's ruling, 2b-4b M2): its run ended (an unexpected bug failed its
+# execution, or it ended from outside) while its row said `running`. Never a plugin's failure: whether it ran is
+# unknown.
+OUTCOME_UNCONFIRMED = "outcome_unconfirmed"
+UNCONFIRMED_MESSAGE = "The run ended before this step's outcome was recorded: whether it ran is unconfirmed."
+# A run an operator settled once Temporal no longer had its history (2b-4b M3): an administrative settlement, its
+# outcome unconfirmed, never proof that it failed
+HISTORY_LOST = "history_lost"
+
+
+class BatchRange(Protocol):
+    """A batch a bug failed: loop `loop`'s items `start` to `end` (excluded), in the iteration `scope` ("" at the
+    root)."""
+
+    @property
+    def scope(self) -> str: ...
+    @property
+    def loop(self) -> str: ...
+    @property
+    def start(self) -> int: ...
+    @property
+    def end(self) -> int: ...
+
+
+def in_batch(key: str, batch: BatchRange) -> bool:
+    """Whether the iteration key `key` is one of the batch's iterations, or nested in one: `l:1` and `l:1/m:0` are in
+    the batch of `l`'s items 1 to 3, `l:10` never."""
+    head = f"{batch.scope}/" if batch.scope else ""
+    if not key.startswith(f"{head}{batch.loop}:"):
+        return False
+    index = key[len(head) + len(batch.loop) + 1 :].split("/", 1)[0]
+    return index.isascii() and index.isdigit() and str(int(index)) == index and batch.start <= int(index) < batch.end
+
+
+def batch_keys(batch: BatchRange) -> list[str]:
+    """The batch's iterations' own keys (each with everything nested in it, for `close_unconfirmed`)."""
+    head = f"{batch.scope}/" if batch.scope else ""
+    return [f"{head}{batch.loop}:{i}" for i in range(batch.start, batch.end)]
 
 
 def sanitize(message: str | None) -> str | None:
@@ -184,23 +224,39 @@ async def finish_run(
     ended_at: datetime,
     error_code: str | None = None,
     error_message: str | None = None,
-    iterations: int = 0,
+    iterations: int | None = 0,
     if_running: bool = False,
 ) -> None:
     """A run's end. `if_running`: only if it has none yet, as when a parent writes the end of a child that was
-    terminated before it could write its own."""
+    terminated before it could write its own. `iterations` None: unknown, so the count recorded stays."""
     query = update(Run).where(Run.id == run_id)
     if if_running:
         query = query.where(Run.status == "running")
+    counted = {} if iterations is None else {"iterations": iterations}
     await s.execute(
         query.values(
             status=status,
             ended_at=ended_at,
             error_code=sanitize(error_code),
             error_message=sanitize(error_message),
-            iterations=iterations,
+            **counted,
         )
     )
+
+
+async def close_unconfirmed(s: AsyncSession, run_id: uuid.UUID, *, scopes: Sequence[str] | None = None) -> None:
+    """The run's steps still `running`, closed `failed` with `outcome_unconfirmed` (the owner's ruling, 2b-4b M2).
+    `scopes`: only those in these iterations, each an iteration key with everything nested in it (`l:1` closes
+    `l:1/m:0`, never `l:10`): a failed batch's, which shares its run's id with every other step of the run."""
+    query = update(RunStep).where(RunStep.run_id == run_id, RunStep.status == "running")
+    if scopes is not None:
+        if not scopes:
+            return
+        inside = [or_(RunStep.iteration_key == k, RunStep.iteration_key.startswith(f"{k}/", autoescape=True))
+                  for k in scopes]  # fmt: skip
+        query = query.where(or_(*inside))
+    closed = {"status": "failed", "error_code": OUTCOME_UNCONFIRMED, "error_message": UNCONFIRMED_MESSAGE}
+    await s.execute(query.values(**closed, ended_at=func.now()).execution_options(synchronize_session=False))
 
 
 async def upsert_steps(s: AsyncSession, tenant_id: uuid.UUID, rows: Iterable[Mapping[str, Any]]) -> None:

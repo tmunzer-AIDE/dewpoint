@@ -17,10 +17,11 @@ grant ever serves it, and only `read_envelope`, following its request, opens it.
 
 import json
 import uuid
+from collections.abc import AsyncIterator, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import exists, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -62,6 +63,7 @@ class NewClaim:
 class Stored:
     value: Any
     sensitive_pointers: tuple[str, ...]
+    size: int = 0  # its ciphertext's bytes, where a grouped read knows them (`fetch_groups`)
 
 
 def _plain(value: Any) -> bytes:
@@ -156,6 +158,78 @@ async def fetch(
 
 
 GRANTS_PER_STATEMENT = 1_000  # 5 arguments a grant: a loop's 10,000 claimed outputs take 10 statements
+READS_PER_STATEMENT = 1_000  # claims read, or checked, a statement (the owner's ruling on the 2b-4b M2 measurement)
+
+
+GROUP_BYTES = 16 * 1024 * 1024  # ciphertext a group of claims opened at once holds, at most (one larger alone)
+
+
+async def _readable(s: AsyncSession, claim_ids: Sequence[uuid.UUID], run_id: uuid.UUID) -> dict[uuid.UUID, Any]:
+    """The claims of `claim_ids` that `run_id` may read (it owns them, or holds a grant), each with its owner and its
+    ciphertext's size, never the ciphertext itself (the fresh M3 review's I4), a thousand a statement: one lookup in
+    each claims table, then one for the grants of those it doesn't own. Never an envelope's (`_row`); a claim in both
+    tables is the input's, as `_row` reads it."""
+    ids = list(dict.fromkeys(claim_ids))
+    found: dict[uuid.UUID, Any] = {}
+    for at in range(0, len(ids), READS_PER_STATEMENT):
+        chunk = ids[at : at + READS_PER_STATEMENT]
+        outputs = select(OutputClaim.id, OutputClaim.owner_run_id, func.octet_length(OutputClaim.ciphertext)
+                         .label("size")).where(OutputClaim.id.in_(chunk))  # fmt: skip
+        inputs = select(InputClaim.id, InputClaim.owner_run_id, func.octet_length(InputClaim.ciphertext)
+                        .label("size")).where(InputClaim.id.in_(chunk), InputClaim.role == "claim")  # fmt: skip
+        rows = {row.id: row for row in await s.execute(outputs)}
+        rows.update({row.id: row for row in await s.execute(inputs)})
+        others = [c for c, row in rows.items() if row.owner_run_id != run_id]
+        held = set()
+        if others:
+            granted = select(ClaimGrant.claim_id).where(ClaimGrant.run_id == run_id, ClaimGrant.claim_id.in_(others))
+            held = set((await s.execute(granted)).scalars())
+        found.update({c: row for c, row in rows.items() if row.owner_run_id == run_id or c in held})
+    return found
+
+
+def _groups(readable: dict[uuid.UUID, Any]) -> Iterator[list[uuid.UUID]]:
+    """The claims in groups whose ciphertexts together stay within `GROUP_BYTES`, a thousand at most."""
+    group: list[uuid.UUID] = []
+    size = 0
+    for claim_id, row in readable.items():
+        if group and (size + row.size > GROUP_BYTES or len(group) == READS_PER_STATEMENT):
+            yield group
+            group, size = [], 0
+        group.append(claim_id)
+        size += row.size
+    if group:
+        yield group
+
+
+async def fetch_groups(
+    s: AsyncSession, cipher: ClaimCipher, tenant_id: uuid.UUID, *, run_id: uuid.UUID, claim_ids: Sequence[uuid.UUID]
+) -> AsyncIterator[dict[uuid.UUID, Stored]]:
+    """Claims' whole values, for `run_id`, as `fetch` reads one, a group at a time, each opened once and let go with
+    its group (a crossing's closure: the owner's ruling on the 2b-4b M2 measurement, the fresh M3 review's I4). Every
+    claim is checked before any is read: one it may not read, or that isn't there, refuses them all."""
+    readable = await _readable(s, claim_ids, run_id)
+    if any(c not in readable for c in claim_ids):
+        raise ClaimUnavailableError("A claim this run may not read, or that doesn't exist.")
+    for group in _groups(readable):
+        outputs = select(OutputClaim.id, OutputClaim.sensitive_pointers, OutputClaim.ciphertext).where(
+            OutputClaim.id.in_(group)
+        )
+        inputs = select(InputClaim.id, InputClaim.sensitive_pointers, InputClaim.ciphertext).where(
+            InputClaim.id.in_(group), InputClaim.role == "claim"
+        )
+        rows = {row.id: row for row in await s.execute(outputs)}
+        rows.update({row.id: row for row in await s.execute(inputs)})  # a claim in both tables: the input's, as `_row`
+        out: dict[uuid.UUID, Stored] = {}
+        for claim_id in group:
+            try:
+                plain = await cipher.open(str(tenant_id), str(claim_id), rows[claim_id].ciphertext)
+            except ClaimUnreadableError as e:
+                raise ClaimUnavailableError("A claim that doesn't open under its tenant.") from e
+            out[claim_id] = Stored(json.loads(plain), tuple(rows[claim_id].sensitive_pointers),
+                                   readable[claim_id].size)  # fmt: skip
+        del rows
+        yield out
 
 
 async def grant(
@@ -168,11 +242,10 @@ async def grant(
     root_run_id: uuid.UUID,
 ) -> None:
     """Grants `to` the claims `granted_by` owns or holds a grant on: a handle crossing between a parent and its child
-    (§3.4). Any other claim refuses the whole grant, and nothing is granted."""
-    for claim_id in claim_ids:
-        row = await _row(s, claim_id)
-        if row is None or not await _may_read(s, claim_id, granted_by, row.owner_run_id):
-            raise ClaimUnavailableError("A claim this run may not grant.")
+    (§3.4). Any other claim refuses the whole grant, and nothing is granted. Checked a thousand a statement."""
+    readable = await _readable(s, claim_ids, granted_by)
+    if any(c not in readable for c in claim_ids):
+        raise ClaimUnavailableError("A claim this run may not grant.")
     rows = [
         {"claim_id": c, "run_id": to, "tenant_id": tenant_id, "granted_by": granted_by, "root_run_id": root_run_id}
         for c in claim_ids

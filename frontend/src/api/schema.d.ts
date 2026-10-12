@@ -4,6 +4,145 @@
  */
 
 export interface paths {
+    "/api/v1/admin/held": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Held */
+        get: operations["held_api_v1_admin_held_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/platform/ingress-capacity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Ingress Capacity
+         * @description The capacity, the deployment's limit it makes and what's outstanding, and its values still unset (production
+         *     readiness refuses then).
+         */
+        get: operations["ingress_capacity_api_v1_admin_platform_ingress_capacity_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Change Ingress Capacity
+         * @description The capacity changed, audited (`platform.ingress_capacity.set`) with the admin's id, the attestation, what it
+         *     was and what it is, and its values still unset.
+         */
+        patch: operations["change_ingress_capacity_api_v1_admin_platform_ingress_capacity_patch"];
+        trace?: never;
+    };
+    "/api/v1/admin/platform/namespace-boundaries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Namespace Boundaries
+         * @description Every boundary recorded, newest first; the erasure's bound relies on the newest not lost.
+         */
+        get: operations["namespace_boundaries_api_v1_admin_platform_namespace_boundaries_get"];
+        put?: never;
+        /**
+         * Record Boundary
+         * @description The boundary recorded, audited (`platform.namespace_boundary.record`) with the admin's id and its evidence.
+         */
+        post: operations["record_boundary_api_v1_admin_platform_namespace_boundaries_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/recovery": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Recovery */
+        get: operations["recovery_api_v1_admin_recovery_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/recovery/unresolved-sends/counts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Unresolved Counts
+         * @description Unresolved sends, counted (task 9): per state, with open sends and the oldest, and the erasures they hold. The
+         *     database checks the caller's session itself (`admin_session`) and returns no identifier.
+         */
+        get: operations["unresolved_counts_api_v1_admin_recovery_unresolved_sends_counts_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/tenants/{tenant_id}/commands": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Ask */
+        post: operations["ask_api_v1_admin_tenants__tenant_id__commands_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/tenants/{tenant_id}/commands/{command_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Command */
+        get: operations["command_api_v1_admin_tenants__tenant_id__commands__command_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/tenants/{tenant_id}/erasure": {
         parameters: {
             query?: never;
@@ -50,6 +189,68 @@ export interface paths {
         put?: never;
         /** Stop */
         post: operations["stop_api_v1_admin_tenants__tenant_id__erasure_stop_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/tenants/{tenant_id}/held/count": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Held Count
+         * @description What a bulk release would free: the tenant's held items of `kind` held before `held_before`.
+         */
+        get: operations["held_count_api_v1_admin_tenants__tenant_id__held_count_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/tenants/{tenant_id}/held/release": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Release
+         * @description A held item's release, recorded as a command with the hold it shows; released once its operator confirms it.
+         */
+        post: operations["release_api_v1_admin_tenants__tenant_id__held_release_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/tenants/{tenant_id}/held/release-many": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Release Many
+         * @description A bulk release (the owner's rulings on the M3 checkpoints), bounded by tenant, kind, `held_before` and `max`,
+         *     never all of them across tenants: recorded as a command with the holds it shows, oldest first, released once its
+         *     operator confirms it, those alone (task 8).
+         */
+        post: operations["release_many_api_v1_admin_tenants__tenant_id__held_release_many_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1355,6 +1556,32 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * AbandonEvidence
+         * @description An abandonment's evidence (task 10): the identifiers (the leader checks each against the record), the Temporal
+         *     response its operator saw, their rationale, and a visibility result if any (recorded, never proof).
+         */
+        AbandonEvidence: {
+            /** Rationale */
+            rationale: string;
+            /**
+             * Request Id
+             * Format: uuid
+             */
+            request_id: string;
+            /** Start Request Id */
+            start_request_id: string | null;
+            temporal_response: components["schemas"]["TemporalResponse"];
+            /**
+             * Tenant Id
+             * Format: uuid
+             */
+            tenant_id: string;
+            /** Visibility */
+            visibility?: string | null;
+            /** Workflow Id */
+            workflow_id: string;
+        };
         /** ActivateIn */
         ActivateIn: {
             /**
@@ -1451,10 +1678,65 @@ export interface components {
             /** Node */
             node: string | null;
         };
+        /** BoundaryIn */
+        BoundaryIn: {
+            /** Attestation */
+            attestation: string;
+            /** Name */
+            name: string;
+            /** Namespace */
+            namespace: string;
+            /** Namespace Id */
+            namespace_id: string;
+            /** Proof Digest */
+            proof_digest: string;
+            /** Server Build */
+            server_build: string;
+        };
+        /**
+         * CapacityIn
+         * @description The values to change, each `null` to unset it, or `unset` for all three; and how the starts were measured.
+         */
+        CapacityIn: {
+            /** Attestation */
+            attestation: string;
+            /** Headroom */
+            headroom?: number | null;
+            /** Queue Wait S */
+            queue_wait_s?: number | null;
+            /** Starts Per S */
+            starts_per_s?: number | null;
+            /**
+             * Unset
+             * @default false
+             */
+            unset?: boolean;
+        };
         /** CodeIn */
         CodeIn: {
             /** Code */
             code: string;
+        };
+        /** CommandIn */
+        CommandIn: {
+            abandon?: components["schemas"]["AbandonEvidence"] | null;
+            /**
+             * Evidence
+             * @default
+             */
+            evidence?: string;
+            /** Idempotency Key */
+            idempotency_key: string;
+            /**
+             * Item Id
+             * Format: uuid
+             */
+            item_id: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "record_lost_run" | "record_lost_subrun" | "release_lost_slot" | "settle_ended" | "inspect_unresolved_send" | "abandon_start";
         };
         /** ConnectionCreateIn */
         ConnectionCreateIn: {
@@ -2290,6 +2572,41 @@ export interface components {
              */
             state: "mfa_pending" | "enroll_required" | "active";
         };
+        /** ReleaseIn */
+        ReleaseIn: {
+            /** Idempotency Key */
+            idempotency_key?: string | null;
+            /**
+             * Item Id
+             * Format: uuid
+             */
+            item_id: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "dispatch" | "reconcile_starting" | "reconcile_open" | "reconcile_slot" | "cancel" | "match" | "subrun";
+        };
+        /**
+         * ReleaseManyIn
+         * @description A tenant's held items of one kind, held before `held_before`: `max` of them at most, oldest first.
+         */
+        ReleaseManyIn: {
+            /**
+             * Held Before
+             * Format: date-time
+             */
+            held_before: string;
+            /** Idempotency Key */
+            idempotency_key?: string | null;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "dispatch" | "reconcile_starting" | "reconcile_open" | "reconcile_slot" | "cancel" | "match" | "subrun";
+            /** Max */
+            max: number;
+        };
         /** RerunIn */
         RerunIn: {
             csv?: components["schemas"]["CsvIn"] | null;
@@ -2719,6 +3036,23 @@ export interface components {
             /** Node */
             node: string | null;
         };
+        /**
+         * TemporalResponse
+         * @description The Temporal response an operator saw, exactly, and when.
+         */
+        TemporalResponse: {
+            /** Call */
+            call: string;
+            /** Message */
+            message: string;
+            /**
+             * Observed At
+             * Format: date-time
+             */
+            observed_at: string;
+            /** Status */
+            status: string;
+        };
         /** TenantIn */
         TenantIn: {
             /** Name */
@@ -3133,6 +3467,279 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    held_api_v1_admin_held_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    ingress_capacity_api_v1_admin_platform_ingress_capacity_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    change_ingress_capacity_api_v1_admin_platform_ingress_capacity_patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CapacityIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    namespace_boundaries_api_v1_admin_platform_namespace_boundaries_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    record_boundary_api_v1_admin_platform_namespace_boundaries_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BoundaryIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    recovery_api_v1_admin_recovery_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    unresolved_counts_api_v1_admin_recovery_unresolved_sends_counts_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    ask_api_v1_admin_tenants__tenant_id__commands_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CommandIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    command_api_v1_admin_tenants__tenant_id__commands__command_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+                command_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     shown_api_v1_admin_tenants__tenant_id__erasure_get: {
         parameters: {
             query?: never;
@@ -3249,6 +3856,116 @@ export interface operations {
         responses: {
             /** @description Successful Response */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    held_count_api_v1_admin_tenants__tenant_id__held_count_get: {
+        parameters: {
+            query: {
+                kind: "dispatch" | "reconcile_starting" | "reconcile_open" | "reconcile_slot" | "cancel" | "match" | "subrun";
+                held_before: string;
+            };
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    release_api_v1_admin_tenants__tenant_id__held_release_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReleaseIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    release_many_api_v1_admin_tenants__tenant_id__held_release_many_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReleaseManyIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
                 headers: {
                     [name: string]: unknown;
                 };

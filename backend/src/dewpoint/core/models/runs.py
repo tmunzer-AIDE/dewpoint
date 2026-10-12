@@ -12,6 +12,7 @@ from sqlalchemy import (
     Identity,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -57,6 +58,7 @@ class Run(Base):
     error_code: Mapped[str | None] = mapped_column(Text)  # a plugin's code: nothing bounds it, sanitize() does
     error_message: Mapped[str | None] = mapped_column(Text)
     iterations: Mapped[int] = mapped_column(Integer, default=0)
+    unconfirmed_batches: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB)  # batches a bug failed (0049)
     started_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     kind: Mapped[str] = mapped_column(String(32), default="run")
     parent_run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
@@ -144,3 +146,13 @@ class ExecutionEvidence(Base):
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     lost_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     next_check_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # A read under way (migration 0048): Temporal's next-page token, the run read, the children initiated on the pages
+    # read and not yet started, the latest event's time
+    read_token: Mapped[bytes | None] = mapped_column(LargeBinary)
+    read_run: Mapped[str | None] = mapped_column(Text)
+    read_pending: Mapped[dict[str, list[str]] | None] = mapped_column(JSONB)
+    read_last_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Temporal's close of that exact run, from a describe of it or its history's close event, and when it was seen
+    # (0063, 2b-4b M4 recovery task 15): what `retained_out` rests on, copied into the erasure's known row
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    closed_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

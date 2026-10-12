@@ -77,6 +77,31 @@ sees `trigger.rows` (one object per row, each column by its name) and `trigger.r
 - **What the run keeps:** the mapping, the file's headers and the skipped rows (each one's number and first code, the
   first 100 errors in detail, and their count), encrypted beside its input; its details show them (`run.view`). The
   audit entry keeps a tenant-keyed digest of the file and counts.
+- **Memory, per API process:** at the platform's caps, an upload's parse peaks near 145 MiB and holds about 90 MiB
+  until it answers, and a CSV start's rows about 235 MiB until its transaction commits (measured as Python's own
+  allocations: `tests/probes/csv_memory.py`). So each API process takes at most `DEWPOINT_CSV_CONCURRENCY` uploads,
+  CSV starts and re-runs keeping their original's input at once (2 by default); one past it is refused at once with
+  503 `csv_busy` and `Retry-After: 1`, before an upload's body is read or a start opens its file, nothing recorded:
+  ask again. A slot is held until the request's transaction commits. Measured as the process sees it
+  (`tests/probes/test_csv_rss.py`, the worst shape, through the commit, on one macOS development machine, 2026-10-09):
+  two worst-case jobs at once raised the process's physical footprint (its resident memory with its compressed pages,
+  the allocator's overhead included) about 465 MiB above idle, one about 325 MiB, and the allocator kept most of it
+  afterwards. **In the API's own Linux container** (`tests/probes/csv_container.py`: the app image, Docker's
+  linux/arm64, a 1 GiB limit, two worst-case uploads then two worst-case starts a round, 2026-10-09), the API process
+  idled at 127 MiB and peaked at 630 MiB in the first round; the same work again kept more each time, its peak
+  settling at about 746 MiB (the container's own, page cache with it, 726 MiB) from the fourth round of eight, and
+  about 475 MiB kept between rounds. It was never killed for its memory. Limiting glibc's arenas
+  (`MALLOC_ARENA_MAX=2`) changed little (a 735 MiB peak). So **size an API process with two slots for about 750 MiB
+  at its peak, about 310 MiB a slot beside its 130 MiB idle**, and leave headroom: a 1 GiB limit kept a quarter
+  free. Two slots stay provisional; another architecture or Python may differ.
+- **The CPU work runs off the event loop**, in a thread, inside the request's slot: an upload's parse and preview,
+  a start's rows, and the input's check against the trigger's schema and its split (at the caps the check and the
+  split take about 3 s each; they held the API's event loop up to 12 s for two starts at once). The database session
+  stays on the loop. With two worst-case starts in one process, the loop's longest wait was 0.24 s (the rows' encoding
+  for their claim stays on it) and a cheap request answered in 43 ms at the median, 0.8 s at the 95th percentile and
+  0.9 s at most; the starts themselves took longer (35 s for the two, against 25 s on the loop), the CPU shared
+  under Python's global lock. In the API's Linux container, through eight rounds of two worst-case starts (17 to 21 s
+  each round), the cheap request answered in 0.28 to 0.35 s at the 95th percentile and 0.92 s at most.
 - **A loop over the rows** needs no `declassify` entry: their count is `trigger.row_count`, already public. Rows that
   together pass 64 KiB are one claim, and the loop gives each iteration a handle to its row: a step's reference to a
   cell is read in its own activity, but CEL over a cell (a condition on `item.status`) runs in `cel.evaluate`, one
@@ -127,12 +152,14 @@ synced yet, or its Temporal id's first update not landed) and `count_pending` (l
   refused as admission refuses it; a tenant being erased skips it, audited. A tick that can't be admitted (the database,
   a key) is retried without limit, and alerts after 10 minutes. Its request's audit entry names the schedule.
 - **Missed firings.** Within the catch-up window, firings missed while Temporal was down fire when it's back, each with
-  its own time. Past it they're skipped: Temporal counts them, and the schedule's `misses` shows the count, read every
-  five minutes for each of its Temporal ids (`misses_read_at`), each id's count added to the total, audited and alerted
-  on (`schedule_firings_missed`). A deleted schedule's count can't be read again, so the dispatcher deletes a Temporal
-  id only once it shows the dispatcher's own pause for the delete (which discards any update another writer still had in
-  flight), when its count can't grow any more, and that count is recorded: nothing it counted is lost. One that goes
-  without Dewpoint deleting it leaves a possibly missed or unknown span (below) over the time its count wasn't read.
+  its own time. Past it they're skipped: Temporal counts them, and the schedule's `misses` shows the count, read for
+  each of its Temporal ids four minutes after its last read (`misses_read_at`), each id's count added to the total,
+  audited and alerted on (`schedule_firings_missed`). A read more than five minutes old leaves the schedule's accounting
+  incomplete (`misses_stale`) until it's read. A deleted schedule's count can't be read again, so the dispatcher deletes
+  a Temporal id only once it shows the dispatcher's own pause for the delete (which discards any update another writer
+  still had in flight), when its count can't grow any more, and that count is recorded: nothing it counted is lost. One
+  that goes without Dewpoint deleting it leaves a possibly missed or unknown span (below) over the time its count wasn't
+  read.
 - **Firings due while a schedule waited for its unpause.** Each Temporal id is created paused, and Temporal neither
   catches up nor counts the firings due before the update that unpauses it. The dispatcher accounts for every such
   span from evidence it records before it acts, never from a guess: the schedule's generation when the id was
@@ -195,7 +222,11 @@ namespace before it connects: exit 2 otherwise, [`deployment.md`](deployment.md)
    doesn't open, or isn't JSON, makes the request `dead` (`envelope_unreadable`), audited; repairing a key never
    reopens it: re-run it;
 3. reserves the slot, writes the run's row (`running`, no start time yet), marks the request `starting`, and starts the
-   workflow under its run's id, refusing a duplicate, with a 10-second deadline.
+   workflow under its run's id, refusing a duplicate, with a 10-second deadline;
+4. then, while its pass has run less than a second (and within its budget), takes again each tenant that has just
+   started one: its next due request (`dispatch_next()`), checked and started the same way, round after round, each
+   such tenant once a round and its oldest first. A tenant that waits (its slots, say) or fails takes no more until the
+   next cycle. One start a cycle held a tenant to about 0.9 starts a second, whatever its backlog.
 
 What Temporal answers decides what follows:
 
@@ -208,10 +239,21 @@ What Temporal answers decides what follows:
 - no answer: it stays `starting`, its slot held, for the reconciler.
 
 The root run's end write releases its slot. A failure the dispatcher can't classify is logged (`dispatch_failed`, its
-type only) and leaves that request as it was; the cycle goes on with the other tenants. A cycle that can't read the
+type only), leaves that request as it was, and is counted ([below](#items-that-keep-failing)); the cycle goes on with
+the other tenants. A cycle that can't read the
 current build from Temporal dispatches nothing (`dispatcher_observe_failed`), and the next one asks again; a cycle
 that fails is logged (`dispatcher_cycle_failed`) and the process goes on. Each instance records its
 last cycle in `dispatcher_reports`.
+
+Each of a cycle's passes picks at most 50 items (the dispatch pass's further rounds, up to a second, pick again: only
+the tenants that just started one), those it tried least lately first, and takes no new one once it has run 10
+seconds, or once a call to Temporal took over a second, ran out its deadline or found Temporal unavailable (a
+prototype: its numbers aren't settled). An item it took runs to its end. A pass stopped that way is a degraded state,
+said in its report (`slow`; `deferred`, the items it picked but didn't take; `backlog`, its pick full, so more may
+wait). It's alerted on (`dispatcher_pass_degraded`, at most every five minutes a pass) once a slow call stopped the
+pass (`why`: `slow`), or once the pass has deferred items in every run for a minute, its calls quick all the same
+(`why`: `budget`). A full pick alone alerts on nothing. A Temporal slower than a second a call leaves each pass one
+item a cycle for as long as it lasts: the schedules' accounting then shows itself stale.
 
 ### The reconciler
 
@@ -226,8 +268,11 @@ over when it goes). It asks Temporal about each request at most once every 30 se
   settles is audited (`run.request.reconciled`).
 - **A started run whose row is still `running`,** once Temporal says the logical run's latest execution closed:
   completed records the run's own result; cancelled, `cancelled`; terminated, `failed` with `terminated`; failed or
-  timed out, `failed` with `internal_error`, and an alert. Its slot is released in the same transaction. This is how a
-  run whose end write was lost, or refused, ends.
+  timed out, `failed` with `internal_error`, and an alert. Its slot is released in the same transaction, and any of
+  its steps still `running` close `failed` with `outcome_unconfirmed`. This is how a run whose end write was lost, or
+  refused, ends, and how a run a bug in the interpreter failed ends (below): its message is then the run's own, naming
+  the exception's type, and its iterations are as its interpreter last counted them, which the message says are
+  unverified. An end that comes with no count leaves the count recorded as it was: never a zero for work used.
 - **A slot whose run's row has ended:** released once its execution is closed.
 - **A sub-run still `running` 30 seconds after its root ended** (a child its root's close asked to cancel, or one whose
   parent went before writing its end): once its own execution is closed, the end Temporal reports is recorded, as for
@@ -235,30 +280,90 @@ over when it goes). It asks Temporal about each request at most once every 30 se
   retirement's `open_runs` check and an erasure's stage 50.
 - **History Temporal no longer has**, for a started run, such a sub-run or a held slot: left as it is, with an error
   (`run_history_missing`, `subrun_history_missing`, `slot_history_missing`); no outcome is invented and no slot
-  released. Recover it by hand. Such a sub-run (one orphaned before the upgrade that added this, say, and closed past
-  the namespace's retention) is asked about again less and less often, twice its last gap each time from 30 seconds,
-  up to a day, with its error each time.
-- **Recovering a sub-run whose history is gone** (an exceptional recovery, by hand, as the database's owner):
-  1. Read the namespace the deployment recorded: `SELECT temporal_namespace FROM platform_settings;`.
-  2. Confirm Temporal has no execution under the sub-run's workflow id, `t:<tenant id>:run:<run id>`, in that
-     namespace: `temporal workflow describe --namespace <namespace> --workflow-id <workflow id>` answers `NotFound`.
-     Any other answer, or any doubt about the namespace: stop here.
-  3. Record its end in a transaction of its own, naming its tenant and its run, and see which row changed:
-
-     ```sql
-     BEGIN;
-     UPDATE runs SET status = 'failed', error_code = 'internal_error',
-                     error_message = 'Its history was gone before its end was recorded.', ended_at = now()
-     WHERE tenant_id = '<tenant id>' AND id = '<run id>' AND parent_run_id IS NOT NULL AND status = 'running'
-     RETURNING tenant_id, id, root_run_id, status, ended_at;
-     ```
-
-  4. Exactly one row must come back (`UPDATE 1`), the sub-run you named: then `COMMIT;`. Any other count: `ROLLBACK;`
-     and check the ids.
-
-  The reconciler stops asking about it, and its tree's retention, a key retirement's `open_runs` check and an erasure's
-  stage 50 go on.
+  released. Recover it with an operator's command ([below](#the-operators-commands)). Such a sub-run (one orphaned
+  before the upgrade that added this, say, and closed past the namespace's retention) is asked about again less and
+  less often, twice its last gap each time from 30 seconds, up to a day, with its error each time.
+- **Recovery reasons** are recorded, not only logged: each of `start_after_end`, `start_history_missing`,
+  `start_unresolved` (once past its 10 minutes), `run_history_missing`, `slot_history_missing` and
+  `subrun_history_missing` is kept in `recovery_items` with its item, since when, and when it was last seen again. An
+  item that resolves on its own (Temporal answers again, the start is verified, the run ends) loses its reasons. A
+  start left `starting` is settled with an operator's command too.
 - **Cancels:** it sends each recorded cancel to Temporal, once.
+
+### Items that keep failing
+
+A request, event or sub-run that a pass can't settle because of an unexpected failure (a bug, or Temporal refusing
+this item, a cancel say) is counted for that kind of work alone: dispatching it, reconciling it (by its request's
+phase: still `starting`, its run open, its slot held), sending its cancel, matching an event, or settling an orphaned
+sub-run. Each failure is logged by its type (`dispatch_failed`, `reconcile_failed`, `cancel_unsent`,
+`event_match_failed`), and the pass leaves the item 1, 2, 4, 8, 16, then 30 minutes before trying it again, going on
+with the others meanwhile.
+
+The 7th failure in a row, about an hour after the first, **holds** the item. It's alerted on once, with the tenant,
+the item and the last error's type: `dispatch_held`, `reconcile_starting_held`, `reconcile_open_held`,
+`reconcile_slot_held`, `cancel_held`, `match_held` or `subrun_held`. No pass tries it again until an operator releases
+it ([below](#the-operators-commands)). A success clears its kind's count; a reconciliation's clears its request's count
+in every phase; an uncertain answer (Temporal not answering, or the history gone) neither counts nor clears. Once an
+item settles (a request no longer queued, starting or open, a slot released, a cancel sent or its run ended, an event no
+longer pending, a sub-run ended), the leader clears its counts, holds and recovery reasons within a cycle.
+
+What isn't counted keeps its own handling:
+
+- anything Temporal answers but a refusal of this item (`INVALID_ARGUMENT`, `FAILED_PRECONDITION`, `OUT_OF_RANGE`,
+  `ALREADY_EXISTS`, which count): not answering or too late to tell, its own fault or an authorizer's
+  (`PERMISSION_DENIED`, `UNAUTHENTICATED`), which would hold every item alike; a `NOT_FOUND` from a namespace that
+  doesn't answer; a timeout; and the database failing;
+- a refused start, which counts in its request's attempts, and an event's own failure, which counts in the event's.
+
+A hold for one kind never stops another's work on the same item: a request whose cancel is held still ends through
+its run, and its reconciliation goes on. A held cancel stays requested: the request keeps `cancel_requested_at`, and
+`cancel_sent_at` stays empty. It's never shown as sent.
+
+The counts are kept in `work_failures`, by tenant, kind and item, with the last error's type, never its text. They go
+with their item under retention, and with their tenant at an erasure's stage 80.
+
+### The operator's commands
+
+A platform admin settles an item a pass left for recovery, and releases a held item, through the API: on an active
+MFA session, and for each change a second factor proven within the reauthentication window (5 minutes by default).
+Each change is audited with the admin's user id.
+
+| Request | What it does |
+|---|---|
+| `GET /api/v1/admin/recovery` | the recovery reasons recorded, across tenants: tenant, reason, item, `since`, `last_seen_at` |
+| `GET /api/v1/admin/held` | the held items, across tenants: tenant, kind of work, item, errors, the last error's type, `held_at` |
+| `POST /api/v1/admin/tenants/{tenant}/held/release` | `{kind, item_id}`: the item's hold for that kind of work ends, and its pass tries it again; another kind's hold stays (`work_failure.release`) |
+| `GET /api/v1/admin/tenants/{tenant}/held/count` | `?kind=…&held_before=…`: how many of the tenant's items of that kind were held before that time (an ISO 8601 timestamp with its offset, such as `2026-10-09T08:00:00Z`; a naive one, a date or a number is a 422; answered in UTC) |
+| `POST /api/v1/admin/tenants/{tenant}/held/release-many` | `{kind, held_before, max}`: those items' holds end, oldest first, `max` at most (1,000), in one change audited in its own transaction (`work_failure.release_many`: the exact items released, oldest first, 100 an entry, each entry with the request and how many; the count previewed may have changed meanwhile); the answer says how many it released and how many are still held. `held_before` as for the count. Never every kind, or every tenant, at once |
+| `POST /api/v1/admin/tenants/{tenant}/commands` | `{kind, item_id, evidence, idempotency_key}`: a command, recorded `pending` (202), for the dispatcher's leader to carry out (`operator.command.request`) |
+| `GET /api/v1/admin/tenants/{tenant}/commands/{id}` | the command: `pending`, `applied` or `refused`, with its outcome |
+
+A command acts only on an item with one of its reasons recorded (else `409 not_recoverable`), and keeps when that
+reason was recorded. Asked again with the same idempotency key, it's the same command (200); an item has one command of
+a kind pending at a time (`409 command_pending`). The evidence, up to 500 characters, is the operator's note of how they
+confirmed the loss (the namespace's retention, an erasure, a restore): required where the item's history is gone.
+
+| Command | Its reason | What it does once Temporal is asked |
+|---|---|---|
+| `record_lost_run` | `run_history_missing` | Absent: the run `failed` with `history_lost`, its steps still `running` closed `outcome_unconfirmed`, its slot released. |
+| `record_lost_subrun` | `subrun_history_missing` | Absent: the sub-run the same; it has no slot. Its tree's retention, a key retirement's `open_runs` check and an erasure's stage 50 then go on. |
+| `release_lost_slot` | `slot_history_missing` | Absent: the slot of a run whose row ended, released. |
+| `settle_ended` | `start_after_end`, `start_history_missing` | Terminal: the request `started`, and its run records the end Temporal reports if it has none. Absent, with evidence: the request `started`, its run's recorded end standing. |
+
+The leader takes up to 20 pending commands a cycle, oldest first, and for each:
+
+1. refuses it unless its operator is still an active platform admin (`unauthorized`), and its item's reason is still
+   recorded since the time it was asked on (`stale`: the reason resolved, or resolved and was recorded again);
+2. asks Temporal about the item's execution in the namespace the deployment recorded (`namespace_mismatch` otherwise):
+   an answer that isn't certain refuses it (`temporal_uncertain`), as does an execution still there for a lost-history
+   command (`execution_present`), or a live one to settle (`execution_live`), or no evidence where it's needed
+   (`evidence_missing`);
+3. applies it in one transaction, every change conditional on what it checked (`changed` if the item moved meanwhile),
+   with the command's outcome and an audit entry naming the operator (`operator.command.applied`, or
+   `operator.command.refused` with why).
+
+Nothing retries a start. A command an unexpected error stops is refused once (`internal_error`): ask again once it's
+mended. The database failing leaves it pending for the next cycle.
 
 ## Cancelling and re-running
 
@@ -378,7 +483,8 @@ ending as cancelled.
   gets its own deadline. The run's end is decided when it fails, but the run shows `running` until its handler has
   finished; then its end is recorded, counting the handler's iterations. The handler's end doesn't change the
   run's, and neither does a cancel while it runs: that cancels the handler. A failure handler's own failure runs no
-  handler.
+  handler. Nor does a run that a bug in the interpreter failed (`internal_error`, below), deliberately: that is an
+  operational failure, not the graph's, and its closed execution can't supervise a handler's grant and lifetime.
 - **A loop over more than 100 items** runs in batches of 100, each a child workflow, one batch at a time; inside a
   batch, the items run with the loop's own concurrency. Its iterations' rows, keys and results are the same as if
   they had run inline, and its `on_item_error` works across batches.
@@ -424,6 +530,22 @@ claims are.
 - **Sub-flows and failure handlers.** A sub-flow's input is checked against the child's input schema
   (`input_invalid` when it doesn't match) and claimed as a trigger is, and the child is granted the parent's claims it
   holds; a sub-flow grants its parent the claims in its outputs. A failure handler is granted what its trigger holds.
+- **How many claims one crossing carries (a present limit).** A sub-flow's input, a sub-flow's outputs and a loop
+  batch's items cross to another run with the claims they hold, granted in one activity with a one-minute timeout. Since
+  2b-4b M3 that activity checks a thousand claims a statement, from their owners and sizes, and reads them in groups of
+  at most 16 MiB, keeping only the handles each nests. Measured through the activity's own code on a worker's engines,
+  beside 30 activities projecting steps (`tests/probes/test_crossing_load.py`, a development machine, 2026-10-08):
+  10,000 claims of 1 KiB held by grant, nested three levels, granted in 1.75 s (it was about 7 to 8 ms a claim, one at a
+  time, so about 7,500 could time out). Past the timeout the step or loop that started it fails with `internal_error`,
+  and a sub-flow whose outputs hold that many fails itself. A list held as one claim crosses as one, with the claims
+  nested in it. A sub-flow's input is also read whole, to check it against the child's schema: since 2b-4b M3 its
+  closure is read once, a thousand claims a statement (each checked as one read alone is), and granted as read, its
+  values let go a group at a time but for the first 16 MiB of them, kept for the check (any other is read again alone).
+  Measured on the dev server (`tests/probes/test_crossing_run.py`, 2026-10-09): a CSV start of 10,000 sites, each with a
+  sensitive key (10,000 claims nested in the rows' claim), ran a sub-flow that ran its own; each crossing granted 10,001
+  claims on its first attempt, in 1.6 and 1.7 s of its minute (98 and 119 statements, against 26 and 29 for 1,000), and
+  the whole run took 4.1 s. Read a claim a session before, the same crossings took 38.5 and 23.3 s, and about 15,000
+  claims would have passed the timeout.
 - **The secret index.** Every string of 4 characters or more in a sensitive claim joins its run tree's index (the run,
   its sub-runs and its batches share one), stored encrypted, and so does a map key claimed with its map. Every
   message leaving an activity (a step's error, a CEL error, a `fail` node's message) and every row the projection
@@ -512,7 +634,8 @@ its error class's either way.
 | `failed` | `workflow_failed` | A `fail` node ended the run. |
 | `failed` | `start_failed` | It never started: Temporal refused it, or its start couldn't be encrypted and was never sent. |
 | `failed` | `version_unusable` | This build can't load or run the version, for example a node type it lacks. Nothing ran. |
-| `failed` | `internal_error` | A bug in the interpreter. The message names the exception's type, and the worker's log names where it was raised, or says the result was too large to return; please report it. |
+| `failed` | `internal_error` | A bug in the interpreter. The message names the exception's type, and the worker's log names where it was raised, or says the result was too large to return; please report it. A bug fails the run's Temporal execution at once (never retried), and the reconciler records the end within about 30 seconds: steps the run hadn't recorded yet are absent, any still `running` show `outcome_unconfirmed`, no failure handler runs, and its iterations are its interpreter's last count, unverified. A sub-flow's or a batch's bug fails its step or loop with the same code. |
+| `failed` | `history_lost` | An operator settled the run once Temporal no longer had its history ([the operator's commands](#the-operators-commands)): an administrative settlement, not proof that it failed. Whether it ran to its end is unconfirmed; its steps still `running` show `outcome_unconfirmed`. |
 | `failed` | `payload_too_large` | The run's outputs were too large to return (over 1.75 MiB once encrypted). A step or a loop fails with the same code, below. |
 | `failed` | `snapshot_too_large` | The run's state was too large to carry on as a new Temporal execution (over 1.5 MiB). |
 | `failed` | `terminated` | A sub-run that an operator terminated in Temporal. It couldn't record its end, so its parent did, and the step or loop that started it failed with the same code. |
@@ -521,7 +644,15 @@ its error class's either way.
 
 Step error codes include the plugin's own codes and `config_invalid`, `output_schema_violation` (an output holding the
 key `$claim` too), `unexpected_error`, `evaluation_error`, `type_mismatch`, `timeout`, `cel_profile_unavailable`,
-`input_too_large`, `item_cap_exceeded`, `iteration_cap_exceeded`, `node_type_unavailable` (the registry lists the node
+`input_too_large`, `history_too_large` (the step's requests to the CEL evaluator would take the run's history past
+32 MiB, under Temporal's limit, which would terminate the run: the rest are never sent), `item_cap_exceeded`,
+`iteration_cap_exceeded`, `outcome_unconfirmed` (the run ended before the step's outcome was recorded: a bug in the
+interpreter failed the run, or a batch of its loop, or the run ended from outside; whether the step ran is unconfirmed,
+and it is never a plugin's failure; a projection landing after the run's end, or after its batch's closing while the
+run still runs, writes its steps so too: the run's row keeps each closed batch, `unconfirmed_batches`; each projection
+with a `running` row checks it against every closed batch: measured, 50 such rows take 37 ms with none closed, 53 with
+1,000, 246 with 10,000),
+`node_type_unavailable` (the registry lists the node
 type, but no worker of this build runs it: install its plugin on the workers), `payload_too_large`,
 `claim_unavailable` (a claim the run may not read, that isn't there or that's nested deeper than 32 claims, or the
 step's output couldn't be stored as claims after the node ran: its effect happened, and its row says so),

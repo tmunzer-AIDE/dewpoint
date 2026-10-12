@@ -8,6 +8,7 @@ holds the leadership; a marker absent or different leaves it queued. A deletion 
 absence is seen a call deadline after it, and a tick that finds a tombstone queues it again."""
 
 import asyncio
+import contextlib
 import dataclasses
 import uuid
 from collections.abc import AsyncIterator
@@ -25,6 +26,7 @@ from dewpoint.apps import schedules
 from dewpoint.apps.dispatcher import schedule_sync, tick
 from dewpoint.core.db import tenant_scope
 from dewpoint.engine.runtime.ids import schedule_workflow_id
+from tests.apps.dispatcher.test_leader_deadlines import recorded
 from tests.apps.test_admission import KEYS, TOKEN, current, published
 from tests.apps.test_runs import rpc
 from tests.apps.test_workflow_ops import update as update_workflow
@@ -346,7 +348,8 @@ async def test_firings_missed_past_the_catch_up_window_are_recorded_audited_and_
         assert (await schedule_sync.check_misses(dispatch_sessionmaker, env.client))["missed"] == 0
     await asyncio.sleep(25)  # past the window: the firings before its last 10 s are skipped
     async with owner_sessionmaker() as s, s.begin():
-        await s.execute(text("update schedules set misses_checked_at = null where id = :i"), {"i": schedule_id})
+        await s.execute(text("update schedule_incarnations set misses_checked_at = null where temporal_id = :i"),
+                        {"i": temporal_id})  # fmt: skip  # due again: its last read was before the outage
     async with await WorkflowEnvironment.start_local(
         data_converter=FIXTURE_CONVERTER, dev_server_extra_args=args
     ) as env:
@@ -359,7 +362,10 @@ async def test_firings_missed_past_the_catch_up_window_are_recorded_audited_and_
             counts = await schedule_sync.check_misses(dispatch_sessionmaker, env.client)
         await env.client.get_schedule_handle(temporal_id).delete()
     row = await stored(owner_sessionmaker, schedule_id)
-    assert counts["missed"] == row["misses"] > 0 and row["misses_checked_at"] is not None
+    async with owner_sessionmaker() as s:
+        read = (await s.execute(text("select misses_checked_at from schedule_incarnations where temporal_id = :i"),
+                                {"i": temporal_id})).scalar_one()  # fmt: skip
+    assert counts["missed"] == row["misses"] > 0 and read is not None
     assert [e["event"] for e in logs if e["log_level"] == "error"] == ["schedule_firings_missed"]
     async with owner_sessionmaker() as s:
         audit = (await s.execute(text("select details from audit_log where action = 'schedule.missed'"))).scalar_one()
@@ -418,6 +424,25 @@ async def test_a_new_schedule_is_created_paused_and_unpaused_only_by_a_token_bea
     assert await sync(server, dispatch_sessionmaker, ctx, schedule_id) == "synced"
     found = await in_temporal(server, ctx, schedule_id)
     assert (found.schedule.state.paused, found.schedule.state.notes) == (False, "dewpoint generation 1")
+
+
+async def test_an_unpausing_update_is_sent_only_after_its_unpause_is_recorded_and_committed(
+    server, ready, owner_sessionmaker, dispatch_sessionmaker, monkeypatch
+) -> None:
+    """The invariant the misses pass rests on (the owner's ruling on checkpoint 3: an incarnation never sent an unpause
+    is never read): every create is paused, and an update that unpauses one is sent only once `unpause_sent_at` is
+    committed, seen here from another connection as the call goes out."""
+    ctx, _, schedule_id = ready
+    seen: list[tuple[bool, object]] = []
+    update = schedule_sync._update
+
+    async def sending(client: Any, temporal_id: str, schedule: Any, token: bytes) -> None:
+        seen.append((schedule.state.paused, (await incarnation(owner_sessionmaker, temporal_id))["unpause_sent_at"]))
+        await update(client, temporal_id, schedule, token)
+
+    monkeypatch.setattr(schedule_sync, "_update", sending)
+    assert await sync(server, dispatch_sessionmaker, ctx, schedule_id) == "synced"
+    assert [paused for paused, _ in seen] == [False] and all(at is not None for _, at in seen)
 
 
 async def test_a_sync_holding_its_read_commits_its_create_before_step_1(
@@ -576,9 +601,9 @@ async def test_two_incarnations_missing_firings_in_one_check_both_count(
     base = schedule_workflow_id(str(ctx.tenant_id), str(schedule_id))
     async with owner_sessionmaker() as s, s.begin():
         for number, temporal_id in ((0, base), (1, f"{base}~1")):
-            await s.execute(text("insert into schedule_incarnations "
-                                 "(temporal_id, tenant_id, schedule_id, number, backfilled) "
-                                 "values (:i, :t, :s, :n, :n = 0)"),
+            await s.execute(text("insert into schedule_incarnations "  # incarnation 1 unpaused by the sync, once
+                                 "(temporal_id, tenant_id, schedule_id, number, backfilled, unpause_sent_at) "
+                                 "values (:i, :t, :s, :n, :n = 0, case when :n = 1 then now() end)"),
                             {"i": temporal_id, "t": ctx.tenant_id, "s": schedule_id, "n": number})  # fmt: skip
         await s.execute(text("update schedules set synced_generation = generation where id = :i"), {"i": schedule_id})
     missed = {base: 2, f"{base}~1": 3}
@@ -796,6 +821,36 @@ async def test_a_failed_second_update_never_moves_the_creation_wait(
     assert (creation["ends_at"], creation["missed"]) == (landing["landed_at"],
                                                          minutes(since, landing["landed_at"]))  # fmt: skip
     assert (await incarnation(owner_sessionmaker, first))["landed_at"] == landing["landed_at"]
+
+
+async def test_the_new_sync_takes_over_the_temporal_schedule_the_old_code_made_under_incarnation_0(
+    server, ready, owner_sessionmaker, dispatch_sessionmaker
+) -> None:
+    """The owner's review of checkpoint 4 (M4): a schedule the application from before 0040 made and synced, under the
+    schedule's own id (incarnation 0's, backfilled or captured), unpaused, its note that dispatcher's; edited since
+    (generation 2). The new sync takes it over: it updates that Temporal schedule in place, with its token, rather
+    than creating another, so the schedule keeps its one incarnation and its one Temporal schedule."""
+    from temporalio.client import Schedule, ScheduleIntervalSpec, ScheduleSpec, ScheduleState
+
+    ctx, _, schedule_id = ready
+    base = schedule_workflow_id(str(ctx.tenant_id), str(schedule_id))
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text("insert into schedule_incarnations (temporal_id, tenant_id, schedule_id, number, "
+                             "backfilled) values (:i, :t, :s, 0, true)"),
+                        {"i": base, "t": ctx.tenant_id, "s": schedule_id})  # fmt: skip
+        await s.execute(text("update schedules set generation = 2, synced_generation = 1 where id = :i"),
+                        {"i": schedule_id})  # fmt: skip
+    await server.client.create_schedule(base, Schedule(  # as the old dispatcher left it: synced, unpaused
+        action=ScheduleActionStartWorkflow("ScheduleTick", id=base, task_queue=tick.ADMISSION_QUEUE),
+        spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(hours=1))]),
+        state=ScheduleState(paused=False, note=schedule_sync.MARK.format(1)),
+    ))  # fmt: skip
+    assert await sync(server, dispatch_sessionmaker, ctx, schedule_id) == "synced"
+    assert await incarnations(schedule_id) == [base]
+    found = await schedule_sync.described(server.client, base)
+    assert found is not None and found.note == schedule_sync.MARK.format(2) and not found.paused
+    second = schedule_sync.incarnation_id(ctx.tenant_id, schedule_id, 1)
+    assert await schedule_sync.described(server.client, second) is None
 
 
 async def test_a_pre_migration_incarnation_that_goes_leaves_its_span_unknown(
@@ -1343,3 +1398,32 @@ async def test_an_older_sync_waits_for_a_successor_being_recorded_and_then_sends
     assert done == {successor, *older} and newest != first
     assert shown is not None and shown.paused  # 1, no longer current, never unpaused
     assert older[0].result() == "pending"
+
+
+@contextlib.asynccontextmanager
+async def before_the_cutover(owner: Any) -> AsyncIterator[None]:
+    """The suite's database as one upgraded while the application from before 0040 ran, before its inventory's
+    cutover (`dewpoint schedules inventory-cutover`)."""
+    async with owner() as s, s.begin():
+        kept = (await s.execute(text("delete from schedule_inventory_cutover returning at"))).scalar_one()
+    try:
+        yield
+    finally:
+        async with owner() as s, s.begin():
+            await s.execute(text("insert into schedule_inventory_cutover (at) values (:a)"), {"a": kept})
+
+
+async def test_no_schedule_pass_runs_before_the_inventorys_cutover(
+    server, ready, owner_sessionmaker, dispatch_sessionmaker
+) -> None:
+    """A dispatcher from before 0040 may still sync any schedule under its own id until every one is gone: the sync,
+    misses and strays passes take nothing (no call to Temporal) until the cutover is recorded, then go on."""
+    ctx, _, schedule_id = ready
+    async with before_the_cutover(owner_sessionmaker):
+        with recorded(server.client) as seen:
+            assert await schedule_sync.sync_schedules(dispatch_sessionmaker, server.client, Leading()) == {
+                "awaiting_cutover": 1}  # fmt: skip
+            assert await schedule_sync.check_misses(dispatch_sessionmaker, server.client) == {"awaiting_cutover": 1}
+            assert await schedule_sync.check_strays(dispatch_sessionmaker, server.client) == {"awaiting_cutover": 1}
+        assert seen == []
+    assert await sync(server, dispatch_sessionmaker, ctx, schedule_id) == "synced"

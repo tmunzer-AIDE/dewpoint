@@ -3,7 +3,8 @@
 `text/csv` body. The API's middleware buffers a body before the app runs, so this one route is passed through unread
 (`STREAMED`): it authorizes the caller and loads the active version's declaration first, then reads the body as it
 arrives, up to the declaration's cap (never past the platform's 5 MiB), and stops one byte past it with 413, never
-reading or buffering the rest."""
+reading or buffering the rest. It reads it only in one of the process's CSV slots (`apps/csv_slots.py`): with every
+slot held, 503 `csv_busy`, its body unread."""
 
 import re
 import uuid
@@ -14,8 +15,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps import admission
-from dewpoint.apps.api.routes.run_requests import get_keys, key_unusable
+from dewpoint.apps.api.routes.run_requests import csv_slot, get_keys, key_unusable, taken
 from dewpoint.apps.csv_input import CsvFileError, mapping_problems
+from dewpoint.apps.csv_slots import Slot
 from dewpoint.apps.csv_uploads import byte_cap, declaration, save_default, stage
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.crypto.keys import KeySource
@@ -68,6 +70,7 @@ async def _read(request: Request, cap: int) -> bytes:
 async def upload_csv(
     workflow_id: uuid.UUID,
     request: Request,
+    slot: Slot = Depends(csv_slot, scope="function"),  # before the session: given back after its commit
     ctx: TenantContext = Depends(require(P.RUN_START)),
     db: AsyncSession = Depends(get_db, scope="function"),
     keys: KeySource = Depends(get_keys),
@@ -80,6 +83,14 @@ async def upload_csv(
     declared = request.headers.get("content-length", "")
     if declared.isdigit() and int(declared) > cap:
         raise HTTPException(413, detail=TOO_LARGE)
+    taken(slot)  # before its body is read: a parse at the caps holds ~90 MiB, through its commit (2b-4b M3)
+    return await _staged(request, cap, db, keys, ctx, workflow_id, csv)
+
+
+async def _staged(
+    request: Request, cap: int, db: AsyncSession, keys: KeySource, ctx: TenantContext, workflow_id: uuid.UUID,
+    csv: dict[str, Any],
+) -> dict[str, object]:  # fmt: skip
     try:
         data = await _read(request, cap)
     except _TooLargeError:

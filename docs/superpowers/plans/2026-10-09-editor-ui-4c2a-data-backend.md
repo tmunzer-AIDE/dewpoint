@@ -4353,4 +4353,3 @@ the outline's B6/B7 rows and engine-core spec §4.3. Critical and important find
 minor ones are listed. Then **stop**: the summary to the owner names what's built, the checks as run, the rulings
 proposed and made, and asks for the owner's word on push and a PR (nothing is pushed before it). CI on the PR runs
 the backend (about 12 minutes), the frontend, CodeQL and the Compose e2e: say so before pushing.
-

@@ -3,20 +3,27 @@ import asyncio
 import base64
 import json
 import os
+import subprocess
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
+import httpx
+import structlog
 import typer
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from temporalio.api.enums.v1 import ArchivalState
 from temporalio.api.workflowservice.v1 import DescribeNamespaceRequest
 from temporalio.client import Client
 
 from dewpoint.apps import admission, dev_run, tick_contract
+from dewpoint.apps.cli import recovery as recovery_commands
+from dewpoint.apps.cli.recovery import recovery_cli
 from dewpoint.apps.codec import KeyringKeys, data_converter
 from dewpoint.apps.dispatcher import evidence
 from dewpoint.apps.dispatcher.dispatch import START_DEADLINE
@@ -29,7 +36,11 @@ from dewpoint.apps.worker.health import WorkerUnhealthyError
 from dewpoint.apps.worker.main import run as run_worker
 from dewpoint.core import logs
 from dewpoint.core.audit import service as audit_log
-from dewpoint.core.audit.anchor import FileAnchorSink, anchor_all, anchor_freshness, verify_anchors
+from dewpoint.core.audit.administration import ADMINISTRATION, read_records, recorded
+from dewpoint.core.audit.anchor import AnchorSink, FileAnchorSink, anchor_all, anchor_freshness, verify_anchors
+from dewpoint.core.audit.monitor import Catalog, Login, Roster, Scope, drift, watch
+from dewpoint.core.audit.s3 import S3AnchorSink, bucket_problems, read_anchors
+from dewpoint.core.auth.sessions import SESSION_COOKIE
 from dewpoint.core.auth.users import PasswordPolicyError, create_user
 from dewpoint.core.config import Settings, get_settings
 from dewpoint.core.crypto import reencrypt, retire
@@ -42,6 +53,8 @@ from dewpoint.core.ingress import secrets_reseal
 from dewpoint.core.ingress.keys import retire_event_keys, rotate_event_key
 from dewpoint.core.models.identity import User
 from dewpoint.core.models.tenancy import Tenant
+from dewpoint.core.platform import inventory
+from dewpoint.core.platform.boundary import ProofRefusedError, proof_evidence
 from dewpoint.core.platform.service import (
     EnvironmentMismatchError,
     EnvironmentNotRecordedError,
@@ -57,11 +70,15 @@ from dewpoint.core.plugins.registry import (
     list_node_types,
     sync_plugins,
 )
+from dewpoint.core.temporal_check import problems as temporal_problems
+from dewpoint.core.temporal_connect import TemporalConfigError
+from dewpoint.core.temporal_connect import connect as temporal_connect
 from dewpoint.core.tenancy import lifecycle as tenant_lifecycle
 from dewpoint.core.tenancy.service import NotKeyAdminError, ensure_tenant_event_keys, ensure_tenant_keys
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.sdk import ManifestError
 
+log = structlog.get_logger("dewpoint.cli")
 app = typer.Typer(no_args_is_help=True)
 
 
@@ -94,6 +111,11 @@ egress_cli = typer.Typer(
 platform_cli.add_typer(egress_cli, name="egress")
 api_cli = typer.Typer(no_args_is_help=True)
 app.add_typer(api_cli, name="api")
+temporal_cli = typer.Typer(help="Temporal, as this deployment reaches it (2b-4b M4).", no_args_is_help=True)
+app.add_typer(temporal_cli, name="temporal")
+schedules_cli = typer.Typer(no_args_is_help=True)
+app.add_typer(schedules_cli, name="schedules")
+app.add_typer(recovery_cli, name="recovery")  # an operator's, under their own recovery login
 
 
 async def _init(email: str, password: str) -> None:
@@ -130,6 +152,43 @@ def _signing_key() -> Ed25519PrivateKey:
     return Ed25519PrivateKey.from_private_bytes(base64.b64decode(raw))
 
 
+def _s3_client(settings: Settings) -> Any:
+    """An S3 client with this process's own credentials (AWS's variables or profile): the anchor writer's put-only
+    ones, the verifier's or the monitor's read-only ones (D6). A session of its own: boto3's default one keeps the
+    first credentials it resolves, which a later command in the same process would otherwise reuse (R2's third
+    attempt: the writer's, on a verify)."""
+    import boto3
+
+    session = boto3.session.Session()
+    return session.client("s3", endpoint_url=settings.audit_s3_endpoint_url, region_name=settings.audit_s3_region)
+
+
+def _kept(settings: Settings) -> timedelta:
+    """How long the bucket must lock each anchor: the audit retention plus the backup period (D6.9)."""
+    return timedelta(days=settings.audit_retention_days + settings.backup_retention_days)
+
+
+def _sink() -> AnchorSink:
+    settings = get_settings()
+    if settings.audit_s3_bucket:
+        return S3AnchorSink(_s3_client(settings), settings.audit_s3_bucket, settings.audit_s3_prefix, _signing_key(),
+                            settings.audit_signing_key_id)  # fmt: skip
+    return FileAnchorSink(_anchor_path(), _signing_key())
+
+
+def _public_keys(settings: Settings) -> dict[str, Ed25519PublicKey]:
+    """The keys anchors are verified with, by id: DEWPOINT_AUDIT_PUBLIC_KEYS, every id kept (rotation); else, in
+    development, the signing key's own. A verifier needs no private key."""
+    if not settings.audit_public_keys:
+        return {settings.audit_signing_key_id: _signing_key().public_key()}
+    try:
+        given = json.loads(settings.audit_public_keys)
+        return {str(kid): Ed25519PublicKey.from_public_bytes(base64.b64decode(raw)) for kid, raw in given.items()}
+    except (ValueError, TypeError, AttributeError):
+        typer.echo("ERROR: DEWPOINT_AUDIT_PUBLIC_KEYS isn't a JSON object of key ids to base64 Ed25519 public keys")
+        raise typer.Exit(2) from None
+
+
 def _anchor_path() -> Path:
     path = get_settings().audit_anchor_path
     if not path:
@@ -140,8 +199,9 @@ def _anchor_path() -> Path:
 
 @audit.command("anchor")
 def audit_anchor() -> None:
-    """Write current chain heads to the external anchor sink. Run as a dewpoint_auditor login, e.g. every 15 min."""
-    sink = FileAnchorSink(_anchor_path(), _signing_key())
+    """Write current chain heads to the external anchor sink (DEWPOINT_AUDIT_S3_BUCKET's, else the file). Run as a
+    dewpoint_auditor login, off the database host, e.g. every 15 min."""
+    sink = _sink()
 
     async def _run() -> int:
         engine = make_engine(get_settings().database_url)
@@ -161,7 +221,7 @@ def audit_prune() -> None:
     dewpoint_auditor login. Refused outside a development deployment until an off-host anchor sink exists (#3)."""
     from dewpoint.core.audit.prune import PruningDisabledError, prune
 
-    sink = FileAnchorSink(_anchor_path(), _signing_key())
+    sink = _sink()
 
     async def _run() -> dict[str, int]:
         engine = make_engine(get_settings().database_url)
@@ -183,17 +243,23 @@ def audit_prune() -> None:
 @audit.command("verify")
 def audit_verify() -> None:
     """Recompute every chain and check it against the signed external anchors. Exit 1 on any problem,
-    including when no anchors exist, so a broken anchor job can't look healthy."""
-    key = _signing_key()
-    sink = FileAnchorSink(_anchor_path(), key)
+    including when no anchors exist, so a broken anchor job can't look healthy. With DEWPOINT_AUDIT_S3_BUCKET: every
+    version and delete marker in the bucket, each one's lock, and the bucket's default retention (D6), verified with
+    the public keys alone."""
+    settings = get_settings()
 
     async def _run() -> list[str]:
-        engine = make_engine(get_settings().database_url)
-        try:
-            async with make_sessionmaker(engine)() as s:
-                return await verify_anchors(s, sink.entries(), key.public_key())
-        finally:
-            await engine.dispose()
+        if settings.audit_s3_bucket:
+            client, kept = _s3_client(settings), _kept(settings)
+            listing = read_anchors(client, settings.audit_s3_bucket, settings.audit_s3_prefix, kept=kept)
+            found = bucket_problems(client, settings.audit_s3_bucket, kept=kept) + listing.problems
+            keys = _public_keys(settings)
+            async with _auditing() as s:
+                return found + await verify_anchors(s, listing.entries, keys)
+        key = _signing_key()
+        sink = FileAnchorSink(_anchor_path(), key)
+        async with _auditing() as s:
+            return await verify_anchors(s, sink.entries(), key.public_key())
 
     problems = asyncio.run(_run())
     for problem in problems:
@@ -201,6 +267,103 @@ def audit_verify() -> None:
     if problems:
         raise typer.Exit(1)
     typer.echo("audit chain verified against external anchors")
+
+
+@asynccontextmanager
+async def _auditing() -> AsyncIterator[AsyncSession]:
+    engine = make_engine(get_settings().database_url)
+    try:
+        async with make_sessionmaker(engine)() as s:
+            yield s
+    finally:
+        await engine.dispose()
+
+
+_SCOPES = text(
+    "select scope, max(seq) from (select scope, seq from audit_log union all select scope, seq from audit_checkpoints)"
+    " kept group by scope"
+)
+_UNANCHORED = text("select min(created_at) from audit_log where scope = :s and seq > :after")
+# The database's administration, as the auditor reads it (task 7): the recovery group's members, the mappings, every
+# recovery login's attributes, the schema's revision
+_MEMBERS = text("select m.rolname from pg_auth_members a join pg_roles g on g.oid = a.roleid "
+                "join pg_roles m on m.oid = a.member where g.rolname = 'dewpoint_recovery'")  # fmt: skip
+_MAPPINGS = text("select login, revoked_at is not null from recovery_operators")
+_LOGINS = text(r"select rolname, rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls "
+               r"from pg_roles where rolname like 'rcv\_%' or rolname = any(:names)")  # fmt: skip
+_REVISION = text("select version_num from alembic_version")
+
+
+async def _catalog(s: AsyncSession) -> Catalog:
+    members = frozenset(str(row[0]) for row in (await s.execute(_MEMBERS)).all())
+    mappings = {str(login): bool(gone) for login, gone in (await s.execute(_MAPPINGS)).all()}
+    found = await s.execute(_LOGINS, {"names": sorted(members | mappings.keys())})
+    logins = {str(row[0]): Login(*(bool(v) for v in row[1:])) for row in found.all()}
+    return Catalog(members, mappings, logins, (await s.execute(_REVISION)).scalar())
+
+
+@audit.command("monitor")
+def audit_monitor(
+    roster_file: str = typer.Option(..., "--roster", help="the expected scopes and cadences, off the database host"),
+    state_file: str = typer.Option(..., "--state", help="this monitor's high-water marks, off the database host"),
+    init: bool = typer.Option(False, "--init", help="set the marks up: no state yet is no alert, this once"),
+) -> None:
+    """D6's independent monitor (#3), run on a schedule off the database host with read-only credentials: `audit
+    verify` against the bucket, then a scope gone from the database, an anchor overdue past its cadence, or a
+    high-water mark lost or rolled back. Each alert is logged and printed; exit 1 on any, so a monitor that can't see
+    can't look healthy. Its alert destination is the operator's (the owner's ruling: chosen and tested before
+    readiness)."""
+    settings, roster, state = get_settings(), Path(roster_file), Path(state_file)
+    if not settings.audit_s3_bucket:
+        typer.echo("ERROR: the monitor reads the anchors' bucket: set DEWPOINT_AUDIT_S3_BUCKET")
+        raise typer.Exit(2)
+    try:
+        given = json.loads(roster.read_text())
+        cadences = {str(k): timedelta(minutes=int(v)) for k, v in given.get("scopes", {}).items()}
+        rostered = Roster(default=timedelta(minutes=int(given["default_cadence_minutes"])), scopes=cadences)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        typer.echo("ERROR: the roster isn't readable JSON with default_cadence_minutes and scopes")
+        raise typer.Exit(2) from None
+    try:
+        marks: dict[str, int] | None = {str(k): int(v) for k, v in json.loads(state.read_text()).items()}
+    except (OSError, ValueError, TypeError, AttributeError):
+        marks = None  # lost: alerted on, unless --init
+    client, kept = _s3_client(settings), _kept(settings)
+    listing = read_anchors(client, settings.audit_s3_bucket, settings.audit_s3_prefix, kept=kept)
+    found = bucket_problems(client, settings.audit_s3_bucket, kept=kept) + listing.problems
+    newest: dict[str, int] = {}
+    for entry in listing.entries:
+        newest[str(entry["scope"])] = max(newest.get(str(entry["scope"]), 0), int(entry["seq"]))
+    keys = _public_keys(settings)
+
+    records = read_records(client, settings.audit_s3_bucket, settings.audit_s3_prefix + ADMINISTRATION)
+
+    async def _run() -> tuple[list[str], dict[str, Scope], datetime, Catalog]:
+        async with _auditing() as s:
+            problems = await verify_anchors(s, listing.entries, keys)
+            catalog = await _catalog(s)
+            now: datetime = (await s.execute(text("select statement_timestamp()"))).scalar_one()  # the entries' clock
+            database: dict[str, Scope] = {}
+            for scope, top in (await s.execute(_SCOPES)).all():
+                oldest = (await s.execute(_UNANCHORED, {"s": scope, "after": newest.get(scope, 0)})).scalar()
+                database[str(scope)] = Scope(newest=int(top), oldest_unanchored=oldest)
+            return problems, database, now, catalog
+
+    problems, database, now, catalog = asyncio.run(_run())
+    alerts, updated = watch(rostered, marks, database, newest, now, init=init)
+    alerts = [("audit_verify_failed", "", problem) for problem in found + problems] + alerts
+    alerts += [("admin_record_problem", "", problem) for problem in records.problems]
+    alerts += drift(records.entries, catalog)  # the administration no record off the host explains
+    if marks is not None or init:  # a lost state isn't made afresh: it stays alerted on until set up knowingly (--init)
+        written = state.with_name(state.name + ".new")
+        written.write_text(json.dumps(updated, sort_keys=True))
+        os.replace(written, state)
+    for event, scope, what in alerts:
+        log.error(event, scope=scope, what=what)
+        typer.echo(f"ALERT {event}{' ' + scope if scope else ''}: {what}")
+    if alerts:
+        raise typer.Exit(1)
+    typer.echo(f"audit monitor: healthy, {len(updated)} scope(s)")
 
 
 @audit.command("freshness")
@@ -417,26 +580,70 @@ def keys_reseal_ingress(batch_size: int = typer.Option(100, min=1, max=1000)) ->
     typer.echo("resealed " + " ".join(f"{k}={v}" for k, v in asyncio.run(_run()).items()))
 
 
-async def _verified_namespace(s: AsyncSession, settings: Settings) -> None:
+async def _verified_namespace(s: AsyncSession, settings: Settings) -> str:
     """Engine 2b spec §2.1, before a key command asks Temporal anything: this process's namespace is the deployment's
     recorded one. A mismatch, or none recorded, ends the command (exit 2) before any connection: never read as Temporal
-    being unreachable, an unknown answer (the final review's I1)."""
+    being unreachable, an unknown answer (the final review's I1). The recorded environment, which §10.4's settings are
+    checked against."""
     async with s.begin():
         try:
-            await check_namespace(s, settings.temporal_namespace)
+            return (await check_namespace(s, settings.temporal_namespace)).environment
         except (EnvironmentNotRecordedError, EnvironmentMismatchError) as e:
             typer.echo(f"ERROR: {e}")
             raise typer.Exit(2) from None
 
 
-async def _namespace_retention(settings: Settings) -> timedelta | None:
+def _refused(e: TemporalConfigError) -> typer.Exit:
+    """§10.4's settings refused: the command ends (exit 2), never read as Temporal being unreachable."""
+    typer.echo(f"ERROR: {e}")
+    return typer.Exit(2)
+
+
+@temporal_cli.command("check")
+def temporal_check() -> None:
+    """Read-only: Temporal's namespace as it reports itself, reached with this deployment's §10.4 settings: TLS
+    verified, a retention of at most 30 days (D3g), archival disabled. Exit 1 on a problem or when Temporal can't be
+    asked; 2 when the settings are refused or the namespace isn't the deployment's recorded one."""
+    settings = get_settings()
+
+    async def _run(s: AsyncSession) -> list[str]:
+        environment = await _verified_namespace(s, settings)
+        try:
+            client = await temporal_connect(settings, environment)
+            answer = await client.workflow_service.describe_namespace(
+                DescribeNamespaceRequest(namespace=settings.temporal_namespace)
+            )
+        except TemporalConfigError as e:
+            raise _refused(e) from None
+        except Exception as e:  # unreachable, refused: a problem, never a pass
+            return [f"Temporal couldn't be asked ({type(e).__name__})"]
+        ttl = answer.config.workflow_execution_retention_ttl
+        typer.echo(f"temporal: {settings.temporal_address}, namespace {settings.temporal_namespace} ({environment})")
+        typer.echo(f"retention: {ttl.seconds // 86400} days")
+        archived = [n for n, a in (("history", answer.config.history_archival_state),
+                                   ("visibility", answer.config.visibility_archival_state))
+                    if a == ArchivalState.ARCHIVAL_STATE_ENABLED]  # fmt: skip
+        typer.echo("archival: " + (", ".join(f"{n} enabled" for n in archived) if archived else "disabled"))
+        return temporal_problems(answer, plaintext=settings.temporal_insecure_dev)
+
+    found = asyncio.run(_in_session(_run))
+    for problem in found:
+        typer.echo(f"PROBLEM: {problem}")
+    if found:
+        raise typer.Exit(1)
+    typer.echo("tls: verified; the namespace is within D3g's rules")
+
+
+async def _namespace_retention(settings: Settings, environment: str) -> timedelta | None:
     """The Temporal namespace's retention, as it reports it (engine 2b spec §6.4's payload floor); None when it can't
     be read: the floor then can't be reckoned, and nothing retires."""
     try:
-        client = await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
+        client = await temporal_connect(settings, environment)
         answer = await client.workflow_service.describe_namespace(
             DescribeNamespaceRequest(namespace=settings.temporal_namespace)
         )
+    except TemporalConfigError as e:
+        raise _refused(e) from None
     except Exception as e:  # unreachable, refused: unknown, never assumed
         typer.echo(f"WARNING: the namespace's retention couldn't be read ({type(e).__name__})")
         return None
@@ -444,14 +651,16 @@ async def _namespace_retention(settings: Settings) -> timedelta | None:
     return timedelta(seconds=ttl.seconds, microseconds=ttl.nanos // 1000)
 
 
-async def _run_histories(settings: Settings, s: AsyncSession, tenant_id: uuid.UUID, version: int, *,
-                         record: bool) -> retire.RunProof | None:  # fmt: skip
+async def _run_histories(settings: Settings, environment: str, s: AsyncSession, tenant_id: uuid.UUID, version: int,
+                         *, record: bool) -> retire.RunProof | None:  # fmt: skip
     """What Temporal shows of the tenant's run executions that could hold `version` (the owner's M3 rulings), in the
     caller's transaction (`record`: whether to record what it shows); None when Temporal can't be asked."""
     try:
-        client = await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
+        client = await temporal_connect(settings, environment)
         before = await retire.candidates_before(s, tenant_id, version)
         return await evidence.prove(s, client, tenant_id, before=before, record=record)
+    except TemporalConfigError as e:
+        raise _refused(e) from None
     except Exception as e:  # unreachable, refused: unknown, never assumed
         typer.echo(f"WARNING: the run executions couldn't be asked about ({type(e).__name__})")
         return None
@@ -480,14 +689,14 @@ def keys_retire(
     settings = get_settings()
 
     async def _run(s: AsyncSession) -> tuple[list[retire.Check], bool]:
-        if tenant_id:
-            await _verified_namespace(s, settings)
-        retention = await _namespace_retention(settings) if tenant_id else None
+        environment = await _verified_namespace(s, settings) if tenant_id else ""
+        retention = await _namespace_retention(settings, environment) if tenant_id else None
         async with s.begin():
             if not confirm:  # a dry run changes nothing, what it reads of Temporal included (the final review's I1)
                 await s.execute(text("SET TRANSACTION READ ONLY"))
             await tenant_scope(s, tenant_id)
-            histories = await _run_histories(settings, s, tenant_id, version, record=confirm) if tenant_id else None
+            histories = (await _run_histories(settings, environment, s, tenant_id, version, record=confirm)
+                         if tenant_id else None)  # fmt: skip
             if not confirm:
                 found = await retire.checks(s, tenant_id, version, namespace_retention=retention,
                                             run_histories=histories)  # fmt: skip
@@ -512,11 +721,13 @@ def keys_retire(
 ATTESTED = "every dispatcher from before 0039 stopped and unable to restart; no image from before 0039 deployable"
 
 
-async def _admission_pollers(settings: Settings) -> list[str] | None:
+async def _admission_pollers(settings: Settings, environment: str) -> list[str] | None:
     """The identities polling the admission queue, as Temporal shows them; None when it can't be asked."""
     try:
-        client = await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
+        client = await temporal_connect(settings, environment)
         return await admission_pollers(client)
+    except TemporalConfigError as e:
+        raise _refused(e) from None
     except Exception as e:  # unreachable, refused: unknown, never assumed
         typer.echo(f"WARNING: the admission queue's pollers couldn't be read ({type(e).__name__})")
         return None
@@ -542,12 +753,12 @@ def keys_tick_cutover(
     settings = get_settings()
 
     async def _run(s: AsyncSession) -> str:
-        await _verified_namespace(s, settings)
+        environment = await _verified_namespace(s, settings)
         async with s.begin():
             existing = (await s.execute(text("SELECT at FROM tick_cutover"))).scalar_one_or_none()
         if existing is not None:
             return f"already recorded at {existing.isoformat()}"
-        pollers = await _admission_pollers(settings)
+        pollers = await _admission_pollers(settings, environment)
         if pollers is None:
             raise typer.Exit(3)
         old = [p for p in pollers if tick_contract.IDENTITY not in p]
@@ -578,6 +789,69 @@ def keys_tick_cutover(
             await audit_log.record(s, tenant_id=None, actor_id=None, action="keys.tick_cutover", target_type="platform",
                                target_id="tick_cutover", details=details)  # fmt: skip
         return f"recorded the tick cutover at {recorded.isoformat()}; {queued} schedule(s) queued"
+
+    typer.echo(asyncio.run(_in_session(_run)))
+
+
+INVENTORY_ATTESTED = (
+    "every writer from before 0040 (its API, its dispatcher) stopped and unable to restart; no image from before 0040 "
+    "deployable"
+)
+
+
+@schedules_cli.command("inventory-cutover")
+def schedules_inventory_cutover(
+    attest: bool = typer.Option(False, "--attest", help="no writer from before 0040 runs or can run again"),
+    confirm: bool = typer.Option(False, "--confirm", help="record it (else a dry run)"),
+) -> None:
+    """Record the schedule inventory's cutover (the owner's D15 ruling on the 2b-4b M1 checkpoint): from it, the
+    dispatcher's schedule passes and an erasure's schedule stages rely on every Temporal id a schedule may have. An
+    online upgrade runs while the application from before migration 0040 still writes, and its dispatcher syncs any
+    schedule under the schedule's own id: until this cutover, 0040 records each schedule added as it backfilled those
+    already there. It needs the operator's attestation (`--attest`, required) that every writer from before 0040 (its
+    API and its dispatcher) has stopped and can't restart, and that no image from before 0040 can be deployed against
+    this database: nothing here can prove that. It also refuses (exit 1) while Temporal shows a dispatcher from before
+    0040 polling the admission queue (its identity lacks the tick contract's mark, from the same release), and when
+    Temporal can't be asked (exit 3). With --confirm it catches up first, in batches each committed on its own (any
+    schedule without an incarnation, one the capture missed; each incarnation 0's missed count, as the old dispatcher
+    last recorded it), then records once, audited with the attestation, in a short transaction holding schedules'
+    writes off (`dewpoint.core.platform.inventory`). Interrupted, it's run again: the batches done stay done. Its lock
+    waited for in vain through every attempt, nothing is recorded (exit 1; run it again); the capture off, it refuses.
+    Exit 2 without --attest. Exit 2 when no Temporal namespace is recorded or the configured one isn't it, before any
+    connection. Run as dewpoint_admin."""
+    if not attest:
+        typer.echo("pass --attest: no writer from before migration 0040 runs, or can be deployed again")
+        raise typer.Exit(2)
+    settings = get_settings()
+
+    async def _run(s: AsyncSession) -> str:
+        environment = await _verified_namespace(s, settings)
+        async with s.begin():
+            existing = (await s.execute(text("SELECT at FROM schedule_inventory_cutover"))).scalar_one_or_none()
+        if existing is not None:
+            return f"already recorded at {existing.isoformat()}"
+        pollers = await _admission_pollers(settings, environment)
+        if pollers is None:
+            raise typer.Exit(3)
+        old = [p for p in pollers if tick_contract.IDENTITY not in p]
+        if old:
+            typer.echo(f"{len(old)} poller(s) of the admission queue without the tick contract's mark: stop every "
+                       "dispatcher from before migration 0040 first")  # fmt: skip
+            raise typer.Exit(1)
+        if not confirm:
+            return "not recorded (a dry run: pass --confirm)"
+        try:
+            done = await inventory.cut_over(s, INVENTORY_ATTESTED)
+        except inventory.CutoverRefusedError as e:
+            typer.echo(f"not recorded: {e}")
+            raise typer.Exit(1) from None
+        said = "already recorded" if done.at is None else (
+            f"recorded the inventory's cutover at {done.at.isoformat()}; {done.caught.caught} schedule(s) caught up, "
+            f"{done.caught.refreshed} count(s) refreshed, in {done.caught.batches} batch(es)")  # fmt: skip
+        if done.lock_lost:
+            said += ("; its lock wasn't held to its end (its connection lost, or its unlock unanswered), so another "
+                     "cutover may have run beside it (the database records one only)")  # fmt: skip
+        return said
 
     typer.echo(asyncio.run(_in_session(_run)))
 
@@ -808,14 +1082,16 @@ async def _temporal() -> AsyncIterator[Client]:
     try:
         sessionmaker = make_sessionmaker(engine)
         try:
-            await verify_environment(sessionmaker, settings)
+            recorded = await verify_environment(sessionmaker, settings)
         except (EnvironmentNotRecordedError, EnvironmentMismatchError) as e:
             typer.echo(f"ERROR: {e}")
             raise typer.Exit(2) from None
         keys = KeyringKeys(sessionmaker, Keyring(KekSet.from_settings(settings)))
-        yield await Client.connect(
-            settings.temporal_address, namespace=settings.temporal_namespace, data_converter=data_converter(keys)
-        )
+        try:
+            client = await temporal_connect(settings, recorded.environment, data_converter=data_converter(keys))
+        except TemporalConfigError as e:
+            raise _refused(e) from None
+        yield client
     finally:
         await engine.dispose()
 
@@ -876,6 +1152,232 @@ def platform_disable_production_runs(
         typer.echo(f"production runs are off; {len(left)} {many} still unresolved: {', '.join(map(str, left))}")
         raise typer.Exit(3)
     typer.echo("production runs are off; no start is left unresolved")
+
+
+class CapacityApiError(Exception):
+    """The API refused a platform admin's command: its error code, never more."""
+
+
+def _api_client(base: str) -> httpx.AsyncClient:
+    return httpx.AsyncClient(base_url=base, timeout=30.0)
+
+
+async def capacity_via_api(
+    client: httpx.AsyncClient, *, email: str, password: str, code: str, change: dict[str, object], attestation: str
+) -> dict[str, object]:
+    """The ingress capacity changed through the platform admin's API (D11, the owner's ruling on the 2b-4b M3
+    checkpoint 3). What the capacity is then."""
+    return await _as_platform_admin(client, email=email, password=password, code=code, method="PATCH",
+                                    path="/api/v1/admin/platform/ingress-capacity",
+                                    body={**change, "attestation": attestation})  # fmt: skip
+
+
+async def boundary_via_api(
+    client: httpx.AsyncClient, *, email: str, password: str, code: str, evidence: dict[str, str]
+) -> dict[str, object]:
+    """A namespace boundary recorded through the platform admin's API (D11, the owner's ruling on the 2b-4b M4
+    design). The row as the API shows it."""
+    return await _as_platform_admin(client, email=email, password=password, code=code, method="POST",
+                                    path="/api/v1/admin/platform/namespace-boundaries",
+                                    body=dict(evidence))  # fmt: skip
+
+
+async def _as_platform_admin(
+    client: httpx.AsyncClient, *, email: str, password: str, code: str, method: str, path: str,
+    body: dict[str, object],
+) -> dict[str, object]:  # fmt: skip
+    """One platform admin's call (D11): signed in with the password, then the authenticator's code (a second factor
+    proven now, so fresh), the call made on that session, which is then ended. Its answer."""
+    token: str | None = None
+    csrf = ""
+
+    async def call(method: str, path: str, body: dict[str, object] | None = None) -> httpx.Response:
+        nonlocal token
+        headers = {"X-Dewpoint-Client": "web", **({"X-CSRF-Token": csrf} if csrf else {}),
+                   **({"Cookie": f"{SESSION_COOKIE}={token}"} if token else {})}  # fmt: skip
+        answer = await client.request(method, path, json=body, headers=headers)
+        token = answer.cookies.get(SESSION_COOKIE) or token  # sent by hand: the client's own jar keeps none
+        client.cookies.clear()
+        if answer.status_code >= 400:
+            error = (
+                answer.json().get("error")
+                if answer.headers.get("content-type", "").startswith("application/json")
+                else None
+            )
+            raise CapacityApiError(str(error or answer.status_code))
+        return answer
+
+    csrf = (await call("POST", "/api/v1/auth/login", {"email": email, "password": password})).json()["csrf_token"]
+    csrf = (await call("POST", "/api/v1/auth/mfa/totp", {"code": code})).json()["csrf_token"]
+    try:
+        answered = await call(method, path, body)
+        result: dict[str, object] = answered.json()
+        return result
+    finally:
+        try:
+            await call("POST", "/api/v1/auth/logout")
+        except (CapacityApiError, httpx.HTTPError):
+            pass
+
+
+@platform_cli.command("record-namespace-boundary")
+def platform_record_namespace_boundary(
+    api: str = typer.Option(..., "--api", envvar="DEWPOINT_API_URL", help="the API's origin, as the web reaches it"),
+    email: str = typer.Option(..., "--email", help="the platform admin's email: you sign in as them"),
+    proof: str = typer.Option(..., "--proof", help="D12's proof record (the JSON lines DEWPOINT_PROOF_OUT wrote)"),
+    name: str = typer.Option(..., "--name", help="the boundary's name, kept while the boundary holds: a rebuilt "
+                             "server recorded under the same name doesn't strand an erasure relying on it"),
+    attestation: str = typer.Option(..., "--attestation", help="where and how D12 was proven, kept with the row and "
+                                    "in the audit"),
+) -> None:  # fmt: skip
+    """Record this deployment's namespace boundary (D3g) through the platform admin's API (D11), tied to D12's proof
+    and to the server and namespace it holds for (2b-4b M4). First the proof record: a whole pass, both
+    configurations' inventories naming one server build. Then Temporal, with this deployment's own settings: the
+    namespace's id, its TLS verified, its retention at most 30 days, its archival disabled. Then you sign in with your
+    password and your authenticator's code. A development deployment's boundary only: production's waits for
+    real-target qualification. Exit 2 on a refused proof or setting, 1 on what Temporal shows."""
+    try:
+        evidence = proof_evidence(Path(proof).read_bytes())
+    except (OSError, ProofRefusedError) as e:
+        typer.echo(f"ERROR: the proof record is refused: {e if isinstance(e, ProofRefusedError) else type(e).__name__}")
+        raise typer.Exit(2) from None
+    settings = get_settings()
+
+    async def _described(s: AsyncSession) -> Any:
+        environment = await _verified_namespace(s, settings)
+        try:
+            client = await temporal_connect(settings, environment)
+            return await client.workflow_service.describe_namespace(
+                DescribeNamespaceRequest(namespace=settings.temporal_namespace)
+            )
+        except TemporalConfigError as e:
+            raise _refused(e) from None
+        except Exception as e:  # unreachable, refused: nothing recorded on an unknown
+            typer.echo(f"PROBLEM: Temporal couldn't be asked ({type(e).__name__})")
+            raise typer.Exit(1) from None
+
+    answer = asyncio.run(_in_session(_described))
+    problems = temporal_problems(answer, plaintext=settings.temporal_insecure_dev)
+    for problem in problems:
+        typer.echo(f"PROBLEM: {problem}")
+    if problems:
+        raise typer.Exit(1)
+    recorded = {"name": name, "namespace": settings.temporal_namespace, "namespace_id": answer.namespace_info.id,
+                "server_build": evidence.server_build, "proof_digest": evidence.digest,
+                "attestation": attestation}  # fmt: skip
+    password = typer.prompt("Password", hide_input=True)
+    code = typer.prompt("Authenticator code")
+
+    async def _go() -> dict[str, object]:
+        async with _api_client(api) as client:
+            return await boundary_via_api(client, email=email, password=password, code=code, evidence=recorded)
+
+    try:
+        shown = asyncio.run(_go())
+    except (CapacityApiError, httpx.HTTPError) as e:
+        typer.echo(f"ERROR: the API refused it: {e}" if isinstance(e, CapacityApiError) else "ERROR: the API is "
+                   f"unreachable ({type(e).__name__})")  # fmt: skip
+        raise typer.Exit(2) from None
+    typer.echo(
+        f"namespace boundary {shown['id']} recorded: {name}, namespace {recorded['namespace']} "
+        f"({recorded['namespace_id']}), server {evidence.server_build}, proof {evidence.digest}"
+    )
+
+
+@platform_cli.command("set-ingress-capacity")
+def platform_set_ingress_capacity(
+    api: str = typer.Option(..., "--api", envvar="DEWPOINT_API_URL", help="the API's origin, as the web reaches it"),
+    email: str = typer.Option(..., "--email", help="the platform admin's email: you sign in as them"),
+    attestation: str = typer.Option(..., "--attestation", help="how and where the starts were measured, kept in the "
+                                    "audit with the change"),
+    starts: float | None = typer.Option(None, "--starts-per-s", help="sustained starts a second, measured on this "
+                                        "deployment's own Temporal (tests/probes/test_ingress_starts.py)"),
+    headroom: float | None = typer.Option(None, "--headroom", help="the share of them ingress may use: above 0, at "
+                                          "most 1"),
+    wait: int | None = typer.Option(None, "--queue-wait-s", help="the agreed wait, in seconds, a tenant's queued "
+                                    "webhook requests may stand for"),
+    unset: bool = typer.Option(False, "--unset", help="unset all three: the development-only rates and cap"),
+) -> None:  # fmt: skip
+    """Change this deployment's ingress capacity through the platform admin's API (D11): you sign in with your password
+    and your authenticator's code, and the API audits the change with your id and the attestation. A value left out
+    keeps what it was; `--unset` unsets all three, which a production deployment whose runs are on refuses. Until the
+    starts and the headroom are set, ingress keeps its development-only rates; until the wait is too, its
+    development-only cap."""
+    given: dict[str, object] = {
+        k: v for k, v in (("starts_per_s", starts), ("headroom", headroom), ("queue_wait_s", wait)) if v is not None
+    }
+    if unset == bool(given):
+        typer.echo("ERROR: give the ingress capacity's values to change, or --unset alone")
+        raise typer.Exit(2)
+    password = typer.prompt("Password", hide_input=True)
+    code = typer.prompt("Authenticator code")
+
+    async def _go() -> dict[str, object]:
+        async with _api_client(api) as client:
+            change: dict[str, object] = {"unset": True} if unset else given
+            return await capacity_via_api(client, email=email, password=password, code=code, change=change,
+                                          attestation=attestation)  # fmt: skip
+
+    try:
+        now = asyncio.run(_go())
+    except (CapacityApiError, httpx.HTTPError) as e:
+        typer.echo(f"ERROR: the API refused it: {e}" if isinstance(e, CapacityApiError) else "ERROR: the API is "
+                   f"unreachable ({type(e).__name__})")  # fmt: skip
+        raise typer.Exit(2) from None
+    if now["starts_per_s"] is None and now["headroom"] is None and now["queue_wait_s"] is None:
+        typer.echo("ingress capacity unset: the development-only rates and limit")
+        return
+    problems = now.get("problems")
+    missing = [str(name) for name in problems] if isinstance(problems, list) else []
+    if missing:  # the limit in force is the development-only one: never shown as agreed (the fresh review 5's M4)
+        if now["starts_per_s"] is None or now["headroom"] is None:
+            typer.echo(f"ingress capacity incomplete ({', '.join(missing)} unset): the development-only rates and "
+                       f"limit, {now['limit']} requests' outstanding work at most")  # fmt: skip
+        else:  # the rates derived already (the fresh review 6's M3)
+            typer.echo(f"ingress capacity incomplete ({', '.join(missing)} unset): event rates from "
+                       f"{now['starts_per_s']} starts a second measured, {now['headroom']} of them for ingress; the "
+                       f"development-only limit, {now['limit']} requests' outstanding work at most")  # fmt: skip
+        return
+    typer.echo(f"ingress capacity: {now['starts_per_s']} starts a second measured, {now['headroom']} of them for "
+               f"ingress, a {now['queue_wait_s']} s wait: the deployment's outstanding work at most {now['limit']} "
+               "requests")  # fmt: skip
+
+
+def _alembic_upgrade() -> int:
+    """`alembic upgrade head`, run as Compose's migrate step ran it: its exit code."""
+    return subprocess.run(["alembic", "upgrade", "head"], check=False).returncode  # noqa: S607 (the image's alembic)
+
+
+async def _revision(url: str) -> str | None:
+    """The schema's revision; None before the first migration."""
+    engine = make_engine(url)
+    try:
+        async with make_sessionmaker(engine)() as s:
+            if (await s.execute(text("select to_regclass('public.alembic_version')"))).scalar() is None:
+                return None
+            found = (await s.execute(text("select version_num from alembic_version"))).scalar()
+            return None if found is None else str(found)
+    finally:
+        await engine.dispose()
+
+
+@deployment_cli.command("migrate")
+def deployment_migrate() -> None:
+    """The schema migrated to head on the prescribed path (2b-4b M4 recovery, the plan's ruling 7): its intent recorded
+    off the database host first, then `alembic upgrade head`, then its outcome. It refuses in production without the
+    administration sink. It claims nothing about an administrator who runs Alembic directly: that's the trusted
+    exception, which the monitor sees only as persistent drift (`admin_revision_unrecorded`)."""
+    settings = get_settings()
+    sink = recovery_commands.required_sink(settings)
+    action = uuid.uuid4()
+    if sink is not None:  # its failure stops the migration before it starts
+        sink.write(recorded("migration", "intent", action, target="head",
+                            **{"from": asyncio.run(_revision(settings.database_url))}))  # fmt: skip
+    code = _alembic_upgrade()
+    if sink is not None:
+        sink.write(recorded("migration", "outcome", action, status="succeeded" if code == 0 else "failed", exit=code,
+                            to=asyncio.run(_revision(settings.database_url))))  # fmt: skip
+    raise typer.Exit(code)
 
 
 @deployment_cli.command("set-current")

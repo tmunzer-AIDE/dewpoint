@@ -27,6 +27,11 @@ ENV = {
     "DEWPOINT_KEK_B64": "k" * 44,
     "DEWPOINT_AUDIT_SIGNING_KEY_B64": "s" * 44,
     "DEWPOINT_TEMPORAL_NAMESPACE": "dewpoint-ci",
+    # The administration sink's (2b-4b M4 recovery): D6's bucket, and the migrate step's own put-only identity
+    "DEWPOINT_AUDIT_S3_BUCKET": "audit-anchors",
+    "DEWPOINT_AUDIT_S3_PREFIX": "deployment-1/",
+    "DEWPOINT_ADMINISTRATION_AWS_ACCESS_KEY_ID": "administration-put-only",
+    "DEWPOINT_ADMINISTRATION_AWS_SECRET_ACCESS_KEY": "administration-secret",
 }
 
 
@@ -59,6 +64,25 @@ def test_the_migrate_step_records_the_namespace_the_worker_checks() -> None:
     2 unless its own matches it. Both take it from the same `.env` setting."""
     namespaces = [environment(name).get("DEWPOINT_TEMPORAL_NAMESPACE") for name in ("migrate", "worker")]
     assert namespaces == ["dewpoint-ci", "dewpoint-ci"]
+
+
+def test_the_migrate_step_alone_records_its_migration_off_the_host_with_its_own_put_only_identity() -> None:
+    """The owner's review of gate C (finding 2): `migrate` runs `dewpoint deployment migrate`, which refuses in
+    production without the administration sink. `.env`'s bucket and the sink's credentials reach that step, and no
+    other service holds the credentials."""
+    assert "dewpoint deployment migrate;" in service("migrate")["command"][2]
+    migrate = environment("migrate")
+    assert (migrate["DEWPOINT_AUDIT_S3_BUCKET"], migrate["DEWPOINT_AUDIT_S3_PREFIX"]) == (
+        "audit-anchors",
+        "deployment-1/",
+    )
+    assert (migrate["AWS_ACCESS_KEY_ID"], migrate["AWS_SECRET_ACCESS_KEY"]) == (
+        "administration-put-only", "administration-secret")  # fmt: skip
+    compose: dict[str, Any] = yaml.safe_load(COMPOSE.read_text())
+    for name, other in compose["services"].items():
+        given = other.get("environment") or {}
+        held = {rendered(str(v)) for v in (given.values() if isinstance(given, dict) else given)}
+        assert name == "migrate" or not held & {"administration-put-only", "administration-secret"}, name
 
 
 def test_the_migrate_step_gives_tenants_keys_as_the_key_admin() -> None:
@@ -94,12 +118,26 @@ def test_a_stopping_dispatcher_outlasts_a_starts_deadline() -> None:
     assert grace.endswith("s") and int(grace[:-1]) > START_DEADLINE.total_seconds()
 
 
+# The processes that talk to Temporal: in development, Compose's dev server, without TLS (§10.4)
+TEMPORAL_CLIENTS = ("worker", "dispatcher", "retention", "api")
+
+
 def test_plain_compose_is_production_and_the_development_override_initializes_development() -> None:
-    """§2.1: ordinary Compose is `production`, and gated; CI and local development opt in through their own override,
-    which changes nothing else."""
+    """§2.1: ordinary Compose is `production`, and gated, and none of its services may reach Temporal in plaintext. CI
+    and local development opt in through their own override: `migrate` records `development`, and each process that
+    talks to Temporal may connect to the dev server in plaintext, which only a recorded `development` environment
+    accepts (§10.4). The override changes nothing else (the owner's ruling on gate C: its scope is right, the earlier
+    assertion that only `migrate` changes was stale)."""
     assert environment("migrate")["DEWPOINT_ENVIRONMENT"] == "production"
+    compose: dict[str, Any] = yaml.safe_load(COMPOSE.read_text())
+    plaintext = [name for name, plain in compose["services"].items()
+                 if "DEWPOINT_TEMPORAL_INSECURE_DEV" in (plain.get("environment") or {})]  # fmt: skip
+    assert plaintext == []
     override: dict[str, Any] = yaml.safe_load(OVERRIDE.read_text())
-    assert override["services"] == {"migrate": {"environment": {"DEWPOINT_ENVIRONMENT": "development"}}}
+    assert override["services"] == {
+        "migrate": {"environment": {"DEWPOINT_ENVIRONMENT": "development"}},
+        **{name: {"environment": {"DEWPOINT_TEMPORAL_INSECURE_DEV": "true"}} for name in TEMPORAL_CLIENTS},
+    }
 
 
 def test_ci_runs_every_compose_command_with_the_development_override() -> None:

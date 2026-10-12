@@ -47,6 +47,7 @@ with workflow.unsafe.imports_passed_through():
         CLAIMS_GRANT,
         CLAIMS_MESSAGE,
         CLAIMS_SPILL,
+        CLOSE_BATCH,
         ENGINE_QUEUE,
         MAPPED,
         OUTCOME_UNKNOWN,
@@ -60,6 +61,7 @@ with workflow.unsafe.imports_passed_through():
         ChildInput,
         ChildInputResult,
         Claiming,
+        CloseBatchInput,
         DeriveInput,
         DeriveResult,
         GrantInput,
@@ -75,6 +77,7 @@ with workflow.unsafe.imports_passed_through():
         StepInput,
         StepResult,
         StepRow,
+        UnconfirmedBatch,
         cel_queue,
         step_activity,
     )
@@ -127,6 +130,15 @@ PROJECT_BYTES = 256 * 1024  # a projection's rows at most, as JSON: far below Te
 CEL_BATCH = 1_000  # binding sets per cel.evaluate request
 CEL_REQUEST_BYTES = 1_835_008  # a cel.evaluate request's JSON bytes, a margin under Temporal's 2 MiB limit (#15)
 REQUEST_TOO_LARGE = "The values this expression reads are too large to send to the CEL evaluator (over 1.75 MiB)."
+# What a run's history may hold before a step's CEL requests stop (#26's backstop, D7): Temporal terminates a run whose
+# history passes 50 MiB (its default, which the dev server enforced after 30 requests of 1.77 MB); this leaves room
+# for the rest of the execution to end, its continued run's input included
+HISTORY_GUARD = 32 * 1024 * 1024
+HISTORY_FULL = "The run's history can't hold more of this step's requests to the CEL evaluator (over 32 MiB)."
+# Drain once an execution has added this much history, whatever Temporal suggests (the review of the M2 checkpoint, M6):
+# its own suggestion is a server setting, about 4 MB by default, which an operator may raise; HISTORY_GUARD's margin
+# rests on draining well before it (a continued run starts with at most SNAPSHOT_MAX of state)
+DRAIN_BYTES = 8 * 1024 * 1024
 FILTER_INLINE = 1_000  # a filter's items the workflow may evaluate itself; a larger list goes to cel.evaluate (spec §6)
 SUBFLOW_GRANT = 1_000  # a sub-flow's initial grant (spec §6)
 MAX_DEPTH = 5  # sub-flows nest at most this deep (spec §6; publish checks it too)
@@ -142,6 +154,9 @@ CLAIM_REFUSED = "A claim this run may not read, or that doesn't exist."
 INPUT_INVALID = "input_invalid"  # a sub-flow's input that doesn't match its schema, found where it's resolved
 SPILLS = uuid.UUID("2b1b5e11-0000-4000-8000-000000000522")  # spilled values' claim ids: from where they were spilled
 SPILL_FRAME = 64  # what a value adds to a spill's input besides its own JSON: its claim id and the framing
+# A plain value several binding sets share goes to the evaluator once, as a size claim (#26), when it weighs more than
+# its handle and its copies would add at least SHARED_REPEAT bytes to the run's history
+SHARED_MIN, SHARED_REPEAT = 256, 64 * 1024
 SPILL_FAILED = "A value couldn't be stored before it was sent."
 
 
@@ -269,6 +284,7 @@ class Execution:
         self._yield = YieldBudget()  # the local evaluations of the current workflow task (spec §5.6)
         self._yield_task = -1  # the history length that workflow task started with
         self._startup_task = workflow.info().get_current_history_length()  # this execution's first: it starts it
+        self._history_from = workflow.info().get_current_history_size()  # its input (a continued run's state) and all
         self._yield_timer: asyncio.Task[None] | None = None  # the one yield point every waiter shares
         self._rows: dict[tuple[str, str, int], StepRow] = {}  # queued for the next projection, per attempt
         self._started: dict[Instance, str] = {}
@@ -343,7 +359,7 @@ class Execution:
             tasks[("step", inst)] = asyncio.create_task(self._timer(inst, self._timers[inst]))
         self._resume = []
         clock = asyncio.create_task(asyncio.sleep(max(0.0, (self.deadline - workflow.now()).total_seconds())))
-        closed = False
+        closing = False
         try:
             while self.sched.ended is None:
                 self._serve_budget()
@@ -437,13 +453,19 @@ class Execution:
                     if effect is not None and key[0] != "cancelled":
                         self._apply(key, effect)
         except GeneratorExit:
-            # Closed, never cancelled: its worker dropped it unevicted, and the garbage collector closes it in
-            # whatever thread it runs, inside another workflow's activation as likely as not. Anything run now would
-            # act on that workflow: nothing does.
-            closed = True
+            # Closed, not cancelled: a stopping worker evicts none of the runs it cached, so this coroutine outlives
+            # it, and whatever closes it later (the garbage collector) may do so while another run's workflow task is
+            # active on its thread, where a workflow call acts in that run. It cancels its own clock and units, which
+            # touches only this execution's tasks, and awaits nothing: awaiting would have raised "coroutine ignored
+            # GeneratorExit", taken for a bug (the 2b-4b M2 suite's #16 failure), and nothing awaited could complete.
+            closing = True
+            clock.cancel()
+            for key, task in tasks.items():
+                if key[0] not in ("project", "cancelled"):
+                    task.cancel()
             raise
         finally:
-            if not closed:
+            if not closing:
                 clock.cancel()
                 for key, task in tasks.items():
                     if key[0] not in ("project", "cancelled"):
@@ -455,10 +477,16 @@ class Execution:
         return None
 
     def _drain_due(self) -> bool:
-        """Past `drain_events`, or Temporal suggests continuing. The drive loop wakes for it too, so a drain begins at
-        the first workflow task past the threshold, not at the next unit's end."""
+        """Past `drain_events`, past `DRAIN_BYTES` of history added since this execution began (its state carried in
+        is counted out, so a continued run never drains at once), or Temporal suggests continuing. The drive loop
+        wakes for it too, so a drain begins at the first workflow task past the threshold, not at the next unit's
+        end."""
         info = workflow.info()
-        return info.get_current_history_length() >= self.drain_events or info.is_continue_as_new_suggested()
+        return (
+            info.get_current_history_length() >= self.drain_events
+            or info.get_current_history_size() - self._history_from >= DRAIN_BYTES
+            or info.is_continue_as_new_suggested()
+        )
 
     def _units(self, tasks: Mapping[tuple[Any, ...], asyncio.Task[Any]]) -> dict[str, int]:
         """What's outstanding, by kind: activities, children, timers, values (CEL, filters), collects, the
@@ -705,6 +733,19 @@ class Execution:
                 )
             )
 
+    async def _close_batch(self, batch: UnconfirmedBatch) -> None:
+        """A batch of this run's that a bug failed (the owner's ruling, 2b-4b M2): its rows still `running` close,
+        `outcome_unconfirmed`, and nothing else of the run's (a batch shares the run's id); its closing is kept for a
+        projection of it landing later."""
+        data = CloseBatchInput(self.tenant_id, self.run_id, batch)
+        await self._send(data)
+        await workflow.execute_activity(
+            CLOSE_BATCH,
+            data,
+            start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(maximum_interval=timedelta(seconds=30)),
+        )
+
     async def _project(
         self, rows: list[StepRow], summary: RunSummary | None = None, start: RunStart | None = None
     ) -> None:
@@ -944,13 +985,14 @@ class Execution:
         scope: ScopeKey = (),
     ) -> resolve.CelTask:
         """Bind each view within the workflow task's budget (spec §5.6). Binding converts every value it binds, so
-        it's charged as they are (`Measure.nodes`), whether the expression then runs here or in `cel.evaluate`.
+        it's charged as they are (`Measure.nodes`), and the bytes measuring them serialized (`Measure.serialized`,
+        #18), whether the expression then runs here or in `cel.evaluate`.
         `inline` False: it goes to `cel.evaluate`, whatever its class."""
         bound: list[resolve.Bound] = []
         for v in views:
             await self._yield_point(None)
             b = resolve.bind_view(record, v)
-            self._yield.charge(nodes=b.measured.nodes)
+            self._yield.charge(nodes=b.measured.nodes, serialized=b.measured.serialized)
             bound.append(await self._bounded_bindings(b, owner, scope))
         local_profile = LOCAL_CEL_PROFILE if inline else None
         return resolve.cel_task(record, bound, local_profile=local_profile, version_profile=self.program.cel_profile)
@@ -992,6 +1034,7 @@ class Execution:
                                       strict=True):  # fmt: skip
                     outcomes[i] = outcome
             return outcomes
+        task = await self._shared_once(task, owner, scope)
         out: list[cel.Outcome] = []
         profile = self.program.cel_profile
 
@@ -1018,6 +1061,11 @@ class Execution:
                 return out + [refused] * (count - start)
             chunk = resolve.CelTask(task.record, task.bindings[start:end], False)
             await self._yield_point(None, send=size)
+            if workflow.info().get_current_history_size() + self._task_budget().sent + size > HISTORY_GUARD:
+                # a fan-out sharing couldn't shrink (#26's backstop): its remaining sets are never sent, and the step
+                # fails cleanly, before Temporal would terminate the run for its history's size
+                refused = cel.Outcome(error=cel.HISTORY_TOO_LARGE, message=HISTORY_FULL)
+                return out + [refused] * (count - start)
             self._yield.charge(sent=size)
             try:
                 result = await workflow.execute_activity(
@@ -1073,6 +1121,73 @@ class Execution:
                 return value
             self._task_budget().charge(structure=units)
             await self._yield_point(None, structure=STRUCTURE_STEP)
+
+    async def _shared_once(self, task: resolve.CelTask, owner: Step | None, scope: ScopeKey) -> resolve.CelTask:
+        """#26: a plain value several binding sets share (a filter's every item binding the same string) goes to
+        `cel.evaluate` once, as a size claim, and each set carries its handle, which the evaluator resolves (engine 2b
+        spec §4.2). Each set carried its own copy: 1,000 items over a 65,500-character string sent about 64 MB, until
+        Temporal terminated the run for its history's size. Shared is the same value bound in several sets, at any
+        depth (binding never copies a value, though a projection makes a new container around it). Claimed in the
+        order first bound, so a replay claims the same; each whole, in one claim (the review of the M2 checkpoint,
+        I1), its id from this call's own seed (C2: never another filter's, iteration's or continued run's). A value no
+        heavier than its handle (`SHARED_MIN`), whose copies would add less than `SHARED_REPEAT`, too large for one
+        spill, or whose claim couldn't be written (M1: claiming is a saving, never a requirement), is sent as copies,
+        as before: the history guard still applies. The walk, and the sets rebuilt, are charged their values at yield
+        points, as binding is (M2)."""
+        seen: dict[int, list[Any]] = {}  # id -> [the value, the sets it's in, the last set seen in]
+        visited: list[int] = []  # each set's values walked
+        for k, bindings in enumerate(task.bindings):
+            await self._yield_point(None)
+            count, stack = 0, list(bindings.values())
+            while stack:
+                value = stack.pop()
+                if not isinstance(value, str | list | dict) or ClaimRef.of(value) is not None:
+                    continue
+                count += 1
+                entry = seen.get(id(value))
+                if entry is not None:  # its parts were walked where it was first seen
+                    if entry[2] != k:
+                        entry[1], entry[2] = entry[1] + 1, k
+                    continue
+                seen[id(value)] = [value, 1, k]
+                stack.extend(value.values() if isinstance(value, dict) else value if isinstance(value, list) else ())
+            self._yield.charge(nodes=count)
+            visited.append(count)
+        candidates = [
+            (key, value)
+            for key, (value, sets, _) in seen.items()
+            if sets > 1 and (weight := json_bytes(value)) > SHARED_MIN and weight * (sets - 1) >= SHARED_REPEAT
+        ]
+        if not candidates:
+            return task
+        seed = workflow.uuid4()  # this call's own: its claims' ids are never another call's
+        converter = workflow.payload_converter()
+        handles: dict[int, Any] = {}
+        for n, (key, value) in enumerate(candidates):
+            claim = {"id": str(uuid.uuid5(seed, str(n))), "value": value}
+            alone = SpillInput([claim], self.root_run_id, str(owner.id) if owner else None, iteration_key(scope))
+            if not fits(alone, converter):
+                continue  # one spill can't carry it whole: it stays, and a set binding it is refused as before
+            if await self._spill([claim], owner, scope) is None:
+                handles[key] = ClaimRef(claim["id"]).to_json()
+        if not handles:
+            return task
+
+        def swapped(value: Any) -> Any:
+            if (handle := handles.get(id(value))) is not None:
+                return handle
+            if isinstance(value, dict) and ClaimRef.of(value) is None:
+                return {name: swapped(v) for name, v in value.items()}
+            if isinstance(value, list):
+                return [swapped(v) for v in value]
+            return value
+
+        rebuilt = []
+        for bindings, count in zip(task.bindings, visited, strict=True):
+            await self._yield_point(None)
+            rebuilt.append(swapped(bindings))
+            self._yield.charge(nodes=count)
+        return resolve.CelTask(task.record, tuple(rebuilt), task.local)
 
     async def _yield_point(
         self, record: ExpressionRecord | None, *, send: int = 0, structure: int = 0, whole: bool = False
@@ -1171,11 +1286,11 @@ class Execution:
         record = self.program.record(step.id, "/predicate")
         views = [self._view(inst.scope, item=(item, i)) for i, item in enumerate(items)]
         try:
-            task = await self._cel_task(record, views, inline=len(items) <= FILTER_INLINE)
+            task = await self._cel_task(record, views, inline=len(items) <= FILTER_INLINE, owner=step, scope=inst.scope)
         except resolve.ValueFailure as e:
             return _Effect(failure=e.failure)
         kept: list[Any] = []
-        for item, outcome in zip(items, await self._evaluate(task), strict=True):
+        for item, outcome in zip(items, await self._evaluate(task, owner=step, scope=inst.scope), strict=True):
             if not outcome.ok:
                 return _Effect(failure=Failure(str(outcome.error), outcome.message))
             if not isinstance(outcome.value, bool):
@@ -1420,9 +1535,12 @@ class Execution:
 
     @staticmethod
     def _lost(kind: str, e: ChildWorkflowError) -> Failure:
-        """A child that ended without a result: terminated from outside Dewpoint, or failed as a workflow (a bug)."""
+        """A child that ended without a result: terminated from outside Dewpoint, or failed as a workflow (a bug, its
+        own message naming only its type)."""
         if isinstance(e.cause, TerminatedError):
             return Failure(TERMINATED, f"The {kind} was terminated outside Dewpoint.")
+        if isinstance(e.cause, ApplicationError) and e.cause.type in (VERSION_UNUSABLE, INTERNAL_ERROR):
+            return Failure(e.cause.type, e.cause.message)
         return Failure(INTERNAL_ERROR, f"The {kind} ended without a result ({type(e.cause).__name__}).")
 
     async def _lost_end(self, run: RunInput, started_at: str, failure: Failure) -> None:
@@ -1511,6 +1629,9 @@ class Execution:
             used = result.iterations
         except ChildWorkflowError as e:  # its version didn't load or compile, a bug, or it was terminated
             cause = e.cause
+            if isinstance(cause, ApplicationError) and cause.type == INTERNAL_ERROR:  # a bug failed its execution
+                key, past = self.program.steps[b.loop.step].key, b.start + count(b.items)
+                await self._close_batch(UnconfirmedBatch(iteration_key(b.loop.scope), key, b.start, past))
             if isinstance(cause, ApplicationError) and cause.type in (VERSION_UNUSABLE, INTERNAL_ERROR):
                 return _Effect(failure=Failure(cause.type, cause.message))
             return _Effect(failure=self._lost("batch", e))

@@ -302,6 +302,9 @@ async def test_a_deadline_after_the_payload_may_have_delivered() -> None:
             await smtp(limits=SmtpLimits(session_s=0.5)).send(target(server.port), ["ops@example.com"], MESSAGE)
 
 
+# A loop of its own: the one-worker default executor it sets dies with that loop, never the session's, which every
+# later test shares (left there, it starved later tests' name lookups behind one busy worker: the serial run's failures)
+@pytest.mark.asyncio(loop_scope="function")
 async def test_sessions_never_take_the_loops_default_executor() -> None:
     """The guard resolves names on the default executor: a slow server's session must not hold it (the review's H1)."""
     loop = asyncio.get_running_loop()
@@ -310,11 +313,13 @@ async def test_sessions_never_take_the_loops_default_executor() -> None:
         tasks = [asyncio.create_task(smtp(limits=SmtpLimits(session_s=3.0)).send(target(server.port),
                                                                                  ["ops@example.com"], MESSAGE))
                  for _ in range(2)]  # fmt: skip
-        await asyncio.sleep(0.3)
-        assert await asyncio.wait_for(loop.run_in_executor(None, lambda: 7), 1.0) == 7
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            await asyncio.sleep(0.3)
+            assert await asyncio.wait_for(loop.run_in_executor(None, lambda: 7), 1.0) == 7
+        finally:  # cancelled whatever the assertion found
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 @pytest.mark.parametrize("fails", [False, True])  # the first address connects slowly, or fails slowly

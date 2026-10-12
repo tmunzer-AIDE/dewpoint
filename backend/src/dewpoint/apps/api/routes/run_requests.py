@@ -6,6 +6,7 @@ a value: 503 while the deployment can't start runs (or the tenant's key can't be
 workflow's state. A cancel and a re-run name a request: its id is its run's, if it has one."""
 
 import uuid
+from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
@@ -15,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps import admission, cancels
 from dewpoint.apps.api.responses import StartFormOut
+from dewpoint.apps.csv_slots import CsvBusyError, Slot
 from dewpoint.apps.forms import csv_form, form_fields
 from dewpoint.apps.inputs import INPUT_INVALID
 from dewpoint.core.authz.permissions import P
@@ -31,6 +33,7 @@ from dewpoint.engine.handles import NestingError, StoredClaim, resolve_value
 
 router = APIRouter(prefix="/api/v1", tags=["runs"])
 KEY_MAX = 255
+CSV_BUSY = {"error": "csv_busy"}  # every CSV slot of this process held: ask again (2b-4b M3)
 UNAVAILABLE = {admission.PRODUCTION_RUNS_DISABLED, admission.ENVIRONMENT_NOT_RECORDED, admission.NO_CURRENT_BUILD}
 INVALID = {INPUT_INVALID, SECRET_INDEX_LIMIT, admission.CSV_MAPPING_INVALID}
 NOT_FOUND = {admission.UPLOAD_NOT_FOUND}  # whoever's it is: an upload is its owner's only
@@ -77,6 +80,16 @@ def get_keys(request: Request) -> KeySource:
     return request.app.state.keys  # type: ignore[no-any-return]
 
 
+async def csv_slot(request: Request) -> AsyncIterator[Slot]:
+    """The request's hold on a CSV slot, taken by its CSV work and given back once its transaction has committed: a
+    route declares it before its session (`get_db`), so it's torn down after the session's commit (2b-4b M3)."""
+    slot = Slot(request.app.state.csv_slots)
+    try:
+        yield slot
+    finally:
+        slot.give_back()
+
+
 def idempotency_key(key: str | None = Header(None, alias="Idempotency-Key")) -> str:
     if not key:
         raise HTTPException(428, detail={"error": "idempotency_key_required"})
@@ -106,8 +119,13 @@ def request_body(r: RunRequest) -> dict[str, object]:
 
 async def admit(
     db: AsyncSession, keys: KeySource, ctx: TenantContext, workflow_id: uuid.UUID, source: str, body: StartIn, key: str,
-    rerun: admission.Rerun | None = None,
+    rerun: admission.Rerun | None = None, slot: Slot | None = None,
 ) -> RunRequest:  # fmt: skip
+    """The request admitted. A CSV start takes one of the process's CSV slots before its rows are built, held through
+    its commit (2b-4b M3): with every slot held, 503 `csv_busy`. (A re-run keeping its original's input takes one in
+    `rerun`, before it reads that input.)"""
+    if body.csv is not None and slot is not None:
+        taken(slot)
     try:
         admitted = await admission.admit_request(
             db, keys, tenant_id=ctx.tenant_id, workflow_id=workflow_id, source=source, actor_id=ctx.user.id,
@@ -131,6 +149,14 @@ async def admit(
     return admitted.request
 
 
+def taken(slot: Slot) -> None:
+    """The request's CSV slot, or 503 `csv_busy` with every slot held."""
+    try:
+        slot.take()
+    except CsvBusyError:
+        raise HTTPException(503, detail=CSV_BUSY, headers={"Retry-After": "1"}) from None
+
+
 async def not_past_cutoff(db: AsyncSession, ctx: TenantContext, request: RunRequest) -> None:
     """An exact retry finds the request its key admitted, which it shows only within the retention cutoff: past it,
     410 `request_not_retained`, and still nothing new is admitted under the key. The key is recognized only while its
@@ -143,6 +169,7 @@ async def not_past_cutoff(db: AsyncSession, ctx: TenantContext, request: RunRequ
 async def start_run(
     workflow_id: uuid.UUID,
     body: StartIn,
+    slot: Slot = Depends(csv_slot, scope="function"),  # before the session: given back after its commit
     key: str = Depends(idempotency_key),
     ctx: TenantContext = Depends(require(P.RUN_START)),
     db: AsyncSession = Depends(get_db, scope="function"),
@@ -150,7 +177,7 @@ async def start_run(
 ) -> dict[str, object]:
     """202 with the request, queued for the dispatcher (or as an exact retry finds it now, within the retention cutoff:
     410 `request_not_retained` past it)."""
-    return request_body(await admit(db, keys, ctx, workflow_id, "manual", body, key))
+    return request_body(await admit(db, keys, ctx, workflow_id, "manual", body, key, slot=slot))
 
 
 @router.get(
@@ -210,6 +237,7 @@ async def cancel_run(
 async def rerun(
     request_id: uuid.UUID,
     body: RerunIn | None = None,
+    slot: Slot = Depends(csv_slot, scope="function"),  # before the session: given back after its commit
     key: str = Depends(idempotency_key),
     ctx: TenantContext = Depends(require(P.RUN_START)),
     db: AsyncSession = Depends(get_db, scope="function"),
@@ -244,14 +272,14 @@ async def rerun(
         return request_body(existing)
     if given.csv is not None:
         start = StartIn(input=given.input or {}, mode=mode, csv=given.csv)
-        return request_body(await admit(db, keys, ctx, workflow_id, "rerun", start, key, rerun=again))
+        return request_body(await admit(db, keys, ctx, workflow_id, "rerun", start, key, rerun=again, slot=slot))
     if given.input is not None:
-        value = given.input
-    elif old is None or not await retention.request_kept(db, await retention.cutoff(db, ctx.tenant_id), old):
+        start = StartIn(input=given.input, mode=mode)
+        return request_body(await admit(db, keys, ctx, workflow_id, "rerun", start, key, rerun=again))
+    if old is None or not await retention.request_kept(db, await retention.cutoff(db, ctx.tenant_id), old):
         raise HTTPException(410, detail={"error": INPUT_NOT_RETAINED})
-    else:
-        value = await original_input(db, keys, ctx.tenant_id, old)
-    start = StartIn(input=value, mode=mode)
+    taken(slot)  # its original's input, a CSV's rows perhaps, read only in a slot (the fresh M3 review's I5)
+    start = StartIn(input=await original_input(db, keys, ctx.tenant_id, old), mode=mode)
     return request_body(await admit(db, keys, ctx, workflow_id, "rerun", start, key, rerun=again))
 
 

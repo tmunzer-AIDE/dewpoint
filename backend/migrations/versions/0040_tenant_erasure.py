@@ -62,11 +62,26 @@ earlier stage (a late Temporal item found) keeps its fence.
 was verified, and when it was found lost), which step 9's bound relies on. The verified proof of 2b-4b (D12) records
 it, as the key admin; no migration does. An erasure records the boundary it relied on, and can't complete without one,
 nor once it's lost. Not fenced: the audit log (kept under the audit
-policy), and the retention sweep's own counts (deleted by the erasure's sweep once audited)."""
+policy), and the retention sweep's own counts (deleted by the erasure's sweep once audited).
+
+The inventory's cutover (the owner's D15 ruling on the 2b-4b M1 checkpoint): an online upgrade runs while the
+application from before it still writes, and its dispatcher syncs every schedule row under the schedule's own id. Until
+`dewpoint schedules inventory-cutover --attest` records `schedule_inventory_cutover` (every writer from before 0040
+gone, attested), each schedule added, by any writer, is captured as the backfill records those already here: its
+incarnation 0 and its life until then unknown (`schedules_inventoried`, from before the backfill, so none slips between
+them). The cutover first catches up, in batches, any schedule the capture missed and the missed counts the old
+dispatcher recorded since (`schedule_inventory_catch_up`), then records, in a short transaction that reads no schedule
+(`schedule_inventory_cutover_record`). No dispatcher pass or erasure stage that relies on the inventory runs before the
+cutover; no migration records it, not even a fresh deployment's."""
+
+from collections.abc import Callable
+from uuid import UUID
 
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
+
+from migrations.online import batches, exists, grants, online, step, ungranted
 
 revision = "0040"
 down_revision = "0039"
@@ -190,11 +205,6 @@ ERASER = [
     "GRANT SELECT, INSERT, UPDATE, DELETE ON tenant_erasure_items TO dewpoint_retention",
     "GRANT SELECT, INSERT ON tenant_erasure_known TO dewpoint_retention",
     "GRANT USAGE ON SEQUENCE tenant_erasure_items_id_seq, tenant_erasure_known_id_seq TO dewpoint_retention",
-    *(
-        f"CREATE POLICY {t}_erasure ON {t} TO dewpoint_retention USING (tenant_id = app_tenant_id()) "
-        "WITH CHECK (tenant_id = app_tenant_id())"
-        for t in NO_POLICY
-    ),
     *(f"GRANT SELECT ({columns}) ON {t} TO dewpoint_retention" for t, columns in READS.items()),
     "GRANT SELECT ON execution_evidence TO dewpoint_retention",  # identifiers and times only
     f"GRANT DELETE ON {DELETES} TO dewpoint_retention",
@@ -204,8 +214,12 @@ ERASER = [
     "GRANT UPDATE (pending_events, pending_bytes) ON webhook_endpoints, tenant_event_counters TO dewpoint_retention",
     "GRANT EXECUTE ON FUNCTION end_unstarted_run(uuid) TO dewpoint_retention",
     "GRANT UPDATE (status, name, slug) ON tenants TO dewpoint_retention",
-    "CREATE POLICY tenants_erasure ON tenants FOR UPDATE TO dewpoint_retention USING (id = app_tenant_id())",
 ]
+ERASER_POLICY = (  # on each of NO_POLICY
+    "CREATE POLICY {t}_erasure ON {t} TO dewpoint_retention USING (tenant_id = app_tenant_id()) "
+    "WITH CHECK (tenant_id = app_tenant_id())"
+)
+TOMBSTONE = "CREATE POLICY tenants_erasure ON tenants FOR UPDATE TO dewpoint_retention USING (id = app_tenant_id())"
 # An erasure's record, items and known ids are its tenant's (the final review's M3): read and written in its scope. The
 # retention process finds the erasures to carry on, the completed ones, and how many are unfinished, across tenants,
 # through functions returning ids or a count only. `namespace_boundaries` holds no tenant's rows: a platform table.
@@ -289,9 +303,6 @@ INCARNATIONS = [
     "landed_at, landed_paused, unpause_sent_at) ON schedule_incarnations TO dewpoint_dispatch",
     "GRANT SELECT ON schedule_incarnations TO dewpoint_api",  # a wait not yet settled, shown as pending
     "GRANT SELECT, DELETE ON schedule_incarnations TO dewpoint_retention",
-    # every schedule already here: incarnation 0, under the id the sync gave every schedule before
-    "INSERT INTO schedule_incarnations (temporal_id, tenant_id, schedule_id, number, misses, backfilled) "
-    "SELECT 't:' || tenant_id || ':sched:' || id, tenant_id, id, 0, misses, true FROM schedules",
     """CREATE FUNCTION stray_incarnations(max_rows integer) RETURNS TABLE (tenant_id uuid, temporal_id text)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
     SELECT i.tenant_id, i.temporal_id FROM schedule_incarnations i
@@ -316,10 +327,135 @@ INTERVALS = [
     "GRANT USAGE ON SEQUENCE schedule_intervals_id_seq TO dewpoint_dispatch",
     "GRANT SELECT ON schedule_intervals TO dewpoint_api",
     "GRANT SELECT, DELETE ON schedule_intervals TO dewpoint_retention",
-    # every schedule already here: its life before the migration, which nothing recorded as evidence, unknown
+]
+
+# Every schedule already here, in batches (2b-4b, D15): incarnation 0, under the id the sync gave every schedule
+# before; then its life before the migration, which nothing recorded as evidence, unknown.
+INCARNATED_BOUNDS = (
+    "WITH b AS (SELECT s.id FROM schedules s WHERE s.id > :after AND NOT EXISTS (SELECT 1 FROM schedule_incarnations i "
+    "WHERE i.schedule_id = s.id) ORDER BY s.id LIMIT :n) SELECT (SELECT id FROM b ORDER BY id DESC LIMIT 1), "
+    "(SELECT count(*) FROM b)"
+)
+INCARNATED = (
+    "INSERT INTO schedule_incarnations (temporal_id, tenant_id, schedule_id, number, misses, backfilled) "
+    "SELECT 't:' || tenant_id || ':sched:' || id, tenant_id, id, 0, misses, true FROM schedules s "
+    "WHERE s.id > :after AND s.id <= :hi AND NOT EXISTS (SELECT 1 FROM schedule_incarnations i "
+    "WHERE i.schedule_id = s.id) ON CONFLICT (temporal_id) DO NOTHING"
+)
+SPANNED_BOUNDS = (
+    "WITH b AS (SELECT i.temporal_id FROM schedule_incarnations i WHERE i.backfilled AND i.temporal_id > :after "
+    "AND NOT EXISTS (SELECT 1 FROM schedule_intervals v WHERE v.temporal_id = i.temporal_id AND v.kind = 'creation') "
+    "ORDER BY i.temporal_id LIMIT :n) SELECT (SELECT temporal_id FROM b ORDER BY temporal_id DESC LIMIT 1), "
+    "(SELECT count(*) FROM b)"
+)
+SPANNED = (
     "INSERT INTO schedule_intervals (tenant_id, schedule_id, temporal_id, kind, starts_at, ends_at, class, reason) "
     "SELECT i.tenant_id, i.schedule_id, i.temporal_id, 'creation', s.created_at, i.recorded_at, 'unknown', "
-    "'before_migration' FROM schedule_incarnations i JOIN schedules s ON s.id = i.schedule_id WHERE i.backfilled",
+    "'before_migration' FROM schedule_incarnations i JOIN schedules s ON s.id = i.schedule_id WHERE i.backfilled "
+    "AND i.temporal_id > :after AND i.temporal_id <= :hi AND NOT EXISTS (SELECT 1 FROM schedule_intervals v "
+    "WHERE v.temporal_id = i.temporal_id AND v.kind = 'creation')"
+)
+
+# Until the inventory's cutover, a schedule any writer adds is captured as the backfill records those already here.
+INVENTORIED = [
+    """CREATE FUNCTION schedule_inventoried() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = public, pg_temp SET row_security = off AS $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM schedule_inventory_cutover) THEN
+    INSERT INTO schedule_incarnations (temporal_id, tenant_id, schedule_id, number, misses, backfilled)
+    VALUES ('t:' || NEW.tenant_id || ':sched:' || NEW.id, NEW.tenant_id, NEW.id, 0, NEW.misses, true)
+    ON CONFLICT (temporal_id) DO NOTHING;
+    INSERT INTO schedule_intervals (tenant_id, schedule_id, temporal_id, kind, starts_at, ends_at, class, reason)
+    VALUES (NEW.tenant_id, NEW.id, 't:' || NEW.tenant_id || ':sched:' || NEW.id, 'creation', NEW.created_at,
+            statement_timestamp(), 'unknown', 'before_migration')
+    ON CONFLICT (temporal_id, kind) DO NOTHING;
+  END IF;
+  RETURN NULL;
+END $$""",
+    "REVOKE ALL ON FUNCTION schedule_inventoried() FROM PUBLIC",
+    # The catch-up, before the cutover, a batch at a time (the owner's review of checkpoint 3: done under the cutover's
+    # lock, its time grew with the schedules): of the next `max_rows` schedules past `after`, by id, each without an
+    # incarnation (one the capture missed: its trigger off while it was added, as only the table's owner can turn it)
+    # given its incarnation 0 and its life until then unknown; each incarnation 0 given its schedule's missed count, as
+    # the old dispatcher last recorded it (it read Temporal's under the schedule's own id every five minutes, past the
+    # count copied here: the new misses pass adds only what's missed after the cutover, never that increase again, the
+    # review's I1). It holds no lock a schedule's writer waits for. The last id it took (NULL: none left), how many it
+    # took, caught up and refreshed. Refused once the cutover is recorded: a schedule added since is the new sync's.
+    """CREATE FUNCTION schedule_inventory_catch_up(after uuid, max_rows integer)
+RETURNS TABLE (last_id uuid, seen integer, caught integer, refreshed integer) LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = public, pg_temp SET row_security = off AS $$
+DECLARE
+  v_ids uuid[];
+  v_seen integer;
+  v_caught integer;
+  v_refreshed integer;
+BEGIN
+  IF EXISTS (SELECT 1 FROM schedule_inventory_cutover) THEN
+    RAISE EXCEPTION 'the schedule inventory''s cutover is recorded already';
+  END IF;
+  SELECT array_agg(id ORDER BY id) INTO v_ids
+  FROM (SELECT id FROM schedules WHERE id > after ORDER BY id LIMIT max_rows) b;
+  v_seen := coalesce(array_length(v_ids, 1), 0);
+  IF v_seen = 0 THEN
+    RETURN QUERY SELECT NULL::uuid, 0, 0, 0;
+    RETURN;
+  END IF;
+  INSERT INTO schedule_incarnations (temporal_id, tenant_id, schedule_id, number, misses, backfilled)
+  SELECT 't:' || s.tenant_id || ':sched:' || s.id, s.tenant_id, s.id, 0, s.misses, true FROM schedules s
+  WHERE s.id = ANY (v_ids) AND NOT EXISTS (SELECT 1 FROM schedule_incarnations i WHERE i.schedule_id = s.id)
+  ON CONFLICT (temporal_id) DO NOTHING;
+  GET DIAGNOSTICS v_caught = ROW_COUNT;
+  INSERT INTO schedule_intervals (tenant_id, schedule_id, temporal_id, kind, starts_at, ends_at, class, reason)
+  SELECT i.tenant_id, i.schedule_id, i.temporal_id, 'creation', s.created_at, i.recorded_at, 'unknown',
+         'before_migration'
+  FROM schedule_incarnations i JOIN schedules s ON s.id = i.schedule_id
+  WHERE i.schedule_id = ANY (v_ids) AND i.backfilled
+    AND NOT EXISTS (SELECT 1 FROM schedule_intervals v WHERE v.temporal_id = i.temporal_id AND v.kind = 'creation')
+  ON CONFLICT (temporal_id, kind) DO NOTHING;
+  UPDATE schedule_incarnations i SET misses = s.misses FROM schedules s
+  WHERE i.schedule_id = s.id AND s.id = ANY (v_ids) AND i.backfilled AND s.misses > i.misses;
+  GET DIAGNOSTICS v_refreshed = ROW_COUNT;
+  RETURN QUERY SELECT v_ids[v_seen], v_seen, v_caught, v_refreshed;
+END $$""",
+    "REVOKE ALL ON FUNCTION schedule_inventory_catch_up(uuid, integer) FROM PUBLIC",
+    # The capture's state (the owner's review of checkpoint 4, R1): its trigger's row, as `oid:xmin:tgenabled`, which
+    # turning it off or on, or replacing it, changes; NULL when it's gone. Read before the catch-up, and compared in the
+    # final step: a capture turned off and on again in between would have let a schedule escape both.
+    """CREATE FUNCTION schedule_inventory_capture() RETURNS text LANGUAGE sql STABLE
+SET search_path = public, pg_temp AS $$
+  SELECT t.oid::text || ':' || t.xmin::text || ':' || t.tgenabled::text FROM pg_trigger t
+  WHERE t.tgrelid = 'public.schedules'::regclass AND t.tgname = 'schedules_inventoried'
+$$""",
+    "REVOKE ALL ON FUNCTION schedule_inventory_capture() FROM PUBLIC",
+    # The cutover, once, after the catch-up: in one short transaction holding schedules' writes off, and the capture's
+    # state still (turning a trigger off takes the same lock), it records, unless the capture is off, or changed since
+    # `capture` was read before the catch-up (a schedule added meanwhile would be missed). It reads no schedule: its
+    # hold doesn't grow with them. `recorded`, `recorded_already`, `capture_off` or `capture_changed`. The key admin's,
+    # as the catch-up is, through `dewpoint schedules inventory-cutover`.
+    """CREATE FUNCTION schedule_inventory_cutover_record(capture text) RETURNS text LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = public, pg_temp SET row_security = off AS $$
+BEGIN
+  LOCK TABLE schedules IN SHARE ROW EXCLUSIVE MODE;
+  IF EXISTS (SELECT 1 FROM schedule_inventory_cutover) THEN
+    RETURN 'recorded_already';
+  END IF;
+  IF schedule_inventory_capture() IS DISTINCT FROM capture THEN
+    RETURN 'capture_changed';
+  END IF;
+  IF capture IS NULL OR right(capture, 1) NOT IN ('O', 'A') THEN
+    RETURN 'capture_off';
+  END IF;
+  INSERT INTO schedule_inventory_cutover DEFAULT VALUES;
+  RETURN 'recorded';
+END $$""",
+    "REVOKE ALL ON FUNCTION schedule_inventory_cutover_record(text) FROM PUBLIC",
+]
+CAPTURED = "CREATE TRIGGER schedules_inventoried AFTER INSERT ON schedules FOR EACH ROW EXECUTE FUNCTION schedule_inventoried()"
+CUTOVER = [
+    "GRANT SELECT ON schedule_inventory_cutover TO dewpoint_admin, dewpoint_dispatch, dewpoint_retention, dewpoint_api",
+    "GRANT EXECUTE ON FUNCTION schedule_inventory_catch_up(uuid, integer) TO dewpoint_admin",
+    "GRANT EXECUTE ON FUNCTION schedule_inventory_capture() TO dewpoint_admin",
+    "GRANT EXECUTE ON FUNCTION schedule_inventory_cutover_record(text) TO dewpoint_admin",
 ]
 
 # The retention process checks the deployment's recorded namespace before erasure reaches Temporal (§2.1).
@@ -352,12 +488,20 @@ GATE = [
     REACHED,
     "REVOKE ALL ON FUNCTION erasure_reached(uuid, integer) FROM PUBLIC",
     "GRANT EXECUTE ON FUNCTION erasure_reached(uuid, integer) TO dewpoint_retention",
-    *(
+]
+MADE_GATED = ("schedule_incarnations", "schedule_intervals")  # made here, their grants with them: gated as they're made
+
+
+def gates(table: str) -> list[str]:
+    """The gate's restrictive policies on `table`."""
+    return [
         f"CREATE POLICY {t}_erasure_{command.lower()} ON {t} AS RESTRICTIVE FOR {command} TO dewpoint_retention "
         f"USING (erasure_reached({column}, {stage}))"
         for t, command, column, stage in GATED
-    ),
-]
+        if t == table
+    ]
+
+
 BOUNDARIES = [
     "GRANT SELECT, INSERT, UPDATE (lost_at) ON namespace_boundaries TO dewpoint_admin",
     "GRANT USAGE ON SEQUENCE namespace_boundaries_id_seq TO dewpoint_admin",
@@ -366,146 +510,200 @@ BOUNDARIES = [
 
 
 def upgrade() -> None:
-    op.drop_constraint("tenants_status", "tenants", type_="check")
-    op.create_check_constraint("tenants_status", "tenants", "status IN ('active', 'erasing', 'erased')")
-    op.create_table(
-        "tenant_erasures",
-        sa.Column("tenant_id", sa.Uuid, sa.ForeignKey("tenants.id"), primary_key=True),
-        sa.Column("requested_by", sa.Uuid, nullable=False),  # a platform admin's user id
-        sa.Column("requested_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
-        sa.Column("step", sa.SmallInteger, nullable=False, server_default="20"),
-        sa.Column("step_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),  # entered it
-        sa.Column("stopped_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("stopped_by", sa.Uuid, nullable=True),
-        sa.Column("attempts", sa.Integer, nullable=False, server_default="0"),
-        sa.Column("failure", sa.Text, nullable=True),  # the last failure's fixed code
-        sa.Column("failed_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("next_attempt_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
-        sa.Column("fenced_at", sa.DateTime(timezone=True), nullable=True),  # entered stage 60: never cleared
-        sa.Column("paused_at", sa.DateTime(timezone=True), nullable=True),  # the last schedule verified paused
-        sa.Column("latest_close", sa.DateTime(timezone=True), nullable=True),  # every found execution verified gone
-        sa.Column("check_after", sa.DateTime(timezone=True), nullable=True),  # the bound: the final check's earliest
-        sa.Column("boundary", sa.Text, nullable=True),  # the namespace-change boundary it relied on
-        sa.Column("counts", postgresql.JSONB, nullable=False, server_default=sa.text("'{}'::jsonb")),
-        sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("reopened_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("incidents", sa.Integer, nullable=False, server_default="0"),
-        sa.CheckConstraint(f"step IN ({', '.join(map(str, STAGES))})", name="tenant_erasures_step"),
-    )
-    op.create_table(
-        "tenant_erasure_items",
-        sa.Column("id", sa.BigInteger, sa.Identity(always=False), primary_key=True),
-        sa.Column("tenant_id", sa.Uuid, sa.ForeignKey("tenant_erasures.tenant_id"), nullable=False),
-        sa.Column("step", sa.SmallInteger, nullable=False),
-        sa.Column("kind", sa.Text, nullable=False),
-        sa.Column("workflow_id", sa.Text, nullable=False),  # a request's or run's id, a schedule's or a workflow's
-        sa.Column("run_id", sa.Text, nullable=True),
-        sa.Column("source", sa.Text, nullable=False),
-        sa.Column("state", sa.Text, nullable=False, server_default="found"),
-        sa.Column("attempts", sa.Integer, nullable=False, server_default="0"),
-        sa.Column("failure", sa.Text, nullable=True),
-        sa.Column("verified_at", sa.DateTime(timezone=True), nullable=True),
-        sa.CheckConstraint("kind IN ('request', 'schedule', 'run', 'execution')", name="tenant_erasure_items_kind"),
-        sa.CheckConstraint("state IN ('found', 'requested', 'verified')", name="tenant_erasure_items_state"),
-    )
-    op.create_index("tenant_erasure_items_one", "tenant_erasure_items",
-                    ["tenant_id", "step", "workflow_id", sa.text("coalesce(run_id, '')")], unique=True)  # fmt: skip
-    op.create_index("tenant_erasure_items_open", "tenant_erasure_items", ["tenant_id", "step", "id"],
-                    postgresql_where=sa.text("state <> 'verified'"))  # fmt: skip
-    op.create_table(
-        "tenant_erasure_known",
-        sa.Column("id", sa.BigInteger, sa.Identity(always=False), primary_key=True),
-        sa.Column("tenant_id", sa.Uuid, sa.ForeignKey("tenant_erasures.tenant_id"), nullable=False),
-        sa.Column("kind", sa.Text, nullable=False),
-        sa.Column("workflow_id", sa.Text, nullable=False),  # a schedule's id, or an execution's workflow id
-        sa.Column("run_id", sa.Text, nullable=True),
-        sa.CheckConstraint("kind IN ('schedule', 'execution')", name="tenant_erasure_known_kind"),
-    )
-    op.create_index("tenant_erasure_known_one", "tenant_erasure_known",
-                    ["tenant_id", "kind", "workflow_id", sa.text("coalesce(run_id, '')")], unique=True)  # fmt: skip
-    op.create_table(
-        "schedule_firings",
-        sa.Column("workflow_id", sa.Text, primary_key=True),
-        sa.Column("run_id", sa.Text, primary_key=True),
-        sa.Column("tenant_id", sa.Uuid, sa.ForeignKey("tenants.id"), nullable=False),
-        sa.Column("schedule_id", sa.Uuid, nullable=False),  # no key: a tombstone goes before its firings' records
-        sa.Column("recorded_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
-    )
-    op.create_index("schedule_firings_tenant", "schedule_firings", ["tenant_id", "schedule_id"])
-    op.create_index("schedule_firings_recorded", "schedule_firings", ["recorded_at"])
-    for statement in [*FIRINGS, *STATUS, *ERASURES, *ERASER, *SCOPE, VERSIONS, EVIDENCE_DUE, RECORD]:
-        op.execute(statement)
-    op.create_table(
-        "namespace_boundaries",
-        sa.Column("id", sa.BigInteger, sa.Identity(always=False), primary_key=True),
-        sa.Column("name", sa.Text, nullable=False),
-        sa.Column("verified_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
-        sa.Column("lost_at", sa.DateTime(timezone=True), nullable=True),
-    )
-    for statement in BOUNDARIES:
-        op.execute(statement)
-    op.create_table(
-        "schedule_incarnations",
-        sa.Column("temporal_id", sa.Text, primary_key=True),
-        sa.Column("tenant_id", sa.Uuid, sa.ForeignKey("tenants.id"), nullable=False),
-        sa.Column("schedule_id", sa.Uuid, nullable=False),  # no key: a tombstone goes before its incarnations
-        sa.Column("number", sa.Integer, nullable=False),
-        sa.Column("recorded_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
-        sa.Column("misses", sa.BigInteger, nullable=False, server_default="0"),  # Temporal's, as last read
-        sa.Column("backfilled", sa.Boolean, nullable=False, server_default=sa.false()),  # from before 2b-4a
-        sa.Column("generation", sa.BigInteger, nullable=True),  # its schedule's, when it was recorded
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),  # Temporal's
-        sa.Column("landed_generation", sa.BigInteger, nullable=True),  # its first landed update's
-        sa.Column("landed_row_generation", sa.BigInteger, nullable=True),  # its schedule's, once that was seen
-        sa.Column("landed_at", sa.DateTime(timezone=True), nullable=True),  # Temporal's time for it
-        sa.Column("landed_paused", sa.Boolean, nullable=True),
-        sa.Column("unpause_sent_at", sa.DateTime(timezone=True), nullable=True),  # before the call: else never fired
-        sa.Column("seen_at", sa.DateTime(timezone=True), nullable=True),  # a describe last showed it
-        sa.Column("checked_at", sa.DateTime(timezone=True), nullable=True),  # the stray check last described it
-        sa.UniqueConstraint("schedule_id", "number", name="schedule_incarnations_number"),
-    )
-    for statement in INCARNATIONS:
-        op.execute(statement)
-    op.create_table(
-        "schedule_intervals",
-        sa.Column("id", sa.BigInteger, sa.Identity(always=False), primary_key=True),
-        sa.Column("tenant_id", sa.Uuid, sa.ForeignKey("tenants.id"), nullable=False),
-        sa.Column("schedule_id", sa.Uuid, nullable=False),
-        sa.Column("temporal_id", sa.Text, nullable=False),  # the incarnation it accounts for
-        sa.Column("kind", sa.Text, nullable=False),
-        sa.Column("starts_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("ends_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("class", sa.Text, nullable=False),
-        sa.Column("missed", sa.Integer, nullable=True),  # counted only when certainly missed
-        sa.Column("reason", sa.Text, nullable=False),
-        sa.Column("recorded_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
-        sa.CheckConstraint("kind IN ('creation', 'lost', 'deleted')", name="schedule_intervals_kind"),
-        sa.CheckConstraint(
-            "class IN ('certainly_missed', 'intentionally_disabled', 'possibly_missed', 'unknown')",
-            name="schedule_intervals_class",
+    # Online (2b-4b, D15). A step locks at most one table in use (a grant locks none, and a new table's keys only share
+    # what they reference), so no writer's lock order can hold it up for long: the new tables first, each with its
+    # row-level security, the functions, and the gates of the new tables (it locks `tenants`); the schedules already
+    # here, recorded in batches; each existing table's gate; the eraser's policies, table by table; each table's
+    # fence; the schedules' new column; and last every grant of the migration, once each gate and fence that bounds
+    # them is there (the eraser may advance an erasure only once every insert past stage 60 is refused).
+    with online() as conn:
+        step(conn, "0040 tenant erasure", *ungranted(*_actions()), done=exists("relation", "tenant_erasures"))
+        step(conn, "0040 schedules inventoried", CAPTURED, done=exists("trigger", "schedules_inventoried", "schedules"))
+        batches(conn, "0040 schedule_incarnations backfill", INCARNATED_BOUNDS, INCARNATED, first=UUID(int=0))
+        batches(conn, "0040 schedule_intervals backfill", SPANNED_BOUNDS, SPANNED, first="")
+        for table in dict.fromkeys(t for t, *_ in GATED if t not in MADE_GATED):
+            first = next(f"{t}_erasure_{command.lower()}" for t, command, *_ in GATED if t == table)
+            step(conn, f"0040 {table} gated", *gates(table), done=exists("policy", first, table))
+        for table in NO_POLICY:
+            step(conn, f"0040 {table} for the eraser", ERASER_POLICY.format(t=table),
+                 done=exists("policy", f"{table}_erasure", table))  # fmt: skip
+        for table in FENCED:
+            step(conn, f"0040 {table} fenced",
+                 f"CREATE TRIGGER {table}_fence BEFORE INSERT ON {table} FOR EACH ROW EXECUTE FUNCTION tenant_insert_fence()",
+                 done=exists("trigger", f"{table}_fence", table))  # fmt: skip
+        step(conn, "0040 schedules.creation_misses",
+             lambda: op.add_column("schedules", sa.Column("creation_misses", sa.Integer, nullable=False, server_default="0")),
+             done=exists("column", "creation_misses", "schedules"))  # fmt: skip
+        step(conn, "0040 grants", *grants(*_actions()), *ERASER, *CUTOVER,
+             "GRANT UPDATE (creation_misses) ON schedules TO dewpoint_dispatch", TOMBSTONE,
+             done=exists("policy", "tenants_erasure", "tenants"))  # fmt: skip
+
+
+def _actions() -> list[str | Callable[[], object]]:
+    """The first step's operations, in their order."""
+    return [
+        lambda: op.drop_constraint("tenants_status", "tenants", type_="check"),
+        lambda: op.create_check_constraint("tenants_status", "tenants", "status IN ('active', 'erasing', 'erased')"),
+        lambda: op.create_table(
+            "tenant_erasures",
+            sa.Column("tenant_id", sa.Uuid, sa.ForeignKey("tenants.id"), primary_key=True),
+            sa.Column("requested_by", sa.Uuid, nullable=False),  # a platform admin's user id
+            sa.Column("requested_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+            sa.Column("step", sa.SmallInteger, nullable=False, server_default="20"),
+            sa.Column(
+                "step_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+            ),  # entered it
+            sa.Column("stopped_at", sa.DateTime(timezone=True), nullable=True),
+            sa.Column("stopped_by", sa.Uuid, nullable=True),
+            sa.Column("attempts", sa.Integer, nullable=False, server_default="0"),
+            sa.Column("failure", sa.Text, nullable=True),  # the last failure's fixed code
+            sa.Column("failed_at", sa.DateTime(timezone=True), nullable=True),
+            sa.Column("next_attempt_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+            sa.Column("fenced_at", sa.DateTime(timezone=True), nullable=True),  # entered stage 60: never cleared
+            sa.Column("paused_at", sa.DateTime(timezone=True), nullable=True),  # the last schedule verified paused
+            sa.Column("latest_close", sa.DateTime(timezone=True), nullable=True),  # every found execution verified gone
+            sa.Column(
+                "check_after", sa.DateTime(timezone=True), nullable=True
+            ),  # the bound: the final check's earliest
+            sa.Column("boundary", sa.Text, nullable=True),  # the namespace-change boundary it relied on
+            sa.Column("counts", postgresql.JSONB, nullable=False, server_default=sa.text("'{}'::jsonb")),
+            sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
+            sa.Column("reopened_at", sa.DateTime(timezone=True), nullable=True),
+            sa.Column("incidents", sa.Integer, nullable=False, server_default="0"),
+            sa.CheckConstraint(f"step IN ({', '.join(map(str, STAGES))})", name="tenant_erasures_step"),
+        ),
+        lambda: op.create_table(
+            "tenant_erasure_items",
+            sa.Column("id", sa.BigInteger, sa.Identity(always=False), primary_key=True),
+            sa.Column("tenant_id", sa.Uuid, sa.ForeignKey("tenant_erasures.tenant_id"), nullable=False),
+            sa.Column("step", sa.SmallInteger, nullable=False),
+            sa.Column("kind", sa.Text, nullable=False),
+            sa.Column("workflow_id", sa.Text, nullable=False),  # a request's or run's id, a schedule's or a workflow's
+            sa.Column("run_id", sa.Text, nullable=True),
+            sa.Column("source", sa.Text, nullable=False),
+            sa.Column("state", sa.Text, nullable=False, server_default="found"),
+            sa.Column("attempts", sa.Integer, nullable=False, server_default="0"),
+            sa.Column("failure", sa.Text, nullable=True),
+            sa.Column("verified_at", sa.DateTime(timezone=True), nullable=True),
+            sa.CheckConstraint("kind IN ('request', 'schedule', 'run', 'execution')", name="tenant_erasure_items_kind"),
+            sa.CheckConstraint("state IN ('found', 'requested', 'verified')", name="tenant_erasure_items_state"),
+        ),
+        lambda: op.create_index(
+            "tenant_erasure_items_one",
+            "tenant_erasure_items",
+            ["tenant_id", "step", "workflow_id", sa.text("coalesce(run_id, '')")],
+            unique=True,
         ),  # fmt: skip
-        sa.CheckConstraint(
-            "(missed IS NOT NULL) = (class IN ('certainly_missed', 'intentionally_disabled'))",
-            name="schedule_intervals_counted",
+        lambda: op.create_index(
+            "tenant_erasure_items_open",
+            "tenant_erasure_items",
+            ["tenant_id", "step", "id"],
+            postgresql_where=sa.text("state <> 'verified'"),
         ),  # fmt: skip
-        sa.UniqueConstraint("temporal_id", "kind", name="schedule_intervals_one"),
-    )
-    op.create_index("schedule_intervals_schedule", "schedule_intervals", ["schedule_id", "starts_at"])
-    for statement in INTERVALS:
-        op.execute(statement)
-    op.add_column("schedules", sa.Column("creation_misses", sa.Integer, nullable=False, server_default="0"))
-    op.execute("GRANT UPDATE (creation_misses) ON schedules TO dewpoint_dispatch")
-    for statement in FENCE:
-        op.execute(statement)
-    for table in FENCED:
-        op.execute(f"CREATE TRIGGER {table}_fence BEFORE INSERT ON {table} FOR EACH ROW "
-                   "EXECUTE FUNCTION tenant_insert_fence()")  # fmt: skip
-    op.execute(CALL_CANDIDATES)
-    for statement in GATE:  # last: every table it gates exists by now (schedule_incarnations, schedule_intervals)
-        op.execute(statement)
+        lambda: op.create_table(
+            "tenant_erasure_known",
+            sa.Column("id", sa.BigInteger, sa.Identity(always=False), primary_key=True),
+            sa.Column("tenant_id", sa.Uuid, sa.ForeignKey("tenant_erasures.tenant_id"), nullable=False),
+            sa.Column("kind", sa.Text, nullable=False),
+            sa.Column("workflow_id", sa.Text, nullable=False),  # a schedule's id, or an execution's workflow id
+            sa.Column("run_id", sa.Text, nullable=True),
+            sa.CheckConstraint("kind IN ('schedule', 'execution')", name="tenant_erasure_known_kind"),
+        ),
+        lambda: op.create_index(
+            "tenant_erasure_known_one",
+            "tenant_erasure_known",
+            ["tenant_id", "kind", "workflow_id", sa.text("coalesce(run_id, '')")],
+            unique=True,
+        ),  # fmt: skip
+        lambda: op.create_table(
+            "schedule_firings",
+            sa.Column("workflow_id", sa.Text, primary_key=True),
+            sa.Column("run_id", sa.Text, primary_key=True),
+            sa.Column("tenant_id", sa.Uuid, sa.ForeignKey("tenants.id"), nullable=False),
+            sa.Column("schedule_id", sa.Uuid, nullable=False),  # no key: a tombstone goes before its firings' records
+            sa.Column("recorded_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        ),
+        lambda: op.create_index("schedule_firings_tenant", "schedule_firings", ["tenant_id", "schedule_id"]),
+        lambda: op.create_index("schedule_firings_recorded", "schedule_firings", ["recorded_at"]),
+        *[*FIRINGS, *STATUS, *ERASURES, *SCOPE, VERSIONS, EVIDENCE_DUE, RECORD],
+        lambda: op.create_table(
+            "namespace_boundaries",
+            sa.Column("id", sa.BigInteger, sa.Identity(always=False), primary_key=True),
+            sa.Column("name", sa.Text, nullable=False),
+            sa.Column("verified_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+            sa.Column("lost_at", sa.DateTime(timezone=True), nullable=True),
+        ),
+        *BOUNDARIES,
+        lambda: op.create_table(
+            "schedule_incarnations",
+            sa.Column("temporal_id", sa.Text, primary_key=True),
+            sa.Column("tenant_id", sa.Uuid, sa.ForeignKey("tenants.id"), nullable=False),
+            sa.Column("schedule_id", sa.Uuid, nullable=False),  # no key: a tombstone goes before its incarnations
+            sa.Column("number", sa.Integer, nullable=False),
+            sa.Column("recorded_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+            sa.Column("misses", sa.BigInteger, nullable=False, server_default="0"),  # Temporal's, as last read
+            sa.Column("backfilled", sa.Boolean, nullable=False, server_default=sa.false()),  # from before 2b-4a
+            sa.Column("generation", sa.BigInteger, nullable=True),  # its schedule's, when it was recorded
+            sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),  # Temporal's
+            sa.Column("landed_generation", sa.BigInteger, nullable=True),  # its first landed update's
+            sa.Column("landed_row_generation", sa.BigInteger, nullable=True),  # its schedule's, once that was seen
+            sa.Column("landed_at", sa.DateTime(timezone=True), nullable=True),  # Temporal's time for it
+            sa.Column("landed_paused", sa.Boolean, nullable=True),
+            sa.Column(
+                "unpause_sent_at", sa.DateTime(timezone=True), nullable=True
+            ),  # before the call: else never fired
+            sa.Column("seen_at", sa.DateTime(timezone=True), nullable=True),  # a describe last showed it
+            sa.Column("checked_at", sa.DateTime(timezone=True), nullable=True),  # the stray check last described it
+            sa.UniqueConstraint("schedule_id", "number", name="schedule_incarnations_number"),
+        ),
+        *INCARNATIONS,
+        lambda: op.create_table(
+            "schedule_intervals",
+            sa.Column("id", sa.BigInteger, sa.Identity(always=False), primary_key=True),
+            sa.Column("tenant_id", sa.Uuid, sa.ForeignKey("tenants.id"), nullable=False),
+            sa.Column("schedule_id", sa.Uuid, nullable=False),
+            sa.Column("temporal_id", sa.Text, nullable=False),  # the incarnation it accounts for
+            sa.Column("kind", sa.Text, nullable=False),
+            sa.Column("starts_at", sa.DateTime(timezone=True), nullable=False),
+            sa.Column("ends_at", sa.DateTime(timezone=True), nullable=False),
+            sa.Column("class", sa.Text, nullable=False),
+            sa.Column("missed", sa.Integer, nullable=True),  # counted only when certainly missed
+            sa.Column("reason", sa.Text, nullable=False),
+            sa.Column("recorded_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+            sa.CheckConstraint("kind IN ('creation', 'lost', 'deleted')", name="schedule_intervals_kind"),
+            sa.CheckConstraint(
+                "class IN ('certainly_missed', 'intentionally_disabled', 'possibly_missed', 'unknown')",
+                name="schedule_intervals_class",
+            ),  # fmt: skip
+            sa.CheckConstraint(
+                "(missed IS NOT NULL) = (class IN ('certainly_missed', 'intentionally_disabled'))",
+                name="schedule_intervals_counted",
+            ),  # fmt: skip
+            sa.UniqueConstraint("temporal_id", "kind", name="schedule_intervals_one"),
+        ),
+        lambda: op.create_index("schedule_intervals_schedule", "schedule_intervals", ["schedule_id", "starts_at"]),
+        *INTERVALS,
+        lambda: op.create_table(
+            "schedule_inventory_cutover",
+            sa.Column("id", sa.SmallInteger, primary_key=True, server_default="1"),
+            sa.Column("at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+            sa.CheckConstraint("id = 1", name="schedule_inventory_cutover_once"),
+        ),
+        *INVENTORIED,
+        *FENCE,
+        CALL_CANDIDATES,
+        *GATE,
+        *(policy for table in MADE_GATED for policy in gates(table)),
+    ]
 
 
 def downgrade() -> None:
+    op.execute("DROP TRIGGER schedules_inventoried ON schedules")
+    op.execute("DROP FUNCTION schedule_inventoried()")
+    op.execute("DROP FUNCTION schedule_inventory_cutover_record(text)")
+    op.execute("DROP FUNCTION schedule_inventory_capture()")
+    op.execute("DROP FUNCTION schedule_inventory_catch_up(uuid, integer)")
+    op.drop_table("schedule_inventory_cutover")
     op.execute(CALL_CANDIDATES_0042)
     for table, command, _, _ in GATED:
         op.execute(f"DROP POLICY {table}_erasure_{command.lower()} ON {table}")

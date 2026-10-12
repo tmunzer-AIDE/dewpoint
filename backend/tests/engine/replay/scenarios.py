@@ -5,7 +5,8 @@
 error policy; variables and timers; stop, fail, simulation and the deadline; CEL through `cel.evaluate`. 2a-3b adds
 batched loops, sub-flows, the failure handler, grants, continue-as-new and drain mode. 2a-3c turns local CEL on:
 expressions run in the workflow, with the yield-point timer, and the rest go to `cel.evaluate`. It also records a
-cancelled run and a version this build can't compile. A scenario that runs sub-flows builds its graph against the
+cancelled run and a version this build can't compile. 2b-4b's engine blockers add a value several binding sets share,
+claimed once (#26). A scenario that runs sub-flows builds its graph against the
 recorder's store, which publishes them first."""
 
 from collections.abc import Callable
@@ -212,6 +213,17 @@ def _evaluator() -> G:
     return g.node("f", "flow.filter@1", {"items": cel("trigger.xs"), "predicate": cel("item % 2 == 0")})
 
 
+SHARED = {"type": "object", "properties": {"s": {"type": "string"}}, "required": ["s"]}
+
+
+def _shared() -> G:
+    """A filter whose ten items bind the same string, past the local caps: it goes to `cel.evaluate` once, as a claim,
+    and each binding set carries its handle (#26)."""
+    g = G()
+    g.settings = {"input_schema": SHARED, "outputs": {"kept": ref("steps.f.output.count")}}
+    return g.node("f", "flow.filter@1", {"items": list(range(10)), "predicate": cel("size(trigger.s) > item")})
+
+
 def scenarios() -> dict[str, Scenario]:
     return {
         "branches": Scenario(_branches()),
@@ -234,6 +246,7 @@ def scenarios() -> dict[str, Scenario]:
         "drain": Scenario(_drained, options={"drain_events": 40}),
         "local_cel": Scenario(_local_cel(), trigger=dict(TEXT_TRIGGER)),
         "evaluator": Scenario(_evaluator(), trigger=dict(TEXT_TRIGGER)),
+        "shared": Scenario(_shared(), trigger={"s": "x" * 20_000}),
         "cancelled": Scenario(_graph().node("d", "flow.delay@1", {"duration_s": 3_600}), cancel=True),
         "version_unusable": Scenario(_graph().node("a", ECHO, {"value": 1}), unusable=True),
     }

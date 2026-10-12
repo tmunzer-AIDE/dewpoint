@@ -11,6 +11,8 @@ on the database's own host can't show that a privileged operator didn't prune, r
 
 from alembic import op
 
+from migrations.online import exists, online, step
+
 revision = "0038"
 down_revision = "0037"
 branch_labels = None
@@ -138,8 +140,8 @@ BEGIN RAISE EXCEPTION 'audit_log is append-only'; END $$""",
 
 
 def upgrade() -> None:
-    for statement in UPGRADE:
-        op.execute(statement)
+    with online() as conn:  # in one step (2b-4b, D15)
+        step(conn, "0038 audit pruning", *UPGRADE, done=exists("relation", "audit_checkpoints"))
 
 
 def downgrade() -> None:

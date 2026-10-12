@@ -374,7 +374,11 @@ async def test_a_schedules_note_shows_the_generation_of_the_update_that_landed_a
     token-bearing update as its spec, action and pause state, and marks the generation synced only once a fresh
     describe shows that marker. The note carries what the create wrote, then what each landed update wrote, a pause
     included. Two writers describe the same token; the one whose update lands is the one the read-back shows, and the
-    other's marker never appears: its update was discarded, and its read-back tells it so."""
+    other's marker never appears: its update was discarded, and its read-back tells it so. Which one lands is
+    Temporal's timing, never the order they were sent in: its scheduler applies only the last update it holds when its
+    workflow task runs, that one's token checked against the state before them, so two updates in one task leave the
+    second, and in two tasks the first (the second's token no longer matches). Once one has landed, the token both
+    read is refused."""
     client = Client(dev_env.client.service_client, namespace=dev_env.client.namespace, data_converter=RECORDING)
     schedule_id = f"t:{A}:sched:{uuid.uuid4()}"
     service, namespace = client.workflow_service, client.namespace
@@ -407,7 +411,10 @@ async def test_a_schedules_note_shows_the_generation_of_the_update_that_landed_a
     await update(wanted(3, 3, paused=False), fresh)
     await update(wanted(2, 2, paused=False), stale)  # the slower writer's update, computed from the same describe
     token, note, paused, interval = await read_back()
-    assert (note, paused, interval) == (MARK.format(3), False, 10800)  # the landed update's marker, never the stale one
+    landed = {(MARK.format(3), False, 10800), (MARK.format(2), False, 7200)}  # one update whole, its marker with it
+    assert (note, paused, interval) in landed, (note, paused, interval)
+    await update(wanted(5, 5, paused=False), stale)  # a writer still holding the token both read
+    assert (await read_back())[1:] == (note, paused, interval)  # refused: what landed stays
     await update(wanted(3, 4, paused=True), token)
     _, note, paused, _ = await read_back()
     assert (note, paused) == (MARK.format(4), True)  # a pause carries its generation too

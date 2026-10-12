@@ -20,13 +20,15 @@ from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 from dewpoint.apps.dispatcher import schedule_sync
 from dewpoint.apps.erasure import process, stages, temporal
+from dewpoint.core.db import tenant_scope
 from dewpoint.core.erasure import service
 from dewpoint.core.models.erasure import Stage
 from dewpoint.engine.runtime.ids import run_workflow_id, schedule_workflow_id
-from tests.apps.dispatcher.test_schedule_sync import Leading
-from tests.apps.erasure.support import erasing, populated, rows_of
+from tests.apps.dispatcher.test_schedule_sync import Leading, before_the_cutover
+from tests.apps.erasure.support import erasing, executed, populated, rows_of
 from tests.core.erasure.test_fence import FENCED_TABLES
 from tests.core.retention.support import sql
+from tests.support.starting import mark_starting
 
 pytestmark = pytest.mark.usefixtures("development_deployment")
 QUEUE = "erasure-stages"
@@ -42,7 +44,8 @@ async def until(retention: Any, client: Client, tenant: uuid.UUID, stage: Stage,
         if at is not None and at >= stage:
             return at
         await asyncio.sleep(0.3)
-    async with retention() as s:
+    async with retention() as s, s.begin():
+        await tenant_scope(s, tenant)  # the items are the tenant's: unscoped, row security hides every one
         left = (await s.execute(text("select step, workflow_id, run_id, state, attempts from tenant_erasure_items "
                                      "where tenant_id = :t and state <> 'verified'"), {"t": tenant})).all()  # fmt: skip
     raise AssertionError(f"held at {at}: {[tuple(r) for r in left]}")
@@ -67,6 +70,7 @@ async def test_an_erasure_reaches_its_bound_with_no_row_of_the_tenant_left_and_e
 ) -> None:
     data = await populated(owner_sessionmaker, ingress_sessionmaker)
     other = await populated(owner_sessionmaker, ingress_sessionmaker)
+    await executed(server.client, owner_sessionmaker, data["t"])  # nothing left unresolved (task 12)
     every = uuid.uuid4()  # an egress exception for every tenant (0041): no tenant's, never swept
     async with owner_sessionmaker() as s, s.begin():
         await s.execute(text("insert into egress_allowlist (id, network) values (:i, '192.0.2.0/24')"), {"i": every})
@@ -116,8 +120,8 @@ async def test_a_starting_request_holds_the_erasure_until_the_reconciler_resolve
     server, owner_sessionmaker, ingress_sessionmaker, api_sessionmaker, retention_sessionmaker
 ) -> None:
     data = await populated(owner_sessionmaker, ingress_sessionmaker)
-    await sql(owner_sessionmaker, "update run_requests set status = 'starting', starting_at = now() where id = :i",
-              i=data["queued"])  # fmt: skip
+    async with owner_sessionmaker() as s, s.begin():
+        await mark_starting(s, data["queued"])
     await erasing(api_sessionmaker, data["t"])
     for _ in range(3):
         assert await process.advance(retention_sessionmaker, server.client, data["t"]) == Stage.RECONCILE
@@ -235,6 +239,7 @@ async def test_a_failure_backs_off_with_its_fixed_code_and_alerts_and_a_stop_is_
     server, owner_sessionmaker, ingress_sessionmaker, api_sessionmaker, retention_sessionmaker, monkeypatch
 ) -> None:
     data = await populated(owner_sessionmaker, ingress_sessionmaker)
+    await executed(server.client, owner_sessionmaker, data["t"])  # nothing left unresolved (task 12)
     await erasing(api_sessionmaker, data["t"])
 
     async def refused(_: Any) -> bool:
@@ -262,7 +267,9 @@ async def test_a_failure_backs_off_with_its_fixed_code_and_alerts_and_a_stop_is_
     assert await process.advance(retention_sessionmaker, server.client, data["t"]) == Stage.RECONCILE
     async with api_sessionmaker() as s, s.begin():
         await service.retry(s, tenant_id=data["t"], actor_id=uuid.uuid4())
-    assert await process.erase_pass(retention_sessionmaker, server.client) == {str(int(Stage.BOUND)): 1}
+    # the pass takes it again; 60 deletes what it shows and reads each back on later passes (task 12)
+    assert await process.erase_pass(retention_sessionmaker, server.client) == {str(int(Stage.EXECUTIONS)): 1}
+    assert await until(retention_sessionmaker, server.client, data["t"], Stage.BOUND) == Stage.BOUND
     erasure = await record(owner_sessionmaker, data["t"])
     assert (erasure.failure, erasure.attempts) == ("firing_bound_unproven", 0)  # the failure cleared; held at 90
 
@@ -345,3 +352,19 @@ async def test_a_firing_recorded_after_the_inventory_is_still_found_and_deleted(
         known = (await s.execute(text("select count(*) from tenant_erasure_known where workflow_id = :w "
                                       "and run_id = :r"), {"w": late, "r": late_run})).scalar_one()  # fmt: skip
     assert known == 1
+
+
+async def test_an_erasure_waits_at_its_schedules_until_the_inventorys_cutover(
+    server, owner_sessionmaker, ingress_sessionmaker, api_sessionmaker, retention_sessionmaker
+) -> None:
+    """Pausing, inventorying and deleting a tenant's schedules relies on every Temporal id a schedule may have: until
+    the inventory's cutover, a dispatcher from before 0040 may still sync one under its own id. The erasure holds at
+    stage 31, its fixed reason recorded and alerted on, and goes on once the cutover is recorded."""
+    data = await populated(owner_sessionmaker, ingress_sessionmaker)
+    await erasing(api_sessionmaker, data["t"])
+    async with before_the_cutover(owner_sessionmaker):
+        with structlog.testing.capture_logs() as logs:
+            assert await process.advance(retention_sessionmaker, server.client, data["t"]) == Stage.PAUSE
+        assert (await record(owner_sessionmaker, data["t"])).failure == "schedule_inventory_not_cut_over"
+        assert any(e["event"] == "erasure_held" and e["log_level"] == "error" for e in logs)
+    assert await process.advance(retention_sessionmaker, server.client, data["t"]) > Stage.PAUSE

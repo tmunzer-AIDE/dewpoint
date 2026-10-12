@@ -8,6 +8,7 @@ from temporalio.testing import WorkflowEnvironment
 from dewpoint.apps import runs as run_ops
 from dewpoint.engine import ENGINE_ABI
 from tests.support.keys import FIXTURE_CONVERTER
+from tests.support.temporal import probe_temporal
 
 
 @pytest.fixture(scope="session")
@@ -31,15 +32,15 @@ async def own_env() -> AsyncIterator[WorkflowEnvironment]:
 async def dev_env() -> AsyncIterator[WorkflowEnvironment]:
     """Temporal's CLI dev server (downloaded once by the SDK), for what the test server can't do: Worker Versioning,
     a terminated child reaching its parent, and Temporal suggesting continue-as-new. Time runs for real on it. A
-    version that no run is pinned to reports itself drained within about a second (the default checks every 3 min)."""
+    version that no run is pinned to reports itself drained within about a second (the default checks every 3 min).
+    With `DEWPOINT_PROBE_TEMPORAL_ADDRESS` set, D12's proof server instead (`probe_temporal`, with §10.4's security):
+    D12.9-D12.11 are the deletion, visibility and schedule contract tests run there (2b-4b M4)."""
     drainage = [
         "matching.wv.VersionDrainageStatusVisibilityGracePeriod",
         "matching.wv.VersionDrainageStatusRefreshInterval",
     ]
     args = [a for key in drainage for a in ("--dynamic-config-value", f'{key}="1s"')]
-    async with await WorkflowEnvironment.start_local(
-        data_converter=FIXTURE_CONVERTER, dev_server_extra_args=args
-    ) as environment:
+    async with probe_temporal(data_converter=FIXTURE_CONVERTER, dev_server_extra_args=args) as environment:
         yield environment
 
 

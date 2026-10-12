@@ -6,6 +6,8 @@ sets it on a new endpoint."""
 
 from alembic import op
 
+from migrations.online import online, step
+
 revision = "0036"
 down_revision = "0035"
 branch_labels = None
@@ -13,7 +15,12 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.execute("REVOKE UPDATE (events_pointer) ON webhook_endpoints FROM dewpoint_api")
+    with online() as conn:  # a step of its own (2b-4b, D15)
+        step(
+            conn,
+            "0036 the events pointer fixed",
+            "REVOKE UPDATE (events_pointer) ON webhook_endpoints FROM dewpoint_api",
+        )
 
 
 def downgrade() -> None:

@@ -6,11 +6,15 @@ given only once its transaction has committed."""
 import uuid
 from typing import Any
 
+import structlog
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from dewpoint.apps.ingress.batch import Batch
+
+log = structlog.get_logger("dewpoint.ingress")
+UNKNOWN_RETRY_S = 30  # an outcome this build doesn't know: tried again as after an outage
 
 RECORD = text(
     "select record_inbound_events(:e, :refusal, :read, cast(:ids as uuid[]), cast(:sealed as bytea[]), "
@@ -56,8 +60,15 @@ def respond(outcome: dict[str, Any]) -> Response:
             return _error(409, "event_id_reused")
         case "quota_exceeded":
             return _error(429, "quota_exceeded", retry_after=int(outcome["retry_after"]))
+        case "over_limit":  # more than ingress may ever fill: no retry helps it
+            return _error(413, "over_limit")
+        case "backlog_full":  # the deployment's outstanding work at its limit: nothing stored
+            return _error(429, "backlog_full", retry_after=int(outcome["retry_after"]))
         case "retained_full":
             return _error(429, "retained_full")  # nothing frees it before 2b-4: no Retry-After
         case "environment":
             return _error(503, "unavailable")
-    raise ValueError("an outcome the recording function doesn't give")
+    # One this build doesn't know: a later release's recording function, met during an upgrade (2b-4b M4, the owner's
+    # ruling on online upgrades). Answered as an outage, a retry later, never an error; logged by its code alone.
+    log.warning("ingress_outcome_unknown", outcome=str(outcome["outcome"]))
+    return _error(503, "unavailable", retry_after=UNKNOWN_RETRY_S)

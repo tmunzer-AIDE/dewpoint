@@ -16,6 +16,7 @@ import json
 import time
 import uuid
 from collections.abc import AsyncIterator
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -25,7 +26,7 @@ from temporalio.client import Client
 from temporalio.testing import WorkflowEnvironment
 
 from dewpoint.apps.codec import data_converter
-from dewpoint.apps.dispatcher import dispatch, matching
+from dewpoint.apps.dispatcher import dispatch, failures, matching
 from dewpoint.apps.ingress.main import create_app as create_ingress
 from dewpoint.apps.worker.store import DbRunStore
 from dewpoint.core.crypto.kek import KekSet
@@ -138,6 +139,8 @@ async def test_a_signed_webhook_becomes_a_run_end_to_end_with_the_keyrings_real_
             raise RuntimeError("the dispatcher dies before its commit")
 
         monkeypatch.setattr(matching, "_before_commit", crash)
+        # A crash's process writes no delay (`failures.DELAYS`, for an error the pass catches): none here either
+        monkeypatch.setattr(failures, "DELAYS", (timedelta(0),) * len(failures.DELAYS))
         assert (await matching.match_once(dispatch_sessionmaker, dispatch_keys, matching.Verified())).get("error")
         assert await status_of(owner_sessionmaker, event_id) == ("pending", None)  # nothing it decided stayed
         monkeypatch.undo()

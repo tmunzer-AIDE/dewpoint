@@ -8,6 +8,7 @@ An input that doesn't match its schema is refused with the places and rules it b
 supplied (a map's key can be a secret, and a sub-flow's refusal is an activity result: history); one that holds the
 handle marker is refused: data from outside never crosses into a run as a handle (§3.2)."""
 
+import asyncio
 import uuid
 from collections.abc import Mapping
 from typing import Any
@@ -22,7 +23,7 @@ from dewpoint.core.claims.secret_index import SECRET_INDEX_LIMIT
 from dewpoint.core.crypto.keys import KeySource
 from dewpoint.engine.handles import contains_marker
 from dewpoint.engine.runtime.projection import location
-from dewpoint.engine.split import split
+from dewpoint.engine.split import Split, split
 
 FORGED = "The run's input holds the reserved key `$claim`, which only Dewpoint writes."
 RESERVED_INPUT = "The run's input holds `rows` or `row_count`, which only a CSV upload supplies."
@@ -58,6 +59,16 @@ def reasons(schema: Mapping[str, Any], value: Any) -> list[str]:
     ]
 
 
+def checked(schema: Mapping[str, Any], value: dict[str, Any]) -> Split:
+    """`value` checked against `schema`, then split: CPU only. Raises InputRefusedError."""
+    refused = reasons(schema, value)
+    if refused:
+        raise InputRefusedError(refused)
+    if contains_marker(value):
+        raise InputRefusedError([FORGED])
+    return split(value, schema, lambda pointer: str(uuid.uuid4()))
+
+
 async def claim_input(
     s: AsyncSession,
     keys: KeySource,
@@ -67,15 +78,13 @@ async def claim_input(
     root_run_id: uuid.UUID,
     schema: Mapping[str, Any],
     value: dict[str, Any],
+    off_loop: bool = False,
 ) -> Any:
     """The envelope of `value`, its claims written (`run_inputs`) and its secrets indexed, inside the caller's
-    transaction. Raises InputRefusedError, having written nothing that commits."""
-    refused = reasons(schema, value)
-    if refused:
-        raise InputRefusedError(refused)
-    if contains_marker(value):
-        raise InputRefusedError([FORGED])
-    done = split(value, schema, lambda pointer: str(uuid.uuid4()))
+    transaction. Raises InputRefusedError, having written nothing that commits. `off_loop`: the check and the split in a
+    thread, for the work a CSV slot bounds (seconds of CPU for a CSV's rows at the caps; the owner's ruling 2 on 2b-4b's
+    M3 checkpoint); the session stays on the event loop."""
+    done = await asyncio.to_thread(checked, schema, value) if off_loop else checked(schema, value)
     if done.claims:
         cipher = ClaimCipher(keys)
         for c in done.claims:

@@ -14,6 +14,7 @@ fits the active version's declaration; one that no longer does is marked stale a
 and the exact matches are proposed instead: it's never applied silently, and a start always needs a mapping valid for
 its version."""
 
+import asyncio
 import json
 import uuid
 from collections.abc import Mapping, Sequence
@@ -85,8 +86,9 @@ async def stage(
     data: bytes,
 ) -> dict[str, Any]:
     """The file staged, and what the uploader is told. Raises CsvFileError for a file that can't be read, having
-    staged nothing."""
-    table = read_table(data, max_rows=int(csv["max_rows"]), max_bytes=byte_cap(csv))
+    staged nothing. Its parse and its preview run in a thread, inside the caller's CSV slot (the owner's ruling 2 on
+    2b-4b's M3 checkpoint); the session stays on the event loop."""
+    table = await asyncio.to_thread(read_table, data, max_rows=int(csv["max_rows"]), max_bytes=byte_cap(csv))
     upload_id = uuid.uuid4()
     staged = await ClaimCipher(keys, purpose=PURPOSE).seal(str(tenant_id), str(upload_id), data)
     key_version, file_digest = await digests.file_digest(keys, str(tenant_id), data)
@@ -107,7 +109,7 @@ async def stage(
         "headers": table.headers,
         "row_count": len(table.rows),
         "default_mapping": default,
-        **described(table, columns, mapping),
+        **(await asyncio.to_thread(described, table, columns, mapping)),
     }
 
 

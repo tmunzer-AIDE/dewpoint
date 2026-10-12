@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
+# D12's dynamic configuration (2b-4b M4): Temporal's defaults, stated where the proof relies on them.
+frontend.exposeAuthorizerErrors:
+  - value: false

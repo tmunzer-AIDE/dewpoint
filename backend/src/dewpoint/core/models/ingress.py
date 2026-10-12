@@ -14,6 +14,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Integer,
     LargeBinary,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -100,6 +101,25 @@ class TenantEventCounters(Base):
     retained_events_max: Mapped[int] = mapped_column(BigInteger, server_default="250000")
     retained_bytes_max: Mapped[int] = mapped_column(BigInteger, server_default=str(1024 * 1024 * 1024))
     recounted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    recount_tried_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # its recount's last try
+
+
+class IngressBudget(Base):
+    """The deployment's webhook work outstanding and its tenants with any (one row, migration 0050): written only by the
+    database's own budget functions and triggers, read by the platform admin's API and the leader's drift check."""
+
+    __tablename__ = "ingress_budget"
+    id: Mapped[int] = mapped_column(SmallInteger, primary_key=True)
+    outstanding: Mapped[int] = mapped_column(BigInteger, server_default="0")
+    active: Mapped[int] = mapped_column(Integer, server_default="0")
+
+
+class IngressOutstanding(Base):
+    """A tenant's webhook work outstanding (0050): written only under the budget's row, by the database itself."""
+
+    __tablename__ = "ingress_outstanding"
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    outstanding: Mapped[int] = mapped_column(BigInteger, server_default="0")
 
 
 class TriggerBinding(Base):
@@ -155,5 +175,6 @@ class InboundEvent(Base):
     attempts: Mapped[int] = mapped_column(Integer, server_default="0")
     next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     request_count: Mapped[int | None] = mapped_column(Integer)
+    credit: Mapped[int | None] = mapped_column(Integer)  # its endpoint's enabled bindings when accepted (0050)
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

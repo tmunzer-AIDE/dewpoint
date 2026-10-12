@@ -25,6 +25,8 @@ dependencies = [
   "temporalio==1.33.0",
   "ahocorasick-rs>=0.22",
   "websockets>=17.1,<18",
+  "boto3==1.43.103",
+  "botocore==1.43.103",
 ]
 
 [project.scripts]
@@ -105,6 +107,11 @@ ignore_errors = true
 [[tool.mypy.overrides]]
 # cel-expr-python ships a .pyi but no py.typed marker; only engine.cel.runtime imports it.
 module = ["cel_expr_python", "cel_expr_python.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# botocore and boto3 ship no type information (D6's S3 anchor sink, core/audit/s3.py, is their only user).
+module = ["botocore", "botocore.*", "boto3", "boto3.*"]
 ignore_missing_imports = true
 
 [tool.importlinter]

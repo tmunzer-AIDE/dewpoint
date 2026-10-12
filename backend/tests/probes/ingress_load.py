@@ -17,7 +17,14 @@ with synthetic data only. From `backend/`:
 - `buckets`: each rate bucket (an endpoint's events and bytes, a tenant's events and bytes) at its default, on its own;
 - `quotas`: each pending and retained quota (events and bytes, an endpoint's and a tenant's) at its default, on its own;
 - `tenant-drain`: one tenant's endpoints drained together by one dispatcher or two (processes of their own), with two
-  tenants as the control: a tenant's default event rate stays below it.
+  tenants as the control: a tenant's default event rate stays below it;
+- `scaling`: D9's acceptance, one dispatcher and then two on equal backlogs of four independent tenants, at fan-outs
+  1, 5 and 20: the aggregate drain, each tenant's, what's left, the counters and the admissions;
+- `contention`: recordings across 16 tenants at once, 1, 8 and 32 connections, each a 1 KiB event a call (sealed
+  beforehand): calls a second and each call's time, what a row every recording takes would cost (the owner's ruling
+  on 2b-4b's M3 checkpoint 4: measured before a shared admission row is ruled out, and after). Each concurrency starts
+  with nothing outstanding: the events before it are cancelled, and its counters emptied, so no tenant's share or
+  quota refuses it.
 
 Numbers depend on the machine; record them with it."""
 
@@ -132,7 +139,9 @@ class Database:
 
         self._container = PostgresContainer("postgres:16-alpine", driver="asyncpg").__enter__()
         self.url = self._container.get_connection_url()
-        env = {**os.environ, "DEWPOINT_DATABASE_URL": self.url, "UV_NO_SYNC": "1"}
+        # migration 0053 refuses a database not named apart from the URL (DEWPOINT_EXPECTED_DATABASE)
+        named = self.url.rsplit("/", 1)[1]
+        env = {**os.environ, "DEWPOINT_DATABASE_URL": self.url, "DEWPOINT_EXPECTED_DATABASE": named, "UV_NO_SYNC": "1"}
         subprocess.run([".venv/bin/alembic", "upgrade", "head"], cwd=BACKEND, env=env, check=True, capture_output=True)
         return self
 
@@ -318,6 +327,51 @@ async def _record(db: Database, ready: Any, n: int, *, batch: int = 1) -> list[f
             await s.execute(RECORD, params)
         times.append(time.perf_counter() - start)
     return times
+
+
+CONTENTION_S = 10.0  # each concurrency's window
+
+
+async def contention(db: Database) -> None:
+    from sqlalchemy import text
+
+    from dewpoint.core.db import make_engine, make_sessionmaker
+    from tests.apps.dispatcher.inbound import sealed
+    from tests.core.ingress.support import RECORD
+
+    tenants = [await _inbound(db, 1) for _ in range(16)]
+    engine = make_engine(db.role_url("dewpoint_ingress"), pool_size=32, max_overflow=0)
+    ingress_ = make_sessionmaker(engine)
+    results: dict[str, Any] = {}
+    owner = db.sessions()
+    for workers in (1, 8, 32):
+        async with owner() as s, s.begin():  # the budget's own triggers release what was outstanding
+            await s.execute(text("update inbound_events set status = 'cancelled', reason = 'user_cancelled', "
+                                 "ended_at = now() where status = 'pending'"))  # fmt: skip
+            for table in ("webhook_endpoints", "tenant_event_counters"):
+                await s.execute(text(f"update {table} set pending_events = 0, pending_bytes = 0, "  # noqa: S608
+                                     "retained_events = 0, retained_bytes = 0"))  # fmt: skip
+        stop = time.monotonic() + CONTENTION_S
+        times: list[float] = []
+
+        async def worker(k: int, stop: float = stop, times: list[float] = times) -> None:
+            ready = tenants[k % len(tenants)]
+            while time.monotonic() < stop:
+                event = uuid.uuid4()
+                params = {"e": ready.endpoint_id, "refusal": None, "read": 0, "ids": [event],
+                          "sealed": [sealed(ready, event, {"type": "ap_down", "pad": "x" * 900})], "versions": [1],
+                          "dedupe": [None], "digests": [None]}  # fmt: skip
+                start = time.perf_counter()
+                async with ingress_() as s, s.begin():
+                    outcome = (await s.execute(RECORD, params)).scalar_one()
+                times.append(time.perf_counter() - start)
+                assert outcome["outcome"] == "recorded", outcome
+
+        await asyncio.gather(*(worker(k) for k in range(workers)))
+        results[str(workers)] = {"calls_per_s": round(len(times) / CONTENTION_S, 1), "p50": ms(pct(times, 0.5)),
+                                 "p95": ms(pct(times, 0.95)), "p99": ms(pct(times, 0.99))}  # fmt: skip
+    await engine.dispose()
+    print(json.dumps({"tenants": len(tenants), "window_s": CONTENTION_S, "by_connections": results}))
 
 
 async def lock(db: Database) -> None:
@@ -561,6 +615,59 @@ async def tenant_drain(db: Database) -> None:
         print(f"| {name} | {total} | {elapsed:.1f} s | {total / elapsed:.1f} |")
 
 
+SCALING_TENANTS, SCALING_EVENTS = 4, 100  # independent tenants, each with this backlog (D9: at least two)
+
+
+async def scaling(db: Database) -> None:
+    """D9's acceptance (the owner's ruling on the 2b-4 outline): one dispatcher and then two (each a process of its own,
+    its own loop), on equal backlogs of independent tenants, at fan-outs 1, 5 and 20 (proposed criteria: at least 1.5
+    times the aggregate drain; no tenant's backlog drained later than with one; none starved; the counters right;
+    each event admitted once a binding). A tenant's drain is the time from the dispatchers' start to its last event
+    matched, on the database's clock: its oldest event's age at worst. A fake Temporal, as `drain`."""
+    from sqlalchemy import text
+
+    from tests.apps.dispatcher.support import workers
+
+    owner = db.sessions()
+    await workers(owner)
+    print("| fan-out | dispatchers | events | elapsed | events/s | tenants' drains (s) | left | counters | admitted |")
+    print("|---|---|---|---|---|---|---|---|---|")
+    for fan_out in (1, 5, 20):
+        for dispatchers in (1, 2):
+            readies = [await _inbound(db, fan_out) for _ in range(SCALING_TENANTS)]
+            for ready in readies:
+                await _record(db, ready, SCALING_EVENTS, batch=50)
+            tenants = [r.tenant_id for r in readies]
+            async with owner() as s:
+                began = (await s.execute(text("select clock_timestamp()"))).scalar_one()
+            env = os.environ | {"PYTHONPATH": f"{BACKEND}/src:{BACKEND}"}
+            children = [subprocess.Popen([".venv/bin/python", "-m", "tests.probes.ingress_load", "dispatcher-loop",  # noqa: ASYNC220
+                                          db.role_url("dewpoint_dispatch")], cwd=BACKEND, env=env,
+                                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                        for _ in range(dispatchers)]  # fmt: skip
+            spans = [tuple(float(v) for v in child.communicate()[0].split()[-2:]) for child in children]
+            elapsed = max(end for _, end in spans) - min(begin for begin, _ in spans)
+            async with owner() as s:
+                drains = (await s.execute(text(
+                    "select tenant_id, extract(epoch from max(ended_at) - :b) from inbound_events "
+                    "where tenant_id = any(:t) group by tenant_id"), {"b": began, "t": tenants})).all()  # fmt: skip
+                left = (await s.execute(text("select count(*) from inbound_events where tenant_id = any(:t) "
+                                             "and status = 'pending'"), {"t": tenants})).scalar_one()  # fmt: skip
+                counters = (await s.execute(text(
+                    "select coalesce(sum(pending_events), 0) + (select coalesce(sum(pending_events), 0) from "
+                    "webhook_endpoints where tenant_id = any(:t)) from tenant_event_counters "
+                    "where tenant_id = any(:t)"),
+                    {"t": tenants})).scalar_one()  # fmt: skip
+                admitted = (await s.execute(text(
+                    "select count(*), count(distinct (idempotency_key, workflow_id)) from run_requests "
+                    "where tenant_id = any(:t) and idempotency_key like 'evt:%'"), {"t": tenants})).one()  # fmt: skip
+            events = SCALING_TENANTS * SCALING_EVENTS
+            shown = ", ".join(f"{float(d):.1f}" for _, d in sorted(drains, key=lambda r: str(r[0])))
+            print(f"| {fan_out} | {dispatchers} | {events} | {elapsed:.1f} s | {events / elapsed:.1f} | {shown} | "
+                  f"{left} | {'0 pending' if counters == 0 else f'{counters} pending'} | "
+                  f"{admitted[0]} ({admitted[1]} distinct, {events * fan_out} expected) |")  # fmt: skip
+
+
 def replace_endpoint(ready: Any, endpoint_id: uuid.UUID) -> Any:
     return replace(ready, endpoint_id=endpoint_id)
 
@@ -601,7 +708,7 @@ async def dispatcher_loop(dispatch_url: str) -> None:
 
 PARTS: dict[str, Callable[[Database], Coroutine[Any, Any, None]]] = {
     "candidates": candidates, "ingress": ingress, "lock": lock, "drain": drain, "buckets": buckets, "quotas": quotas,
-    "tenant-drain": tenant_drain,
+    "tenant-drain": tenant_drain, "scaling": scaling, "contention": contention,
 }  # fmt: skip
 
 

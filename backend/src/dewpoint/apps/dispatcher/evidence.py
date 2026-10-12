@@ -22,7 +22,7 @@ unread, lost or pending keeps the version; one shown gone is proven, and its evi
 
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -30,10 +30,15 @@ import structlog
 from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from temporalio.api.workflowservice.v1 import DescribeNamespaceRequest
+from temporalio.api.common.v1 import WorkflowExecution
+from temporalio.api.enums.v1 import EventType
+from temporalio.api.workflowservice.v1 import DescribeNamespaceRequest, GetWorkflowExecutionHistoryRequest
 from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.service import RPCError, RPCStatusCode
 
+from dewpoint.apps.dispatcher import budget, dispatch, recovery
+from dewpoint.core import blockers
+from dewpoint.core.audit import service as audit
 from dewpoint.core.crypto.retire import RunProof
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.models.runs import ExecutionEvidence
@@ -45,17 +50,39 @@ PENDING_MAX = timedelta(days=1)  # one never shown backs off, twice its last gap
 RETAINED_FOR = timedelta(days=1)  # when the namespace's retention can't be read: a read one is described again after
 BATCH = 50  # rows a pass
 CALL_DEADLINE = timedelta(seconds=10)
+PAGES = 8  # history pages a visit reads, at most (the owner's D16 ruling: an experimental cap, not a time budget)
+CLOSES = frozenset((  # a run's close, the last event of its history
+    EventType.EVENT_TYPE_WORKFLOW_EXECUTION_COMPLETED, EventType.EVENT_TYPE_WORKFLOW_EXECUTION_FAILED,
+    EventType.EVENT_TYPE_WORKFLOW_EXECUTION_TIMED_OUT, EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CANCELED,
+    EventType.EVENT_TYPE_WORKFLOW_EXECUTION_TERMINATED, EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CONTINUED_AS_NEW,
+))  # fmt: skip
 
 
-@dataclass(frozen=True)
-class _Read:
-    """One run's history, read: when it closed, every child it started (its workflow id, its run id when Temporal
-    showed it started, when its start was initiated), and the run it continued as."""
+@dataclass
+class _Reading:
+    """A closed run's history, as far as it's read: the run, Temporal's next-page token (None: from its start), the
+    children whose start it saw initiated and not yet started (by the initiating event), its latest event's time; what
+    the pages read this visit found (every child they showed started, the run it continued as); whether it's done."""
 
     run_id: str
-    closed: datetime
-    children: list[tuple[str, str | None, datetime]]
-    continued: tuple[str, datetime] | None
+    token: bytes | None = None
+    initiated: dict[int, tuple[str, datetime]] = field(default_factory=dict)
+    last: datetime | None = None
+    children: list[tuple[str, str | None, datetime]] = field(default_factory=list)
+    continued: tuple[str, datetime] | None = None
+    closed: datetime | None = None  # its close event's time, once a page reached it (0063)
+    done: bool = False
+
+    @classmethod
+    def kept(cls, row: ExecutionEvidence) -> "_Reading":
+        """Where a row's read stopped."""
+        if row.read_run is None:
+            raise RuntimeError("A read kept without its run.")  # both are written together
+        pending = {int(k): (v[0], datetime.fromisoformat(v[1])) for k, v in (row.read_pending or {}).items()}
+        return cls(row.read_run, row.read_token, pending, row.read_last_at)
+
+    def pending(self) -> dict[str, list[str]]:
+        return {str(k): [child, at.isoformat()] for k, (child, at) in self.initiated.items()}
 
 
 async def namespace_retention(client: Client) -> timedelta | None:
@@ -101,32 +128,51 @@ def _open(described: Any) -> bool:
     return described.status is None or described.status == WorkflowExecutionStatus.RUNNING
 
 
-async def _history(client: Client, workflow_id: str, run_id: str) -> _Read:
-    """A closed run's history, read whole, page by page."""
-    initiated: dict[int, tuple[str, datetime]] = {}
-    children: list[tuple[str, str | None, datetime]] = []
-    continued: tuple[str, datetime] | None = None
-    closed: datetime | None = None
-    async for event in client.get_workflow_handle(workflow_id, run_id=run_id).fetch_history_events(
-        rpc_timeout=CALL_DEADLINE
-    ):
-        at = event.event_time.ToDatetime(tzinfo=UTC)
-        closed = at
-        if event.HasField("start_child_workflow_execution_initiated_event_attributes"):
-            child = event.start_child_workflow_execution_initiated_event_attributes.workflow_id
-            initiated[event.event_id] = (child, at)
-        elif event.HasField("child_workflow_execution_started_event_attributes"):
-            started = event.child_workflow_execution_started_event_attributes
-            _, when = initiated.pop(started.initiated_event_id, ("", at))
-            children.append((started.workflow_execution.workflow_id, started.workflow_execution.run_id, when))
-        elif event.HasField("start_child_workflow_execution_failed_event_attributes"):
-            initiated.pop(event.start_child_workflow_execution_failed_event_attributes.initiated_event_id, None)
-        elif event.HasField("workflow_execution_continued_as_new_event_attributes"):
-            continued = (event.workflow_execution_continued_as_new_event_attributes.new_execution_run_id, at)
-    if closed is None:
-        raise RuntimeError("A history without events.")
-    children.extend((child, None, when) for child, when in initiated.values())  # may have started: its id alone
-    return _Read(run_id, closed, children, continued)
+async def _read_on(client: Client, workflow_id: str, reading: _Reading) -> _Reading:
+    """At most `PAGES` more pages of a closed run's history, from where `reading` stopped, each a call of its own."""
+    for _ in range(PAGES):
+        answer = await client.workflow_service.get_workflow_execution_history(
+            GetWorkflowExecutionHistoryRequest(
+                namespace=client.namespace,
+                execution=WorkflowExecution(workflow_id=workflow_id, run_id=reading.run_id),
+                next_page_token=reading.token or b"",
+            ),
+            timeout=CALL_DEADLINE,
+        )
+        for event in answer.history.events:
+            at = event.event_time.ToDatetime(tzinfo=UTC)
+            reading.last = at
+            if event.event_type in CLOSES:
+                reading.closed = at
+            if event.HasField("start_child_workflow_execution_initiated_event_attributes"):
+                child = event.start_child_workflow_execution_initiated_event_attributes.workflow_id
+                reading.initiated[event.event_id] = (child, at)
+            elif event.HasField("child_workflow_execution_started_event_attributes"):
+                started = event.child_workflow_execution_started_event_attributes
+                _, when = reading.initiated.pop(started.initiated_event_id, ("", at))
+                execution = started.workflow_execution
+                reading.children.append((execution.workflow_id, execution.run_id, when))
+            elif event.HasField("start_child_workflow_execution_failed_event_attributes"):
+                reading.initiated.pop(event.start_child_workflow_execution_failed_event_attributes.initiated_event_id,
+                                      None)  # fmt: skip
+            elif event.HasField("workflow_execution_continued_as_new_event_attributes"):
+                reading.continued = (event.workflow_execution_continued_as_new_event_attributes.new_execution_run_id,
+                                     at)  # fmt: skip
+        reading.token = answer.next_page_token or None
+        if reading.token is None:
+            if reading.last is None:
+                raise RuntimeError("A history without events.")
+            reading.done = True
+            break
+    return reading
+
+
+async def _history(client: Client, workflow_id: str, run_id: str) -> _Reading:
+    """A closed run's history, read whole (the probe's measure of a read)."""
+    reading = _Reading(run_id)
+    while not reading.done:
+        reading = await _read_on(client, workflow_id, reading)
+    return reading
 
 
 async def _after(s: AsyncSession, gap: timedelta, since: datetime | None = None) -> datetime:
@@ -154,51 +200,184 @@ async def _check(sessionmaker: async_sessionmaker[AsyncSession], client: Client,
         if row is None:
             return "gone"
         workflow_id, run_id, read = row.workflow_id, row.run_id, row.read_at is not None
-    described = await _described(client, workflow_id, run_id)
-    asked: datetime | None = None
-    kept = (retention or RETAINED_FOR) + timedelta(minutes=1)
-    async with sessionmaker() as s, s.begin():
-        await tenant_scope(s, tenant_id)
-        row = await s.get(ExecutionEvidence, row_id, with_for_update=True, populate_existing=True)
-        if row is None or (row.workflow_id, row.run_id, row.read_at is not None) != (workflow_id, run_id, read):
-            return "moved"  # a retirement's proof, or another pass, changed it meanwhile
-        if described is None:
-            if read:
-                await s.delete(row)
-                return "gone"
-            previous = row.checked_at
-            judged = await _unshown(s, row)
-            if judged == "lost":
-                log.error("execution_evidence_lost", evidence=row_id)
+        reading = _Reading.kept(row) if row.read_token is not None and not read else None
+    if reading is None:
+        described = await _described(client, workflow_id, run_id)
+        if described is not None:  # any run of its chain shown: what its blocker is owed, retried on every sighting
+            await _sighted(sessionmaker, client, tenant_id, workflow_id, described if run_id is None else None)
+        asked: datetime | None = None
+        kept = (retention or RETAINED_FOR) + timedelta(minutes=1)
+        async with sessionmaker() as s, s.begin():
+            await tenant_scope(s, tenant_id)
+            row = await s.get(ExecutionEvidence, row_id, with_for_update=True, populate_existing=True)
+            if row is None or (row.workflow_id, row.run_id, row.read_at is not None) != (workflow_id, run_id, read):
+                return "moved"  # a retirement's proof, or another pass, changed it meanwhile
+            if described is None:
+                if read:
+                    await s.delete(row)
+                    return "gone"
+                previous = row.checked_at
+                judged = await _unshown(s, row)
+                if judged == "lost":
+                    log.error("execution_evidence_lost", evidence=row_id)
+                    row.next_check_at = await _after(s, RECHECK)
+                else:
+                    now = await _after(s, timedelta(0))
+                    row.next_check_at = now + _backoff(previous, now)
+                return judged
+            asked = await _after(s, timedelta(0))
+            row.seen_at, row.checked_at = row.seen_at or asked, asked
+            if run_id is not None and row.closed_at is None and not _open(described) and described.close_time:
+                row.closed_at, row.closed_seen_at = described.close_time, asked  # that exact run's, from Temporal
+            if _open(described):
+                first = described.raw_description.workflow_execution_info.first_run_id
+                if run_id is None and first and first != described.run_id:
+                    row.run_id = first  # its chain's first run, closed (a later one exists): read next
+                    row.next_check_at = await _after(s, timedelta(0))
+                    return "resolved"
                 row.next_check_at = await _after(s, RECHECK)
-            else:
-                now = await _after(s, timedelta(0))
-                row.next_check_at = now + _backoff(previous, now)
-            return judged
-        asked = await _after(s, timedelta(0))
-        row.seen_at, row.checked_at = row.seen_at or asked, asked
-        if _open(described):
-            first = described.raw_description.workflow_execution_info.first_run_id
-            if run_id is None and first and first != described.run_id:
-                row.run_id = first  # its chain's first run, closed (a later one exists): read next
-                row.next_check_at = await _after(s, timedelta(0))
-                return "resolved"
-            row.next_check_at = await _after(s, RECHECK)
-            return "open"
-        if read:
-            row.next_check_at = await _later(s, kept, described.close_time)
-            return "retained"
-    run = run_id or described.raw_description.workflow_execution_info.first_run_id or described.run_id
-    found = await _history(client, workflow_id, run)  # the first run, if a root's chain continued: it's closed
+                return "open"
+            if read:
+                row.next_check_at = await _later(s, kept, described.close_time)
+                return "retained"
+        run = run_id or described.raw_description.workflow_execution_info.first_run_id or described.run_id
+        reading = _Reading(run)  # the first run, if a root's chain continued: it's closed
+    started_from = reading.token
+    try:
+        reading = await _read_on(client, workflow_id, reading)
+    except RPCError as e:
+        if e.status == RPCStatusCode.INVALID_ARGUMENT and started_from is not None:
+            return await _restarted(sessionmaker, tenant_id, row_id, run_id, started_from)
+        if e.status != RPCStatusCode.NOT_FOUND:
+            raise
+        return await _gone_reading(sessionmaker, tenant_id, row_id, run_id, started_from)
+    return await _recorded(sessionmaker, tenant_id, row_id, workflow_id, run_id, started_from, reading, retention)
+
+
+ENDED = ("dead", "cancelled", "refused")  # a request that never sends again
+LATE_START = "A late start: its request had ended before this execution was seen (2b-4b M4 recovery)."
+
+
+async def _sighted(sessionmaker: async_sessionmaker[AsyncSession], client: Client, tenant_id: uuid.UUID,
+                   workflow_id: str, latest: Any | None) -> None:  # fmt: skip
+    """A chain Temporal shows, whose root's request has a blocker (2b-4b M4 recovery, tasks 4 and 5; the owner's
+    gate-B review). Looked at on every sighting of any run of the chain, while something is owed:
+
+    - Not yet identified: identified only when the chain's first run's started event carries the recorded start
+      request id (`dispatch.started_by`). Another id, or none: left as it is, alerted. A lookup that fails is retried on
+      the next sighting, whichever run of the chain it describes.
+    - A late start (the chain's latest run live, its request ended): terminated only on the exact match (that started
+      event, the request's own workflow id, the call naming the chain's first run). Its record commits first: on its
+      blocker (`late_start`, once, never refused by the erasure's fence), with its audit entry and, where the fence
+      allows, its `late_start` item; the termination follows, and is tried again on each sighting while the chain is
+      live. A mismatch is recorded for an operator, on its blocker and as a `late_start_unmatched` item, alerted once,
+      never identified nor terminated (the owner's ruling, the design's revision 2, section D).
+
+    `latest`: the chain's latest run as just described, or None to describe it here."""
+    async with sessionmaker() as s:
+        await tenant_scope(s, tenant_id)
+        found = await blockers.of_root(s, workflow_id)
+        if found is None:
+            return
+        request_id, start_request_id, state = found
+        status = (await s.execute(text("select status from run_requests where id = :i"), {"i": request_id})).scalar()
+    unidentified, ended = state in ("pending", "unresolved"), status in ENDED
+    if not (unidentified or ended):
+        return
+    try:
+        latest = latest if latest is not None else await _described(client, workflow_id, None)
+        late = ended and latest is not None and _open(latest)
+        if not (unidentified or late):
+            return
+        first_run = (
+            None if start_request_id is None else await dispatch.started_by(client, workflow_id, start_request_id)
+        )
+    except Exception as e:  # unanswered this time: the next sighting asks again
+        log.warning("start_identity_unread", request_id=str(request_id), error=type(e).__name__)
+        return
+    if first_run is None:  # another id, none, or no recorded id to match: never identified, never terminated
+        if not late:
+            log.error("start_unidentified", request_id=str(request_id))
+            return
+        async with sessionmaker() as s, s.begin():  # recorded for an operator, durably (the owner's ruling, design §D)
+            await tenant_scope(s, tenant_id)
+            if await blockers.late_started(s, request_id, matched=False):
+                log.error("late_start_unmatched", request_id=str(request_id))
+                await recovery.noted(s, tenant_id, recovery.LATE_START_UNMATCHED, request_id)
+        return
+    run = first_run.execution.run_id
+    async with sessionmaker() as s, s.begin():  # the record first: a failure before the termination terminates nothing
+        await tenant_scope(s, tenant_id)
+        await blockers.identified(s, request_id, run)
+        recorded = await blockers.late_started(s, request_id, matched=True) if late else None
+        if recorded is not None:  # once: on the unfenced blocker
+            log.error("late_start", request_id=str(request_id), run_id=run)
+            if recorded == "promoted":  # a mismatch shown matched later: its item is obsolete, with this record
+                await recovery.cleared(s, tenant_id, recovery.LATE_START_UNMATCHED, request_id)
+            await recovery.noted(s, tenant_id, recovery.LATE_START, request_id)
+            await audit.record(s, tenant_id=tenant_id, actor_id=None, action="run.request.late_start",
+                               target_type="run_request", target_id=str(request_id),
+                               details={"run_id": run})  # fmt: skip
+    if late:
+        try:
+            await client.get_workflow_handle(workflow_id, first_execution_run_id=run).terminate(
+                reason=LATE_START, rpc_timeout=CALL_DEADLINE
+            )
+        except RPCError as e:  # recorded: tried again on the next sighting while it's live
+            log.warning("late_start_unterminated", request_id=str(request_id), error=e.status.name)
+
+
+async def _restarted(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, row_id: int,
+                     run_id: str | None, started_from: bytes) -> str:  # fmt: skip
+    """A kept page token Temporal refuses (a server that no longer reads it, the review's I6): the read starts over on
+    the next pass, from a describe and the first page, rather than failing every pass for good. What the pages read
+    before found stays recorded; recording it again changes nothing."""
     async with sessionmaker() as s, s.begin():
         await tenant_scope(s, tenant_id)
         row = await s.get(ExecutionEvidence, row_id, with_for_update=True, populate_existing=True)
-        if row is None or (row.run_id, row.read_at) != (run_id, None):
+        if row is None or (row.run_id, row.read_at, row.read_token) != (run_id, None, started_from):
             return "moved"
-        recorded = [(child, child_run, when) for child, child_run, when in found.children]
-        if found.continued is not None:
-            recorded.append((workflow_id, *found.continued))
-        for child, child_run, when in recorded:
+        row.read_token = row.read_run = row.read_pending = row.read_last_at = None
+        row.next_check_at = await _after(s, timedelta(0))
+    log.warning("execution_evidence_read_restarted", evidence=row_id)
+    return "restarted"
+
+
+async def _gone_reading(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, row_id: int,
+                        run_id: str | None, started_from: bytes | None) -> str:  # fmt: skip
+    """A history gone before its read ended (retention deleted it): seen, so lost; what it started past the pages read
+    is unknown."""
+    async with sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant_id)
+        row = await s.get(ExecutionEvidence, row_id, with_for_update=True, populate_existing=True)
+        if row is None or (row.run_id, row.read_at, row.read_token) != (run_id, None, started_from):
+            return "moved"
+        row.read_token = row.read_run = row.read_pending = row.read_last_at = None
+        judged = await _unshown(s, row)
+        if judged == "lost":
+            log.error("execution_evidence_lost", evidence=row_id)
+        row.next_check_at = await _after(s, RECHECK)
+        return judged
+
+
+async def _recorded(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, row_id: int,
+                    workflow_id: str, run_id: str | None, started_from: bytes | None, reading: _Reading,
+                    retention: timedelta | None) -> str:  # fmt: skip
+    """What a visit's pages found, recorded: every child they showed started, and the run it continued as (recorded by
+    the visit that read it: a later one may read only an empty last page, the review's I4); then, the read not done,
+    where it stopped (`reading`, due again); done, every child only initiated (by its id alone), the row read
+    (`read`)."""
+    async with sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant_id)
+        row = await s.get(ExecutionEvidence, row_id, with_for_update=True, populate_existing=True)
+        if row is None or (row.run_id, row.read_at, row.read_token) != (run_id, None, started_from):
+            return "moved"
+        found = list(reading.children)
+        if reading.continued is not None:
+            found.append((workflow_id, *reading.continued))
+        if reading.done:
+            found += [(child, None, when) for child, when in reading.initiated.values()]  # may have started: its id
+        for child, child_run, when in found:
             if tenant_of(child) != str(tenant_id):
                 raise RuntimeError("A child of another tenant than its parent's.")  # server-built ids: impossible
             target = ["workflow_id"] if child_run is None else ["workflow_id", "run_id"]
@@ -207,8 +386,19 @@ async def _check(sessionmaker: async_sessionmaker[AsyncSession], client: Client,
             await s.execute(insert(ExecutionEvidence).values(tenant_id=tenant_id, workflow_id=child, run_id=child_run,
                                                              started_at=when, seen_at=seen, checked_at=seen)
                             .on_conflict_do_nothing(index_elements=target, index_where=where))  # fmt: skip
-        row.run_id, row.read_at = found.run_id, await _after(s, timedelta(0))
-        row.next_check_at = await _later(s, kept, found.closed)
+        if not reading.done:
+            row.read_run, row.read_token, row.read_last_at = reading.run_id, reading.token, reading.last
+            row.read_pending = reading.pending()
+            row.next_check_at = await _after(s, timedelta(0))  # read on next pass
+            return "reading"
+        if reading.last is None:
+            raise RuntimeError("A history without events.")
+        kept = (retention or RETAINED_FOR) + timedelta(minutes=1)
+        row.read_token = row.read_run = row.read_pending = row.read_last_at = None
+        row.run_id, row.read_at = reading.run_id, await _after(s, timedelta(0))
+        if reading.closed is not None and row.closed_at is None:  # the run read: its history's close event
+            row.closed_at, row.closed_seen_at = reading.closed, row.read_at
+        row.next_check_at = await _later(s, kept, reading.last)
     return "read"
 
 
@@ -228,26 +418,28 @@ async def _unshown(s: AsyncSession, row: ExecutionEvidence, *, record: bool = Tr
 
 async def check_evidence(sessionmaker: async_sessionmaker[AsyncSession], client: Client, *,
                          retention: timedelta | None, batch: int = BATCH) -> dict[str, int]:  # fmt: skip
-    """One pass over the evidence due, each row on its own (`read`, `open`, `retained`, `gone`, `pending`, `lost`,
-    `resolved`, `moved`, `failed`); a row that failed is looked at again later. `retention`: the namespace's, as
-    Temporal reports it, which only schedules when a read execution is next described (None: a day)."""
+    """One pass over the evidence due, each row on its own (`read`, `reading`, `restarted`, `open`, `retained`, `gone`,
+    `pending`, `lost`, `resolved`, `moved`, `failed`); a row that failed is looked at again later. `retention`: the
+    namespace's, as Temporal reports it, which only schedules when a read execution is next described (None: a day)."""
     async with sessionmaker() as s:
         due = (await s.execute(text("select tenant_id, id from execution_evidence_due(:n)"), {"n": batch})).all()
     counts: dict[str, int] = {}
-    for tenant_id, row_id in due:
-        try:
-            outcome = await _check(sessionmaker, client, tenant_id, row_id, retention)
-        except Exception as e:
-            log.error("execution_evidence_unchecked", evidence=row_id, error=type(e).__name__)
-            outcome = "failed"
+    with budget.passing("evidence") as admitted:
+        for tenant_id, row_id in admitted(due, key=lambda row: row[1]):
             try:
-                async with sessionmaker() as s, s.begin():
-                    await tenant_scope(s, tenant_id)
-                    await s.execute(update(ExecutionEvidence).where(ExecutionEvidence.id == row_id)
-                                    .values(next_check_at=await _after(s, RECHECK)))  # fmt: skip
-            except Exception as again:
-                log.error("execution_evidence_unrescheduled", evidence=row_id, error=type(again).__name__)
-        counts[outcome] = counts.get(outcome, 0) + 1
+                outcome = await _check(sessionmaker, client, tenant_id, row_id, retention)
+            except Exception as e:
+                log.error("execution_evidence_unchecked", evidence=row_id, error=type(e).__name__)
+                outcome = "failed"
+                try:
+                    async with sessionmaker() as s, s.begin():
+                        await tenant_scope(s, tenant_id)
+                        await s.execute(update(ExecutionEvidence).where(ExecutionEvidence.id == row_id)
+                                        .values(next_check_at=await _after(s, RECHECK)))  # fmt: skip
+                except Exception as again:
+                    log.error("execution_evidence_unrescheduled", evidence=row_id, error=type(again).__name__)
+            counts[outcome] = counts.get(outcome, 0) + 1
+    admitted.reported(counts, full=len(due) >= batch)
     return counts
 
 

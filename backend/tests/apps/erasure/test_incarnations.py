@@ -16,7 +16,7 @@ from dewpoint.apps.dispatcher import schedule_sync
 from dewpoint.apps.erasure import bound, process, temporal
 from dewpoint.core.models.erasure import Stage
 from tests.apps.dispatcher.test_schedule_sync import Leading
-from tests.apps.erasure.support import erasing, populated
+from tests.apps.erasure.support import erasing, executed, populated
 from tests.apps.erasure.test_stages import record, until
 from tests.apps.test_runs import rpc
 from tests.core.retention.support import sql
@@ -30,6 +30,7 @@ async def test_a_late_create_and_a_stale_unpause_never_meet_and_the_erasure_dele
 ) -> None:  # fmt: skip
     data = await populated(owner_sessionmaker, ingress_sessionmaker)
     client, tenant, schedule_id = server.client, data["t"], data["schedule"]
+    await executed(server.client, owner_sessionmaker, data["t"])  # nothing left unresolved (task 12)
     creates: list[tuple[str, Any]] = []
     unpauses: list[tuple[str, Any, bytes]] = []
     real_create, real_update = schedule_sync._create, schedule_sync._update

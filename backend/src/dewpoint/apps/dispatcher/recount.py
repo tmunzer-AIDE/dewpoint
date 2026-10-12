@@ -3,8 +3,10 @@
 leader. Each tenant `recount_candidates()` picks (at most every 10 minutes) is recounted in one transaction, under the
 one lock order: the tenant's lifecycle lock shared, its endpoint rows in id order, its counter row, all held **before**
 it counts, so no insert or match in flight is overwritten by a stale total. Every pending and retained counter that
-drifted from what the events say is corrected and warned about."""
+drifted from what the events say is corrected and warned about. The leader also checks the deployment's ingress
+budget against what's outstanding (the owner's ruling on 2b-4b's M3 checkpoint 4), alerting on any difference."""
 
+import time
 import uuid
 from collections import Counter
 
@@ -12,6 +14,7 @@ import structlog
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from dewpoint.apps.dispatcher import budget
 from dewpoint.apps.dispatcher.dispatch import tenant_lock
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.models.ingress import InboundEvent, TenantEventCounters, WebhookEndpoint
@@ -19,6 +22,30 @@ from dewpoint.core.models.ingress import InboundEvent, TenantEventCounters, Webh
 log = structlog.get_logger("dewpoint.dispatcher.recount")
 BATCH = 20  # tenants a leader's cycle
 FIELDS = ("pending_events", "pending_bytes", "retained_events", "retained_bytes")
+DRIFT_S = 60.0  # the ingress budget checked at most this often: its query sums every pending event (provisional)
+
+
+class Drift:
+    """When the leader next checks the ingress budget."""
+
+    def __init__(self) -> None:
+        self.due = 0.0
+
+
+async def check_budget(sessionmaker: async_sessionmaker[AsyncSession], drift: Drift) -> dict[str, int]:
+    """The deployment's ingress budget against its truth (pending events' credit, webhook requests queued or
+    starting), every `DRIFT_S`, alerted on, never corrected here: the counters move only with the work, so a difference
+    is a defect to find."""
+    now = time.monotonic()
+    if now < drift.due:
+        return {}
+    drift.due = now + DRIFT_S
+    async with sessionmaker() as s:
+        counted, actual = (await s.execute(text("select counted, actual from ingress_budget_drift()"))).one()
+    if counted != actual:
+        log.error("ingress_budget_drift", counted=int(counted), actual=int(actual))
+        return {"drifted": 1}
+    return {"checked": 1}
 
 
 async def _after_recount_locked() -> None:
@@ -29,6 +56,18 @@ async def _before_recount_commit() -> None:
     """Runs as a recount is about to commit its corrections. A no-op; the tests fail a transaction here."""
 
 
+async def _tried(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID) -> None:
+    """A recount's try, marked: its candidates come least lately tried first, so one that keeps failing never keeps the
+    other tenants out (the owner's review of the 2b-4b M1 checkpoint 4). Never fails the pass."""
+    try:
+        async with sessionmaker() as s, s.begin():
+            await tenant_scope(s, tenant_id)
+            await s.execute(text("update tenant_event_counters set recount_tried_at = statement_timestamp() "
+                                 "where tenant_id = :t"), {"t": tenant_id})  # fmt: skip
+    except Exception as e:
+        log.error("event_recount_try_unmarked", tenant_id=str(tenant_id), error=type(e).__name__)
+
+
 async def recount_once(sessionmaker: async_sessionmaker[AsyncSession], *, batch: int = BATCH) -> dict[str, int]:
     """The tenants due a recount, each recounted: how many, and how many rows were corrected. A recount that fails is
     logged by type and leaves its tenant for a later cycle."""
@@ -36,13 +75,16 @@ async def recount_once(sessionmaker: async_sessionmaker[AsyncSession], *, batch:
         query = text("select tenant_id from recount_candidates(:n)")
         picked: list[uuid.UUID] = list((await s.execute(query, {"n": batch})).scalars().all())
     counts: Counter[str] = Counter()
-    for tenant_id in picked:
-        try:
-            counts["drifted"] += await recount_tenant(sessionmaker, tenant_id)
-            counts["recounted"] += 1
-        except Exception as e:
-            log.error("event_recount_failed", tenant_id=str(tenant_id), error=type(e).__name__)
-            counts["error"] += 1
+    with budget.passing("recount") as admitted:
+        for tenant_id in admitted(picked, key=lambda tenant: tenant):
+            await _tried(sessionmaker, tenant_id)
+            try:
+                counts["drifted"] += await recount_tenant(sessionmaker, tenant_id)
+                counts["recounted"] += 1
+            except Exception as e:
+                log.error("event_recount_failed", tenant_id=str(tenant_id), error=type(e).__name__)
+                counts["error"] += 1
+    admitted.reported(counts, full=len(picked) >= batch)
     return dict(counts)
 
 

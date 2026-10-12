@@ -9,7 +9,7 @@ in `cel.evaluate`, which resolves it and checks the types then (§4.2)."""
 
 import math
 from collections.abc import Collection, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from dewpoint.engine.canonical import canonical_json
@@ -174,6 +174,8 @@ class Measure:
     longest_string: int
     nodes: int  # every value bound, containers included: what binding them costs grows with this (spec §5.6)
     handles: bool = False  # a handle, or the marker, anywhere in them: they're never evaluated here (2b spec §4.2)
+    # what measuring them serialized: their JSON within the caps, nothing past them (#18), charged by its bytes
+    serialized: int = field(default=0, compare=False)
 
     @property
     def within_caps(self) -> bool:
@@ -187,20 +189,41 @@ class Measure:
 
 
 def measure(bindings: Mapping[str, Any]) -> Measure:
-    sizes = [len(canonical_json(v)) for v in bindings.values()]
-    lists = maps = strings = nodes = 0
+    """What routing reads of one view's bindings. Exact within the local caps; past one, its sizes are lower bounds that
+    pass it, found without serializing what passes it (#18: each view's measure serialized every value it bound, a
+    shared 1.8 MiB string once per item, a cost the yield budget, charging `nodes`, never counted). `nodes` and
+    `handles` are always exact: the walk visits every value, as binding them did. So the route, the budget's charge and
+    the handles seen are what they were, and no workflow command changes."""
+    least: list[int] = []  # each value's canonical JSON bytes at least: characters, quotes and punctuation
+    lists = maps = strings = nodes = seen = 0
     handles = False
-    stack = list(bindings.values())
-    while stack:
-        v = stack.pop()
-        nodes += 1
-        if isinstance(v, dict):
-            maps = max(maps, len(v))
-            handles = handles or MARKER in v
-            stack.extend(v.values())
-        elif isinstance(v, list):
-            lists = max(lists, len(v))
-            stack.extend(v)
-        elif isinstance(v, str):
-            strings = max(strings, len(v.encode()))
-    return Measure(sum(sizes), max(sizes, default=0), lists, maps, strings, nodes, handles)
+    for value in bindings.values():
+        bound, stack = 0, [value]
+        while stack:
+            v = stack.pop()
+            nodes += 1
+            if isinstance(v, dict):
+                maps = max(maps, len(v))
+                handles = handles or MARKER in v
+                bound += 1 + sum((len(k) if isinstance(k, str) else 1) + 4 for k in v)  # {, "k":, and , or }
+                stack.extend(v.values())
+            elif isinstance(v, list):
+                lists = max(lists, len(v))
+                bound += 1 + len(v)  # [, and , or ]
+                stack.extend(v)
+            elif isinstance(v, str):
+                bound += 2 + len(v)
+                past = seen + bound > caps.TOTAL_JSON or len(v) > caps.STRING_BYTES or not _within(lists, maps)
+                strings = max(strings, len(v) if past else len(v.encode()))  # characters: at most its bytes
+            else:
+                bound += 1
+        least.append(bound)
+        seen += bound
+    if seen > caps.TOTAL_JSON or strings > caps.STRING_BYTES or not _within(lists, maps):
+        return Measure(seen, max(least, default=0), lists, maps, strings, nodes, handles)
+    sizes = [len(canonical_json(v)) for v in bindings.values()]  # within the caps: a few times TOTAL_JSON at most
+    return Measure(sum(sizes), max(sizes, default=0), lists, maps, strings, nodes, handles, serialized=sum(sizes))
+
+
+def _within(lists: int, maps: int) -> bool:
+    return lists <= caps.LIST_LENGTH and maps <= caps.MAP_ENTRIES

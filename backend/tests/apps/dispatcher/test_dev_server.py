@@ -106,11 +106,15 @@ async def test_a_namespace_that_doesnt_exist_never_reads_as_an_absence(
 async def test_already_started_is_verified_from_the_real_history(
     server, ready, api_sessionmaker, dispatch_sessionmaker, api_settings
 ) -> None:
+    """The same start sent again carries the same recorded request id: Temporal answers with the execution it has.
+    Sent under another request id, it's refused as already started, and the real describe tells them apart: the first
+    run's started event carries the recorded id, never the other (the start-check slice)."""
     ctx, wf = ready
     found = await starting(dispatch_sessionmaker, await admitted(api_sessionmaker, ctx, wf, "a"), api_settings)
     assert (await dispatch.start(server.client, found)).kind == "started"
-    again = await dispatch.start(server.client, found)  # the same start, sent again: Temporal refuses the duplicate
-    assert again.kind == "started" and again.at is not None
+    assert (await dispatch.start(server.client, found)).kind == "started"
+    other = dataclasses.replace(found, start_request_id=uuid.uuid4())
+    assert (await dispatch.start(server.client, other)).kind == "uncertain"  # never taken for this request's
 
 
 async def test_the_reconciler_records_a_real_termination(
@@ -139,9 +143,7 @@ async def test_the_reconciler_follows_continue_as_new_to_the_latest_executions_e
     await current(dispatch_sessionmaker)
     await ready_workers(owner_sessionmaker)
     found = await starting(dispatch_sessionmaker, await admitted(api_sessionmaker, ctx, wf, "a"), api_settings)
-    eager = dispatch.Starting(
-        found.request_id, found.tenant_id, dataclasses.replace(found.start, checkpoint_events=120)
-    )
+    eager = dataclasses.replace(found, start=dataclasses.replace(found.start, checkpoint_events=120))  # its id kept
     workflow_id = run_workflow_id(str(ctx.tenant_id), str(found.request_id))
     async with serving(server.client, NoEndWrite(worker_sessionmaker, KEYS)):  # type: ignore[arg-type]
         outcome = await dispatch.start(server.client, eager)

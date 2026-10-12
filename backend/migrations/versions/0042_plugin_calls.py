@@ -7,9 +7,13 @@ each tenant taking its turn, only calls whose connection type is declared as the
 delete calls a minute past their expiry through `plugin_calls_sweep()`. A call names only its own tenant's connection.
 Chained from 0041 (D25)."""
 
+from collections.abc import Callable
+
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql as pg
+
+from migrations.online import exists, index, online, step
 
 revision = "0042"
 down_revision = "0041"
@@ -42,58 +46,76 @@ $$"""
 
 
 def upgrade() -> None:
-    # A call names its own tenant's connection only (the 3a-2 review's finding 10): the key is (tenant, connection).
-    op.create_unique_constraint("connections_tenant_id_id", "connections", ["tenant_id", "id"])
-    op.create_table(
-        "plugin_calls",
-        sa.Column("id", pg.UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")),
-        sa.Column("tenant_id", pg.UUID(as_uuid=True), sa.ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False),
-        sa.Column("kind", sa.String(16), nullable=False),
-        sa.Column("node_ref", sa.String(140), nullable=True),  # options: the node type version
-        sa.Column("field", sa.String(64), nullable=True),  # options: its options field
-        sa.Column("connection_type", sa.String(83), nullable=True),  # verify: the type
-        sa.Column("connection_id", pg.UUID(as_uuid=True), nullable=True),
-        sa.Column("connection_revision", sa.Integer, nullable=True),  # the revision the API read
-        # The synced declaration of the connection's type: only a worker that has the same serves the call (finding 8).
-        sa.Column("type_hash", sa.String(64), nullable=True),
-        sa.Column("query", sa.String(200), nullable=False, server_default=""),
-        sa.Column("state", sa.String(16), nullable=False, server_default="pending"),
-        sa.Column("claim_token", pg.UUID(as_uuid=True), nullable=True),
-        sa.Column("lease_until", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
-        # The answer, sealed under the tenant's data key (purpose `plugin.call`, the call's id as context).
-        sa.Column("result_ct", sa.LargeBinary, nullable=True),
-        sa.Column("error", sa.String(64), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
-        sa.CheckConstraint("kind IN ('options', 'verify')", name="plugin_calls_kind"),
-        sa.CheckConstraint(
-            "(kind = 'options') = (node_ref IS NOT NULL AND field IS NOT NULL)", name="plugin_calls_options"
+    with online() as conn:  # its key's index built first, concurrently; the rest in one step (2b-4b, D15)
+        index(
+            conn,
+            "0042 connections_tenant_id_id",
+            "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS connections_tenant_id_id ON connections (tenant_id, id)",
+        )
+        step(conn, "0042 connections_tenant_id_id attached",
+             "ALTER TABLE connections ADD CONSTRAINT connections_tenant_id_id UNIQUE USING INDEX connections_tenant_id_id",
+             done=exists("constraint", "connections_tenant_id_id"))  # fmt: skip
+        step(conn, "0042 plugin calls", *_actions(), done=exists("relation", "plugin_calls"))
+
+
+def _actions() -> list[str | Callable[[], object]]:
+    """The upgrade's operations, in their order, each an action of its one step."""
+    return [
+        # A call names its own tenant's connection only (the 3a-2 review's finding 10): the key is (tenant, connection).
+        lambda: op.create_table(
+            "plugin_calls",
+            sa.Column("id", pg.UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")),
+            sa.Column(
+                "tenant_id", pg.UUID(as_uuid=True), sa.ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+            ),
+            sa.Column("kind", sa.String(16), nullable=False),
+            sa.Column("node_ref", sa.String(140), nullable=True),  # options: the node type version
+            sa.Column("field", sa.String(64), nullable=True),  # options: its options field
+            sa.Column("connection_type", sa.String(83), nullable=True),  # verify: the type
+            sa.Column("connection_id", pg.UUID(as_uuid=True), nullable=True),
+            sa.Column("connection_revision", sa.Integer, nullable=True),  # the revision the API read
+            # The synced declaration of the connection's type: only a worker that has the same serves the call (finding 8).
+            sa.Column("type_hash", sa.String(64), nullable=True),
+            sa.Column("query", sa.String(200), nullable=False, server_default=""),
+            sa.Column("state", sa.String(16), nullable=False, server_default="pending"),
+            sa.Column("claim_token", pg.UUID(as_uuid=True), nullable=True),
+            sa.Column("lease_until", sa.DateTime(timezone=True), nullable=True),
+            sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+            # The answer, sealed under the tenant's data key (purpose `plugin.call`, the call's id as context).
+            sa.Column("result_ct", sa.LargeBinary, nullable=True),
+            sa.Column("error", sa.String(64), nullable=True),
+            sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+            sa.CheckConstraint("kind IN ('options', 'verify')", name="plugin_calls_kind"),
+            sa.CheckConstraint(
+                "(kind = 'options') = (node_ref IS NOT NULL AND field IS NOT NULL)", name="plugin_calls_options"
+            ),
+            sa.CheckConstraint(
+                "(kind = 'verify') = (connection_type IS NOT NULL AND connection_id IS NOT NULL)",
+                name="plugin_calls_verify",
+            ),
+            sa.CheckConstraint(
+                "(connection_id IS NULL) = (connection_revision IS NULL AND type_hash IS NULL)",
+                name="plugin_calls_revision",
+            ),
+            sa.CheckConstraint("(connection_revision IS NULL) = (type_hash IS NULL)", name="plugin_calls_type_hash"),
+            sa.ForeignKeyConstraint(
+                ["tenant_id", "connection_id"], ["connections.tenant_id", "connections.id"], ondelete="CASCADE"
+            ),
+            sa.CheckConstraint("state IN ('pending', 'claimed', 'done', 'failed')", name="plugin_calls_state"),
+            sa.CheckConstraint(
+                "(state = 'claimed') = (claim_token IS NOT NULL AND lease_until IS NOT NULL)", name="plugin_calls_claim"
+            ),
+            sa.CheckConstraint("state <> 'done' OR result_ct IS NOT NULL", name="plugin_calls_done"),
+            sa.CheckConstraint("state <> 'failed' OR error IS NOT NULL", name="plugin_calls_failed"),
         ),
-        sa.CheckConstraint(
-            "(kind = 'verify') = (connection_type IS NOT NULL AND connection_id IS NOT NULL)",
-            name="plugin_calls_verify",
+        lambda: op.create_index(
+            "plugin_calls_due",
+            "plugin_calls",
+            ["created_at"],
+            postgresql_where=sa.text("state IN ('pending', 'claimed')"),
         ),
-        sa.CheckConstraint(
-            "(connection_id IS NULL) = (connection_revision IS NULL AND type_hash IS NULL)",
-            name="plugin_calls_revision",
-        ),
-        sa.CheckConstraint("(connection_revision IS NULL) = (type_hash IS NULL)", name="plugin_calls_type_hash"),
-        sa.ForeignKeyConstraint(
-            ["tenant_id", "connection_id"], ["connections.tenant_id", "connections.id"], ondelete="CASCADE"
-        ),
-        sa.CheckConstraint("state IN ('pending', 'claimed', 'done', 'failed')", name="plugin_calls_state"),
-        sa.CheckConstraint(
-            "(state = 'claimed') = (claim_token IS NOT NULL AND lease_until IS NOT NULL)", name="plugin_calls_claim"
-        ),
-        sa.CheckConstraint("state <> 'done' OR result_ct IS NOT NULL", name="plugin_calls_done"),
-        sa.CheckConstraint("state <> 'failed' OR error IS NOT NULL", name="plugin_calls_failed"),
-    )
-    op.create_index(
-        "plugin_calls_due", "plugin_calls", ["created_at"], postgresql_where=sa.text("state IN ('pending', 'claimed')")
-    )
-    op.execute(CANDIDATES)
-    op.execute(SWEEP)
-    for statement in (
+        CANDIDATES,
+        SWEEP,
         "ALTER TABLE plugin_calls ENABLE ROW LEVEL SECURITY",
         "ALTER TABLE plugin_calls FORCE ROW LEVEL SECURITY",
         "CREATE POLICY plugin_calls_scope ON plugin_calls TO dewpoint_api, dewpoint_worker "
@@ -105,8 +127,7 @@ def upgrade() -> None:
         "GRANT EXECUTE ON FUNCTION plugin_call_candidates(text[], text[], text[], integer) TO dewpoint_worker",
         "REVOKE ALL ON FUNCTION plugin_calls_sweep() FROM PUBLIC",
         "GRANT EXECUTE ON FUNCTION plugin_calls_sweep() TO dewpoint_worker",
-    ):
-        op.execute(statement)
+    ]
 
 
 def downgrade() -> None:

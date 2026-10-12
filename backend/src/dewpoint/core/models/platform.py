@@ -2,7 +2,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Integer, SmallInteger, String, Text, func
+from sqlalchemy import Boolean, DateTime, Float, Integer, SmallInteger, String, Text, func
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -19,6 +19,10 @@ class PlatformSettings(Base):
     temporal_namespace: Mapped[str] = mapped_column(Text)
     production_runs: Mapped[bool] = mapped_column(Boolean, default=False)
     max_concurrent_runs: Mapped[int] = mapped_column(SmallInteger, default=5)  # per tenant, unless its limits row says
+    # The ingress capacity (2b-4b M3): none set until the platform's admin sets it (`set_ingress_capacity`)
+    ingress_starts_per_s: Mapped[float | None] = mapped_column(Float)  # sustained, measured on its own Temporal
+    ingress_headroom: Mapped[float | None] = mapped_column(Float)  # the share of them ingress may use
+    ingress_queue_wait_s: Mapped[int | None] = mapped_column(Integer)  # the agreed wait a tenant's queue stands for
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -54,6 +58,18 @@ class TickCutover(Base):
     last dispatcher from before stopped; a tenant's key made before it never retires."""
 
     __tablename__ = "tick_cutover"
+    id: Mapped[int] = mapped_column(SmallInteger, primary_key=True, default=1)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ScheduleInventoryCutover(Base):
+    """The schedule inventory's cutover (the owner's D15 ruling on the 2b-4b M1 checkpoint): from it, every writer from
+    before migration 0040 is gone (the operator's attestation), so no schedule is added that an older dispatcher may
+    sync under its own id. Recorded once, after its catch-up, by `schedules inventory-cutover`; before it, migration
+    0040 captures every schedule added as it backfilled those already there, and no dispatcher pass or erasure stage
+    that relies on the inventory runs."""
+
+    __tablename__ = "schedule_inventory_cutover"
     id: Mapped[int] = mapped_column(SmallInteger, primary_key=True, default=1)
     at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

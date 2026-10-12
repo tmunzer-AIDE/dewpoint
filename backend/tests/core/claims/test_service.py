@@ -3,11 +3,14 @@
 the existing claim's decrypted value, never a digest of it (#28); only its owner, or a run it was granted to, reads it;
 a run grants only what it owns or holds a grant on."""
 
+import re
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
 
 from dewpoint.core.claims import service
 from dewpoint.core.claims.cipher import ClaimCipher
@@ -174,3 +177,125 @@ async def test_a_claim_of_another_tenant_or_none_at_all_is_unavailable(owner_ses
         with pytest.raises(service.ClaimUnavailableError) as raised:
             await fetch(worker_sessionmaker, t, run, claim_id)
         assert "s3cret" not in str(raised.value)
+
+
+@contextmanager
+def statements(sm: Any) -> Iterator[list[str]]:
+    """The statements `sm`'s engine executes meanwhile: a crossing's cost in work, not time (the M2 measurement: each
+    claim was read, then checked, statement by statement)."""
+    engine, seen = sm.kw["bind"].sync_engine, []
+
+    def counted(_conn: Any, _cursor: Any, statement: str, *_: Any) -> None:
+        seen.append(statement)
+
+    event.listen(engine, "before_cursor_execute", counted)
+    try:
+        yield seen
+    finally:
+        event.remove(engine, "before_cursor_execute", counted)
+
+
+async def many(owner: Any, tenant: uuid.UUID, run: uuid.UUID, n: int) -> list[uuid.UUID]:
+    """`n` output claims `run` owns, written at once (their ciphertext a stand-in: a grant never opens one)."""
+    async with owner() as s, s.begin():
+        return list((await s.execute(text(
+            "insert into step_outputs (id, tenant_id, owner_run_id, root_run_id, sensitive_pointers, ciphertext, kind) "
+            "select gen_random_uuid(), :t, :r, :r, '[]', '\\x00', 'output' from generate_series(1, :n) returning id"
+        ), {"t": tenant, "r": run, "n": n})).scalars())  # fmt: skip
+
+
+async def test_a_grant_checks_its_claims_a_thousand_a_statement(owner_sessionmaker, worker_sessionmaker) -> None:
+    """The M2 measurement and the owner's ruling (2b-4b M3): a grant checked each claim alone, about 7 ms each, and a
+    crossing of 7,500 realistic claims timed out. Its checks read a thousand claims a statement now: 2,000 the granter
+    owns and 500 it holds by grant, checked in a handful of statements, granted whole."""
+    tenant, parent, holder, child = await a_tenant(owner_sessionmaker), uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    owned, held = (
+        await many(owner_sessionmaker, tenant, holder, 2_000),
+        await many(owner_sessionmaker, tenant, parent, 500),
+    )
+    async with worker_sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant)
+        await service.grant(s, tenant, granted_by=parent, to=holder, claim_ids=held, root_run_id=parent)
+    with statements(worker_sessionmaker) as seen:
+        async with worker_sessionmaker() as s, s.begin():
+            await tenant_scope(s, tenant)
+            await service.grant(s, tenant, granted_by=holder, to=child, claim_ids=[*owned, *held], root_run_id=holder)
+    async with owner_sessionmaker() as s:
+        granted = (await s.execute(text("select count(*) from claim_grants where run_id = :c"), {"c": child})).scalar()
+    assert granted == 2_500
+    assert len(seen) <= 15, len(seen)  # 3 chunks: their reads, their grants checked, their inserts; and the scope
+    sized = [re.sub(r"octet_length\([^)]*\)", "", q) for q in seen]  # a size, never the ciphertext itself
+    assert not [q for q in sized if "ciphertext" in q]  # the fresh M3 review's I4: checked, never read
+
+
+async def opened(sm: Any, tenant: uuid.UUID, reader: uuid.UUID, ids: list[uuid.UUID]) -> list[dict[uuid.UUID, Any]]:
+    """The groups `fetch_groups` opens, in one session."""
+    async with sm() as s, s.begin():
+        await tenant_scope(s, tenant)
+        return [group async for group in service.fetch_groups(s, CIPHER, tenant, run_id=reader, claim_ids=ids)]
+
+
+async def test_many_claims_are_read_a_thousand_a_statement_each_opened_once(
+    owner_sessionmaker, worker_sessionmaker
+) -> None:  # fmt: skip
+    """A run reads 1,200 claims at once (a crossing's closure): 1,000 it owns, 200 it holds by grant, read in a few
+    statements, each opened once, each its own value."""
+    tenant, reader, other = await a_tenant(owner_sessionmaker), uuid.uuid4(), uuid.uuid4()
+    mine = [claim(reader, {"n": n}, ()) for n in range(1_000)]
+    theirs = [claim(other, {"n": 1_000 + n}, ()) for n in range(200)]
+    async with worker_sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant)
+        for new in [*mine, *theirs]:
+            await service.write_output(s, CIPHER, tenant, new, kind="output", step_id=None, iteration_key=None,
+                                       attempt=None)  # fmt: skip
+        await service.grant(s, tenant, granted_by=other, to=reader, claim_ids=[c.id for c in theirs],
+                            root_run_id=other)  # fmt: skip
+    ids = [c.id for c in [*mine, *theirs]]
+    with statements(worker_sessionmaker) as seen:
+        groups = await opened(worker_sessionmaker, tenant, reader, ids)
+    found = {c: stored for group in groups for c, stored in group.items()}
+    assert {c: found[c].value["n"] for c in ids} == {c.id: c.value["n"] for c in [*mine, *theirs]}
+    assert len(found) == sum(len(group) for group in groups)  # each opened once
+    assert len(seen) <= 10, len(seen)
+
+
+async def test_claims_are_opened_in_groups_bounded_by_their_bytes(
+    owner_sessionmaker, worker_sessionmaker, monkeypatch
+) -> None:  # fmt: skip
+    """The fresh M3 review's I4: a crossing's closure read a thousand claims' ciphertexts and values at once, however
+    large (10,000 of 200 KiB each held gigabytes). Their readability is checked from their sizes alone; then they're
+    read and opened a group at a time, its ciphertexts within `GROUP_BYTES` (a claim larger alone in its own)."""
+    tenant, reader = await a_tenant(owner_sessionmaker), uuid.uuid4()
+    made = [claim(reader, {"n": n, "pad": "x" * 1_000}, ()) for n in range(30)] + [
+        claim(reader, {"big": "y" * 9_000}, ())
+    ]
+    for new in made:
+        await write(worker_sessionmaker, tenant, new)
+    monkeypatch.setattr(service, "GROUP_BYTES", 4_096)
+    async with owner_sessionmaker() as s:
+        sizes = dict((await s.execute(text("select id, octet_length(ciphertext) from step_outputs where id = any(:i)"),
+                                      {"i": [c.id for c in made]})).all())  # fmt: skip
+    groups = await opened(worker_sessionmaker, tenant, reader, [c.id for c in made])
+    assert sorted(c for group in groups for c in group) == sorted(c.id for c in made)
+    assert len(groups) >= 10
+    assert all(sum(sizes[c] for c in group) <= 4_096 or len(group) == 1 for group in groups)
+
+
+async def test_reading_many_claims_refuses_them_all_for_one_it_may_not_read(
+    owner_sessionmaker, worker_sessionmaker
+) -> None:  # fmt: skip
+    """As one read does: a claim the run neither owns nor holds, one that isn't there, or an envelope refuses the
+    whole read."""
+    tenant, reader, other = await a_tenant(owner_sessionmaker), uuid.uuid4(), uuid.uuid4()
+    mine, theirs = claim(reader), claim(other)
+    for new in (mine, theirs):
+        await write(worker_sessionmaker, tenant, new)
+    async with worker_sessionmaker() as s, s.begin():
+        await tenant_scope(s, tenant)
+        envelope = await service.write_envelope(s, CIPHER, tenant, request_id=reader, envelope={"x": 1})
+    for refused in (theirs.id, uuid.uuid4(), envelope):
+        with pytest.raises(service.ClaimUnavailableError):
+            async with worker_sessionmaker() as s, s.begin():
+                await tenant_scope(s, tenant)
+                async for _ in service.fetch_groups(s, CIPHER, tenant, run_id=reader, claim_ids=[mine.id, refused]):
+                    pytest.fail("nothing is opened before every claim is checked")

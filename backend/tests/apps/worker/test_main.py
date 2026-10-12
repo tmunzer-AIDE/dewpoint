@@ -2,6 +2,7 @@
 """`dewpoint worker`'s workers."""
 
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -28,6 +29,7 @@ def settings(**overrides: Any) -> Settings:
         database_url="postgresql+asyncpg://u:p@localhost/x",
         kek_b64="A" * 43 + "=",
         public_origin="https://dewpoint.test",
+        temporal_insecure_dev=True,  # §10.4: plaintext, in a deployment recorded as development (`recorded` below)
         **overrides,
     )
 
@@ -68,7 +70,8 @@ async def test_the_worker_connects_with_the_tenant_codec(monkeypatch: pytest.Mon
     class Engine:
         async def dispose(self) -> None: ...
 
-    async def recorded(*args: object) -> None: ...
+    async def recorded(*args: object) -> object:
+        return SimpleNamespace(environment="development")
 
     async def connect(*args: object, **kwargs: Any) -> None:
         connected.update(kwargs)
@@ -108,7 +111,8 @@ async def test_a_worker_that_fails_its_self_check_never_polls(monkeypatch: pytes
     class Engine:
         async def dispose(self) -> None: ...
 
-    async def recorded(*args: object) -> None: ...
+    async def recorded(*args: object) -> object:
+        return SimpleNamespace(environment="development")
 
     async def report(healthy: bool) -> None:
         reports.append(healthy)

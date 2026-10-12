@@ -14,10 +14,13 @@ the tenants whose events it deletes; every tenant's id and status, to sweep each
 `retention_sweeps`, which the dispatcher reads for the SLO's check, with its counts per tenant in
 `retention_sweep_tenants`."""
 
+from uuid import UUID
+
 import sqlalchemy as sa
 from alembic import op
-from sqlalchemy import text
 from sqlalchemy.dialects import postgresql as pg
+
+from migrations.online import batches, exists, grants, index, online, plain, step, ungranted
 
 revision = "0037"
 down_revision = "0036"
@@ -120,15 +123,94 @@ UNROLE = [  # after retention_sweeps is dropped, with its sequence and their gra
     "REVOKE ALL ON SCHEMA public FROM dewpoint_retention",
     "DROP ROLE IF EXISTS dewpoint_retention",
 ]
-BACKFILL = """WITH RECURSIVE tree AS (
-  SELECT id, id AS root FROM runs WHERE parent_run_id IS NULL
-  UNION ALL
-  SELECT r.id, t.root FROM runs r JOIN tree t ON r.parent_run_id = t.id
+# Online (2b-4b, D15): existing runs backfilled in committed batches, each run walked up to the first ancestor with its
+# root (or to its root), while new runs get theirs from the trigger, which walks a parent not backfilled yet the same way;
+# its original body is restored once every run has its root. A walk stops at 1,000 levels, so a cycle can't hold it:
+# sub-flows nest at most 5 deep (`MAX_SUBFLOW_DEPTH`).
+WALKING = """CREATE OR REPLACE FUNCTION runs_set_root() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.parent_run_id IS NULL THEN
+    NEW.root_run_id := NEW.id;
+  ELSE
+    NEW.root_run_id := (WITH RECURSIVE up (id, parent, root, depth) AS (
+      SELECT id, parent_run_id, root_run_id, 0 FROM runs WHERE id = NEW.parent_run_id AND tenant_id = NEW.tenant_id
+      UNION ALL
+      SELECT r.id, r.parent_run_id, r.root_run_id, up.depth + 1 FROM runs r JOIN up ON r.id = up.parent
+      WHERE up.root IS NULL AND up.depth < 1000
+    ) SELECT coalesce(root, id) FROM up WHERE root IS NOT NULL OR parent IS NULL LIMIT 1);
+    NEW.root_run_id := COALESCE(NEW.root_run_id, NEW.parent_run_id);
+  END IF;
+  RETURN NEW;
+END $$"""
+BACKFILL_BOUNDS = (  # the batch's last id (uuid has no max()) and its size
+    "WITH b AS (SELECT id FROM runs WHERE root_run_id IS NULL AND id > :after ORDER BY id LIMIT :n) "
+    "SELECT (SELECT id FROM b ORDER BY id DESC LIMIT 1), (SELECT count(*) FROM b)"
 )
-UPDATE runs SET root_run_id = tree.root FROM tree WHERE runs.id = tree.id"""
+BACKFILL = """WITH RECURSIVE up (id, at, parent, root, depth) AS (
+  SELECT id, id, parent_run_id, root_run_id, 0 FROM runs WHERE root_run_id IS NULL AND id > :after AND id <= :hi
+  UNION ALL
+  SELECT up.id, r.id, r.parent_run_id, r.root_run_id, up.depth + 1 FROM up JOIN runs r ON r.id = up.parent
+  WHERE up.root IS NULL AND up.parent IS NOT NULL AND up.depth < 1000
+)
+UPDATE runs SET root_run_id = coalesce(up.root, up.at) FROM up
+WHERE runs.id = up.id AND (up.root IS NOT NULL OR up.parent IS NULL)"""
+CHECKED = "runs_root_run_id_not_null"  # NOT NULL through a validated check: setting it then reads no row
+NOT_NULL = "SELECT attnotnull FROM pg_attribute WHERE attrelid = 'public.runs'::regclass AND attname = 'root_run_id'"
+TENANT_RETENTION = [
+    "ALTER TABLE tenant_retention ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE tenant_retention FORCE ROW LEVEL SECURITY",
+    "CREATE POLICY tenant_retention_scope ON tenant_retention TO dewpoint_api, dewpoint_dispatch "
+    "USING (tenant_id = app_tenant_id()) WITH CHECK (tenant_id = app_tenant_id())",
+    "GRANT SELECT, INSERT ON tenant_retention TO dewpoint_api",
+    "GRANT SELECT ON tenant_retention TO dewpoint_dispatch",  # the dev CLI's retry, under its cutoff
+    "GRANT UPDATE (runs_days, updated_by, updated_at) ON tenant_retention TO dewpoint_api",
+]
 
 
 def upgrade() -> None:
+    # Online (2b-4b, D15), in the original's order: each step's catalogue changes in one transaction; the backfill in
+    # batches; `NOT NULL` through a check validated first; the key added `NOT VALID`, then validated; the indexes built
+    # concurrently. None of these blocks normal reads or writes for longer than a step.
+    with online() as conn:
+        step(conn, "0037 tenant_retention", _tenant_retention, *ungranted(*TENANT_RETENTION),
+             done=exists("relation", "tenant_retention"))  # fmt: skip
+        step(conn, "0037 runs.root_run_id",
+             lambda: op.add_column("runs", sa.Column("root_run_id", pg.UUID(as_uuid=True), nullable=True)),
+             WALKING, ROOTS[1], done=exists("column", "root_run_id", "runs"))  # fmt: skip
+        batches(conn, "0037 runs.root_run_id backfill", BACKFILL_BOUNDS, BACKFILL, first=UUID(int=0))
+        step(conn, "0037 runs.root_run_id checked",
+             f"ALTER TABLE runs ADD CONSTRAINT {CHECKED} CHECK (root_run_id IS NOT NULL) NOT VALID",
+             done=f"SELECT ({NOT_NULL}) OR ({exists('constraint', CHECKED)})")  # fmt: skip
+        plain(conn, "0037 runs.root_run_id validated", f"ALTER TABLE runs VALIDATE CONSTRAINT {CHECKED}", done=NOT_NULL)
+        step(conn, "0037 runs.root_run_id not null", "ALTER TABLE runs ALTER COLUMN root_run_id SET NOT NULL",
+             f"ALTER TABLE runs DROP CONSTRAINT {CHECKED}", done=NOT_NULL)  # fmt: skip
+        step(conn, "0037 runs_root_run",
+             "ALTER TABLE runs ADD CONSTRAINT runs_root_run FOREIGN KEY (root_run_id, tenant_id) "
+             "REFERENCES runs (id, tenant_id) NOT VALID", done=exists("constraint", "runs_root_run"))  # fmt: skip
+        plain(conn, "0037 runs_root_run validated", "ALTER TABLE runs VALIDATE CONSTRAINT runs_root_run")
+        index(
+            conn, "0037 runs_tree", "CREATE INDEX CONCURRENTLY IF NOT EXISTS runs_tree ON runs (tenant_id, root_run_id)"
+        )
+        step(conn, "0037 the runs' tree", ROOTS[0].replace("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION", 1),
+             *ROOTS[2:], lambda: op.add_column("runs", sa.Column("checked_at", sa.DateTime(timezone=True), nullable=True)),
+             done=exists("trigger", "runs_tree", "runs"))  # fmt: skip
+        index(conn, "0037 runs_open_subruns",
+              "CREATE INDEX CONCURRENTLY IF NOT EXISTS runs_open_subruns ON runs (checked_at, id) "
+              "WHERE status = 'running' AND parent_run_id IS NOT NULL")  # fmt: skip
+        # The retention role, then its policies, a step a table (a step locks at most one table in use; a policy
+        # naming a role with no grant opens nothing), then the sweeps' tables, and last every grant of the migration,
+        # once both of its triggers are there (grants lock no table).
+        step(conn, "0037 the retention role", ROLE[0])
+        for statement in (s for s in ROLE if s.startswith("CREATE POLICY")):
+            table = statement.split(" ON ", 1)[1].split()[0]
+            step(conn, f"0037 {table} for retention", statement,
+                 done=exists("policy", statement.split()[2], table))  # fmt: skip
+        step(conn, "0037 retention", *ungranted(*ORPHANS), _retention_sweeps, _retention_sweep_tenants,
+             *ungranted(*SWEEP_SCOPE), *grants(*TENANT_RETENTION, *ROLE, *ORPHANS, *SWEEP_SCOPE),
+             done=exists("relation", "retention_sweeps"))  # fmt: skip
+
+
+def _tenant_retention() -> None:
     op.create_table(
         "tenant_retention",
         sa.Column("tenant_id", pg.UUID(as_uuid=True), sa.ForeignKey("tenants.id"), primary_key=True),
@@ -137,31 +219,9 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.CheckConstraint("runs_days BETWEEN 1 AND 365", name="tenant_retention_bounds"),
     )
-    for statement in (
-        "ALTER TABLE tenant_retention ENABLE ROW LEVEL SECURITY",
-        "ALTER TABLE tenant_retention FORCE ROW LEVEL SECURITY",
-        "CREATE POLICY tenant_retention_scope ON tenant_retention TO dewpoint_api, dewpoint_dispatch "
-        "USING (tenant_id = app_tenant_id()) WITH CHECK (tenant_id = app_tenant_id())",
-        "GRANT SELECT, INSERT ON tenant_retention TO dewpoint_api",
-        "GRANT SELECT ON tenant_retention TO dewpoint_dispatch",  # the dev CLI's retry, under its cutoff
-        "GRANT UPDATE (runs_days, updated_by, updated_at) ON tenant_retention TO dewpoint_api",
-    ):
-        op.execute(statement)
-    op.add_column("runs", sa.Column("root_run_id", pg.UUID(as_uuid=True), nullable=True))
-    conn = op.get_bind()
-    conn.execute(text("SET LOCAL row_security = off"))  # every tenant's runs: a role RLS applies to errors here
-    conn.execute(text(BACKFILL))
-    conn.execute(text("SET LOCAL row_security TO DEFAULT"))
-    op.alter_column("runs", "root_run_id", nullable=False)
-    op.create_foreign_key("runs_root_run", "runs", "runs", ["root_run_id", "tenant_id"], ["id", "tenant_id"])
-    op.create_index("runs_tree", "runs", ["tenant_id", "root_run_id"])
-    for statement in ROOTS:
-        op.execute(statement)
-    op.add_column("runs", sa.Column("checked_at", sa.DateTime(timezone=True), nullable=True))
-    op.create_index("runs_open_subruns", "runs", ["checked_at", "id"],
-                    postgresql_where=sa.text("status = 'running' AND parent_run_id IS NOT NULL"))  # fmt: skip
-    for statement in ORPHANS:
-        op.execute(statement)
+
+
+def _retention_sweeps() -> None:
     op.create_table(
         "retention_sweeps",
         sa.Column("id", sa.BigInteger, sa.Identity(), primary_key=True),
@@ -172,6 +232,9 @@ def upgrade() -> None:
         sa.Column("lag_s", sa.Float),  # how far past its cutoff the oldest data still stored is, at its end
         sa.CheckConstraint("(ended_at IS NULL) = (succeeded IS NULL)", name="retention_sweeps_ended"),
     )
+
+
+def _retention_sweep_tenants() -> None:
     op.create_table(  # a sweep's counts per tenant, kept by the batches that deleted, and whether its entry is written
         "retention_sweep_tenants",
         sa.Column(
@@ -183,8 +246,6 @@ def upgrade() -> None:
         sa.Column("failed", sa.Boolean, nullable=False, server_default=sa.false()),  # its sweep failed: kept, so a
         sa.Column("audited_at", sa.DateTime(timezone=True)),  # resumed sweep still ends unsuccessful
     )
-    for statement in [*ROLE, *SWEEP_SCOPE]:
-        op.execute(statement)
 
 
 def downgrade() -> None:

@@ -5,10 +5,11 @@ scope and its lifecycle lock (shared), in batches that each commit on their own,
 What goes, once past the tenant's cutoff: a terminal root's whole tree (its runs and their steps, its claims, grants and
 secret index, and its request with its envelope, together), never while any run of it is running or its request is
 queued or starting; a terminal request that never started, with its inputs; a terminal event, its endpoint's and its
-tenant's retained counters freed under their rows' locks (the lock order: tenant, endpoint, counter, event). Whatever
-the cutoff: an expired upload, and a schedule's tombstone once the sync recorded Temporal's schedule gone. Not by the
-cutoff, and not counted: a tick's record of its own ids after 31 days (2b-4a M4; identifiers only, the erasure's firing
-inventory, kept while Temporal may keep its execution).
+tenant's retained counters freed under their rows' locks (the lock order: tenant, endpoint, counter, event). Each
+item's failure counts, recovery reason and operator commands go with it (0050). Whatever the cutoff: an expired
+upload, and a schedule's tombstone once the sync recorded Temporal's schedule gone. Not by the cutoff, and not counted:
+a tick's record of its own ids after 31 days (2b-4a M4; identifiers only, the erasure's firing inventory, kept while
+Temporal may keep its execution).
 
 One sweep runs at a time; were two ever to, a tenant's batches still delete its trees and requests in turn, never in a
 deadlock. Each batch counts what it deleted, in its own transaction, so a sweep that stops loses no count: resumed, it
@@ -50,13 +51,15 @@ _UNSTARTED = text(
     "AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.id = q.id) ORDER BY q.ended_at, q.id LIMIT :n"
 )
 _CLAIMS = ("claim_grants", "step_outputs", "run_secret_index")  # by the tree's root
+# An item's failures for a kind of work, its recovery reason, an operator's commands on it (0050): gone with the item
+_TRACKING = ("work_failures", "recovery_items", "operator_commands")
 _EVENT_ENDPOINT = text(
     "SELECT endpoint_id FROM inbound_events WHERE status <> 'pending' AND ended_at <= :cutoff "
     "ORDER BY endpoint_id LIMIT 1"
 )
 _EVENTS = text(
     "DELETE FROM inbound_events WHERE id IN (SELECT id FROM inbound_events WHERE endpoint_id = :e "
-    "AND status <> 'pending' AND ended_at <= :cutoff ORDER BY ended_at, id LIMIT :n) RETURNING size_bytes"
+    "AND status <> 'pending' AND ended_at <= :cutoff ORDER BY ended_at, id LIMIT :n) RETURNING id, size_bytes"
 )
 _UPLOADS = text(
     "DELETE FROM csv_uploads WHERE id IN (SELECT id FROM csv_uploads WHERE expires_at <= statement_timestamp() "
@@ -127,6 +130,11 @@ async def _in_turn(s: AsyncSession, tenant_id: uuid.UUID) -> None:
     await s.execute(_IN_TURN, {"k": f"dewpoint:retention:{tenant_id}"})
 
 
+async def _untracked(s: AsyncSession, items: list[uuid.UUID]) -> None:
+    for table in _TRACKING:
+        await s.execute(text(f"DELETE FROM {table} WHERE item_id = ANY(:i)"), {"i": items})  # noqa: S608
+
+
 async def _trees(s: AsyncSession, tenant_id: uuid.UUID, cutoff: datetime, n: int) -> tuple[int, int]:
     roots: list[uuid.UUID] = list((await s.execute(_ROOTS, {"cutoff": cutoff, "n": n})).scalars())
     if not roots:
@@ -138,9 +146,10 @@ async def _trees(s: AsyncSession, tenant_id: uuid.UUID, cutoff: datetime, n: int
     # The request before its envelope (a restricted key), never one still pending: none is, as chosen.
     await s.execute(text("DELETE FROM run_requests WHERE id = ANY(:r)"), {"r": roots})
     await s.execute(text("DELETE FROM run_inputs WHERE root_run_id = ANY(:r)"), {"r": roots})
-    deleted = await s.execute(text("DELETE FROM runs WHERE root_run_id = ANY(:r) RETURNING id = root_run_id"),
-                              {"r": roots})  # steps go with them; a tree counts once, as its root  # fmt: skip
-    return len(roots), sum(1 for (root,) in deleted if root)
+    deleted = (await s.execute(text("DELETE FROM runs WHERE root_run_id = ANY(:r) RETURNING id, id = root_run_id"),
+                               {"r": roots})).all()  # steps go with them; a tree counts once, as its root  # fmt: skip
+    await _untracked(s, [*roots, *(run_id for run_id, _ in deleted)])
+    return len(roots), sum(1 for _, root in deleted if root)
 
 
 async def _unstarted(s: AsyncSession, tenant_id: uuid.UUID, cutoff: datetime, n: int) -> tuple[int, int]:
@@ -153,6 +162,7 @@ async def _unstarted(s: AsyncSession, tenant_id: uuid.UUID, cutoff: datetime, n:
     count = len(deleted.all())
     for table in ("run_inputs", *_CLAIMS):  # admission's claims and its seeded secret index, rooted at the request
         await s.execute(text(f"DELETE FROM {table} WHERE root_run_id = ANY(:r)"), {"r": ids})  # noqa: S608
+    await _untracked(s, ids)
     return len(ids), count
 
 
@@ -163,8 +173,10 @@ async def _events(s: AsyncSession, tenant_id: uuid.UUID, cutoff: datetime, n: in
     await s.execute(text("SELECT id FROM webhook_endpoints WHERE id = :e FOR UPDATE"), {"e": endpoint})
     await s.execute(text("SELECT tenant_id FROM tenant_event_counters WHERE tenant_id = :t FOR UPDATE"),
                     {"t": tenant_id})  # fmt: skip
-    sizes: list[int] = list((await s.execute(_EVENTS, {"e": endpoint, "cutoff": cutoff, "n": n})).scalars())
+    events = (await s.execute(_EVENTS, {"e": endpoint, "cutoff": cutoff, "n": n})).all()
+    sizes: list[int] = [size for _, size in events]
     freed = {"n": len(sizes), "b": sum(sizes)}
+    await _untracked(s, [event_id for event_id, _ in events])
     for table, key in (("webhook_endpoints", "id = :e"), ("tenant_event_counters", "tenant_id = :t")):
         await s.execute(text(f"UPDATE {table} SET retained_events = greatest(retained_events - :n, 0), "  # noqa: S608
                              f"retained_bytes = greatest(retained_bytes - :b, 0) WHERE {key}"),

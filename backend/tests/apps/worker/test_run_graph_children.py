@@ -15,10 +15,11 @@ from temporalio.client import WorkflowFailureError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import UnsandboxedWorkflowRunner
 
+from dewpoint.core.runs.service import OUTCOME_UNCONFIRMED
 from dewpoint.engine.handles import ClaimRef
 from dewpoint.engine.runtime import execution
 from dewpoint.engine.runtime import workflow as run_graph
-from dewpoint.engine.runtime.activities import ProjectInput, VersionData
+from dewpoint.engine.runtime.activities import ProjectInput, UnconfirmedBatch, VersionData
 from dewpoint.engine.runtime.scheduler import Scheduler
 from tests.apps.worker.harness import MemoryStore, run_id_of, start, workers
 from tests.support.graphs import G, cel, ref
@@ -349,21 +350,26 @@ async def test_a_run_with_nothing_running_and_no_answer_to_wait_for_still_fails(
     env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Checkpoint-2 review: waiting for a grant isn't stuck, but a run with nothing running and no answer to wait for
-    is, and it still ends `internal_error` instead of hanging. The bug here: ready steps are never handed out."""
+    is, and it still ends `internal_error` instead of hanging: its execution fails, as a bug's does (2b-4b M2). The
+    bug here: ready steps are never handed out."""
     monkeypatch.setattr(Scheduler, "take_ready", lambda self: [])
     store = MemoryStore()
     g = graph().node("a", ECHO, {"value": 1})
     async with workers(env.client, store, runner=UnsandboxedWorkflowRunner()):
         handle = await start(env.client, store, g, {"items": []})
-        result = await asyncio.wait_for(handle.result(), 30)
-    assert (result.status, result.error["code"]) == ("failed", "internal_error")
+        with pytest.raises(WorkflowFailureError) as failed:
+            await asyncio.wait_for(handle.result(), 30)
+    assert getattr(failed.value.cause, "type", None) == "internal_error"
 
 
-async def test_a_batch_that_fails_on_a_bug_writes_its_rows_first(
+async def test_a_batch_that_fails_on_a_bug_leaves_none_of_its_steps_running(
     env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """2a-3b's final review, M3: a batch that fails with `internal_error` wrote nothing it had queued, and its steps'
-    rows stayed `running`. It writes them before it fails, as a run does. The bug here: collecting item 50."""
+    """2a-3b's final review, M3: a batch that failed with `internal_error` left its steps' rows `running`; it wrote
+    them first. Narrowed by the owner's ruling on the 2b-4b M2 checkpoint: a bug fails the batch's execution in the
+    task that raised, writing nothing first, so what it hadn't projected is absent; its parent closes the batch's
+    iterations, and a row persisted `running` there ends `outcome_unconfirmed`. None stays `running`. The bug here:
+    collecting item 50."""
     collected = Scheduler.collected
 
     def broken(self: Scheduler, loop: Any, index: int, value: Any) -> None:
@@ -380,8 +386,9 @@ async def test_a_batch_that_fails_on_a_bug_writes_its_rows_first(
         handle = await start(env.client, store, g, {})
         result = await asyncio.wait_for(handle.result(), 60)
     assert (result.status, result.outputs) == ("succeeded", {"code": "internal_error"})
+    assert store.closed_batches == [(run_id_of(handle), UnconfirmedBatch("", "l", 0, 100))]
     rows = [r for r in store.steps(run_id_of(handle)) if r.node_key == "x"]
-    assert len(rows) >= 50 and "running" not in {r.status for r in rows}
+    assert {(r.status, r.error_code) for r in rows} <= {("succeeded", None), ("failed", OUTCOME_UNCONFIRMED)}
 
 
 async def test_the_cap_holds_across_children(env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch) -> None:

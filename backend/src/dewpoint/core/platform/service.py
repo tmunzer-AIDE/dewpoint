@@ -5,16 +5,21 @@ so a development database can't drive a namespace it wasn't set up for, and a pr
 label proves nothing about the data: keeping development's database and namespace apart from production's is the
 operator's job. Its engine worker instances record what they can do (§2.7)."""
 
+import json
+import math
 import uuid
 from collections.abc import Sequence
 from datetime import timedelta
 
 from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dewpoint.core.audit import service as audit
 from dewpoint.core.models.platform import DispatcherReport, PlatformSettings, WorkerInstance
 from dewpoint.core.models.requests import CurrentBuild
+from dewpoint.core.platform import readiness
 
 PRODUCTION = "production"
 DEVELOPMENT = "development"
@@ -32,6 +37,61 @@ class EnvironmentNotRecordedError(Exception):
 
 class EnvironmentMismatchError(Exception):
     pass
+
+
+class IngressCapacityRequiredError(Exception):
+    """Production ingress is enabled: its capacity stays whole."""
+
+
+class IngressCapacityBelowOutstandingError(Exception):
+    """The change would leave the deployment's ingress limit below the work outstanding: refused until it drains."""
+
+
+async def set_ingress_capacity(
+    s: AsyncSession, *, change: dict[str, float | int | None], attestation: str, actor_id: uuid.UUID
+) -> dict[str, object]:
+    """The deployment's ingress capacity changed (the owner's rulings 2 on the 2b-4b M3 checkpoints 2 and 3), as the
+    API's role for a platform admin (D11), in the caller's transaction, audited with that admin's id, the attestation
+    and the readiness it leaves: `change` names the values to set, a None unsetting one; the others keep what they
+    were. What it is then, the values unset among them. Raises ValueError for a value out of range,
+    IngressCapacityRequiredError for one left unset while production ingress is enabled, and
+    IngressCapacityBelowOutstandingError for a limit below the work outstanding (the owner's ruling on the M3
+    checkpoint 5)."""
+    starts, headroom, wait = (change.get(k) for k in readiness.CAPACITY)
+    if (
+        (starts is not None and not (math.isfinite(starts) and starts > 0))
+        or (headroom is not None and not (math.isfinite(headroom) and 0 < headroom <= 1))
+        or (wait is not None and not wait > 0)
+        or set(change) - set(readiness.CAPACITY)
+    ):
+        raise ValueError("The ingress capacity needs starts above 0, a headroom above 0 and at most 1, a wait above 0.")
+    try:
+        async with s.begin_nested():
+            found = await s.execute(text("select set_ingress_capacity(cast(:p as jsonb))::text"),
+                                    {"p": json.dumps(change)})  # fmt: skip
+    except DBAPIError as e:
+        if getattr(e.orig, "sqlstate", None) == CAPACITY_REQUIRED:
+            raise IngressCapacityRequiredError(str(e.orig).split("\n")[0]) from None
+        if getattr(e.orig, "sqlstate", None) == BELOW_OUTSTANDING:
+            raise IngressCapacityBelowOutstandingError(str(e.orig).split("\n")[0]) from None
+        raise
+    moved = json.loads(found.scalar_one())
+    after = moved["after"]
+    problems = readiness.ingress_capacity(_Capacity(after["starts_per_s"], after["headroom"], after["queue_wait_s"]))
+    await audit.record(s, tenant_id=None, actor_id=actor_id, action="platform.ingress_capacity.set",
+                       target_type="platform", target_id="ingress_capacity",
+                       details={"before": moved["before"], "after": after, "attestation": attestation,
+                                "problems": problems})  # fmt: skip
+    return {**after, "problems": problems}
+
+
+CAPACITY_REQUIRED = "DPC01"  # set_ingress_capacity()'s refusal: production ingress keeps a whole capacity
+BELOW_OUTSTANDING = "DPC02"  # and: the limit never below the work outstanding
+
+
+class _Capacity:
+    def __init__(self, starts: float | None, headroom: float | None, wait: int | None) -> None:
+        self.ingress_starts_per_s, self.ingress_headroom, self.ingress_queue_wait_s = starts, headroom, wait
 
 
 async def recorded(s: AsyncSession) -> PlatformSettings | None:
@@ -146,3 +206,54 @@ async def longest_run_duration_days(s: AsyncSession) -> int | None:
     """The longest maximum run duration ever recorded, or None when none is: the payload floor can't be reckoned."""
     found = (await s.execute(text("SELECT max(days) FROM run_duration_limits"))).scalar()
     return None if found is None else int(found)
+
+
+async def inventory_cut_over(s: AsyncSession) -> bool:
+    """Whether the schedule inventory's cutover is recorded (`schedules inventory-cutover`): only from it may a
+    dispatcher pass or an erasure stage rely on every Temporal id a schedule may have. Before it, a dispatcher from
+    before migration 0040 may still sync a schedule under its own id (the owner's D15 ruling on the 2b-4b M1
+    checkpoint)."""
+    return bool(await s.scalar(text("SELECT EXISTS (SELECT 1 FROM schedule_inventory_cutover)")))
+
+
+class BoundaryRefusedError(Exception):
+    """`record_namespace_boundary()` refused: `code` says why (the API's 409 or 422)."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+BOUNDARY_REFUSALS = {  # record_namespace_boundary()'s sqlstates
+    "DPN01": "environment_not_recorded",
+    "DPN02": "boundary_needs_qualification",
+    "DPN03": "namespace_not_recorded",
+    "DPN04": "boundary_evidence_incomplete",
+}
+
+
+async def record_namespace_boundary(s: AsyncSession, *, evidence: dict[str, str], actor_id: uuid.UUID) -> int:
+    """A namespace boundary (D3g) recorded (2b-4b M4, the owner's ruling on the M4 design), as the API's role for a
+    platform admin (D11), in the caller's transaction, audited with that admin's id and everything it rests on:
+    `evidence` names it (`name`), its namespace and Temporal's id for it, the server's and the D12 proof record's
+    SHA-256 and the attestation. Its id. Raises BoundaryRefusedError for what the function refuses."""
+    try:
+        async with s.begin_nested():
+            found = await s.execute(
+                text("select record_namespace_boundary(:name, :namespace, :namespace_id, :server_build, "
+                     ":proof_digest, :attestation, :actor)"),
+                {**{k: evidence[k] for k in BOUNDARY_EVIDENCE}, "actor": actor_id},
+            )  # fmt: skip
+    except DBAPIError as e:
+        code = BOUNDARY_REFUSALS.get(getattr(e.orig, "sqlstate", None) or "")
+        if code is None:
+            raise
+        raise BoundaryRefusedError(code) from None
+    boundary_id = int(found.scalar_one())
+    await audit.record(s, tenant_id=None, actor_id=actor_id, action="platform.namespace_boundary.record",
+                       target_type="namespace_boundary", target_id=str(boundary_id),
+                       details={k: evidence[k] for k in BOUNDARY_EVIDENCE})  # fmt: skip
+    return boundary_id
+
+
+BOUNDARY_EVIDENCE = ("name", "namespace", "namespace_id", "server_build", "proof_digest", "attestation")

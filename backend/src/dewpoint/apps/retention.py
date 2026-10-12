@@ -15,7 +15,7 @@ import asyncio
 
 import structlog
 from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import SettingsConfigDict
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio.client import Client
@@ -26,11 +26,13 @@ from dewpoint.core.db import make_engine, make_sessionmaker
 from dewpoint.core.platform.service import EnvironmentMismatchError, EnvironmentNotRecordedError, check_namespace
 from dewpoint.core.retention.sweep import BATCH, Sweep
 from dewpoint.core.retention.sweep import sweep as sweep_all
+from dewpoint.core.temporal_connect import TemporalConfigError, TemporalConnection, refresh_token
+from dewpoint.core.temporal_connect import connect as temporal_connect
 
 log = structlog.get_logger("dewpoint.retention")
 
 
-class RetentionSettings(BaseSettings):
+class RetentionSettings(TemporalConnection):
     # The environment only, never a `.env` file: a shared one may hold the key-encryption key.
     model_config = SettingsConfigDict(env_prefix="DEWPOINT_", env_file=None, extra="ignore", hide_input_in_errors=True)
 
@@ -43,10 +45,10 @@ class RetentionSettings(BaseSettings):
     temporal_namespace: str = "default"
 
 
-async def connect(settings: RetentionSettings) -> Client:
-    """A plain client: the erasure calls the service directly and decodes no payload, so it needs no key."""
-    return await Client.connect(settings.temporal_address or "", namespace=settings.temporal_namespace,
-                                identity="dewpoint-retention")  # fmt: skip
+async def connect(settings: RetentionSettings, recorded_environment: str) -> Client:
+    """A plain client: the erasure calls the service directly and decodes no payload, so it needs no key. Its
+    security is §10.4's (`core/temporal_connect.py`)."""
+    return await temporal_connect(settings, recorded_environment, identity="dewpoint-retention")
 
 
 async def _erasure_client(sessionmaker: async_sessionmaker[AsyncSession], settings: RetentionSettings) -> Client | None:
@@ -54,14 +56,18 @@ async def _erasure_client(sessionmaker: async_sessionmaker[AsyncSession], settin
     before any call otherwise."""
     try:
         async with sessionmaker() as s:
-            await check_namespace(s, settings.temporal_namespace)
+            recorded = await check_namespace(s, settings.temporal_namespace)
     except EnvironmentNotRecordedError:
         log.error("erasure_environment_unrecorded")
         return None
     except EnvironmentMismatchError:
         log.error("erasure_namespace_mismatch", configured=settings.temporal_namespace)
         return None
-    return await connect(settings)
+    try:
+        return await connect(settings, recorded.environment)
+    except TemporalConfigError as e:  # its §10.4 settings refused: never connected, alerted each interval
+        log.error("erasure_temporal_refused", reason=str(e))
+        return None
 
 
 async def _unattended(sessionmaker: async_sessionmaker[AsyncSession]) -> None:
@@ -89,6 +95,8 @@ async def run(settings: RetentionSettings, *, once: bool = False) -> Sweep | Non
                     client = await _erasure_client(sessionmaker, settings)
                 except Exception as e:  # Temporal or the database unreachable: tried again next interval
                     log.error("erasure_temporal_unreachable", error=type(e).__name__)
+            if client is not None and settings.temporal_bearer_token_file:  # a rotated token, without a restart
+                await refresh_token(client, settings.temporal_bearer_token_file)
             if tick % every == 0:
                 try:
                     await sweep_all(sessionmaker, batch=settings.retention_batch)

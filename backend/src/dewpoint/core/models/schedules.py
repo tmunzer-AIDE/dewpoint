@@ -50,6 +50,7 @@ class Schedule(Base):
     synced_generation: Mapped[int] = mapped_column(BigInteger, default=0)
     misses: Mapped[int] = mapped_column(BigInteger, default=0)
     misses_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sync_visited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # its sync's last visit
     sync_error: Mapped[str | None] = mapped_column(String(64))
     sync_error_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
@@ -91,6 +92,11 @@ class ScheduleIncarnation(Base):
     unpause_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # before the call
     seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # a describe last showed it
     checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # the stray check described it
+    # Migration 0048 (the owner's D16 ruling): its own misses read, every five minutes, while it may still miss a
+    # firing; verified gone (absent after it was seen, or after its schedule's deletion settled)
+    misses_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    misses_tried_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # its read's last try
 
 
 class ScheduleInterval(Base):

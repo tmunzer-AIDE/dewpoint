@@ -15,6 +15,7 @@ from dewpoint.engine.runtime.size import INLINE_LIMIT
 ENGINE_QUEUE = "dewpoint-engine"
 LOAD_VERSION = "dewpoint.load_version"
 PROJECT = "dewpoint.project"
+CLOSE_BATCH = "dewpoint.close_batch"
 CEL_EVALUATE = "cel.evaluate"
 CLAIMS_DERIVE = "claims.derive"
 CLAIMS_CHILD_INPUT = "claims.child_input"
@@ -343,6 +344,28 @@ class RunStart:
             kind=run.parent.kind,
             started_at=started_at,
         )
+
+
+@dataclass(frozen=True)
+class UnconfirmedBatch:
+    """A batch an unexpected bug failed (the owner's ruling, 2b-4b M2): loop `loop`'s items `start` to `end`
+    (excluded), in the iteration `scope` (its key, "" at the run's root). Each item's iteration, and everything nested
+    in it, is the batch's: a sibling's never is."""
+
+    scope: str
+    loop: str
+    start: int
+    end: int
+
+
+@dataclass(frozen=True)
+class CloseBatchInput:
+    """The batch's rows still `running` close `outcome_unconfirmed`, and its closing is kept with its run: a projection
+    of the batch landing later, while the run still runs, lands closed too."""
+
+    tenant_id: str
+    run_id: str
+    batch: UnconfirmedBatch
 
 
 @dataclass(frozen=True)

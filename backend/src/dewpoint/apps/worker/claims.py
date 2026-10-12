@@ -23,12 +23,15 @@ from temporalio.exceptions import ApplicationError
 from dewpoint.apps.inputs import FORGED, reasons
 from dewpoint.core.claims.secret_index import SECRET_INDEX_LIMIT, Index, SecretIndexLimitError
 from dewpoint.core.claims.service import CLAIM_UNAVAILABLE, ClaimUnavailableError, NewClaim
+from dewpoint.engine.canonical import canonical_json
 from dewpoint.engine.cel import evaluate as cel
+from dewpoint.engine.cel import ipc
 from dewpoint.engine.cel import types as T
 from dewpoint.engine.cel.bind import BindingError, bind_item, check_json
 from dewpoint.engine.cel.record import ExpressionRecord
 from dewpoint.engine.handles import (
     MISSING,
+    NESTING_MAX,
     RESERVED,
     ClaimRef,
     Fetch,
@@ -81,6 +84,17 @@ Evaluate = Callable[[dict[str, Any]], Awaitable[list[dict[str, Any]]]]
 class ClaimStore(Protocol):
     async def fetch(self, tenant_id: str, run_id: str, claim_id: str) -> StoredClaim:
         """A whole claim, for `run_id`: its owner, or a run it was granted to. Raises ClaimUnavailableError."""
+        ...
+
+    async def nested(self, tenant_id: str, run_id: str, claim_ids: Sequence[str]) -> set[str]:
+        """The claims the handles in these claims' values name, for `run_id`, in one session: each read as `fetch`
+        reads one and let go once its handles are taken; one this run may not read refuses them all."""
+        ...
+
+    async def read_level(self, tenant_id: str, run_id: str, claim_ids: Sequence[str], room: int) -> "Level":
+        """These claims, for `run_id`, in one session, each checked as `fetch` checks one before any is read (one
+        this run may not read refuses them all), read in groups bounded by bytes: the handles each nests, and the
+        values of those that fit in `room` bytes (their ciphertexts'), kept; the others let go with their group."""
         ...
 
     async def write(
@@ -321,13 +335,58 @@ def unforged(outcomes: list[dict[str, Any]]) -> list[dict[str, Any]]:
             for o in outcomes]  # fmt: skip
 
 
+# What one evaluator call may carry once the sets' handles are resolved: its frame limit, less a margin for how the
+# client re-encodes the request (the review of the 2b-4b M2 checkpoint, C1)
+FRAME_BYTES = ipc.MAX_REQUEST - 4096
+FRAME_TOO_LARGE = "the referenced values exceed the 4 MiB request limit"
+
+
+def _cached(fetch: Fetch) -> Fetch:
+    """`fetch`, each claim read once for the call: binding sets that share a claim (#26's, one handle in every set)
+    don't each fetch it (the review of the 2b-4b M2 checkpoint, I1)."""
+    seen: dict[str, Any] = {}
+
+    async def cached(claim_id: str) -> Any:
+        if claim_id not in seen:
+            seen[claim_id] = await fetch(claim_id)
+        return seen[claim_id]
+
+    return cached
+
+
+def _within_frame(
+    request: Mapping[str, Any], ready: list[tuple[int, dict[str, Any]]]
+) -> list[tuple[list[tuple[int, dict[str, Any]]], list[int]]]:
+    """The resolved sets in order, cut into evaluator calls within FRAME_BYTES, and with each the sets too large for any
+    call alone. Resolved, a set weighs what its handles hold: #26's claim keeps the workflow's request small, but its
+    1,000 sets each carry the shared value again here (the review of the 2b-4b M2 checkpoint, C1)."""
+    base = len(canonical_json({**request, "bindings": []}))
+    out: list[tuple[list[tuple[int, dict[str, Any]]], list[int]]] = []
+    chunk: list[tuple[int, dict[str, Any]]] = []
+    refused: list[int] = []
+    size = base
+    for i, bindings in ready:
+        weight = len(canonical_json(bindings)) + 1
+        if base + weight > FRAME_BYTES:
+            refused.append(i)
+            continue
+        if chunk and size + weight > FRAME_BYTES:
+            out.append((chunk, refused))
+            chunk, refused, size = [], [], base
+        chunk.append((i, bindings))
+        size += weight
+    if chunk or refused:
+        out.append((chunk, refused))
+    return out
+
+
 async def evaluate_claimed(
     request: dict[str, Any], claims: Claiming, store: ClaimStore, evaluate: Evaluate
 ) -> list[dict[str, Any]]:
     """`cel.evaluate` over bindings that may hold handles (§4.2): one outcome per binding set, in order. A set whose
     handles can't be resolved fails alone (`claim_unavailable`, or `type_mismatch` for a value of the wrong type)."""
     tenant, run = caller()
-    fetch = _fetcher(store, tenant, run)
+    fetch = _cached(_fetcher(store, tenant, run))
     sets = request["bindings"]
     outcomes: list[dict[str, Any] | None] = [None] * len(sets)
     tainted = [claims.tainted] * len(sets)
@@ -343,10 +402,13 @@ async def evaluate_claimed(
             continue
         tainted[i] = tainted[i] or read_tainted
         ready.append((i, plain))
-    if ready:
-        answered = unforged(await evaluate({**request, "bindings": [b for _, b in ready]}))
-        for (i, _), outcome in zip(ready, answered, strict=True):
-            outcomes[i] = outcome
+    for chunk, refused in _within_frame(request, ready):
+        for i in refused:
+            outcomes[i] = {"error": cel.INPUT_TOO_LARGE, "message": FRAME_TOO_LARGE}
+        if chunk:
+            answered = unforged(await evaluate({**request, "bindings": [b for _, b in chunk]}))
+            for (i, _), outcome in zip(chunk, answered, strict=True):
+                outcomes[i] = outcome
     done = [o if o is not None else {"error": cel.EVALUATION_ERROR, "message": UNAVAILABLE} for o in outcomes]
     if claims.decision:  # a declassified decision comes back plain, only as a decision (§4.3; review I1)
         for i, o in enumerate(done):
@@ -554,21 +616,79 @@ async def filter_claimed(
 # --- crossing between runs (§3.4) ----------------------------------------------------------------------------------
 
 
-async def _closure(claim_ids: Sequence[str], fetch: Fetch) -> list[str]:
-    """`claim_ids` and every claim nested in them: what a run must be granted to resolve their handles."""
+CLOSURE_READS = 1_000  # claims a closure checks at once: read in groups bounded by bytes, their handles kept
+
+
+async def _closure(claim_ids: Sequence[str], nested: Callable[[Sequence[str]], Awaitable[set[str]]]) -> list[str]:
+    """`claim_ids` and every claim nested in them: what a run must be granted to resolve their handles. Read a level
+    at a time, a thousand claims a read (the owner's ruling on the 2b-4b M2 measurement: a claim a session, about 7 ms
+    each, timed a crossing of 7,500 out), keeping only the handles each nests: its values let go a group at a time,
+    never a thousand large ones at once (the fresh M3 review's I4)."""
     seen: set[str] = set()
-    queue = list(claim_ids)
-    while queue:
-        claim_id = queue.pop()
-        if claim_id in seen:
-            continue
-        seen.add(claim_id)
-        queue.extend(h.id for _, h in handles_in((await fetch(claim_id)).value))
+    level = sorted(set(claim_ids))
+    while level:
+        seen.update(level)
+        found: set[str] = set()
+        for at in range(0, len(level), CLOSURE_READS):
+            found.update(await nested(level[at : at + CLOSURE_READS]))
+        level = sorted(found - seen)
     return sorted(seen)
 
 
+# A crossing's claim values kept for its resolution at once, at most: their ciphertexts' bytes, a group's (2b-4b M3)
+HELD_BYTES = 16 * 1024 * 1024
+
+
+@dataclass
+class Level:
+    """A level of a closure as `read_level` reads it: the values kept, their bytes, and the handles they all nest."""
+
+    kept: dict[str, StoredClaim] = field(default_factory=dict)
+    kept_bytes: int = 0
+    nested: set[str] = field(default_factory=set)
+
+
+async def _walked(store: ClaimStore, tenant: str, run: str, value: Any) -> tuple[dict[str, StoredClaim], list[str]]:
+    """Every claim `value`'s handles reach, as `run` reads them, a level at a time and `CLOSURE_READS` a read: the
+    closure (granted to the child), and the values of the first read, up to `HELD_BYTES`, which its resolution reads
+    one claim at a time otherwise (the owner's ruling on the 2b-4b M3 checkpoint 2: a sub-flow's input of 10,000
+    claims took 38.5 s of its crossing's minute, a claim a session; the fresh M3 review 3's I1: never every value at
+    once). Nested past `NESTING_MAX`, refused, as resolving it is."""
+    held: dict[str, StoredClaim] = {}
+    seen: set[str] = set()
+    room = HELD_BYTES
+    level = sorted({h.id for _, h in handles_in(value)})
+    for depth in range(NESTING_MAX + 2):
+        if not level:
+            break
+        if depth > NESTING_MAX:
+            raise NestingError("Claims nested too deep.")
+        seen.update(level)
+        found: set[str] = set()
+        for at in range(0, len(level), CLOSURE_READS):
+            read = await store.read_level(tenant, run, level[at : at + CLOSURE_READS], room)
+            held.update(read.kept)
+            room -= read.kept_bytes
+            found |= read.nested
+        level = sorted(found - seen)
+    return held, sorted(seen)
+
+
+def _from(held: dict[str, StoredClaim], fetch: Fetch) -> Fetch:
+    """`fetch`, answered from `held` where it can be."""
+
+    async def read(claim_id: str) -> StoredClaim:
+        found = held.get(claim_id)
+        return found if found is not None else await fetch(claim_id)
+
+    return read
+
+
 async def _granted(store: ClaimStore, tenant: str, run: str, to: str, value: Any, root: str) -> None:
-    ids = await _closure([h.id for _, h in handles_in(value)], _fetcher(store, tenant, run))
+    async def nested(claim_ids: Sequence[str]) -> set[str]:
+        return await store.nested(tenant, run, claim_ids)
+
+    ids = await _closure([h.id for _, h in handles_in(value)], nested)
     if ids:
         await store.grant(tenant, granted_by=run, to=to, claim_ids=ids, root_run_id=root)
 
@@ -628,17 +748,18 @@ async def child_input(data: ChildInput, store: ClaimStore) -> ChildInputResult:
     schema = await store.input_schema(tenant, data.version_id)
     if schema is None:
         raise ApplicationError(NO_CHILD_VERSION, type=VERSION_UNUSABLE, non_retryable=True)
-    fetch = _fetcher(store, tenant, run)
     seed = uuid.uuid5(_INPUTS, data.child_run_id)
     made = _Reclassified(seed, uuid.UUID(data.child_run_id), uuid.UUID(data.root_run_id))
     try:
-        resolved = await resolve_value(data.value, fetch)
-        refused = reasons(schema, resolved.value)
+        held, closure = await _walked(store, tenant, run, data.value)  # read once: checked, granted below
+        fetch = _from(held, _fetcher(store, tenant, run))
+        refused = reasons(schema, (await resolve_value(data.value, fetch)).value)
         if refused:
             return ChildInputResult(reasons=refused)
         value = await _reclassify(data.value, from_schema(schema), fetch, made)
     except UNREADABLE:
         raise ApplicationError(UNAVAILABLE, type=CLAIM_UNAVAILABLE, non_retryable=True) from None
+    del held, fetch  # the values kept: the split and the writes need only the handles
     try:
         done = split(
             value,
@@ -660,7 +781,9 @@ async def child_input(data: ChildInput, store: ClaimStore) -> ChildInputResult:
     if rows:
         await store.write_inputs(tenant, rows)
     try:
-        await _granted(store, tenant, run, data.child_run_id, data.value, data.root_run_id)
+        if closure:
+            await store.grant(tenant, granted_by=run, to=data.child_run_id, claim_ids=closure,
+                              root_run_id=data.root_run_id)  # fmt: skip
     except UNREADABLE:
         raise ApplicationError(UNAVAILABLE, type=CLAIM_UNAVAILABLE, non_retryable=True) from None
     return ChildInputResult(trigger=done.envelope)

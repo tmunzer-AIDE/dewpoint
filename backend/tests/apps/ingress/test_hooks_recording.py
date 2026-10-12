@@ -10,6 +10,7 @@ import os
 import uuid
 
 import pytest
+import structlog
 from sqlalchemy import text
 
 from dewpoint.apps.ingress import main
@@ -151,6 +152,47 @@ async def test_over_a_pending_quota_is_429_retry_in_30(app, owner_sessionmaker) 
     assert (await _post(app, endpoint_id, '{"n": 1}')).status_code == 200
     over = await _post(app, endpoint_id, '{"n": 2}')
     assert (over.status_code, over.json(), over.headers["retry-after"]) == (429, {"error": "quota_exceeded"}, "30")
+
+
+async def test_past_the_deployments_limit_is_429_with_a_wait_from_its_starts(app, owner_sessionmaker) -> None:
+    """The owner's ruling on the M3 checkpoint 4: past the deployment's outstanding-work limit nothing is stored; the
+    wait is 30 s until its capacity is set, then what's past the limit over its budget of starts, 1 to 60 s."""
+    _, endpoint_id = await bearer_endpoint(owner_sessionmaker)
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text("update ingress_budget set outstanding = 50000"))  # the development-only limit
+    full = await _post(app, endpoint_id, '{"n": 1}')
+    assert (full.status_code, full.json(), full.headers["retry-after"]) == (429, {"error": "backlog_full"}, "30")
+    async with owner_sessionmaker() as s, s.begin():  # a limit of 20 at 2 starts a second, 9 past it already
+        await s.execute(text("update platform_settings set ingress_starts_per_s = 4, ingress_headroom = 0.5, "
+                             "ingress_queue_wait_s = 10"))  # fmt: skip
+        await s.execute(text("update ingress_budget set outstanding = 29"))
+    later = await _post(app, endpoint_id, '{"n": 1}')
+    assert (later.status_code, later.json(), later.headers["retry-after"]) == (429, {"error": "backlog_full"}, "5")
+    assert await events_of(owner_sessionmaker, endpoint_id) == []
+
+
+def test_an_outcome_this_build_doesnt_know_is_503_with_a_retry_after_never_a_500() -> None:
+    """2b-4b M4, the owner's ruling on online upgrades: an ingress process older than the recording function it calls
+    (a later migration's new refusal) answers as for an outage, never with an error a sender may give up on."""
+    from dewpoint.apps.ingress.recording import respond
+
+    with structlog.testing.capture_logs() as logs:
+        unknown = respond({"outcome": "a_refusal_from_a_later_release"})
+    assert (unknown.status_code, unknown.body, unknown.headers.get("retry-after")) == (
+        503, b'{"error":"unavailable"}', "30",
+    )  # fmt: skip
+    assert [(entry["event"], entry["outcome"]) for entry in logs] == [
+        ("ingress_outcome_unknown", "a_refusal_from_a_later_release")
+    ]
+
+
+def test_a_delivery_that_can_never_fit_the_deployments_limit_is_413_without_a_retry_after() -> None:
+    from dewpoint.apps.ingress.recording import respond
+
+    too_large = respond({"outcome": "over_limit"})
+    assert (too_large.status_code, too_large.body, too_large.headers.get("retry-after")) == (
+        413, b'{"error":"over_limit"}', None,
+    )  # fmt: skip
 
 
 async def test_over_a_retained_cap_is_429_without_a_retry_after(app, owner_sessionmaker) -> None:

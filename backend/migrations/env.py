@@ -9,6 +9,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from dewpoint.core.models import Base
+from migrations import equivalents
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -51,13 +52,33 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
     )
+    # Main's 0047, 0045 and 0070 run online only (D15): a script would hold their original bodies, so each refuses
+    equivalents.refuse_offline(context.script)
 
     with context.begin_transaction():
         context.run_migrations()
 
 
 def do_run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    # A transaction per migration (2b-4b, D15): 0035 to 0044 commit in short steps of their own (`migrations/online.py`),
+    # and each migration is recorded as it ends, so an interrupted upgrade goes on from the last one recorded.
+    # 0053's guard compares the database it runs on with one named explicitly, never taken from the connection's URL:
+    # `alembic -x expected_database=<name>`, or DEWPOINT_EXPECTED_DATABASE. A test may hook its changes (`after_change`).
+    expected = (
+        context.get_x_argument(as_dictionary=True).get("expected_database")
+        or config.attributes.get("expected_database")
+        or os.environ.get("DEWPOINT_EXPECTED_DATABASE")
+    )
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        transaction_per_migration=True,
+        expected_database=expected or None,
+        after_change=config.attributes.get("after_change"),
+    )
+    # Main's 0047, 0045 and 0070, byte-identical, run their online equivalents on a database that hasn't applied them
+    # (D15, the owner's rulings at the merge): each checked against its original's file first, refusing if one changed
+    equivalents.install(context.script)
 
     with context.begin_transaction():
         context.run_migrations()

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta, tzinfo
 
@@ -131,3 +132,60 @@ async def test_anchor_freshness_flags_unanchored_rows(tmp_path, api_sessionmaker
     async with auditor_sessionmaker() as s:
         assert await anchor_freshness(s, timedelta(hours=1)) == []
         assert len(await anchor_freshness(s, timedelta(0))) == 1
+
+
+async def test_an_anchor_signs_no_row_its_synchronous_standby_lacks(
+    tmp_path, pg_url, owner_sessionmaker, auditor_sessionmaker
+) -> None:  # fmt: skip
+    """The review of the 2b-4b M1 checkpoint 6: a row committed locally (the inventory cutover's audit entry, its commit
+    waiting for no standby) is visible before a synchronous standby holds it. An anchor that signed it, then lost it in
+    a failover, would leave `audit verify` failing for good (the sink is append-only). With a standby named that never
+    answers, the anchor writes nothing until it holds every row read; then it anchors them."""
+    from tests.support.standby import silent_standby
+
+    sink = FileAnchorSink(tmp_path / "anchors.jsonl", Ed25519PrivateKey.generate())
+    url = pg_url.replace("postgresql+asyncpg://", "postgresql://")
+    async with silent_standby(url):
+        async with owner_sessionmaker() as s, s.begin():
+            await s.execute(text("SELECT set_config('synchronous_commit', 'local', true)"))
+            await record(s, tenant_id=None, actor_id=None, action="schedules.inventory_cutover")
+        async with owner_sessionmaker() as s:
+            seq = (await s.execute(text("select max(seq) from audit_log where scope = 'platform'"))).scalar_one()
+
+        async def anchoring() -> int:
+            async with auditor_sessionmaker() as s, s.begin():
+                return await anchor_all(s, sink)
+
+        anchored = asyncio.create_task(anchoring())
+        await asyncio.sleep(1.0)
+        signed_meanwhile = [e for e in sink.entries() if e["scope"] == "platform" and e["seq"] == seq]
+    assert await asyncio.wait_for(anchored, 30) >= 1
+    assert signed_meanwhile == []
+    assert [e for e in sink.entries() if e["scope"] == "platform" and e["seq"] == seq]
+
+
+async def test_anchors_verify_by_their_key_ids_across_a_rotation(api_sessionmaker, auditor_sessionmaker) -> None:
+    """D6: each anchor names its key's id, signed into it; verifying keeps every id's public key (rotation), and an
+    anchor whose id isn't known, or whose id was swapped, fails."""
+    from dewpoint.core.audit.s3 import S3AnchorSink, read_anchors
+    from tests.core.audit.fake_s3 import FakeS3
+
+    old, new, bucket = Ed25519PrivateKey.generate(), Ed25519PrivateKey.generate(), FakeS3()
+    for key, kid in ((old, "audit-1"), (new, "audit-2")):
+        async with api_sessionmaker() as s, s.begin():
+            await record(s, tenant_id=None, actor_id=None, action="auth.login")
+        async with auditor_sessionmaker() as s, s.begin():
+            assert await anchor_all(s, S3AnchorSink(bucket, "b", "p/", key, kid)) == 1  # type: ignore[arg-type]
+    entries = read_anchors(bucket, "b", "p/", kept=timedelta(days=435)).entries  # type: ignore[arg-type]
+    both = {"audit-1": old.public_key(), "audit-2": new.public_key()}
+    async with auditor_sessionmaker() as s:
+        assert await verify_anchors(s, entries, both, max_lag=timedelta(0)) == []
+        rotated_away = await verify_anchors(s, entries, {"audit-2": new.public_key()}, max_lag=timedelta(0))
+        assert "platform:1: anchor signed with an unknown key (audit-1)" in rotated_away
+        wrong = await verify_anchors(s, entries, {"audit-1": new.public_key(), "audit-2": new.public_key()},
+                                     max_lag=timedelta(0))  # fmt: skip
+        assert "platform:1: bad anchor signature" in wrong
+        # the id is signed: relabelled, even to an id under the same key, the anchor fails
+        swapped = [dict(e, kid="audit-2") if e["seq"] == 1 else e for e in entries]
+        same = {"audit-1": old.public_key(), "audit-2": old.public_key()}
+        assert "platform:1: bad anchor signature" in await verify_anchors(s, swapped, same, max_lag=timedelta(0))

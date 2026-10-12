@@ -24,7 +24,7 @@ from dewpoint.apps.worker.store import DbRunStore
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, ProjectInput, RunSummary
 from dewpoint.engine.runtime.ids import run_workflow_id
 from dewpoint.engine.runtime.workflow import RunGraph
-from tests.apps.dispatcher.support import begin, state
+from tests.apps.dispatcher.support import begin, reasons, state
 from tests.apps.test_admission import KEYS
 from tests.apps.test_runs import rpc
 from tests.apps.worker.harness import workers
@@ -61,7 +61,7 @@ class Handle:
     def __init__(self, error: BaseException | None) -> None:
         self.error = error
 
-    async def describe(self) -> Any:
+    async def describe(self, **_: Any) -> Any:
         if self.error is not None:
             raise self.error
         raise AssertionError("no execution in this fake")
@@ -71,7 +71,7 @@ class Service:
     def __init__(self, namespace_error: BaseException | None) -> None:
         self.namespace_error = namespace_error
 
-    async def describe_namespace(self, _: Any) -> Any:
+    async def describe_namespace(self, _: Any, **__: Any) -> Any:
         if self.namespace_error is not None:
             raise self.namespace_error
         return object()
@@ -158,20 +158,48 @@ async def test_an_absence_that_cant_be_trusted_keeps_the_start_unresolved(
     after = await state(owner_sessionmaker, request.id)
     assert after["request"] == ("starting", None, 0) and after["slot"] == 1
     assert await once(dispatch_sessionmaker, client, api_settings) == {}  # checked: not again before RECHECK
+    assert await reasons(owner_sessionmaker, request.id) == {}  # not yet past ALERT_AFTER: nothing to recover
 
 
-async def test_another_execution_found_under_the_runs_id_is_an_id_collision(
-    queued, owner_sessionmaker, dispatch_sessionmaker, api_settings, env
+async def test_a_start_unresolved_past_its_alert_is_recorded_for_an_operator(
+    queued, owner_sessionmaker, dispatch_sessionmaker, api_settings
 ) -> None:
+    """2b-4b M3: the error a start still unresolved after ALERT_AFTER raises is recorded, as the reason an operator's
+    command acts on."""
+    _, _, request = queued
+    await starting(dispatch_sessionmaker, request, api_settings)
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text("update run_requests set starting_at = now() - interval '11 minutes' where id = :i"),
+                        {"i": request.id})  # fmt: skip
+    assert await once(dispatch_sessionmaker, DescribeFails(rpc(RPCStatusCode.UNAVAILABLE)), api_settings) == {
+        "unresolved": 1
+    }
+    assert await reasons(owner_sessionmaker, request.id) == {"start_unresolved": False}
+
+
+@pytest.mark.parametrize("recorded", [True, False], ids=["recorded", "from_before_0052"])
+async def test_another_execution_found_under_the_runs_id_is_unidentified_or_for_a_request_without_an_id_a_collision(
+    queued, owner_sessionmaker, dispatch_sessionmaker, api_settings, env, recorded
+) -> None:
+    """With a recorded start request id, only that id identifies the execution: another one is unresolved, left for an
+    operator (the start-check slice). A request from before 0052, with none, is told from it by its payload, as
+    before: an id collision."""
     _, _, request = queued
     lost = await starting(dispatch_sessionmaker, request, api_settings)
+    if not recorded:
+        async with owner_sessionmaker() as s, s.begin():
+            await s.execute(text("update run_requests set start_request_id = null where id = :i"), {"i": request.id})
     impostor = lost.start.__class__(**{**lost.start.__dict__, "version_id": str(uuid.uuid4())})
     await env.client.start_workflow(RunGraph.run, impostor, id=run_workflow_id(impostor.tenant_id, impostor.run_id),
                                     task_queue=ENGINE_QUEUE)  # fmt: skip
     await aged(owner_sessionmaker, request.id)
-    assert await once(dispatch_sessionmaker, env.client, api_settings) == {"dead": 1}
+    after_pass = await once(dispatch_sessionmaker, env.client, api_settings)
     after = await state(owner_sessionmaker, request.id)
-    assert after["request"][:2] == ("dead", "id_collision") and after["slot"] == 0
+    if recorded:
+        assert after_pass == {"unresolved": 1} and after["request"][0] == "starting" and after["slot"] == 1
+    else:
+        assert after_pass == {"dead": 1}
+        assert after["request"][:2] == ("dead", "id_collision") and after["slot"] == 0
 
 
 async def test_a_leaked_slot_is_released_only_once_its_runs_execution_is_closed(
@@ -228,10 +256,12 @@ async def test_a_lost_reply_whose_run_already_ended_is_still_reconciled(
         }
     assert await state(owner_sessionmaker, request.id) == before
     assert any(e["event"] == "start_history_missing" and e["log_level"] == "error" for e in seen)
+    assert await reasons(owner_sessionmaker, request.id) == {"start_history_missing": False}  # kept (2b-4b M3)
     assert await begin(dispatch_sessionmaker, request, api_settings) is None  # not due: it isn't queued
     async with owner_sessionmaker() as s, s.begin():  # its history back: asked again without waiting for RECHECK
         await s.execute(text("update run_requests set checked_at = null where id = :i"), {"i": request.id})
     assert await once(dispatch_sessionmaker, env.client, api_settings) == {"started": 1}
+    assert await reasons(owner_sessionmaker, request.id) == {}  # it resolved on its own
     after = await state(owner_sessionmaker, request.id)
     assert (after["request"][0], after["slot"]) == ("started", 0)
     assert after["run"][1] is not None  # its started_at, from the execution's own start
@@ -329,11 +359,13 @@ async def test_a_queued_request_whose_run_already_ended_is_never_started_again(
     after = await state(owner_sessionmaker, request.id)
     assert (after["request"][0], after["slot"], after["run"][0]) == ("starting", 0, "succeeded")
     assert any(e["event"] == "start_after_end" and e["log_level"] == "error" for e in seen)
+    assert await reasons(owner_sessionmaker, request.id) == {"start_after_end": False}
     async with owner_sessionmaker() as s, s.begin():
         await s.execute(text("update run_requests set starting_at = now() - interval '1 hour' where id = :i"),
                         {"i": request.id})  # fmt: skip
     gone = DescribeFails(rpc(RPCStatusCode.NOT_FOUND))
     assert await once(dispatch_sessionmaker, gone, api_settings) == {"unresolved": 1}  # never back in the queue
+    assert await reasons(owner_sessionmaker, request.id) == {"start_after_end": False, "start_history_missing": False}
 
 
 async def test_a_leaked_slot_whose_history_is_gone_is_kept_with_an_alert(
@@ -354,6 +386,11 @@ async def test_a_leaked_slot_whose_history_is_gone_is_kept_with_an_alert(
     assert {"event": "slot_history_missing", "log_level": "error"}.items() <= next(
         e for e in seen if e["event"] == "slot_history_missing"
     ).items()
+    assert await reasons(owner_sessionmaker, request.id) == {"slot_history_missing": False}
+    async with owner_sessionmaker() as s, s.begin():  # seen again, its first time kept
+        await s.execute(text("update run_requests set checked_at = null where id = :i"), {"i": request.id})
+    await once(dispatch_sessionmaker, DescribeFails(rpc(RPCStatusCode.NOT_FOUND)), api_settings)
+    assert await reasons(owner_sessionmaker, request.id) == {"slot_history_missing": True}
 
 
 async def test_a_starting_request_always_says_when_it_became_starting(queued, owner_sessionmaker) -> None:

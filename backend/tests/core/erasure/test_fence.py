@@ -19,15 +19,19 @@ from dewpoint.core.db import tenant_scope
 from tests.support.workflows import seed_workflow
 
 # What holds a tenant id and isn't fenced, each for its reason: the audit log (kept under the platform's audit policy),
-# the retention sweep's counts (the erasure's sweep deletes them once audited), and the erasure's own record.
-UNFENCED = {"audit_log", "retention_sweep_tenants", "tenant_erasures", "tenant_erasure_items", "tenant_erasure_known"}
+# the retention sweep's counts (the erasure's sweep deletes them once audited), the erasure's own record, and the
+# blocker store (0054: platform-scoped, kept past the erasure, its writes, the backfill's included, landing whatever a
+# tenant's stage).
+UNFENCED = {"audit_log", "retention_sweep_tenants", "tenant_erasures", "tenant_erasure_items", "tenant_erasure_known",
+            "unresolved_sends"}  # fmt: skip
 FENCED_TABLES = (
     "claim_grants", "connections", "csv_mappings", "csv_uploads", "data_keys", "egress_allowlist", "execution_evidence",
-    "inbound_events", "memberships", "plugin_calls", "rate_buckets", "rate_scope_keys", "run_inputs", "run_requests",
+    "inbound_events", "ingress_outstanding", "memberships", "operator_command_holds", "operator_commands",
+    "plugin_calls", "rate_buckets", "rate_scope_keys", "recovery_items", "run_inputs", "run_requests",
     "run_secret_index", "run_slots", "run_step_connections", "run_steps", "runs", "schedule_firings",
     "schedule_incarnations", "schedule_intervals", "schedules", "step_outputs", "tenant_event_counters",
     "tenant_event_keys", "tenant_retention", "tenant_run_limits", "trigger_bindings", "webhook_endpoints",
-    "workflow_versions", "workflows",
+    "work_failures", "workflow_versions", "workflows",
 )  # fmt: skip
 LIMITS = "insert into tenant_run_limits (tenant_id, max_concurrent) values (:t, 3)"
 
@@ -213,6 +217,8 @@ async def test_the_fence_refuses_rather_than_lets_through_when_its_owner_cant_by
         await s.begin()
         await s.execute(text(f"create role {owner} nologin"))
         await s.execute(text(f"grant select on tenant_erasures to {owner}"))
+        # the fence finds its table through `public`, which PUBLIC may use no more (0053): as any owner of it would
+        await s.execute(text(f"grant usage on schema public to {owner}"))
         await s.execute(text(f"alter function tenant_insert_fence() owner to {owner}"))
         with pytest.raises(DBAPIError) as e:
             await s.execute(text(LIMITS), {"t": tenant})

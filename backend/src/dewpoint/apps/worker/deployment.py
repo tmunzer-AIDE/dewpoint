@@ -6,6 +6,7 @@ current is an operator's step (docs/operations/deployment.md)."""
 
 import asyncio
 from dataclasses import dataclass
+from datetime import timedelta
 
 from temporalio.api.enums.v1 import WorkerDeploymentVersionStatus
 from temporalio.api.workflowservice.v1 import (
@@ -21,6 +22,7 @@ import dewpoint
 from dewpoint.engine.runtime.build import abi_of, build_id
 
 DEPLOYMENT = "dewpoint-engine"
+CALL_DEADLINE = timedelta(seconds=10)  # a describe's: the SDK sets none (the 2b-4b plan's M1b)
 IDENTITY = "dewpoint-deployment"  # who changed the routing, as Temporal records it
 
 
@@ -77,7 +79,8 @@ async def describe(client: Client) -> Deployment:
     pinned runs that started on it."""
     info = (
         await client.workflow_service.describe_worker_deployment(
-            DescribeWorkerDeploymentRequest(namespace=client.namespace, deployment_name=DEPLOYMENT)
+            DescribeWorkerDeploymentRequest(namespace=client.namespace, deployment_name=DEPLOYMENT),
+            timeout=CALL_DEADLINE,  # the SDK sets none (the 2b-4b plan's M1b)
         )
     ).worker_deployment_info
     current = info.routing_config.current_deployment_version.build_id or None

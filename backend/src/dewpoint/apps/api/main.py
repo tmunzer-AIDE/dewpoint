@@ -8,6 +8,7 @@ from dewpoint.apps.api.errors import install_error_handlers
 from dewpoint.apps.api.middleware import BodyLimitMiddleware, ClientHeaderMiddleware, SecurityHeadersMiddleware
 from dewpoint.apps.api.openapi import OPENAPI_URL, ROUTERS, TITLE, serve_refined
 from dewpoint.apps.api.routes import csv_uploads
+from dewpoint.apps.csv_slots import CsvSlots
 from dewpoint.core import logs
 from dewpoint.core.config import Settings, get_settings
 from dewpoint.core.crypto.ingress import IngressKey
@@ -33,6 +34,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.sessionmaker = make_sessionmaker(app.state.engine)
     app.state.keyring = Keyring(KekSet.from_settings(settings))
     app.state.keys = KeyringKeys(app.state.sessionmaker, app.state.keyring)  # admission's: claims, envelopes, digests
+    app.state.csv_slots = CsvSlots(settings.csv_concurrency)  # the process's CSV work at once (2b-4b M3)
     # Webhook endpoints' secrets (engine 2b spec §8.3): without the ingress key, nothing that seals one is written.
     app.state.ingress_key = IngressKey.from_settings(settings) if settings.ingress_key_b64 else None
     # Created eagerly (not in the lifespan) so ASGI test transports, which skip lifespan, get it too.

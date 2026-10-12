@@ -13,18 +13,19 @@ from collections.abc import Awaitable, Callable
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio.client import Client
-from temporalio.service import RPCError, RPCStatusCode
+from temporalio.service import RetryConfig, RPCError, RPCStatusCode
 from temporalio.worker import Worker
 
 from dewpoint.apps import tick_contract
 from dewpoint.apps.codec import KeyringKeys, data_converter
-from dewpoint.apps.dispatcher import evidence
+from dewpoint.apps.dispatcher import budget, evidence, matching, recovery, start_call
 from dewpoint.apps.dispatcher.cancels import send_cancels
+from dewpoint.apps.dispatcher.commands import commands_once
 from dewpoint.apps.dispatcher.dispatch import Rotation, dispatch_once
 from dewpoint.apps.dispatcher.matching import Verified, match_once
 from dewpoint.apps.dispatcher.observe import observe, report
 from dewpoint.apps.dispatcher.reconcile import Leader, reconcile_once, reconcile_subruns
-from dewpoint.apps.dispatcher.recount import recount_once
+from dewpoint.apps.dispatcher.recount import Drift, check_budget, recount_once
 from dewpoint.apps.dispatcher.schedule_sync import check_misses, check_strays, sync_schedules
 from dewpoint.apps.dispatcher.tick import ADMISSION_QUEUE, Ticker
 from dewpoint.apps.dispatcher.tick_workflow import ScheduleTick
@@ -36,10 +37,18 @@ from dewpoint.core.crypto.kek import KekSet
 from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.crypto.keys import KeySource
 from dewpoint.core.db import make_engine, make_sessionmaker
+from dewpoint.core.models.platform import PlatformSettings
 from dewpoint.core.platform.service import record_run_duration
+from dewpoint.core.temporal_connect import connect as temporal_connect
+from dewpoint.core.temporal_connect import keep_token_fresh
 
 log = structlog.get_logger("dewpoint.dispatcher")
 CYCLE_S = 1.0  # between cycles
+# The SDK's retries of its own calls (`start_workflow`, a handle's): its defaults, made explicit, since a call's worst
+# rests on them (the owner's D16 review of checkpoint 3): retried until 10 s after its first attempt, each attempt with
+# the call's deadline, so at most 20 s with the 10-second ones (`test_sdk_retry_bounds.py`)
+RETRY = RetryConfig(initial_interval_millis=100, randomization_factor=0.2, multiplier=1.5, max_interval_millis=5_000,
+                    max_elapsed_time_millis=10_000, max_retries=10)  # fmt: skip
 
 
 async def current_build(client: Client) -> str | None:
@@ -55,15 +64,17 @@ async def current_build(client: Client) -> str | None:
 async def cycle(
     sessionmaker: async_sessionmaker[AsyncSession], client: Client, keys: KeySource, settings: Settings, *,
     instance: uuid.UUID, reconciler: uuid.UUID, leader: Leader, rotation: Rotation, verified: Verified | None = None,
-    retention: evidence.Retention | None = None,
+    retention: evidence.Retention | None = None, pages: matching.Busy | None = None, drift: Drift | None = None,
 ) -> None:  # fmt: skip
     """One cycle: observe the current build, dispatch what's due, match inbound events, report; the leader also
-    reconciles, sends cancels, keeps the Temporal Schedules in step with their rows, reads their missed firings,
-    reads the run executions' histories their evidence is due (`evidence`) and recounts the inbound-event counters
-    due a recount. An
-    observation that fails (Temporal, or the database, briefly unavailable) dispatches and matches nothing this cycle,
-    and the next one asks again: admission would refuse a matched event's requests for good without a fresh record of
-    the build (§7.2), which ages out meanwhile."""
+    reconciles, sends cancels, carries out the operator's commands and clears settled items' failure counts and
+    recovery reasons (2b-4b M3), keeps the Temporal Schedules in step
+    with their rows, reads their missed firings, reads the run executions' histories their evidence is due
+    (`evidence`), recounts the inbound-event counters due a recount and checks the ingress budget (2b-4b M3). An
+    observation that fails (Temporal, or the
+    database, briefly unavailable) dispatches and matches nothing this cycle, and the next one asks again: admission
+    would refuse a matched event's requests for good without a fresh record of the build (§7.2), which ages out
+    meanwhile."""
     try:
         build = await observe(sessionmaker, await current_build(client))
     except Exception as e:
@@ -72,13 +83,17 @@ async def cycle(
     build_id = build.build_id if build else ""
     done = await dispatch_once(sessionmaker, client, keys, settings, build, rotation) if build else {}
     if build:
-        matched = await match_once(sessionmaker, keys, verified if verified is not None else Verified())
+        matched = await match_once(sessionmaker, keys, verified if verified is not None else Verified(),
+                                   busy=pages)  # fmt: skip
         done.update({f"event_{k}": v for k, v in matched.items()})
     await report(sessionmaker, instance, build_id, {"current_build": bool(build), **done})
     if await leader.leading():
         settled = await reconcile_once(sessionmaker, client, keys, settings)
         settled.update({f"subrun_{k}": v for k, v in (await reconcile_subruns(sessionmaker, client)).items()})
         settled.update({f"cancel_{k}": v for k, v in (await send_cancels(sessionmaker, client)).items()})
+        settled.update({f"command_{k}": v for k, v in (await commands_once(sessionmaker, client)).items()})
+        if cleared := await recovery.settled(sessionmaker):  # settled items' counts, holds and reasons (2b-4b M3)
+            settled["settled_entries_cleared"] = cleared
         settled.update({f"schedule_{k}": v for k, v in (await sync_schedules(sessionmaker, client, leader)).items()})
         settled.update({f"misses_{k}": v for k, v in (await check_misses(sessionmaker, client)).items()})
         settled.update({f"strays_{k}": v for k, v in (await check_strays(sessionmaker, client)).items()})
@@ -86,6 +101,7 @@ async def cycle(
         checked = await evidence.check_evidence(sessionmaker, client, retention=kept)
         settled.update({f"evidence_{k}": v for k, v in checked.items()})
         settled.update({f"recount_{k}": v for k, v in (await recount_once(sessionmaker)).items()})
+        settled.update({f"budget_{k}": v for k, v in (await check_budget(sessionmaker, drift or Drift())).items()})
         await report(sessionmaker, reconciler, build_id, {**settled}, kind="reconciler")
 
 
@@ -112,13 +128,14 @@ def admission_worker(client: Client, sessionmaker: async_sessionmaker[AsyncSessi
     )
 
 
-async def startup(sessionmaker: async_sessionmaker[AsyncSession], settings: Settings) -> None:
+async def startup(sessionmaker: async_sessionmaker[AsyncSession], settings: Settings) -> PlatformSettings:
     """Before it connects to Temporal: the deployment's environment checked (EnvironmentNotRecordedError,
     EnvironmentMismatchError), and its maximum run duration recorded, which every deadline it sets is reckoned from
-    and the payload floor waits on (engine 2b spec §6.4)."""
-    await verify_environment(sessionmaker, settings)
+    and the payload floor waits on (engine 2b spec §6.4). The record."""
+    recorded = await verify_environment(sessionmaker, settings)
     async with sessionmaker() as s, s.begin():
         await record_run_duration(s, settings.max_run_duration_days)
+    return recorded
 
 
 async def run(settings: Settings) -> None:
@@ -126,20 +143,25 @@ async def run(settings: Settings) -> None:
     engine = make_engine(settings.database_url)
     try:
         sessionmaker = make_sessionmaker(engine)
-        await startup(sessionmaker, settings)
+        recorded = await startup(sessionmaker, settings)
         keys = KeyringKeys(sessionmaker, Keyring(KekSet.from_settings(settings)))
-        client = await Client.connect(
-            settings.temporal_address, namespace=settings.temporal_namespace, data_converter=data_converter(keys),
-            identity=f"{os.getpid()}@{socket.gethostname()} {tick_contract.IDENTITY}",
+        client = await temporal_connect(
+            settings, recorded.environment, data_converter=data_converter(keys),
+            identity=f"{os.getpid()}@{socket.gethostname()} {tick_contract.IDENTITY}", retry_config=RETRY,
         )  # fmt: skip
+        refreshing = asyncio.create_task(keep_token_fresh(client, settings))  # bearer mode: a rotated token
+        budget.instrument(client)  # its passes' soft budget: every call timed (D16 prototype)
+        start_call.install(client)  # its starts carry their recorded request id, one RPC attempt each
         instance = uuid.uuid4()
         reconciler, leader = uuid.uuid5(instance, "reconciler"), Leader(engine)
         log.info("dispatcher_started", instance=str(instance), build=this_build())
-        rotation, verified, retention = Rotation(), Verified(), evidence.Retention()
+        rotation, verified, retention, pages = Rotation(), Verified(), evidence.Retention(), matching.Busy()
+        drift = Drift()
 
         async def one() -> None:
             await cycle(sessionmaker, client, keys, settings, instance=instance, reconciler=reconciler, leader=leader,
-                        rotation=rotation, verified=verified, retention=retention)  # fmt: skip
+                        rotation=rotation, verified=verified, retention=retention, pages=pages,
+                        drift=drift)  # fmt: skip
 
         try:
             async with admission_worker(
@@ -147,6 +169,7 @@ async def run(settings: Settings) -> None:
             ):  # ends the process if it fails: Compose restarts it
                 await serve(one)
         finally:
+            refreshing.cancel()
             await leader.close()
     finally:
         await engine.dispose()

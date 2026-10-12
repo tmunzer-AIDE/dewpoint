@@ -136,6 +136,7 @@ jobs:
           } > .env
       - working-directory: deploy/compose
         run: |
+          sh postgres/make-dev-ca.sh  # PostgreSQL's TLS: a development authority, never committed
           docker compose up -d --build --wait
           set -a; . ./.env; set +a
           docker compose run --rm -e DEWPOINT_INIT_PASSWORD=violet-otter-canyon-42 \
@@ -168,6 +169,13 @@ jobs:
         timeout-minutes: 5
         run: |
           set -a; . ./.env; set +a
+          # A fresh deployment records its schedule inventory's cutover once Temporal is up, before any schedule is
+          # created (no build from before migration 0040 ever wrote here), or the API creates none: as the key admin,
+          # with Temporal's address for its check of the admission queue's pollers
+          docker compose run --rm \
+            -e DEWPOINT_DATABASE_URL="postgresql+asyncpg://dewpoint_admin_login:${DEWPOINT_ADMIN_DB_PASSWORD}@postgres/dewpoint" \
+            -e DEWPOINT_TEMPORAL_ADDRESS=temporal:7233 \
+            api dewpoint schedules inventory-cutover --attest --confirm
           read -r tenant workflow < <(docker compose run --rm -T api python - < ci/seed-workflow.py | tail -n 1)
           # Every 60 s in Europe/Paris, as the API's login: the API's image must hold the time zone data to accept it.
           # The dispatcher's sync creates its Temporal Schedule and its admission worker admits each firing: exit 0

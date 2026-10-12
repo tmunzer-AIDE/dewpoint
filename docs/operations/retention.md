@@ -70,6 +70,8 @@ lifecycle lock, in batches that each commit, so a sweep that stops resumes where
 - a schedule's tombstone, once the dispatcher's sync has recorded its Temporal schedule gone;
 - whatever the cutoff, a tick's record of its own ids (`schedule_firings`, an erasure's firing inventory) after 31
   days, uncounted: identifiers only, kept while Temporal may keep the tick.
+- with each request, run, sub-run or event it deletes, uncounted: the item's failure counts, its recovery reason and
+  the operator's commands on it.
 
 Each sweep is recorded in `retention_sweeps`: its start and end, whether every tenant was swept, and its **lag**, how
 far past its cutoff the oldest data still stored is. A run tree held back past its cutoff (a sub-run that never ended)

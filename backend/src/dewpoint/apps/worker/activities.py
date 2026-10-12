@@ -75,6 +75,7 @@ from dewpoint.engine.runtime.activities import (
     CLAIMS_GRANT,
     CLAIMS_MESSAGE,
     CLAIMS_SPILL,
+    CLOSE_BATCH,
     LOAD_VERSION,
     MAPPED,
     OUTCOME_UNKNOWN,
@@ -85,6 +86,7 @@ from dewpoint.engine.runtime.activities import (
     CelResult,
     ChildInput,
     ChildInputResult,
+    CloseBatchInput,
     DeriveInput,
     DeriveResult,
     GrantInput,
@@ -168,6 +170,7 @@ JSON = DataConverter.default.payload_converter  # what the SDK encodes a result 
 class RunStore(ClaimStore, Protocol):
     async def version(self, tenant_id: str, version_id: str) -> VersionData: ...
     async def project(self, data: ProjectInput) -> None: ...
+    async def close_batch(self, data: CloseBatchInput) -> None: ...
 
 
 class _StepFailed(Exception):
@@ -495,6 +498,13 @@ def engine_activities(
         secrets = (await secrets_of(store, data.tenant_id, root)).matcher if root else Matcher(())
         await store.project(_masked(data, secrets) if secrets.strings else data)
 
+    @activity.defn(name=CLOSE_BATCH)
+    async def close_batch(data: CloseBatchInput) -> None:
+        """A batch an unexpected bug failed: its rows still `running` close, and its closing is kept for a projection
+        of it landing later (the owner's ruling, 2b-4b M2). Nothing of the run's is written, so nothing is masked."""
+        _same_tenant(data.tenant_id)
+        await store.close_batch(data)
+
     @activity.defn(name=CLAIMS_DERIVE)
     async def claims_derive(data: DeriveInput) -> DeriveResult:
         return await derive(data, store)
@@ -524,6 +534,7 @@ def engine_activities(
     return [
         load_version,
         project,
+        close_batch,
         claims_derive,
         claims_child_input,
         claims_grant,

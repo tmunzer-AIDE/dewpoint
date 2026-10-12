@@ -19,6 +19,8 @@ from typing import Any
 import pytest
 import structlog
 from temporalio.api.enums.v1 import EventType
+from temporalio.client import WorkflowFailureError
+from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import UnsandboxedWorkflowRunner
 
@@ -479,20 +481,25 @@ async def bug_logged(
 ) -> tuple[logging.LogRecord, dict[str, Any]]:
     """A run whose workflow code raises an exception quoting IN_A_BUG, outside the sandbox so a test can break it:
     the record the workflow logs for it, and that record's line as the configured process writes it. No log line
-    holds the exception's text."""
+    holds the exception's text, nor what Temporal holds of a failed execution (a bug fails it)."""
     caplog.set_level(logging.DEBUG)
     store, g = MemoryStore(), G()
     g.settings = {"input_schema": {"type": "object", "additionalProperties": False}, "outputs": {}}
     g.node("e", ECHO, {"value": 1})
+    failure = ""
     with rendered(), stdlib_restored():
         core_logs.configure()
         with structlog.testing.capture_logs() as entries:
             async with workers(env.client, store, runner=UnsandboxedWorkflowRunner()):
                 handle = await start(env.client, store, g, {})
-                result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
-    assert result.status == "failed", result
+                try:
+                    result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
+                    assert result.status == "failed", result
+                except WorkflowFailureError as e:  # a bug fails the run's execution (2b-4b M2): Temporal's record of it
+                    assert isinstance(e.cause, ApplicationError) and e.cause.type == "internal_error", e
+                    failure = e.cause.message + (e.cause.failure.stack_trace if e.cause.failure else "")
     err = capsys.readouterr().err
-    assert IN_A_BUG not in caplog.text + json.dumps(entries, default=str) + err
+    assert IN_A_BUG not in caplog.text + json.dumps(entries, default=str) + err + failure
     [record] = [r for r in caplog.records if r.getMessage().startswith(event)]
     [line] = [r for r in records(err.splitlines()) if r["event"].startswith(event)]
     return record, line

@@ -7,6 +7,8 @@ insert. Nothing changes for an owner that bypasses it."""
 
 from alembic import op
 
+from migrations.online import online, step
+
 revision = "0043"
 down_revision = "0040"
 branch_labels = None
@@ -14,7 +16,8 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.execute("ALTER FUNCTION tenant_insert_fence() SET row_security = off")
+    with online() as conn:  # a step of its own (2b-4b, D15)
+        step(conn, "0043 the fence fails closed", "ALTER FUNCTION tenant_insert_fence() SET row_security = off")
 
 
 def downgrade() -> None:

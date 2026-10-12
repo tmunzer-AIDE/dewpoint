@@ -21,6 +21,19 @@ x-app: &app
 services:
   postgres:
     image: postgres:16-alpine
+    # TLS and the admission file (2b-4b M4 recovery): the server's certificate and key from DEWPOINT_POSTGRES_TLS_DIR
+    # (./postgres/make-dev-ca.sh writes a development authority's into ./postgres/tls; a deployment puts its own
+    # authority's there), the key copied for the server's own user first; recovery logins admitted on one path alone
+    # (./postgres/pg_hba.conf, docs/operations/deployment.md).
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        install -d -o postgres -g postgres -m 700 /var/lib/postgresql/tls &&
+        install -o postgres -g postgres -m 600 /etc/postgresql/tls/server.key /var/lib/postgresql/tls/server.key &&
+        install -o postgres -g postgres -m 644 /etc/postgresql/tls/server.crt /var/lib/postgresql/tls/server.crt &&
+        exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/var/lib/postgresql/tls/server.crt
+        -c ssl_key_file=/var/lib/postgresql/tls/server.key -c hba_file=/etc/postgresql/pg_hba.conf
     environment:
       POSTGRES_DB: dewpoint
       POSTGRES_USER: dewpoint_owner
@@ -32,7 +45,11 @@ services:
       DEWPOINT_DISPATCH_DB_PASSWORD: ${DEWPOINT_DISPATCH_DB_PASSWORD:?set in .env}
       DEWPOINT_INGRESS_DB_PASSWORD: ${DEWPOINT_INGRESS_DB_PASSWORD:?set in .env}
       DEWPOINT_RETENTION_DB_PASSWORD: ${DEWPOINT_RETENTION_DB_PASSWORD:?set in .env}
-    volumes: [pgdata:/var/lib/postgresql/data, ./initdb:/docker-entrypoint-initdb.d:ro]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+      - ./postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - ${DEWPOINT_POSTGRES_TLS_DIR:-./postgres/tls}:/etc/postgresql/tls:ro
     healthcheck: { test: ["CMD-SHELL", "pg_isready -U dewpoint_owner -d dewpoint"], interval: 5s, retries: 20 }
 
   migrate:
@@ -41,17 +58,34 @@ services:
     # development setup opts in with its own database and Temporal namespace. Every later run checks the same values.
     # Then a data key for any tenant without one (created before 2b-1a): the payload codec only reads keys (§6.3). The
     # key admin lists every tenant under row-level security (migration 0013), so it needs no role that bypasses it.
+    # The schema goes through `dewpoint deployment migrate` (2b-4b M4 recovery): its intent and outcome recorded off this
+    # host first and last, in D6's bucket under database-administration/. In production it refuses to run without that
+    # bucket (DEWPOINT_AUDIT_S3_BUCKET) and its own put-only credentials, given to this step alone.
     command:
       - sh
       - -c
       - >-
-        set -e; alembic upgrade head; dewpoint platform init-environment;
+        set -e; dewpoint deployment migrate; dewpoint platform init-environment;
         DEWPOINT_DATABASE_URL=$$DEWPOINT_ADMIN_DATABASE_URL dewpoint keys ensure-tenants
     environment:
       <<: *appenv
       DEWPOINT_DATABASE_URL: postgresql+asyncpg://dewpoint_owner:${POSTGRES_PASSWORD}@postgres/dewpoint
+      # The database migration 0053 expects, named apart from the URL: it refuses any other (one Dewpoint database per
+      # PostgreSQL cluster)
+      DEWPOINT_EXPECTED_DATABASE: dewpoint
       DEWPOINT_ADMIN_DATABASE_URL: postgresql+asyncpg://dewpoint_admin_login:${DEWPOINT_ADMIN_DB_PASSWORD}@postgres/dewpoint
       DEWPOINT_ENVIRONMENT: ${DEWPOINT_ENVIRONMENT:-production}
+      # The operator's word, for an upgrade with the application connected: docs/operations/deployment.md
+      DEWPOINT_UPGRADE_SETTINGS_ATTESTED: ${DEWPOINT_UPGRADE_SETTINGS_ATTESTED:-}
+      # The administration sink (2b-4b M4 recovery): D6's bucket, where `dewpoint deployment migrate` records its intent
+      # and outcome under <prefix>database-administration/, with this step's own identity, put-only on that prefix and
+      # given to no other service. Production refuses to migrate without them (docs/operations/deployment.md).
+      DEWPOINT_AUDIT_S3_BUCKET: ${DEWPOINT_AUDIT_S3_BUCKET:-}
+      DEWPOINT_AUDIT_S3_PREFIX: ${DEWPOINT_AUDIT_S3_PREFIX:-dewpoint/}
+      DEWPOINT_AUDIT_S3_ENDPOINT_URL: ${DEWPOINT_AUDIT_S3_ENDPOINT_URL:-}
+      DEWPOINT_AUDIT_S3_REGION: ${DEWPOINT_AUDIT_S3_REGION:-}
+      AWS_ACCESS_KEY_ID: ${DEWPOINT_ADMINISTRATION_AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${DEWPOINT_ADMINISTRATION_AWS_SECRET_ACCESS_KEY:-}
     depends_on: { postgres: { condition: service_healthy } }
     restart: "no"
 

@@ -7,6 +7,7 @@ queued or starting, no pending event. A crash resumes: every batch commits on it
 
 import uuid
 from datetime import timedelta
+from typing import Any
 
 import pytest
 from sqlalchemy import text
@@ -16,7 +17,55 @@ from tests.core.ingress.support import endpoint, record
 from tests.core.retention.support import OLD, RECENT, TREE_ROWS, count, request, run, sql, tenant, tree
 
 RETAINED = ("runs", "run_steps", "step_outputs", "run_inputs", "run_secret_index", "claim_grants", "run_requests",
-            "inbound_events", "csv_uploads", "schedules")  # fmt: skip
+            "inbound_events", "csv_uploads", "schedules", "operator_commands")  # fmt: skip
+TRACKED = (  # 0050's (2b-4b M3): an item's failures for a kind of work, its recovery reason, a command on it
+    "insert into work_failures (tenant_id, kind, item_id, errors, last_error, due_at) values "
+    "(:t, :k, :i, 7, 'RuntimeError', now())",
+    "insert into recovery_items (tenant_id, reason, item_id) values (:t, 'run_history_missing', :i)",
+    "insert into operator_commands (tenant_id, kind, item_id, reason, incident_since, actor_id, idempotency_key) "
+    "values (:t, 'record_lost_run', :i, 'run_history_missing', now(), gen_random_uuid(), 'k')",
+)
+TRACKING = (
+    "select (select count(*) from work_failures where item_id = :i) + (select count(*) from recovery_items where "
+    "item_id = :i) + (select count(*) from operator_commands where item_id = :i)"
+)
+
+
+async def tracking(owner: Any, ctx: dict[str, Any], item: uuid.UUID, kind: str = "dispatch") -> None:
+    for statement in TRACKED:
+        await sql(owner, statement, t=ctx["t"], k=kind, i=item)
+
+
+async def test_a_swept_items_failures_recovery_reason_and_commands_go_with_it(
+    owner_sessionmaker, retention_sessionmaker
+) -> None:  # fmt: skip
+    """The owner's ruling on the M3 design (rev 2): 0050's rows go with their item, a tree's root or sub-run, or a
+    request that never started; an item retention keeps keeps its rows."""
+    ctx = await tenant(owner_sessionmaker)
+    old, recent = await tree(owner_sessionmaker, ctx, OLD), await tree(owner_sessionmaker, ctx, RECENT)
+    gone = [old["root"], old["sub"], await request(owner_sessionmaker, ctx, "dead", OLD)]
+    kept = [recent["root"], recent["sub"], await request(owner_sessionmaker, ctx, "queued", None)]
+    for item in (*gone, *kept):
+        await tracking(owner_sessionmaker, ctx, item)
+    swept = await sweep.sweep_tenant(retention_sessionmaker, ctx["t"])
+    assert (swept.runs, swept.requests) == (1, 1)
+    assert [await count(owner_sessionmaker, TRACKING, i=item) for item in gone] == [0, 0, 0]
+    assert [await count(owner_sessionmaker, TRACKING, i=item) for item in kept] == [3, 3, 3]
+
+
+@pytest.mark.usefixtures("development_deployment")
+async def test_a_swept_events_failures_go_with_it(owner_sessionmaker, ingress_sessionmaker,
+                                                  retention_sessionmaker) -> None:  # fmt: skip
+    t, endpoint_id = await endpoint(owner_sessionmaker)
+    ctx = await tenant(owner_sessionmaker, tenant_id=t)
+    old, recent = uuid.uuid4(), uuid.uuid4()
+    await record(ingress_sessionmaker, endpoint_id, [(None, None, b"x"), (None, None, b"y")], ids=[old, recent])
+    for event, ago in ((old, OLD), (recent, RECENT)):
+        await sql(owner_sessionmaker, "update inbound_events set status = 'dead', reason = 'r', ended_at = now() - "
+                  "cast(:ago as interval) where id = :i", ago=ago, i=event)  # fmt: skip
+        await sql(owner_sessionmaker, TRACKED[0], t=t, k="match", i=event)
+    assert (await sweep.sweep_tenant(retention_sessionmaker, ctx["t"])).events == 1
+    assert [await count(owner_sessionmaker, TRACKING, i=event) for event in (old, recent)] == [0, 1]
 
 
 async def test_a_tree_past_its_cutoff_goes_whole_with_its_request(owner_sessionmaker, retention_sessionmaker) -> None:

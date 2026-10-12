@@ -2,7 +2,7 @@
 import base64
 import os
 import subprocess
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
 import httpx
@@ -25,6 +25,7 @@ TEST_ROLES = [
     "dewpoint_admin",
     "dewpoint_auditor",
     "dewpoint_retention",
+    "dewpoint_start_check",
 ]
 
 
@@ -42,13 +43,29 @@ def _attest_tick_cutover(url: str) -> None:
     asyncio.run(record())
 
 
+def _attest_inventory_cutover(url: str) -> None:
+    """The suite's inventory cutover, recorded before any schedule, as `schedules inventory-cutover --attest` would on a
+    new deployment (no migration records one): the schedules the tests add are the new sync's alone."""
+    import asyncio
+
+    async def record() -> None:
+        engine = make_engine(url)
+        async with engine.begin() as c:
+            await c.execute(text("select schedule_inventory_cutover_record(schedule_inventory_capture())"))
+        await engine.dispose()
+
+    asyncio.run(record())
+
+
 @pytest.fixture(scope="session")
 def pg_url() -> str:
     with PostgresContainer("postgres:16-alpine", driver="asyncpg") as pg:
         url = pg.get_connection_url()
-        env = {**os.environ, "DEWPOINT_DATABASE_URL": url}
+        # 0053's guard: the database it migrates, named explicitly
+        env = {**os.environ, "DEWPOINT_DATABASE_URL": url, "DEWPOINT_EXPECTED_DATABASE": url.rsplit("/", 1)[1]}
         subprocess.run(["uv", "run", "alembic", "upgrade", "head"], cwd=BACKEND, env=env, check=True)
         _attest_tick_cutover(url)
+        _attest_inventory_cutover(url)
         yield url
 
 
@@ -129,22 +146,45 @@ async def auditor_sessionmaker(pg_url: str, _test_users: None) -> AsyncIterator[
 
 
 @pytest.fixture(autouse=True)
+def _pass_budgets(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """The dispatcher passes' soft budget (`budget`, the D16 prototype) out of reach where a test doesn't set it: tests
+    count work, not time, so a loaded machine never stops a pass early; and no pass remembers another test's items."""
+    from dewpoint.apps.dispatcher import budget
+
+    monkeypatch.setattr(budget, "PASS_S", 3600.0)
+    monkeypatch.setattr(budget, "SLOW_S", 3600.0)
+    for remembered in (budget._visits, budget._limited, budget._ended):
+        remembered.clear()
+    yield
+    for remembered in (budget._visits, budget._limited, budget._ended):
+        remembered.clear()
+
+
+@pytest.fixture(autouse=True)
 async def clean_db(owner_sessionmaker: async_sessionmaker[AsyncSession]) -> AsyncIterator[None]:
-    """Every table emptied after each test, but what migrating an empty database records: its revision and its tick
-    cutover (migration 0039), which a test changing restores."""
+    """Every table emptied after each test, but what migrating an empty database records: its revision, its tick
+    cutover (migration 0039), which a test changing restores, and its ingress budget's row (0050), counting nothing."""
     yield
     async with owner_sessionmaker() as s, s.begin():
         tables = (
             await s.execute(
                 text(
                     "select string_agg(format('%I', tablename), ',') from pg_tables "
-                    "where schemaname='public' and tablename not in ('alembic_version', 'tick_cutover')"
+                    "where schemaname='public' and tablename not in ('alembic_version', 'tick_cutover', "
+                    "'schedule_inventory_cutover', 'ingress_budget')"
                 )
             )
         ).scalar_one()
         if tables:
             await s.execute(text("SET LOCAL session_replication_role = replica"))  # bypass audit triggers
             await s.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
+            await s.execute(text("UPDATE ingress_budget SET outstanding = 0, active = 0"))
+        # the recovery logins a test made (tests/support/recovery.py): roles are the cluster's, not the database's
+        drops = await s.execute(
+            text(r"select format('DROP ROLE %I', rolname) from pg_roles where rolname like 'rcv\_t\_%'")
+        )
+        for drop in drops.scalars().all():
+            await s.execute(text(drop))
 
 
 @pytest.fixture(scope="session")

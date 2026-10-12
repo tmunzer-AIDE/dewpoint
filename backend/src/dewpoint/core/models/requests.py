@@ -16,6 +16,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -67,7 +68,12 @@ class RunRequest(Base):
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cancel_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancel_tried_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # its last try
     starting_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # when it last became starting
+    start_request_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))  # every start of it carries it
+    sends: Mapped[int] = mapped_column(Integer, server_default=text("0"))  # its start sends, counted before each
+    unavailable_sends: Mapped[int] = mapped_column(Integer, server_default=text("0"))  # denied: check unavailable
+    not_permitted_sends: Mapped[int] = mapped_column(Integer, server_default=text("0"))  # denied: not permitted
     checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # the reconciler's last look
     envelope_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     envelope_role: Mapped[str] = mapped_column(String(16), server_default="envelope")  # its envelope key's constant

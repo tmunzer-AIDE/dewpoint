@@ -41,3 +41,11 @@ async def state(owner: Any, request_id: uuid.UUID) -> dict[str, Any]:
                                {"i": request_id})).first()  # fmt: skip
         slot = (await s.execute(text("select count(*) from run_slots where run_id = :i"), {"i": request_id})).scalar()
     return {"request": tuple(r), "run": tuple(run) if run else None, "slot": slot}
+
+
+async def reasons(owner: Any, item: uuid.UUID) -> dict[str, bool]:
+    """The recovery reasons recorded for `item` (2b-4b M3), each with whether it was seen again since it was first."""
+    async with owner() as s:
+        found = await s.execute(text("select reason, last_seen_at > since from recovery_items where item_id = :i"),
+                                {"i": item})  # fmt: skip
+        return {reason: again for reason, again in found}

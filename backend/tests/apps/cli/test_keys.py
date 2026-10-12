@@ -18,7 +18,12 @@ OLD, NEW = base64.b64encode(os.urandom(32)).decode(), base64.b64encode(os.urando
 
 
 def _env(monkeypatch, pg_url: str, **kek: str) -> None:
-    for k, v in {"DEWPOINT_DATABASE_URL": pg_url, "DEWPOINT_PUBLIC_ORIGIN": "https://dewpoint.test", **kek}.items():
+    for k, v in {
+        "DEWPOINT_DATABASE_URL": pg_url,
+        "DEWPOINT_PUBLIC_ORIGIN": "https://dewpoint.test",
+        "DEWPOINT_TEMPORAL_INSECURE_DEV": "true",
+        **kek,
+    }.items():  # §10.4: a development deployment
         monkeypatch.setenv(k, v)
     for k in ("DEWPOINT_KEK_PREVIOUS_B64", "DEWPOINT_KEK_PREVIOUS_ID"):
         if k not in kek:
@@ -229,10 +234,12 @@ def test_retire_lists_its_checks_and_retires_only_with_confirm(pg_url, monkeypat
 
     from dewpoint.apps.cli import main as cli
 
-    async def one_day(settings: object) -> timedelta:
+    async def one_day(settings: object, environment: str) -> timedelta:
         return timedelta(days=1)
 
-    async def proven(settings: object, s: object, tenant: object, version: int, **_: object) -> object:
+    async def proven(
+        settings: object, environment: str, s: object, tenant: object, version: int, **_: object
+    ) -> object:
         from dewpoint.core.crypto.retire import RunProof
 
         return RunProof()  # Temporal shows none of its run executions (here, a stand-in)
@@ -261,7 +268,7 @@ def test_retire_lists_its_checks_and_retires_only_with_confirm(pg_url, monkeypat
     dry = r.invoke(app, ["keys", "retire", "--tenant", t, "--version", "1"])
     assert dry.exit_code == 0 and "payload_floor: yes" in dry.output and "not retired" in dry.output, dry.output
 
-    async def unknown(settings: object, s: object, tenant: object, version: int, **_: object) -> None:
+    async def unknown(settings: object, environment: str, s: object, tenant: object, version: int, **_: object) -> None:
         return None
 
     monkeypatch.setattr(cli, "_run_histories", unknown)  # Temporal can't be asked: never assumed gone
@@ -286,7 +293,7 @@ def test_the_tick_cutover_is_recorded_once_and_never_while_an_old_dispatcher_pol
 
     pollers: list[str] = ["4242@an-old-dispatcher"]
 
-    async def admission_pollers(settings: object) -> list[str]:
+    async def admission_pollers(settings: object, environment: str) -> list[str]:
         return pollers
 
     monkeypatch.setattr(cli, "_admission_pollers", admission_pollers)
@@ -356,13 +363,11 @@ def test_key_commands_that_ask_temporal_refuse_a_namespace_not_the_recorded_one_
 
     attempts: list[object] = []
 
-    class Unreached:
-        @staticmethod
-        async def connect(*args: object, **kwargs: object) -> object:
-            attempts.append(args)
-            raise AssertionError("connected to Temporal")
+    async def unreached(*args: object, **kwargs: object) -> object:
+        attempts.append(args)
+        raise AssertionError("connected to Temporal")
 
-    monkeypatch.setattr(cli, "Client", Unreached)
+    monkeypatch.setattr(cli, "temporal_connect", unreached)  # every Temporal connection of the CLI's
     r = CliRunner()
     _env(monkeypatch, pg_url, DEWPOINT_KEK_B64=OLD, DEWPOINT_KEK_ID="old")
     if recorded is not None:
@@ -383,19 +388,17 @@ def test_a_retire_dry_run_changes_nothing(pg_url, monkeypatch) -> None:
     from dewpoint.apps.cli import main as cli
     from dewpoint.apps.dispatcher import evidence
 
-    async def one_day(settings: object) -> timedelta:
+    async def one_day(settings: object, environment: str) -> timedelta:
         return timedelta(days=1)
 
-    class Connected:
-        @staticmethod
-        async def connect(*args: object, **kwargs: object) -> object:
-            return object()
+    async def connected(*args: object, **kwargs: object) -> object:
+        return object()  # Temporal, a stand-in: connected with §10.4's checks (tests/core/test_temporal_connect.py)
 
     async def gone(client: object, workflow_id: str, run_id: str | None) -> None:
         return None  # Temporal shows none of them
 
     monkeypatch.setattr(cli, "_namespace_retention", one_day)
-    monkeypatch.setattr(cli, "Client", Connected)
+    monkeypatch.setattr(cli, "temporal_connect", connected)
     monkeypatch.setattr(evidence, "_described", gone)
     r = CliRunner()
     _env(monkeypatch, pg_url, DEWPOINT_KEK_B64=OLD, DEWPOINT_KEK_ID="old")

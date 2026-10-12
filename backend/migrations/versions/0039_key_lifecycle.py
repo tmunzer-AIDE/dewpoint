@@ -41,10 +41,14 @@ unknown.
   a retirement waits for it, so no stored event names a keypair that's gone."""
 
 import importlib.util
+from collections.abc import Callable
 from pathlib import Path
+from uuid import UUID
 
 import sqlalchemy as sa
 from alembic import op
+
+from migrations.online import batches, exists, grants, online, step, ungranted
 
 revision = "0039"
 down_revision = "0038"
@@ -91,7 +95,10 @@ KEYPAIRS = {  # then the tenant's keypair lock (core/ingress/keys.py), shared: r
 SCOPED = ("csv_uploads", "csv_mappings", "schedules", "rate_scope_keys", "plugin_calls")  # their policies name their
 # roles: the key admin's added
 
-
+TRIGGER = (  # a root's evidence, whatever process inserts its row
+    "CREATE TRIGGER runs_evidence AFTER INSERT ON runs FOR EACH ROW WHEN (NEW.parent_run_id IS NULL) "
+    "EXECUTE FUNCTION runs_evidence()"
+)
 EVIDENCE = [
     "ALTER TABLE execution_evidence ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE execution_evidence FORCE ROW LEVEL SECURITY",
@@ -110,8 +117,7 @@ BEGIN
   RETURN NEW;
 END $$""",
     "REVOKE ALL ON FUNCTION runs_evidence() FROM PUBLIC",
-    "CREATE TRIGGER runs_evidence AFTER INSERT ON runs FOR EACH ROW WHEN (NEW.parent_run_id IS NULL) "
-    "EXECUTE FUNCTION runs_evidence()",
+    TRIGGER,
     """CREATE FUNCTION execution_evidence_due(max_rows integer) RETURNS TABLE (tenant_id uuid, id bigint)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
     SELECT e.tenant_id, e.id FROM execution_evidence e
@@ -141,83 +147,127 @@ def _recorder() -> str:
     )
 
 
+# Every root already here, backfilled in batches (2b-4b, D15): what its attempts did is unknown, so it's unproven.
+BACKFILL_BOUNDS = (  # the batch's last id (uuid has no max()) and its size
+    "WITH b AS (SELECT r.id FROM runs r WHERE r.parent_run_id IS NULL AND r.id > :after AND NOT EXISTS "
+    "(SELECT 1 FROM execution_evidence e WHERE e.workflow_id = 't:' || r.tenant_id || ':run:' || r.id "
+    "AND e.run_id IS NULL) ORDER BY r.id LIMIT :n) SELECT (SELECT id FROM b ORDER BY id DESC LIMIT 1), "
+    "(SELECT count(*) FROM b)"
+)
+BACKFILL = (
+    "INSERT INTO execution_evidence (tenant_id, workflow_id, started_at, unproven) SELECT tenant_id, "
+    "'t:' || tenant_id || ':run:' || id, coalesce(started_at, queued_at), true FROM runs "
+    "WHERE parent_run_id IS NULL AND id > :after AND id <= :hi ON CONFLICT (workflow_id) WHERE run_id IS NULL DO NOTHING"
+)
+
+
 def upgrade() -> None:
-    op.create_table(
-        "run_duration_limits",
-        sa.Column("days", sa.Integer, primary_key=True),
-        sa.Column("first_recorded_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
-        sa.CheckConstraint("days > 0", name="run_duration_limits_days"),
-    )
-    for statement in (
-        "GRANT SELECT, INSERT ON run_duration_limits TO dewpoint_dispatch",
-        "GRANT SELECT ON run_duration_limits TO dewpoint_admin",
-    ):
-        op.execute(statement)
     recorder = _recorder().replace(NAMED, AGREES).replace(SIZED, RETIRED)
     for anchor, replaced in KEYPAIRS.items():
         recorder = recorder.replace(anchor, replaced)
-    op.execute(recorder)
-    op.add_column("schedules", sa.Column("action_key_version", sa.Integer, nullable=True))
-    op.execute("GRANT UPDATE (action_key_version) ON schedules TO dewpoint_dispatch")
-    op.create_table(
-        "tick_cutover",
-        sa.Column("id", sa.SmallInteger, primary_key=True, server_default="1"),
-        sa.Column("at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
-        sa.CheckConstraint("id = 1", name="tick_cutover_once"),
-    )
-    op.execute("GRANT SELECT, INSERT ON tick_cutover TO dewpoint_admin")
-    op.create_table(
-        "execution_evidence",
-        sa.Column("id", sa.BigInteger, sa.Identity(always=False), primary_key=True),
-        sa.Column("tenant_id", sa.Uuid, sa.ForeignKey("tenants.id"), nullable=False),
-        sa.Column("workflow_id", sa.Text, nullable=False),
-        sa.Column("run_id", sa.Text, nullable=True),  # none: a root recorded before its start, its chain unread
-        sa.Column("started_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("seen_at", sa.DateTime(timezone=True), nullable=True),  # Temporal first showed it
-        sa.Column("checked_at", sa.DateTime(timezone=True), nullable=True),  # Temporal last asked about it
-        sa.Column("unproven", sa.Boolean, nullable=False, server_default=sa.false()),
-        sa.Column("read_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("lost_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("next_check_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
-    )
-    op.create_index("execution_evidence_root", "execution_evidence", ["workflow_id"], unique=True,
-                    postgresql_where=sa.text("run_id IS NULL"))  # fmt: skip
-    op.create_index("execution_evidence_run", "execution_evidence", ["workflow_id", "run_id"], unique=True,
-                    postgresql_where=sa.text("run_id IS NOT NULL"))  # fmt: skip
-    op.create_index("execution_evidence_due", "execution_evidence", ["next_check_at"],
-                    postgresql_where=sa.text("lost_at IS NULL"))  # fmt: skip
-    op.create_index("execution_evidence_tenant", "execution_evidence", ["tenant_id", "started_at"])
-    for statement in EVIDENCE:
-        op.execute(statement)
-    op.execute(  # every root already here: what its attempts did is unknown, so it's unproven
-        "INSERT INTO execution_evidence (tenant_id, workflow_id, started_at, unproven) SELECT tenant_id, "
-        "'t:' || tenant_id || ':run:' || id, coalesce(started_at, queued_at), true FROM runs "
-        "WHERE parent_run_id IS NULL ON CONFLICT (workflow_id) WHERE run_id IS NULL DO NOTHING"
-    )
-    for table, columns in SEALED.items():
-        op.execute(f"GRANT SELECT, UPDATE ({columns}) ON {table} TO dewpoint_admin")
-    for table in SCOPED:
-        op.execute(
-            f"CREATE POLICY {table}_key_admin ON {table} TO dewpoint_admin USING (tenant_id = app_tenant_id()) "
-            "WITH CHECK (tenant_id = app_tenant_id())"
-        )
-    # Retiring a data-key version nothing needs (spec §6.4): the key admin deletes it.
-    op.execute("GRANT DELETE ON data_keys, platform_keys TO dewpoint_admin")
-    # The ingress key's rotation (spec §8.3): the key admin seals every endpoint's secrets again, across tenants.
-    op.execute(
+    # Online (2b-4b, D15), in the original's order: the tables, the recorder and the evidence's trigger in one step, so
+    # every root inserted from then on is recorded; the roots already here, in batches; then the key admin's grants
+    # and policies in one step, its `DELETE` on data keys among them: no key retires while a root's evidence is missing.
+    # A step locks at most one table in use: the trigger on `runs` and each policy a step of its own (grants lock none).
+    with online() as conn:
+        step(conn, "0039 schedules.action_key_version",
+             lambda: op.add_column("schedules", sa.Column("action_key_version", sa.Integer, nullable=True)),
+             done=exists("column", "action_key_version", "schedules"))  # fmt: skip
+        step(conn, "0039 key lifecycle", *ungranted(*_tables(recorder)), done=exists("relation", "execution_evidence"))
+        step(conn, "0039 runs_evidence", TRIGGER, done=exists("trigger", "runs_evidence", "runs"))
+        batches(conn, "0039 execution_evidence backfill", BACKFILL_BOUNDS, BACKFILL, first=UUID(int=0))
+        for table, policy in _policies():
+            step(conn, f"0039 {table} for the key admin", policy,
+                 done=exists("policy", f"{table}_key_admin", table))  # fmt: skip
+        step(conn, "0039 grants", "GRANT UPDATE (action_key_version) ON schedules TO dewpoint_dispatch",
+             *grants(*_tables(recorder)), *_grants())  # fmt: skip
+
+
+def _tables(recorder: str) -> list[str | Callable[[], object]]:
+    return [
+        lambda: op.create_table(
+            "run_duration_limits",
+            sa.Column("days", sa.Integer, primary_key=True),
+            sa.Column("first_recorded_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+            sa.CheckConstraint("days > 0", name="run_duration_limits_days"),
+        ),
+        "GRANT SELECT, INSERT ON run_duration_limits TO dewpoint_dispatch",
+        "GRANT SELECT ON run_duration_limits TO dewpoint_admin",
+        recorder,
+        lambda: op.create_table(
+            "tick_cutover",
+            sa.Column("id", sa.SmallInteger, primary_key=True, server_default="1"),
+            sa.Column("at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+            sa.CheckConstraint("id = 1", name="tick_cutover_once"),
+        ),
+        "GRANT SELECT, INSERT ON tick_cutover TO dewpoint_admin",
+        lambda: op.create_table(
+            "execution_evidence",
+            sa.Column("id", sa.BigInteger, sa.Identity(always=False), primary_key=True),
+            sa.Column("tenant_id", sa.Uuid, sa.ForeignKey("tenants.id"), nullable=False),
+            sa.Column("workflow_id", sa.Text, nullable=False),
+            sa.Column("run_id", sa.Text, nullable=True),  # none: a root recorded before its start, its chain unread
+            sa.Column("started_at", sa.DateTime(timezone=True), nullable=False),
+            sa.Column("seen_at", sa.DateTime(timezone=True), nullable=True),  # Temporal first showed it
+            sa.Column("checked_at", sa.DateTime(timezone=True), nullable=True),  # Temporal last asked about it
+            sa.Column("unproven", sa.Boolean, nullable=False, server_default=sa.false()),
+            sa.Column("read_at", sa.DateTime(timezone=True), nullable=True),
+            sa.Column("lost_at", sa.DateTime(timezone=True), nullable=True),
+            sa.Column("next_check_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        ),
+        lambda: op.create_index(
+            "execution_evidence_root",
+            "execution_evidence",
+            ["workflow_id"],
+            unique=True,
+            postgresql_where=sa.text("run_id IS NULL"),
+        ),  # fmt: skip
+        lambda: op.create_index(
+            "execution_evidence_run",
+            "execution_evidence",
+            ["workflow_id", "run_id"],
+            unique=True,
+            postgresql_where=sa.text("run_id IS NOT NULL"),
+        ),  # fmt: skip
+        lambda: op.create_index(
+            "execution_evidence_due",
+            "execution_evidence",
+            ["next_check_at"],
+            postgresql_where=sa.text("lost_at IS NULL"),
+        ),  # fmt: skip
+        lambda: op.create_index("execution_evidence_tenant", "execution_evidence", ["tenant_id", "started_at"]),
+        *(s for s in EVIDENCE if s != TRIGGER),
+    ]
+
+
+def _policies() -> list[tuple[str, str]]:
+    """The key admin's policies: each table's."""
+    return [
+        *(
+            (table, f"CREATE POLICY {table}_key_admin ON {table} TO dewpoint_admin USING (tenant_id = app_tenant_id()) "
+                    "WITH CHECK (tenant_id = app_tenant_id())")
+            for table in SCOPED
+        ),
+        # The ingress key's rotation (spec §8.3): the key admin seals every endpoint's secrets again, across tenants.
+        ("webhook_endpoints", "CREATE POLICY webhook_endpoints_key_admin ON webhook_endpoints TO dewpoint_admin "
+                              "USING (true) WITH CHECK (true)"),
+        # An older inbound keypair no stored event names, retired (spec §8.3); the key admin reads events' versions.
+        ("inbound_events", "CREATE POLICY inbound_events_key_admin ON inbound_events TO dewpoint_admin "
+                           "USING (tenant_id = app_tenant_id())"),
+    ]  # fmt: skip
+
+
+def _grants() -> list[str]:
+    """The key admin's grants, after the backfill: no key retires while a root's evidence is missing."""
+    return [
+        *(f"GRANT SELECT, UPDATE ({columns}) ON {table} TO dewpoint_admin" for table, columns in SEALED.items()),
+        # Retiring a data-key version nothing needs (spec §6.4): the key admin deletes it.
+        "GRANT DELETE ON data_keys, platform_keys TO dewpoint_admin",
         "GRANT SELECT (id, hmac_secret, dedupe_key), UPDATE (hmac_secret, dedupe_key) ON webhook_endpoints "
-        "TO dewpoint_admin"
-    )
-    op.execute(
-        "CREATE POLICY webhook_endpoints_key_admin ON webhook_endpoints TO dewpoint_admin USING (true) "
-        "WITH CHECK (true)"
-    )
-    # An older inbound keypair no stored event names, retired (spec §8.3); the key admin reads events' versions.
-    op.execute("GRANT DELETE ON tenant_event_keys TO dewpoint_admin")
-    op.execute("GRANT SELECT (tenant_id, key_version) ON inbound_events TO dewpoint_admin")
-    op.execute(
-        "CREATE POLICY inbound_events_key_admin ON inbound_events TO dewpoint_admin USING (tenant_id = app_tenant_id())"
-    )
+        "TO dewpoint_admin",
+        "GRANT DELETE ON tenant_event_keys TO dewpoint_admin",
+        "GRANT SELECT (tenant_id, key_version) ON inbound_events TO dewpoint_admin",
+    ]
 
 
 def downgrade() -> None:

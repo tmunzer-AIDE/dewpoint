@@ -5,9 +5,12 @@ import uuid
 from typing import Any
 
 from sqlalchemy import text
+from temporalio.client import Client
+from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from dewpoint.core.auth.users import create_user
 from dewpoint.core.erasure import service
+from dewpoint.engine.runtime.ids import run_workflow_id
 from tests.core.erasure.test_fence import FENCED_TABLES
 from tests.core.ingress.support import KEYRING, digest, endpoint, key, record
 from tests.core.retention.support import CIPHER, OLD, request, sql, tree
@@ -28,7 +31,7 @@ async def populated(owner: Any, ingress: Any) -> dict[str, Any]:
     await record(ingress, endpoint_id, [(key(1), digest(1), b"one")])
     run_tree = await tree(owner, ctx, OLD)
     queued = await request(owner, ctx, "queued", None)
-    schedule_id = uuid.uuid4()
+    schedule_id, release = uuid.uuid4(), uuid.uuid4()  # a release command (0057) and its snapshot
     for statement, params in (
         ("insert into memberships (tenant_id, user_id, role) values (:t, :u, 'owner')", {}),
         ("insert into connections (id, tenant_id, type, name, config) values (:i, :t, 'http', 'c', '{}')",
@@ -59,6 +62,17 @@ async def populated(owner: Any, ingress: Any) -> dict[str, Any]:
          "(:t, 'options', 'flow.x@1', 'f', 'done', now() + interval '1 hour', :c)", {"c": CIPHER}),  # no connection
         ("insert into tenant_run_limits (tenant_id, max_concurrent) values (:t, 3)", {}),
         ("insert into run_slots (run_id, tenant_id) values (:i, :t)", {"i": uuid.uuid4()}),
+        ("insert into work_failures (tenant_id, kind, item_id, errors, last_error, due_at) values "  # 2b-4b M3's
+         "(:t, 'dispatch', :i, 1, 'RuntimeError', now())", {"i": queued}),
+        ("insert into recovery_items (tenant_id, reason, item_id) values (:t, 'run_history_missing', :i)",
+         {"i": uuid.uuid4()}),
+        ("insert into operator_commands (id, tenant_id, kind, item_id, reason, incident_since, actor_id, "
+         "idempotency_key, status) values (:i, :t, 'record_lost_run', :r, 'run_history_missing', now(), :u, 'k', "
+         "'pending')", {"i": uuid.uuid4(), "r": uuid.uuid4()}),
+        ("insert into operator_commands (id, tenant_id, kind, item_id, work_kind, actor_id, idempotency_key) "  # 0057's
+         "values (:i, :t, 'release_held', :r, 'dispatch', :u, 'release')", {"i": release, "r": uuid.uuid4()}),
+        ("insert into operator_command_holds (command_id, tenant_id, kind, item_id, hold_id) "
+         "values (:c, :t, 'dispatch', :r, 1)", {"c": release, "r": uuid.uuid4()}),
     ):  # fmt: skip
         await sql(owner, statement, t=tenant, w=workflow_id, v=version_id, u=user, **params)
     return {**ctx, "endpoint": endpoint_id, "tree": run_tree, "queued": queued, "schedule": schedule_id}
@@ -77,3 +91,43 @@ async def rows_of(owner: Any, tenant: uuid.UUID) -> dict[str, int]:
 async def erasing(api: Any, tenant: uuid.UUID) -> None:
     async with api() as s, s.begin():
         await service.start(s, tenant_id=tenant, requested_by=uuid.uuid4())
+
+
+async def executed(client: Client, owner: Any, tenant: uuid.UUID) -> None:
+    """Every execution step 60 will enumerate for the tenant started on the dev server and closed at once (the runs
+    `populated` writes ended long ago; no worker serves the queue), and the exact runs its evidence and firings name set
+    to the started ones: each is then shown, deleted and read back, `gone`. `populated` writes those rows alone, as if
+    Temporal had them: an id Temporal never shows holds an erasure for good (2b-4b M4 recovery, task 12;
+    `test_erasure_bound.py`). Closed, not left open: the dev server takes minutes, more for each, to delete an execution
+    terminated just before (measured, task 12), and one closed a while before in about 30 s."""
+    runs_of = text("select id from runs where tenant_id = :t")
+    started_of = text("select id from run_requests where tenant_id = :t and status = 'started'")
+    async with owner() as s:
+        runs = [str(r) for r in (await s.execute(runs_of, {"t": tenant})).scalars()]
+        started = [str(r) for r in (await s.execute(started_of, {"t": tenant})).scalars()]
+        evidence = (await s.execute(text("select id, workflow_id from execution_evidence where tenant_id = :t"),
+                                    {"t": tenant})).all()  # fmt: skip
+        firings = (await s.execute(text("select workflow_id, run_id from schedule_firings where tenant_id = :t"),
+                                   {"t": tenant})).all()  # fmt: skip
+    run_ids: dict[str, str] = {}
+
+    async def start(workflow_id: str) -> str:
+        if workflow_id not in run_ids:
+            try:
+                handle = await client.start_workflow("Unserved", id=workflow_id, task_queue="erasure-unserved")
+                await handle.terminate()
+                run_ids[workflow_id] = str(handle.first_execution_run_id or handle.result_run_id)
+            except WorkflowAlreadyStartedError as err:  # the test started it itself: its open run, left as it is
+                run_ids[workflow_id] = str(err.run_id)
+        return run_ids[workflow_id]
+
+    for run in dict.fromkeys([*runs, *started]):
+        await start(run_workflow_id(str(tenant), run))
+    async with owner() as s, s.begin():
+        for evidence_id, workflow_id in evidence:
+            await s.execute(text("update execution_evidence set run_id = :r where id = :i"),
+                            {"r": await start(workflow_id), "i": evidence_id})  # fmt: skip
+        for workflow_id, run_id in firings:
+            await s.execute(text("update schedule_firings set run_id = :r where workflow_id = :w and run_id = :o "
+                                 "and tenant_id = :t"),
+                            {"r": await start(workflow_id), "w": workflow_id, "o": run_id, "t": tenant})  # fmt: skip

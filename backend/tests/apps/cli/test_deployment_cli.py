@@ -3,6 +3,7 @@
 lists every version. The calls themselves are covered by tests/apps/worker/test_deployment.py, on Temporal's dev
 server; here Temporal is a stand-in."""
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -21,13 +22,18 @@ class _Client:
         return _Client()
 
 
-async def _recorded(*args: Any) -> None:
+async def _recorded(*args: Any) -> Any:
     """A deployment whose record matches: the CLI's Temporal commands check it before connecting (2b spec §2.1)."""
+    return SimpleNamespace(environment="development")
+
+
+async def _connected(*args: Any, **kwargs: Any) -> "_Client":
+    return _Client()
 
 
 @pytest.fixture
 def temporal_stand_in(cli_env: None, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: F811
-    monkeypatch.setattr(cli, "Client", _Client)
+    monkeypatch.setattr(cli, "temporal_connect", _connected)
     monkeypatch.setattr(cli, "verify_environment", _recorded)  # the check itself: tests/apps/test_environment.py
 
 

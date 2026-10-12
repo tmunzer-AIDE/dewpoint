@@ -16,7 +16,7 @@ import uuid
 import zoneinfo
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, select
@@ -28,6 +28,7 @@ from dewpoint.core.claims.cipher import ClaimCipher
 from dewpoint.core.crypto.keys import KeySource
 from dewpoint.core.models.schedules import Schedule, ScheduleIncarnation, ScheduleInterval
 from dewpoint.core.models.workflows import Workflow, WorkflowVersion
+from dewpoint.core.platform.service import inventory_cut_over
 from dewpoint.engine.graph.csv import RESERVED, trigger_schema
 from dewpoint.engine.handles import contains_marker
 
@@ -186,7 +187,11 @@ async def create(
     s: AsyncSession, keys: KeySource, *, tenant_id: uuid.UUID, actor_id: uuid.UUID, workflow_id: uuid.UUID,
     timing: Mapping[str, Any], mode: str, input: Mapping[str, Any], enabled: bool,
 ) -> Schedule:  # fmt: skip
-    """A schedule of the workflow's active version, its timing and its fixed input checked, the input sealed."""
+    """A schedule of the workflow's active version, its timing and its fixed input checked, the input sealed. None
+    before the inventory's cutover (the owner's review of checkpoint 4, M5): on any installation, one created then
+    would be captured as if from before migration 0040, its accounting incomplete for good."""
+    if not await inventory_cut_over(s):
+        raise ScheduleRefusedError(503, {"error": "schedule_inventory_not_cut_over"})
     version = await _active_version(s, workflow_id)
     _checked_timing(timing)
     _checked_input(version, input)
@@ -252,6 +257,11 @@ async def delete(s: AsyncSession, *, actor_id: uuid.UUID, schedule: Schedule) ->
     await _audited(s, "schedule.delete", actor_id, schedule)
 
 
+# An incarnation's misses are read every five minutes (the owner's ruling 3): stale past that, the accounting never
+# complete while one is overdue (the owner's review of checkpoint 3: a grace may govern an alert, never this)
+MISSES_STALE = timedelta(minutes=5)
+
+
 @dataclass(frozen=True)
 class Accounting:
     """A schedule's missed-firing accounting (D3f; the owner's ruling B and its review): complete only when no span of
@@ -259,6 +269,7 @@ class Accounting:
     None while one is open) and fixed reasons."""
 
     uncounted: list[dict[str, str | None]] = field(default_factory=list)
+    misses_read_at: datetime | None = None  # the oldest read of the incarnations that may still miss a firing
     # Whether nothing ever unpaused it (4c-3a ruling 6): its incarnations, read here for its waits, record an unpause
     # before it's sent; one seen unpaused, or one from before 2b-4a, whose unpauses nobody recorded, may have fired.
     never_unpaused: bool = True
@@ -298,7 +309,19 @@ async def accounting(s: AsyncSession, schedule_id: uuid.UUID) -> Accounting:
                                   "class": "pending",
                                   "reason": "count_pending" if landed else "awaiting_first_update"}))  # fmt: skip
     unpaused = any(i.backfilled or i.unpause_sent_at is not None or i.landed_paused is False for i in ids)
-    return Accounting([span for _, span in sorted(spans, key=lambda pair: pair[0])], never_unpaused=not unpaused)
+    # Missed firings are read every five minutes for each incarnation that may still miss one (D16): one not read
+    # within that leaves the accounting stale, from its last read (never read: from its unpause, or its recording)
+    relevant = [i for i in ids if i.retired_at is None and (i.backfilled or i.unpause_sent_at is not None
+                                                            or i.landed_paused is False)]  # fmt: skip
+    now: datetime = (await s.execute(select(func.statement_timestamp()))).scalar_one()
+    last = [i.misses_checked_at or i.unpause_sent_at or i.recorded_at for i in relevant]
+    if last and min(last) < now - MISSES_STALE:
+        spans.append((min(last), {"from": min(last).isoformat(), "to": None, "class": "pending",
+                                  "reason": "misses_stale"}))  # fmt: skip
+    read = [i.misses_checked_at for i in relevant]
+    oldest = None if not read or None in read else min(r for r in read if r is not None)
+    return Accounting([span for _, span in sorted(spans, key=lambda pair: pair[0])], misses_read_at=oldest,
+                      never_unpaused=not unpaused)  # fmt: skip
 
 
 def body(schedule: Schedule, accounted: Accounting) -> dict[str, object]:
@@ -314,7 +337,7 @@ def body(schedule: Schedule, accounted: Accounting) -> dict[str, object]:
         "misses": schedule.misses + schedule.creation_misses,  # every firing certainly missed, both kinds (D3f)
         "missed_while_created": schedule.creation_misses,  # due while it waited, created paused, for its unpause
         # Temporal's count, read every five minutes: `misses` as of then (a deletion reads it last, paused, D3f)
-        "misses_read_at": schedule.misses_checked_at.isoformat() if schedule.misses_checked_at else None,
+        "misses_read_at": accounted.misses_read_at.isoformat() if accounted.misses_read_at else None,
         "accounting_complete": accounted.complete,  # false: some span's firings are possibly missed, unknown or pending
         "uncounted_intervals": accounted.uncounted,  # those spans, never in `misses`
         "sync_error": schedule.sync_error,

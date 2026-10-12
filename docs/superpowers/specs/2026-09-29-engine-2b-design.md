@@ -1,6 +1,8 @@
 # Dewpoint — Engine 2b Design (payload protection, admission, triggers, retention)
 
-- **Status:** revision 10, a draft for the owner's approval with the 2b-4a plan, written from the 2b-4a prototype, whose
+- **Status:** revision 11 (2026-10-09), a draft: §10.4 as the owner ruled on 2b-4b's M4 design (mTLS the production
+  target, a JWT bearer token in a file, the authorizer's archival rule), not yet approved. Revision 10, a draft for the
+  owner's approval with the 2b-4a plan, written from the 2b-4a prototype, whose
   four milestones the owner approved as prototype checkpoints (2026-10-05 and 2026-10-06), not production sign-off: no
   tenant erasure completes yet (§6.5), and the production gate stays off until 2b-4b (§2). Revision 9 (2026-10-05) is
   approved with the 2b-3b plan (#36). Revision 8 (2026-10-04) is approved (#33); revisions 6 and 7 (2026-10-03) are
@@ -1895,13 +1897,33 @@ its guide.
 
 ### 10.4 Production Temporal
 
-- A cluster whose server supports Worker Deployments — self-hosted with persistent storage, or Temporal Cloud.
-- **Verified TLS always,** with the server's certificate checked against a configured CA or the system roots. Client
-  authentication by mTLS (`DEWPOINT_TEMPORAL_TLS_CERT`, `…_KEY`, `…_CA`) or by an API key
-  (`DEWPOINT_TEMPORAL_API_KEY`) sent over that TLS. An API key replaces the client certificate, never TLS.
+- A cluster whose server supports Worker Deployments, self-hosted with persistent storage. D3g's 30-day cap needs an
+  enforced namespace-change boundary: Temporal Cloud doesn't qualify as documented (D12, ruled 2026-10-05). The
+  candidate is Temporal's server run with Dewpoint's authorizer (`deploy/temporal`), proven by D12 locally and
+  requalified on the real target before readiness.
+- **Verified TLS always,** the server's certificate checked against `DEWPOINT_TEMPORAL_TLS_CA` (else the system roots)
+  for the name `DEWPOINT_TEMPORAL_TLS_SERVER_NAME` (else the address's host).
+- **Exactly one client authentication,** over that TLS; both, or neither outside the exception below, are refused at
+  startup, as are an unreadable CA, certificate, key or token file (named by its setting, never its content):
+  - **mTLS, production's target** (the owner's ruling on the M4 design): `DEWPOINT_TEMPORAL_TLS_CERT` and
+    `DEWPOINT_TEMPORAL_TLS_KEY`. Issuing and rotating the certificates needs an operational plan before real-target
+    qualification (`docs/operations/temporal-certificates.md`).
+  - **A JWT bearer token,** without a client certificate: `DEWPOINT_TEMPORAL_BEARER_TOKEN_FILE`, read at connection
+    and every minute after, a new token set on the live client. The server's JWT claim mapper validates it against
+    its key set and audience. It isn't a Temporal Cloud API key. Rotation without a restart is promised only once
+    D12's DW.3 shows it on the D12 server; until then a rotated token takes a restart.
 - **One exception:** a `development` environment may connect without TLS when `DEWPOINT_TEMPORAL_INSECURE_DEV=true`
   (CI and local Compose on their isolated network). Every process refuses that setting unless the recorded
-  environment is `development`, and warns at startup when it's used.
+  environment is `development`, refuses it with any TLS setting, and warns at startup when it's used.
+- **The namespace,** kept by the server's authorizer: after any `RegisterNamespace` or `UpdateNamespace`, a retention
+  of at most 30 days and archival disabled for history and visibility, checked against the namespace's effective
+  configuration (a setting a request leaves out keeps its stored value, read from the server's store). Every other API
+  that can change a namespace's configuration is refused. Each namespace-changing decision, allowed or refused, is
+  written to D6's bucket before it's returned, and refused when that write fails. `dewpoint temporal check` reads the
+  namespace back with the deployment's own settings; readiness calls it.
+- **The boundary** (D3g) is recorded through the platform admin's API, tied to the D12 proof record's SHA-256, the
+  server binary's and Temporal's id for the namespace: a development deployment's after D12 passes locally; a
+  production deployment's only after real-target qualification.
 - Compose's dev server can never pass readiness; a Compose deployment runs production only against an external
   Temporal.
 - The rollout guide gains these requirements, the minimum server version, and the drainage dynamic config.

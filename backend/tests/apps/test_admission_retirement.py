@@ -17,6 +17,7 @@ from tests.apps.test_admission import admit, current, published
 from tests.apps.test_workflow_ops import ECHO_GRAPH, update
 from tests.core.requests.test_schema import INSERT_REQUEST, claim
 from tests.core.requests.test_schema import request as request_row
+from tests.support.starting import mark_starting
 from tests.support.workflows import seed_workflow
 
 pytestmark = pytest.mark.usefixtures("development_deployment")
@@ -73,9 +74,7 @@ async def test_a_starting_request_blocks_normal_retirement_and_survives_a_forced
                                     api_settings)  # fmt: skip
     await update(api_sessionmaker, ctx, wf, enabled=False)  # only the request references the entry
     async with owner_sessionmaker() as s, s.begin():
-        await s.execute(
-            text("update run_requests set status = 'starting', starting_at = now() where id = :i"), {"i": request.id}
-        )
+        await mark_starting(s, request.id)
     with pytest.raises(lifecycle.ReferencedError):
         async with admin_sessionmaker() as s, s.begin():
             await lifecycle.retire(s, ECHO)

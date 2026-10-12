@@ -1,6 +1,70 @@
 {
   "components": {
     "schemas": {
+      "AbandonEvidence": {
+        "description": "An abandonment's evidence (task 10): the identifiers (the leader checks each against the record), the Temporal\nresponse its operator saw, their rationale, and a visibility result if any (recorded, never proof).",
+        "properties": {
+          "rationale": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Rationale",
+            "type": "string"
+          },
+          "request_id": {
+            "format": "uuid",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "start_request_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Request Id"
+          },
+          "temporal_response": {
+            "$ref": "#/components/schemas/TemporalResponse"
+          },
+          "tenant_id": {
+            "format": "uuid",
+            "title": "Tenant Id",
+            "type": "string"
+          },
+          "visibility": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Visibility"
+          },
+          "workflow_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tenant_id",
+          "request_id",
+          "workflow_id",
+          "start_request_id",
+          "temporal_response",
+          "rationale"
+        ],
+        "title": "AbandonEvidence",
+        "type": "object"
+      },
       "ActivateIn": {
         "properties": {
           "version_id": {
@@ -259,6 +323,112 @@
         "title": "BindingSite",
         "type": "object"
       },
+      "BoundaryIn": {
+        "properties": {
+          "attestation": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Attestation",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "namespace": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Namespace",
+            "type": "string"
+          },
+          "namespace_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Namespace Id",
+            "type": "string"
+          },
+          "proof_digest": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Proof Digest",
+            "type": "string"
+          },
+          "server_build": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Server Build",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "namespace",
+          "namespace_id",
+          "server_build",
+          "proof_digest",
+          "attestation"
+        ],
+        "title": "BoundaryIn",
+        "type": "object"
+      },
+      "CapacityIn": {
+        "description": "The values to change, each `null` to unset it, or `unset` for all three; and how the starts were measured.",
+        "properties": {
+          "attestation": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Attestation",
+            "type": "string"
+          },
+          "headroom": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 1.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Headroom"
+          },
+          "queue_wait_s": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queue Wait S"
+          },
+          "starts_per_s": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Starts Per S"
+          },
+          "unset": {
+            "default": false,
+            "title": "Unset",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "attestation"
+        ],
+        "title": "CapacityIn",
+        "type": "object"
+      },
       "CodeIn": {
         "properties": {
           "code": {
@@ -272,6 +442,56 @@
           "code"
         ],
         "title": "CodeIn",
+        "type": "object"
+      },
+      "CommandIn": {
+        "properties": {
+          "abandon": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AbandonEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "evidence": {
+            "default": "",
+            "maxLength": 500,
+            "title": "Evidence",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "item_id": {
+            "format": "uuid",
+            "title": "Item Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "record_lost_run",
+              "record_lost_subrun",
+              "release_lost_slot",
+              "settle_ended",
+              "inspect_unresolved_send",
+              "abandon_start"
+            ],
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "item_id",
+          "idempotency_key"
+        ],
+        "title": "CommandIn",
         "type": "object"
       },
       "ConnectionCreateIn": {
@@ -2538,6 +2758,96 @@
         "title": "RecoveryCodesOut",
         "type": "object"
       },
+      "ReleaseIn": {
+        "properties": {
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Idempotency Key"
+          },
+          "item_id": {
+            "format": "uuid",
+            "title": "Item Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "dispatch",
+              "reconcile_starting",
+              "reconcile_open",
+              "reconcile_slot",
+              "cancel",
+              "match",
+              "subrun"
+            ],
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "item_id"
+        ],
+        "title": "ReleaseIn",
+        "type": "object"
+      },
+      "ReleaseManyIn": {
+        "description": "A tenant's held items of one kind, held before `held_before`: `max` of them at most, oldest first.",
+        "properties": {
+          "held_before": {
+            "format": "date-time",
+            "title": "Held Before",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Idempotency Key"
+          },
+          "kind": {
+            "enum": [
+              "dispatch",
+              "reconcile_starting",
+              "reconcile_open",
+              "reconcile_slot",
+              "cancel",
+              "match",
+              "subrun"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "max": {
+            "maximum": 1000.0,
+            "minimum": 1.0,
+            "title": "Max",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "held_before",
+          "max"
+        ],
+        "title": "ReleaseManyIn",
+        "type": "object"
+      },
       "RerunIn": {
         "additionalProperties": false,
         "properties": {
@@ -3796,6 +4106,42 @@
           "field"
         ],
         "title": "TaintSiteOut",
+        "type": "object"
+      },
+      "TemporalResponse": {
+        "description": "The Temporal response an operator saw, exactly, and when.",
+        "properties": {
+          "call": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Call",
+            "type": "string"
+          },
+          "message": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "status": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "call",
+          "status",
+          "message",
+          "observed_at"
+        ],
+        "title": "TemporalResponse",
         "type": "object"
       },
       "TenantIn": {
@@ -5070,6 +5416,366 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/v1/admin/held": {
+      "get": {
+        "operationId": "held_api_v1_admin_held_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Held Api V1 Admin Held Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Held",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/platform/ingress-capacity": {
+      "get": {
+        "description": "The capacity, the deployment's limit it makes and what's outstanding, and its values still unset (production\nreadiness refuses then).",
+        "operationId": "ingress_capacity_api_v1_admin_platform_ingress_capacity_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Ingress Capacity Api V1 Admin Platform Ingress Capacity Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Ingress Capacity",
+        "tags": [
+          "admin"
+        ]
+      },
+      "patch": {
+        "description": "The capacity changed, audited (`platform.ingress_capacity.set`) with the admin's id, the attestation, what it\nwas and what it is, and its values still unset.",
+        "operationId": "change_ingress_capacity_api_v1_admin_platform_ingress_capacity_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CapacityIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Change Ingress Capacity Api V1 Admin Platform Ingress Capacity Patch",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Change Ingress Capacity",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/platform/namespace-boundaries": {
+      "get": {
+        "description": "Every boundary recorded, newest first; the erasure's bound relies on the newest not lost.",
+        "operationId": "namespace_boundaries_api_v1_admin_platform_namespace_boundaries_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Namespace Boundaries Api V1 Admin Platform Namespace Boundaries Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Namespace Boundaries",
+        "tags": [
+          "admin"
+        ]
+      },
+      "post": {
+        "description": "The boundary recorded, audited (`platform.namespace_boundary.record`) with the admin's id and its evidence.",
+        "operationId": "record_boundary_api_v1_admin_platform_namespace_boundaries_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BoundaryIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Record Boundary Api V1 Admin Platform Namespace Boundaries Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Record Boundary",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/recovery": {
+      "get": {
+        "operationId": "recovery_api_v1_admin_recovery_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Recovery Api V1 Admin Recovery Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Recovery",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/recovery/unresolved-sends/counts": {
+      "get": {
+        "description": "Unresolved sends, counted (task 9): per state, with open sends and the oldest, and the erasures they hold. The\ndatabase checks the caller's session itself (`admin_session`) and returns no identifier.",
+        "operationId": "unresolved_counts_api_v1_admin_recovery_unresolved_sends_counts_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Unresolved Counts Api V1 Admin Recovery Unresolved Sends Counts Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Unresolved Counts",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/tenants/{tenant_id}/commands": {
+      "post": {
+        "operationId": "ask_api_v1_admin_tenants__tenant_id__commands_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CommandIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Ask Api V1 Admin Tenants  Tenant Id  Commands Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ask",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/tenants/{tenant_id}/commands/{command_id}": {
+      "get": {
+        "operationId": "command_api_v1_admin_tenants__tenant_id__commands__command_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "command_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Command Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Command Api V1 Admin Tenants  Tenant Id  Commands  Command Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Command",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/api/v1/admin/tenants/{tenant_id}/erasure": {
       "get": {
         "operationId": "shown_api_v1_admin_tenants__tenant_id__erasure_get",
@@ -5253,6 +5959,192 @@
           }
         },
         "summary": "Stop",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/tenants/{tenant_id}/held/count": {
+      "get": {
+        "description": "What a bulk release would free: the tenant's held items of `kind` held before `held_before`.",
+        "operationId": "held_count_api_v1_admin_tenants__tenant_id__held_count_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "enum": [
+                "dispatch",
+                "reconcile_starting",
+                "reconcile_open",
+                "reconcile_slot",
+                "cancel",
+                "match",
+                "subrun"
+              ],
+              "title": "Kind",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "held_before",
+            "required": true,
+            "schema": {
+              "format": "date-time",
+              "title": "Held Before",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Held Count Api V1 Admin Tenants  Tenant Id  Held Count Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Held Count",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/tenants/{tenant_id}/held/release": {
+      "post": {
+        "description": "A held item's release, recorded as a command with the hold it shows; released once its operator confirms it.",
+        "operationId": "release_api_v1_admin_tenants__tenant_id__held_release_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReleaseIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Release Api V1 Admin Tenants  Tenant Id  Held Release Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Release",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/tenants/{tenant_id}/held/release-many": {
+      "post": {
+        "description": "A bulk release (the owner's rulings on the M3 checkpoints), bounded by tenant, kind, `held_before` and `max`,\nnever all of them across tenants: recorded as a command with the holds it shows, oldest first, released once its\noperator confirms it, those alone (task 8).",
+        "operationId": "release_many_api_v1_admin_tenants__tenant_id__held_release_many_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReleaseManyIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Release Many Api V1 Admin Tenants  Tenant Id  Held Release Many Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Release Many",
         "tags": [
           "admin"
         ]
