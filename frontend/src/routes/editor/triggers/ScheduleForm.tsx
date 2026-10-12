@@ -269,7 +269,8 @@ export function ScheduleForm({ schedule, form, activeNumber, onDone, onDelete }:
       const changed = (k: keyof Schedule, v: unknown) => schedule[k] !== v;
       return updateSchedule(t.tenantId, schedule.id, {
         ...(timing && (changed("cron", timing.cron) || changed("every_s", timing.every_s) || changed("offset_s", timing.offset_s)) ? timing : {}),
-        ...(changed("time_zone", time_zone) ? { time_zone } : {}),
+        // A zone is a cron's: an interval counts in UTC, so its edit never sends one (4c-3b's final review).
+        ...((timing ? timing.cron !== null : schedule.cron !== null) && changed("time_zone", time_zone) ? { time_zone } : {}),
         ...(changed("catchup_window_s", catchup) ? { catchup_window_s: catchup } : {}),
         ...(changed("mode", mode) ? { mode } : {}),
         ...(replacing ? { input } : {}),

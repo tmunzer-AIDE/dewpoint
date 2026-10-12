@@ -108,7 +108,12 @@ export function SchedulesSection() {
                       {t.manage ? (
                         <>
                           <Switch checked={s.enabled} label={title} disabled={toggle.isPending} onCheckedChange={(enabled) => toggle.mutate({ id: s.id, title, enabled })} />
-                          <Button size="sm" aria-label={`Edit ${title}`} data-back={`schedule:${s.id}`} disabled={!form.data} onClick={() => setOpen(s.id)}>Edit</Button>
+                          <Button
+                            size="sm" aria-label={`Edit ${title}`} data-back={`schedule:${s.id}`} disabled={!form.data}
+                            aria-describedby={form.isError ? "triggers-no-form" : undefined} onClick={() => setOpen(s.id)}
+                          >
+                            Edit
+                          </Button>
                         </>
                       ) : (
                         <span className="text-small">{s.enabled ? "On" : "Off"}</span>
@@ -140,7 +145,9 @@ export function SchedulesSection() {
             ＋ Schedule
           </Button>
           {why && <p id="triggers-no-schedule" className="text-small text-muted">{why}</p>}
-          {published && form.isError && <p className="text-small text-danger">The published version&apos;s form couldn&apos;t be read, so a schedule can&apos;t be added now.</p>}
+          {published && form.isError && (
+            <p id="triggers-no-form" className="text-small text-danger">The published version&apos;s form couldn&apos;t be read, so a schedule can&apos;t be added or edited now.</p>
+          )}
         </div>
       ) : null}
       <ConfirmDialog

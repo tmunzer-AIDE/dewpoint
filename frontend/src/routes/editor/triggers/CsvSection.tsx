@@ -130,7 +130,13 @@ function ColumnEditor({ i, column, last, onClose }: { i: number; column: CsvColu
   const t = useTriggers();
   const disabled = !t.editable;
   const box = useRef<HTMLDivElement>(null);
-  useEffect(() => box.current?.querySelector("input")?.focus(), []);
+  useEffect(() => {
+    // Opened from its row's Edit, which at 320 px sits past the table's right edge: the table goes back to its start, so
+    // its first header shows, and the editor, as wide as the table's box at most, fits it (4c-3b's final review).
+    const table = box.current?.closest<HTMLElement>('[role="region"]');
+    if (table) table.scrollLeft = 0;
+    box.current?.querySelector("input")?.focus();
+  }, []);
   const set = (patch: Partial<CsvColumn>, key: string) =>
     t.actions.update(onCsv((csv) => setColumn(csv, i, patch)), null, `${columnAt(i)}/${key}`);
   const problems = problemsAt(t.check, columnAt(i));
@@ -143,7 +149,7 @@ function ColumnEditor({ i, column, last, onClose }: { i: number; column: CsvColu
           onClose();
         }
       }}
-      className="flex flex-col gap-3 rounded-lg border border-line-strong p-3"
+      className="flex max-w-[calc(100cqi-1.5rem)] flex-col gap-3 rounded-lg border border-line-strong p-3"
     >
       <ColumnText i={i} column={column} k="header" label="Header in the file" />
       <ColumnText i={i} column={column} k="name" label="Name" />
@@ -201,7 +207,7 @@ function Limit({ k, label, csv }: { k: "max_rows" | "max_bytes"; label: string; 
     return "value" in read && read.value === v;
   }, held?.text);  // prettier-ignore
   return (
-    <div className="flex flex-col gap-1.5">
+    <div data-limit={k} className="flex flex-col gap-1.5">
       <Field
         label={label} value={held?.text ?? typed} disabled={!t.editable} inputMode="decimal" error={heldWhy(t.actions, "limit", at) ?? undefined}
         placeholder={k === "max_bytes" ? "5" : String(MAX_ROWS)}
@@ -222,20 +228,26 @@ function Limit({ k, label, csv }: { k: "max_rows" | "max_bytes"; label: string; 
 export function CsvSection({ csv, focusAt, back }: { csv: CsvSettings; focusAt: FocusAt; back: (...keys: string[]) => void }) {
   const t = useTriggers();
   const [editing, setEditing] = useState<number | null>(null);
+  const root = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const m = focusAt ? /^\/settings\/csv\/columns\/(\d+)/.exec(focusAt.pointer) : null;
     if (m) setEditing(Number(m[1]));
+    // A held limit: "Go to it" gives it focus (4c-3b's final review).
+    const limit = focusAt ? /^\/settings\/csv\/(max_rows|max_bytes)$/.exec(focusAt.pointer) : null;
+    if (limit) requestAnimationFrame(() => root.current?.querySelector<HTMLElement>(`[data-limit="${limit[1]}"] input`)?.focus());
   }, [focusAt]);
   const columnProblems = csv.columns.flatMap((c, i) => (editing === i ? [] : problemsAt(t.check, columnAt(i)).map((d) => ({ i, c, d }))));
   return (
-    <div role="group" aria-labelledby="triggers-csv" className="flex flex-col gap-3">
+    <div ref={root} role="group" aria-labelledby="triggers-csv" className="flex flex-col gap-3">
       <h4 id="triggers-csv" className="text-small font-semibold">CSV file</h4>
       <p className="text-small text-muted">
         Started by hand with a file: one run reads its rows as <code className="font-mono">trigger.rows</code> and their count as{" "}
         <code className="font-mono">trigger.row_count</code>.
       </p>
       <Problems problems={problemsAt(t.check, AT, true)} />
-      <Table label="CSV columns">
+      {/* Its box is a size container: a column's editor is as wide as the box at most, so it fits what shows of a table
+          wider than the box at 320 px (4c-3b's final review). */}
+      <Table label="CSV columns" className="@container">
         <thead>
           <tr><Th>Header</Th><Th>Name</Th><Th>Type</Th><Th>Rules</Th><Th><span className="sr-only">Actions</span></Th></tr>
         </thead>

@@ -28,14 +28,15 @@ cover local work only: anything outward-facing (push, PR, issues) is confirmed i
 
 | Slot | Work |
 |---|---|
-| 0043 | Used on main (2b-4, `0043_fence_fails_closed`); it had been reserved for B4b, now 0048 |
-| 0044 | Used on main (`0044_orphan_backoff`); it had been reserved for B8, now 0049 |
+| 0043 | Used on main (2b-4, `0043_fence_fails_closed`); it had been reserved for B4b, then 0048, now 0071 |
+| 0044 | Used on main (`0044_orphan_backoff`); it had been reserved for B8, then 0049, now 0072 |
 | 0045 | B7: per-attempt connection provenance, with sub-project 3 |
 | 0046 | B9: preview consumption and durable live-test execution |
 | 0047 | 4b: `runs_workflow_last` (ruling 72; merged in #60, chained after 0044: M36) |
-| 0048 | B4b: `skipped` and `not_started` projection statuses (the owner, 2026-10-08) |
-| 0049 | B8: draft and single-step simulation (the owner, 2026-10-08) |
-| 0070 | 4c-3a: `webhook_endpoints.trigger_key`, an endpoint's sender (the owner; it was 0054 until 2026-10-11, which 2b-4b's work also names; 2b-4b's plan holds 0048–0063) |
+| 0048–0065 | 2b-4b's work (#90, not merged). B4b and B8, reserved at 0048 and 0049 on 2026-10-08, moved to 0071 and 0072 (the owner, 2026-10-11) |
+| 0070 | 4c-3a: `webhook_endpoints.trigger_key`, an endpoint's sender (the owner; it was 0054 until 2026-10-11, which 2b-4b's work also names) |
+| 0071 | B4b: `skipped` and `not_started` projection statuses (the owner, 2026-10-08; the slot, 2026-10-11) |
+| 0072 | B8: draft and single-step simulation (the owner, 2026-10-08; the slot, 2026-10-11) |
 
 - One Alembic chain: before merging, the first unmerged migration's `down_revision` is reconciled with the actual head.
 - Deployed migrations are never rewritten; 0035–0042 are never altered.
@@ -2627,3 +2628,20 @@ M89. **The list's pointer, the id's pointer and the id's header are described by
 
 The unit suite 983 passed (72 files), two runs; typecheck, lint, check:api and build clean; the browser gate 43 passed
 (1.7 min, 204 s); local CodeQL 0 findings in both languages, at 2056acd8.
+
+### 4c-3b, the deferred minors (2026-10-11)
+
+The owner, in chat, asked for the deferred minors and approved the design, its clarifications included. Fixed on
+`fix/editor-4c3b-minors` (5d9c61b5), each with a test that failed first: at 320 px a CSV column's editor opens with its
+table back at its start, the first header in view, and fits the table's box (a browser flow checks both); Escape in the
+topic picker cancels it, focus back to what opened it; "Go to it" gives a held CSV limit focus, and opens a field on its
+held Default; an interval schedule's edit sends no time zone; a schedule's disabled Edit is described by why; the
+endpoints' Workflows column says loading apart from couldn't be read; the JSON line finder ends on any text, what isn't
+JSON having no line. A review pasted in chat found three gaps, fixed with tests that failed first (b0c58975): "Go to it"
+opens only its own field on Default, until Done, another field's Edit or ＋ Field (a further review); the line finder
+maps only JSON (`tru`, `01`, `NaN`, a no-break space get no line); a failed refresh keeps an endpoint's known workflow
+count and says so. The unit suite 995 passed (72 files); typecheck, lint, check:api and build clean.
+
+Migration slots (the owner, 2026-10-11): B4b moves to 0071 and B8 to 0072, as the table above records: 2b-4b's work
+(#90) uses 0048–0065. #90's own chain is reconciled with main by its session when it lands.
+

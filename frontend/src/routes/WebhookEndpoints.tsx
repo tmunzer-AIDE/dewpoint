@@ -137,7 +137,15 @@ export function WebhookEndpointsPage({ tenantId }: { tenantId: string }) {
     ) : (
       <span>{e.enabled ? "On" : "Off"}</span>
     );  // prettier-ignore
-  const workflowsOf = (e: Endpoint) => (bound.get(e.id) ?? null)?.length ?? "–";
+  /** How many workflows it starts: loading, a first read that failed, and a refresh that failed (the count kept), said
+   * apart (4c-3b's final review). */
+  const workflowsOf = (e: Endpoint) => {
+    const read = bindings[list.indexOf(e)];
+    if (!read || read.isPending) return <><span aria-hidden="true">…</span><span className="sr-only">Loading</span></>;
+    if (read.data === undefined) return <span className="font-sans text-muted">couldn&apos;t be read</span>;
+    const count = read.data.bindings.length;
+    return read.isError ? <>{count}<span className="font-sans text-muted"> · couldn&apos;t be refreshed</span></> : count;
+  };
   const detailsButton = (e: Endpoint) => (
     <Button size="sm" aria-label={`${e.name}, details`} aria-expanded={open === e.id} data-back={`endpoint:${e.id}`} onClick={() => setOpen(open === e.id ? null : e.id)}>Details</Button>
   );

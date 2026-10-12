@@ -175,5 +175,20 @@ test("Settings → Webhook endpoints and the Triggers panel's forms reflow at 32
   await expect(panel.getByRole("form", { name: "New schedule" })).toBeVisible();
   expect(await overflow(), "the schedule's form scrolls sideways at 320 px").toBeLessThanOrEqual(0);
   await expectAccessible(page, "editor: triggers, a schedule's form at 320 px");
+  // A CSV column opened at 320 px leaves its table where it was, its first header in view, and fits the table's box
+  // (4c-3b's final review: the editor's focus scrolled the table 22 px, clipping "Header").
+  await page.goto(`/t/${await tenantId(page)}/workflows`);
+  await page.getByRole("link", { name: "Input flow", exact: true }).click();
+  await page.getByRole("button", { name: /^Start: by hand/ }).click();
+  const triggers = page.getByRole("complementary", { name: "Triggers" });
+  await triggers.getByRole("button", { name: "Edit AP name" }).click();
+  await expect(triggers.getByRole("textbox", { name: "Header in the file" })).toBeFocused();
+  const columns = triggers.getByRole("region", { name: "CSV columns" });
+  expect(await columns.evaluate((el) => el.scrollLeft), "the CSV table scrolled sideways at 320 px").toBe(0);
+  const fits = await columns.evaluate((el) => {
+    const box = el.querySelector('[role="group"]')!.getBoundingClientRect();
+    return box.right <= el.getBoundingClientRect().right + 0.5;
+  });
+  expect(fits, "the column's editor runs past the table's box at 320 px").toBe(true);
   await page.setViewportSize({ width: 1280, height: 720 });
 });

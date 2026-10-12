@@ -57,11 +57,20 @@ export function pointerWords(pointer: string): string {
 
 const escape = (key: string) => key.replaceAll("~", "~0").replaceAll("/", "~1");
 
+/** Text the line finder can't read as JSON. */
+class Malformed extends Error {}
+
 /** The line each value of valid JSON text starts on, by its pointer from the text's root ("" is the root). */
 export function pointerLines(text: string): Map<string, number> {
   const lines = new Map<string, number>();
   let i = 0;
   let line = 1;
+  // Text that isn't JSON (cut off, a stray token, a bad escape) has no lines: every scan stops at its end and a stray
+  // character ends it, so the finder always ends (4c-3b's final review).
+  const broken = (): never => {
+    throw new Malformed();
+  };
+  const at = (c: string) => i < text.length && text[i] === c;
   const space = () => {
     while (i < text.length && /\s/.test(text[i]!)) {
       if (text[i] === "\n") line++;
@@ -69,44 +78,62 @@ export function pointerLines(text: string): Map<string, number> {
     }
   };
   const string = (): string => {
+    if (!at('"')) broken();
     const start = i;
     i++;
-    while (text[i] !== '"') i += text[i] === "\\" ? 2 : 1;
+    while (i < text.length && text[i] !== '"') i += text[i] === "\\" ? 2 : 1;
+    if (i >= text.length) broken();
     i++;
     return JSON.parse(text.slice(start, i)) as string;
   };
-  const value = (at: string): void => {
+  const value = (pointer: string): void => {
     space();
-    lines.set(at, line);
+    if (i >= text.length) broken();
+    lines.set(pointer, line);
     const c = text[i];
     if (c === "{") {
       i++;
       space();
-      if (text[i] === "}") return void i++;
+      if (at("}")) return void i++;
       for (;;) {
         space();
         const key = string();
         space();
-        i++; // the colon
-        value(`${at}/${escape(key)}`);
+        if (!at(":")) broken();
+        i++;
+        value(`${pointer}/${escape(key)}`);
         space();
-        if (text[i++] === "}") return;
+        if (at("}")) return void i++;
+        if (!at(",")) broken();
+        i++;
       }
     }
     if (c === "[") {
       i++;
       space();
-      if (text[i] === "]") return void i++;
+      if (at("]")) return void i++;
       for (let n = 0; ; n++) {
-        value(`${at}/${n}`);
+        value(`${pointer}/${n}`);
         space();
-        if (text[i++] === "]") return;
+        if (at("]")) return void i++;
+        if (!at(",")) broken();
+        i++;
       }
     }
     if (c === '"') return void string();
+    const scalar = i;
     while (i < text.length && !/[\s,\]}]/.test(text[i]!)) i++;
+    if (i === scalar) broken(); // a stray ",", "]" or "}" where a value goes
   };
-  value("");
+  try {
+    JSON.parse(text); // what isn't JSON (a value or a space JSON doesn't have) has no line, the scan never guessing
+    value("");
+    space();
+    if (i < text.length) broken(); // something after the value
+  } catch (e) {
+    if (e instanceof Malformed || e instanceof SyntaxError) return new Map();
+    throw e;
+  }
   return lines;
 }
 

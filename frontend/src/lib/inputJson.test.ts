@@ -57,4 +57,24 @@ describe("where a server's problem shows in the text", () => {
     expect(lineOf(odd, "/settings/input_schema/properties/a~1b/title")).toBe(1);
     expect(lineOf(odd, "/settings/csv/columns/0/name")).toBe(2);
   });
+
+  it("finds no line in text with a value or a space JSON doesn't have", () => {
+    // The review of the deferred minors: the loops ended, but these still got lines.
+    for (const text of ['{"a": tru}', '{"a": 01}', '{"a": NaN}', '{"a": +1}', '{"a": .5}', '{"a": 1.}', '{"a":\u00a01}', '{"a": "x\ny"}']) {
+      expect(pointerLines(text), JSON.stringify(text)).toEqual(new Map());
+    }
+    expect(pointerLines('{"a": -1.5e3, "b": [true, false, null]}').get("/b/2")).toBe(1); // JSON's own scalars still map
+  });
+
+  it("finds no line in text that isn't JSON, wherever it breaks off, and always ends", () => {
+    // 4c-3b's final review: an unterminated string ran the finder past the text; so did an open object or list.
+    const broken = [
+      '{"a": "b', '{"a": 1', '{"a": [1, 2', '[1, {"b": 2}', '{"a": "b\\', '{"a": "b\\"', '{"a" 1}', '{"a": 1 "b": 2}',
+      "[1 2]", "{", "[", '"', '{"a": "\\x"}', '{"a": 1,', '{"a": }',
+    ];
+    for (const text of broken) {
+      expect(pointerLines(text), text).toEqual(new Map());
+      expect(lineOf(text, "/settings/a"), text).toBeNull();
+    }
+  });
 });
