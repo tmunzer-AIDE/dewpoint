@@ -40,8 +40,15 @@ def handshake(host: str, port: int, context: ssl.SSLContext, name: str) -> str:
             return f"refused: {type(e).__name__}"
 
 
+def _client(**trust: str) -> ssl.SSLContext:
+    """A verifying client context over TLS 1.2 or later: the floor said here, never left to the platform's default."""
+    context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, **trust)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    return context
+
+
 def _pinned(ca: Path) -> ssl.SSLContext:
-    context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=str(ca))
+    context = _client(cafile=str(ca))
     context.check_hostname, context.verify_mode = True, ssl.CERT_REQUIRED
     return context
 
@@ -65,10 +72,10 @@ def main() -> int:
     answer = handshake(args.host, args.port, _pinned(args.ca), "not-the-server.invalid")
     record.check(answer.startswith("refused"), "another name: refused", answer=answer)
     other = Authority.create("Dewpoint qualification: another authority")
-    stranger = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cadata=other.cert_pem().decode())
+    stranger = _client(cadata=other.cert_pem().decode())
     answer = handshake(args.host, args.port, stranger, name)
     record.check(answer.startswith("refused"), "another authority: refused", answer=answer)
-    answer = handshake(args.host, args.port, ssl.create_default_context(), name)
+    answer = handshake(args.host, args.port, _client(), name)
     record.check(answer.startswith("refused"), "the system's store alone: refused (a private authority)",
                  answer=answer)  # fmt: skip
     for weaker in ("require", "verify-ca", "prefer"):
