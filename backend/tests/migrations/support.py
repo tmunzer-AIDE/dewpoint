@@ -4,8 +4,10 @@ each committed step against the states before and after the upgrade (`violations
 compared between two databases."""
 
 import asyncio
+import gc
 import hashlib
 import os
+import threading
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -183,11 +185,35 @@ def alembic_config(migrations: Path = BACKEND / "migrations") -> Config:
 
 FROM_URL = "<the url's database>"  # the default expected name (0053's guard): the database `url` names
 
+_COLLECTION = {"migrations": 0, "was_on": True}  # migrations running in this process; collection's state before them
+_COLLECTION_LOCK = threading.Lock()
+
+
+@contextmanager
+def _collection_paused() -> Iterator[None]:
+    """No automatic garbage collection while a migration runs in this process (the disconnect, 2026-10-12): under the
+    parallel suite a long-lived worker's full collection took up to 2 s (a fresh process's, like production's migrate,
+    0.07 s), freezing every thread, the migrating one mid-step included, past D15's idle bound, and the server ended the
+    step's session. Process-wide, so counted across threads: paused at the first, the state before it back after the
+    last."""
+    with _COLLECTION_LOCK:
+        if _COLLECTION["migrations"] == 0:
+            _COLLECTION["was_on"] = gc.isenabled()
+            gc.disable()
+        _COLLECTION["migrations"] += 1
+    try:
+        yield
+    finally:
+        with _COLLECTION_LOCK:
+            _COLLECTION["migrations"] -= 1
+            if _COLLECTION["migrations"] == 0 and _COLLECTION["was_on"]:
+                gc.enable()
+
 
 def _alembic(url: str, config: Config | None, run: Callable[[Config], None], expected: str | None = FROM_URL) -> None:
     """An Alembic command in this process (its hooks seen here), on `url` (asyncpg's, plain); env.py reads the url, and
     the expected database's name 0053's guard compares (`expected`: the url's own by default, None for none), from the
-    environment, restored after."""
+    environment, restored after; no automatic garbage collection meanwhile (`_collection_paused`)."""
     before = {k: os.environ.get(k) for k in ("DEWPOINT_DATABASE_URL", "DEWPOINT_EXPECTED_DATABASE")}
     os.environ["DEWPOINT_DATABASE_URL"] = url.replace("postgresql://", "postgresql+asyncpg://")
     name = url.rsplit("/", 1)[1].split("?", 1)[0] if expected == FROM_URL else expected
@@ -196,7 +222,8 @@ def _alembic(url: str, config: Config | None, run: Callable[[Config], None], exp
     else:
         os.environ["DEWPOINT_EXPECTED_DATABASE"] = name
     try:
-        run(config or alembic_config())
+        with _collection_paused():
+            run(config or alembic_config())
     finally:
         for key, value in before.items():
             if value is None:
