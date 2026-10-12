@@ -43,3 +43,19 @@ if (typeof globalThis.localStorage?.getItem !== "function") {
   };
   Object.defineProperty(globalThis, "localStorage", { value: storage, configurable: true });
 }
+// jsdom 25's Blob (and so File) has no text(), which every browser gives: read through its FileReader instead, so a
+// file the person picks reads as it would in a browser.
+if (typeof Blob.prototype.text !== "function") {
+  Object.defineProperty(Blob.prototype, "text", {
+    configurable: true,
+    writable: true,
+    value(this: Blob): Promise<string> {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = () => reject(reader.error ?? new Error("the file couldn't be read"));
+        reader.readAsText(this);
+      });
+    },
+  });
+}

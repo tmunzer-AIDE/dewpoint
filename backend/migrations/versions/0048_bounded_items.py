@@ -5,15 +5,17 @@ it reads (`read_run`), the children it saw initiated but not yet started (`read_
 (`read_last_at`). A schedule incarnation that may still miss a firing (sent an unpause once, or from before 0040) is its
 own item of the misses pass, due four minutes after its last read (`misses_checked_at`), so read before its accounting
 turns stale at five, until it's verified gone (`retired_at`: absent after it was seen, or after its schedule's deletion
-settled), listed across tenants, ids only, by `incarnation_miss_candidates()`. Online (D15), in steps. Slot 0048: 0045
-to 0047 are another branch's to coordinate."""
+settled), listed across tenants, ids only, by `incarnation_miss_candidates()`. Online (D15), in steps. Slot 0048, in
+2b-4b's 0048 to 0065 (main's slot table, the owner, 2026-10-11). Written on 0044, and chained, when it met main, after
+main's head at that merge (0070), so the chain keeps one head and main's migrations are never rewritten (slot numbers
+name ownership, not order: 4b ruling 72)."""
 
 from alembic import op
 
 from migrations.online import exists, grants, index, online, step, ungranted
 
 revision = "0048"
-down_revision = "0044"
+down_revision = "0070"
 branch_labels = None
 depends_on = None
 

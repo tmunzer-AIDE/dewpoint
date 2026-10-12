@@ -49,7 +49,7 @@ async def add_connection(
     secret: dict[str, Any] | None = None,
 ) -> uuid.UUID:
     cid = uuid.uuid4()
-    blob = await seal(tenant, cid, secret or {"token": "s3cr3t-token-value"})
+    blob = await seal(tenant, cid, secret if secret is not None else {"token": "s3cr3t-token-value"})
     async with owner() as s, s.begin():
         await s.execute(
             text(

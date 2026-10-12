@@ -61,7 +61,8 @@ Each slice is shippable on its own branch (D26) and ends at one checkpoint (revi
 - Built-in widgets: text, number, boolean, enum, `pill-text`, `cel`, `connection`, list, object, opt-in JSON. The
   widget contract of §3.3: value, schema, upstream scope, options loader.
 - Pills: `/` and + Data open the upstream tree (B6) with types and always/conditional markers; pill details open on
-  focus + Enter (a popover, never on hover alone): the redacted sample, its run, connection, time and staleness (B7).
+  focus + Enter (in the drawer's flow under its field, never on hover alone: 4c-2b ruling 2, ledger 126): the redacted
+  sample, its run, connection, time and staleness (B7).
 - Condition builder → CEL (D18); formula mode behind a toggle; the class badge with its reason.
 - Trigger setup: manual input form and CSV columns (§6.8), schedule, webhook endpoint and topic filter (B13), and
   Settings → Webhook endpoints (D11). The declassify list, with what each site reveals (2b §4.1; publish needs
@@ -91,6 +92,11 @@ Each slice is shippable on its own branch (D26) and ends at one checkpoint (revi
 (Resource → Action, live options that accept pills, Find a setting), nested update, the message composer with Slack,
 Teams and Google Chat previews, and the run form's connection-scoped pickers (`picker`).
 
+**4g — connection forms for declared types** (proposed, pending approval): lifts D1's "Mist only": the add-connection
+form for any synced type, built from its declaration; the API's preflight on creation and on updates that supply a
+host-setting value (plugins-3 outline D7, D8; plugins-3 ledger, "Deferred: the API's preflight on creation and
+host-setting updates"); its warnings shown in the form.
+
 **Helm:** out of sub-project 4 (D25).
 
 ## 3. Decisions
@@ -98,7 +104,8 @@ Teams and Google Chat previews, and the run form's connection-scoped pickers (`p
 Each gives my recommendation (**Rec**). D1–D7 are where the design and §10 differ.
 
 - **D1 Connections.** 1i makes it a Settings tab (with LLM and MCP sections); §10.2 and your slicing make it a rail
-  item. Rec: a rail item showing 1i's sectioned page, Mist only until 3 and 5.
+  item. Rec: a rail item showing 1i's sectioned page, Mist only until 3 and 5. Forms for the other synced types: 4g
+  (proposed, pending approval).
 - **D2 Simulated.** §10.1: neutral hatched slate. The design: slate (`--sim`) outlines and a "◌" marker, no hatch, no
   simulated-result screen. Rec: slate for simulate controls; simulated results (node badges, test and run banners,
   origin tags) add a hatch (a bundled SVG) and their text label, so colour is never the only signal.
@@ -210,14 +217,14 @@ need a migration (a slot from you each). Today no route sets `response_model`.
 | B4a | 4b, 4e | `GET …/workflows/{wid}/versions/{vid}` with the graph, expression classes and `engine_abi` (B4b's "not recorded" rule reads it): no route returns a version's graph, and the versions list omits `engine_abi` | no |
 | B4b | before 4d-1 and 4e | Projection of every node instance's end, per scope, in live and simulated runs. `skipped` for branch elimination. `not_started` for instantiated node or scope instances that never began execution and were discarded by scope failure or run termination: waiting, ready, deferred, and handed off but unstarted work. Completed attempts keep their outcomes; started work that is stopped records `cancelled`, control steps included (today `_queue_settled` writes control rows only on success or failure). Covers scope failure (`_fail_scope`), explicit stop and fail nodes, cancellation and the deadline (`end()`, which clears the queues without `_fail_scope`). The classification never rests on `NodeState` alone: `RUNNING` also means queued (scheduler.py:1029). Runs of versions whose `engine_abi` predates B4b show a missing row as "not recorded". An engine change under its replay and ABI rules | yes: the `run_steps_status` CHECK (0008) |
 | B5 | 4b, 4c | `/node-types` adds side effect, credentials, capabilities, retry and timeout defaults (Options defaults, connection picker, D12) | no |
-| B6 | 4c | Draft scope: every ref available at a node, with type, always or conditional, and sensitive, from the validator's liveness analysis (today it only shows in diagnostics) | no |
-| B7 | 4c | Samples from `run_steps` previews, for a node id and the saved draft revision. Selection: the newest **succeeded** row of an ended run of this workflow; its highest attempt; the first iteration unless one is asked for. It returns run, mode (a simulated sample says so), version, iteration, attempt, captured time, the node's `type@version` and whether its config equals the draft's. Connection provenance can't come from the graph: a connection keeps its id while its config changes (`connections.revision`). So the credential resolver (sub-project 3) records on each attempt the resolved connection id, revision and a non-secret context (type, name, cloud, org); a sample without that record shows its connection as "unknown", and one whose revision differs from the connection's current one as "changed since". Different type, config or connection marks it stale, never representative. Flow nodes bind none. No sample: none shown | yes: the attempt's connection record (with 3); maybe an index |
+| B6 | 4c | Draft scope: every ref available at a node, with type, always or conditional, and sensitive, from the validator's liveness analysis (today it only shows in diagnostics). Built in 4c-2a: `GET …/draft/scope`, and validate's `conditional_steps`; its screens in 4c-2b: the data tree, pills, the builder, the badge | no |
+| B7 | 4c | Samples from `run_steps` previews, for a node id and the saved draft revision. Selection: the newest **succeeded** row of an ended run of this workflow; its highest attempt; the first iteration unless one is asked for. It returns run, mode (a simulated sample says so), version, iteration, attempt, captured time, the node's `type@version` and whether its config equals the draft's. Connection provenance can't come from the graph: a connection keeps its id while its config changes (`connections.revision`). So the credential resolver (sub-project 3) records on each attempt the resolved connection id, revision and a non-secret context (type, name, cloud, org); a sample without that record shows its connection as "unknown", and one whose revision differs from the connection's current one as "changed since". Different type, config or connection marks it stale, never representative. Flow nodes bind none. No sample: none shown. Built in 4c-2a: `GET …/draft/samples`; slot 0045 `run_step_connections`; its screen in 4c-2b: a pill's details | yes: the attempt's connection record (with 3); maybe an index |
 | B8 | 4d-1 | Draft and single-step simulation (D14), after its design; its runs replay through B4b | likely |
 | B9 | 4d-2 | Live single-step test, after sub-project 3. Preview returns the target and where it came from, the diff, the exact body and a single-use `preview_id` that expires in minutes and binds, server-side, the user, draft revision, node id, config hash, `type@version`, connection id and revision, operation, resolved target ids and body hash. Execute takes `preview_id` and the typed confirmation (target name, or count and org name); the server re-resolves everything, re-checks permission, capability, scope and connection, and executes the bound body only if all still match; any change is `409 preview_stale` and needs a new preview. **Once only:** in one transaction, under a lock on the preview, execute consumes it and creates a durable execution record; the worker runs it through admission, never the API (§3.3). A retry or a concurrent submit of the same `preview_id` returns that execution and its result (202 while it runs) and never executes again; a lost response is recovered the same way. Expiry applies only to unconsumed previews. An `outcome_unknown` result (the request may have been sent) is recorded as such and never retried automatically; a new attempt needs a new preview whose dialog states the unknown outcome, after `reconcile()` for a reconcilable node | yes: preview and execution records |
 | B10 | 4e | Runs list: status, mode, source and time filters, and the workflow's name per item (paging exists) | no |
 | B11 | 4e | CSV: read the saved default mapping; re-preview a staged upload under a new mapping | no |
 | B12 | 4b | Workflow export and import as JSON, connections replaced by typed placeholders and re-bound on import (D9) | no |
-| B13 | 4c | Webhook bindings per workflow, for the trigger drawer | no |
+| B13 | 4c | Webhook bindings per workflow, for the trigger drawer. Built in 4c-3a: `GET …/workflows/{workflow_id}/webhook-bindings`, each binding with its endpoint | no |
 | B14 | 4e | `expected_version_id` on `StartIn` and `RerunIn` (D13). Checked in `_frozen`, after `lock_for_admission`: a mismatch is `409 version_changed` naming the active number. Exact retries are resolved by key before that (`_by_key` → `_retry`), so they return their request whatever is active now. The digest stores no format version, so `canonical()` adds `expected_version_id` as a fifth key only when it's given: every existing digest, and every request without it, keeps its exact bytes (as a CSV start's `csv` already does). With it, the same key and another version is `idempotency_conflict` | no |
 
 Seen, not proposed here: `connection.use`, `approval.decide` and `agent.grant` are defined but no route checks them;

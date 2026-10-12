@@ -42,7 +42,8 @@ BATCH = 40
 # and has tests of its own (test_0053.py)
 HEAD = "0052"
 # each deployed starting revision's migrations, in order (D15)
-LATER = ["0035", "0036", "0037", "0038", "0039", "0040", "0043", "0044", "0048", "0049", "0050", "0051", "0052"]
+LATER = ["0035", "0036", "0037", "0038", "0039", "0040", "0043", "0044", "0047", "0045", "0070", "0048", "0049", "0050",
+         "0051", "0052"]  # fmt: skip  # main's 0047, 0045 and 0070 before 2b-4b's, chained after them at the merge
 PATHS = {"0034": ["0041", "0042", *LATER], "0042": LATER}
 TREE = """WITH RECURSIVE tree AS (
   SELECT id, id AS root FROM runs WHERE parent_run_id IS NULL
@@ -464,6 +465,18 @@ HELD = {  # the table held and how, from which revision; the writes probed meanw
                                 ["UPDATE inbound_events SET attempts = attempts WHERE false"], "0050"),
     "run_requests, by 0050": ("run_requests", "ROW EXCLUSIVE", "0049",
                               ["UPDATE run_requests SET attempts = attempts WHERE false"], "0050"),
+    # Main's three, run by their online equivalents (`migrations/equivalents.py`, the owner's rulings at the merge):
+    # 0047's index built concurrently, which waits for the writer, never a write for it
+    "runs, by 0047": ("runs", "ROW EXCLUSIVE", "0044", ["UPDATE runs SET iterations = iterations WHERE false",
+                                                        "SELECT count(*) FROM runs WHERE false"], "0047"),
+    # 0045's new table, whose keys take both tables it references, in one bounded step
+    "runs, by 0045": ("runs", "ROW EXCLUSIVE", "0047", ["UPDATE runs SET iterations = iterations WHERE false"], "0045"),
+    "tenants, by 0045": ("tenants", "ROW EXCLUSIVE", "0047", ["UPDATE tenants SET status = status WHERE false"],
+                         "0045"),
+    # 0070's column, behind a long read of ingress's endpoints: its writes and reads queue behind the step a budget
+    "webhook_endpoints, by 0070": ("webhook_endpoints", "ACCESS SHARE", "0045",
+                                   ["UPDATE webhook_endpoints SET id = id WHERE false",
+                                    "SELECT count(*) FROM webhook_endpoints"], "0070"),
 }  # fmt: skip
 
 

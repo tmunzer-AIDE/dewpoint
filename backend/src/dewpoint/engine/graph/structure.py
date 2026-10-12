@@ -63,7 +63,7 @@ def _dynamic_ports(node: GraphNode, spec: NodeTypeSpec) -> tuple[list[str], list
     ports: list[str] = []
     for item in raw:
         port = item.get("port") if isinstance(item, dict) else None
-        if not isinstance(port, str) or not PORT_RE.match(port) or port in RESERVED_PORTS:
+        if not isinstance(port, str) or not PORT_RE.fullmatch(port) or port in RESERVED_PORTS:
             return [], [bad]
         if port in spec.ports or port in ports:
             return [], [bad]

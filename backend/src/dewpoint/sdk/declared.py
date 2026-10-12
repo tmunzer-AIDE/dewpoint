@@ -32,18 +32,22 @@ class DeclaredModel(RootModel[Any]):
     @model_validator(mode="before")
     @classmethod
     def _declared(cls, value: Any) -> Any:
-        """Each failing place and its rule's keyword, never the value: a validation message may be shown to users."""
+        """Each failing place and its rule's keyword, never the value: a validation message may be shown to users. One
+        error for each: jsonschema reports `required` once per missing property (`dependentRequired` per missing
+        dependency, `propertyNames` per refused name)."""
         if cls.declared_validator is None:
             raise TypeError("a DeclaredModel is made by declared_model()")
-        errors = sorted(cls.declared_validator.iter_errors(value), key=lambda e: [str(p) for p in e.absolute_path])
+        errors: dict[tuple[tuple[str | int, ...], Any], Any] = {}  # each place and rule, and what's there
+        for e in sorted(cls.declared_validator.iter_errors(value), key=lambda e: [str(p) for p in e.absolute_path]):
+            errors.setdefault((tuple(e.absolute_path), e.validator), e.instance)
         if errors:
             details = [
                 InitErrorDetails(
-                    type=PydanticCustomError(ERROR, "Doesn't match the schema's {rule}.", {"rule": e.validator}),
-                    loc=tuple(e.absolute_path),
-                    input=e.instance,
+                    type=PydanticCustomError(ERROR, "Doesn't match the schema's {rule}.", {"rule": rule}),
+                    loc=loc,
+                    input=instance,
                 )
-                for e in errors
+                for (loc, rule), instance in errors.items()
             ]
             raise ValidationError.from_exception_data(cls.__name__, details, hide_input=True)
         return value

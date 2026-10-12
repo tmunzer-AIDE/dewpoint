@@ -1,9 +1,7 @@
 name: ci
 # Once per commit: a pull request's, and main's. A branch without a pull request runs only when started by hand.
 on:
-  # proto/2b4b-v1 too: its pull request conflicts with main, so GitHub starts no pull_request run for it, and a run
-  # started by hand scans every branch's history for leaks; a push scans only its own commits
-  push: { branches: [main, proto/2b4b-v1] }
+  push: { branches: [main] }
   pull_request:
   workflow_dispatch:
 # A newer commit on a pull request cancels the run of the one before it; every other run stands on its own.

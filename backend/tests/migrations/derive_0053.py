@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""0053's expected state after its upgrade, derived from the reference snapshot (2b-4b M4 recovery, task 1's run 4) and
-the statements gate A approved (`approved_0053.sql`). Nothing here reads a database: the tests compare the real
-upgrade with what this derives, and a difference stops task 2 (back to gate A), never a change to either side.
+"""0053's expected state after its upgrade, derived from the reference snapshot and the statements gate A approved
+(`approved_0053.sql`). Nothing here reads a database: the tests compare the real upgrade with what this derives, and
+a difference stops task 2 (back to gate A), never a change to either side.
 
-Run as a script, it writes `migrations/expected_0053.json` from run 4's `expected-snapshot.json`:
+The reference is run 5's snapshot (the owner's gate-A rebaseline at main's merge, 2026-10-11): task 1's run 4
+(2b-4b M4 recovery), the reference until then, with main's run_step_connections (0045) added, chained before 0053 at
+the merge; 0053's derived changes and touched objects are run 4's. Run as a script, it writes
+`migrations/expected_0053.json` from run 5's `expected-snapshot.json`:
 `python -I tests/migrations/derive_0053.py <expected-snapshot.json>`.
 """
 
@@ -19,8 +22,8 @@ APPROVED = Path(__file__).with_name("approved_0053.sql")
 EXPECTED = BACKEND / "migrations" / "expected_0053.json"
 MIGRATOR = "<migrator>"  # the role running the migration, as snapshot.sql writes it
 SCHEMA_OWNER = "pg_database_owner"  # schema public's owner: a superuser's grant on it is recorded as the owner's
-# run 4's expected-snapshot.json, by its digest's prefix (inventory.md, section 5)
-REFERENCE_SHA256 = "2c1b6bf633210e48"
+# run 5's expected-snapshot.json, by its digest's prefix (run5-merge/REVIEW.md; run 4's was 2c1b6bf633210e48)
+REFERENCE_SHA256 = "37af679e24321731"
 
 Object = tuple[str, str, str, str, str]  # kind, identity, owner, ACL state, detail
 Grant = tuple[str, str, str, str, str, bool]  # kind, identity, privilege, grantee, grantor, grant option
@@ -127,7 +130,7 @@ def derive(
 def reference(path: Path) -> dict[str, Any]:
     raw = path.read_bytes()
     if not hashlib.sha256(raw).hexdigest().startswith(REFERENCE_SHA256):
-        raise ValueError("not run 4's expected-snapshot.json")
+        raise ValueError("not run 5's expected-snapshot.json")
     return json.loads(raw)
 
 
@@ -137,7 +140,10 @@ def write(path: Path) -> None:
     before_grants = {tuple(g) for g in ref["EXPECTED_GRANTS"]}
     after_objects, after_grants, touched = derive(before_objects, before_grants)  # type: ignore[arg-type]
     document = {
-        "source": {"run4_expected_snapshot_sha256": hashlib.sha256(path.read_bytes()).hexdigest()},
+        "source": {
+            "reference_snapshot": "run 5",
+            "reference_snapshot_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        },
         "EXPECTED_OBJECTS": ref["EXPECTED_OBJECTS"],
         "EXPECTED_GRANTS": ref["EXPECTED_GRANTS"],
         "recovery_presence": ref["recovery_presence"],

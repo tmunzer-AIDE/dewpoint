@@ -316,12 +316,46 @@ def test_literal_config_is_validated() -> None:
     assert codes(too_wide) == ["config.invalid"]
 
 
+def test_a_config_problem_never_says_the_value() -> None:
+    # Ledger M25: a literal written into a step's config (`_schema_errors`), even into a field marked sensitive, is
+    # named by its field and what it fails, never quoted.
+    send = G().node("a", "testkit.ambiguous_send@1", {"token": ["tok-9f2c"], "outcome": "tok-9f2c"})
+    found = check(send).diagnostics
+    assert {(d.code, d.field) for d in found} >= {("config.invalid", "/token"), ("config.invalid", "/outcome")}
+    assert all("tok-9f2c" not in d.message for d in found)
+
+
 VARS = {"type": "object", "properties": {"count": {"type": "integer", "default": 0}}}
 
 
 def _vars(g: G) -> G:
     g.settings["vars_schema"] = VARS
     return g
+
+
+def test_a_literal_checked_against_its_target_never_says_the_value() -> None:
+    # Ledger M25: a literal value, and a reference's default, checked against the field they fill (`_check_instance`).
+    assigned = check(_vars(G().node("s", SET, {"assignments": {"count": "tok-9f2c"}})))
+    defaulted = check(G().node("d", "flow.delay@1", {"duration_s": ref("trigger.wait", default="tok-9f2c")}))
+    for result in (assigned, defaulted):
+        invalid = [d for d in result.diagnostics if d.code == "config.invalid"]
+        assert invalid and all("tok-9f2c" not in d.message for d in result.diagnostics)
+
+
+def test_properties_missing_together_are_one_problem() -> None:
+    # jsonschema reports `required` once per missing property; its sentence names them all, so it's said once: for a
+    # step's own config (`_schema_errors`) and for a value checked against the field it fills (`_check_instance`).
+    empty = check(G().node("f", "flow.filter@1", {}))
+    assert [(d.code, d.field, d.message) for d in empty.diagnostics] == [
+        ("config.invalid", "", "Needs `items`, `predicate`.")
+    ]
+    place = {"type": "object", "properties": {"a": {"type": "integer"}, "b": {"type": "integer"}}}
+    place |= {"required": ["a", "b"], "default": {"a": 1, "b": 2}}
+    g = G().node("s", SET, {"assignments": {"place": ref("trigger.place", default={})}})
+    g.settings["vars_schema"] = {"type": "object", "properties": {"place": place}}
+    assert [(d.code, d.field, d.message) for d in check(g).diagnostics] == [
+        ("config.invalid", "/assignments/place", "Needs `a`, `b`.")
+    ]
 
 
 def test_variables() -> None:
@@ -529,3 +563,37 @@ def test_cel_keywords_are_rejected_as_step_keys_and_variable_names() -> None:
     g = G().node("a", ECHO)
     g.settings = {"vars_schema": {"type": "object", "properties": {"true": {"type": "integer", "default": 0}}}}
     assert codes(g) == ["vars.invalid_name"]
+
+
+def test_a_name_with_a_trailing_newline_is_refused() -> None:
+    """`$` also matches before a final newline (the owner's review R3 of 3b-2): a name is matched whole."""
+    g = G().node("a", ECHO)
+    g.settings = {"vars_schema": {"type": "object", "properties": {"x\n": {"type": "integer", "default": 0}}}}
+    assert codes(g) == ["vars.invalid_name"]
+    g = G().node("a", ECHO)
+    g.settings["outputs"] = {"x\n": "fixed"}
+    assert codes(g) == ["settings.output_name"]
+
+
+def test_a_reference_through_alternatives_is_typed() -> None:
+    """4c-2a ruling 1: a field every alternative declares as text is text, so it can't fill a number."""
+    union = {
+        "type": "object",
+        "properties": {"device": {"anyOf": [
+            {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
+            {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
+        ]}},
+        "required": ["device"],
+    }  # fmt: skip
+    g = G().node("wait", "flow.delay@1", {"duration_s": ref("trigger.device.name")})
+    g.settings = {"input_schema": union}
+    found = [d for d in check(g).diagnostics if d.code == "ref.type_mismatch"]
+    assert [d.message for d in found] == ["`trigger.device.name` is string, but this field expects integer."]
+
+
+def test_a_number_that_must_be_an_integer_fills_an_integer() -> None:
+    """The review of revision 2: `allOf: [number, integer]` is an integer, and 5 passes it."""
+    g = G().node("wait", "flow.delay@1", {"duration_s": ref("trigger.count")})
+    g.settings = {"input_schema": {"type": "object", "properties": {"count": {"allOf": [{"type": "number"},
+                  {"type": "integer"}]}}, "required": ["count"]}}  # fmt: skip
+    assert [d.code for d in check(g).diagnostics if d.code == "ref.type_mismatch"] == []

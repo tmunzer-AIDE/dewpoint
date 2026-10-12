@@ -6,6 +6,7 @@ import pytest
 
 from dewpoint.core.plugins import lifecycle
 from dewpoint.core.plugins.lifecycle import Entry
+from dewpoint.engine.graph.model import graph_hash, parse_graph
 from tests.apps.api.helpers import member_client, session_client
 from tests.support.graphs import G, cel, nid, ref
 from tests.support.registry import sync_test_plugins
@@ -30,7 +31,10 @@ async def test_draft_edit_validate_publish_flow(app, owner_sessionmaker, api_set
         stale = await c.put(f"{base}/draft", json=GRAPH, headers={"If-Match": "7"})
         assert stale.status_code == 409 and stale.json() == {"error": "draft_conflict", "draft_revision": 1}
         saved = await c.put(f"{base}/draft", json=GRAPH, headers={"If-Match": "1"})
-        assert saved.status_code == 200 and saved.json() == {"draft_revision": 2}
+        assert saved.status_code == 200, saved.text
+        body = saved.json()
+        assert (body["draft_revision"], body["unpublished_changes"], body["active_version_id"]) == (2, True, None)
+        assert body["graph_hash"] == graph_hash(parse_graph(GRAPH))
         checked = (await c.post(f"{base}/validate")).json()
         assert checked["valid"] is True and checked["diagnostics"] == []
         published = await c.post(f"{base}/publish", headers={"If-Match": '"2"'})
@@ -88,6 +92,9 @@ async def test_permission_matrix(app, owner_sessionmaker, api_settings) -> None:
             assert (await c.post(f"/api/v1/t/{tid}/workflows", json={"name": role})).status_code == 403
             assert (await c.put(f"{base}/draft", json=GRAPH, headers={"If-Match": "1"})).status_code == 403
             assert (await c.post(f"{base}/validate")).status_code == 403
+            scope = await c.get(f"{base}/draft/scope", params={"node": str(nid("a")), "field": "/value"})
+            assert scope.status_code == 200  # workflow.view: a read-only drawer shows a pill's details too
+            assert (await c.get(f"{base}/draft/samples", params={"node": str(nid("a"))})).status_code == 200  # run.view
             assert (await c.post(f"{base}/publish", headers={"If-Match": "1"})).status_code == 403
             assert (await c.patch(base, json={"enabled": False})).status_code == 403
     stranger, other_tenant = await session_client(app, owner_sessionmaker, api_settings, "owner")
@@ -248,3 +255,48 @@ async def test_validation_explains_the_taint_to_the_editor(app, owner_sessionmak
         ),
         "declassified": [{"node": str(nid("c")), "field": "/condition", "reveals": "the branch taken"}],
     }
+
+
+async def test_a_tainted_workflow_output_is_a_site_with_no_step(app, owner_sessionmaker, api_settings) -> None:
+    """A workflow output's value belongs to no step: its tainted site says `node: null`, as its expression does,
+    whether the output is the value or holds it."""
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    g = G().node("a", "testkit.echo@1")
+    g.settings = {
+        "input_schema": {
+            "type": "object",
+            "properties": {"token": {"type": "string", "x-sensitive": True}},
+            "required": ["token"],
+            "additionalProperties": False,
+        },
+        "outputs": {"echo": ref("trigger.token"), "pair": {"secret": ref("trigger.token"), "plain": 1}},
+    }
+    async with c:
+        wf = (await c.post(f"/api/v1/t/{tid}/workflows", json={"name": "Out", "draft": g.data()})).json()
+        r = await c.post(f"/api/v1/t/{tid}/workflows/{wf['id']}/validate")
+    assert r.status_code == 200, r.text
+    assert r.json()["valid"] is True
+    assert r.json()["taint"] == {
+        "sites": [
+            {"node": None, "field": "/settings/outputs/echo"},
+            {"node": None, "field": "/settings/outputs/pair/secret"},
+        ],
+        "declassified": [],
+    }
+
+
+async def test_validate_says_which_steps_may_not_run(app, owner_sessionmaker, api_settings) -> None:
+    """4c-2a ruling 3: a branch's steps may not run; the step after the join does."""
+    draft = (
+        G().node("c", "flow.if@1", {"condition": True})
+        .node("t", "testkit.echo@1", {"value": 1}).node("f", "testkit.echo@1", {"value": 2})
+        .node("j", "testkit.echo@1", {"value": 3})
+        .edge("c", "t", port="true").edge("c", "f", port="false").edge("t", "j").edge("f", "j")
+        .data()
+    )  # fmt: skip
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    async with c:
+        wf = (await c.post(f"/api/v1/t/{tid}/workflows", json={"name": "Branches", "draft": draft})).json()
+        r = await c.post(f"/api/v1/t/{tid}/workflows/{wf['id']}/validate")
+    assert r.status_code == 200, r.text
+    assert r.json()["conditional_steps"] == sorted([str(nid("t")), str(nid("f"))])

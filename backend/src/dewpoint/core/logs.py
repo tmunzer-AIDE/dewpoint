@@ -8,7 +8,9 @@ What this covers, once `configure` has run:
 - structlog's lines, on stdout.
 - every record of a standard library logger that reaches the root logger, on stderr: uvicorn's (its own configuration
   gives way), SQLAlchemy's, Temporal's. Its exception is named by its type and where; an exception among its message's
-  arguments, or as its message, by its type. A record is written once, however often the process is configured.
+  arguments, or as its message, by its type. Of its `extra=` fields, only the ones the engine logs by (`EXTRAS`);
+  the others are a library's to fill (Temporal's workflow logger adds the workflow's info).
+  A record is written once, however often the process is configured.
 - an ASGI app's lifespan failure, behind `LifespanFailures`: Starlette sends the server the formatted traceback.
 
 What it doesn't cover: text a library writes into a message itself (asyncio's default exception handler writes the
@@ -31,6 +33,12 @@ from structlog.typing import EventDict, Processor, WrappedLogger
 
 WHERE_FRAMES = 8  # the innermost frames an exception's log names
 UVICORN = ("uvicorn", "uvicorn.access")  # the loggers uvicorn's own configuration gives handlers of its own
+# The HTTP libraries' loggers: httpx logs each request's whole URL at INFO, and an incoming webhook's URL is its
+# credential (plugins-3 3c-1 review, finding 6). Only their warnings and errors are written.
+HTTP = ("httpx", "httpcore")
+# A record's `extra=` fields written, the ones the engine logs by: a workflow bug's type and where (engine 2b spec
+# §6.7), and an undelivered budget signal's workflow, an id the server built, and its name. No other is written.
+EXTRAS = ("error_type", "where", "signal_to", "signal_name")
 
 log = structlog.get_logger(__name__)
 
@@ -99,7 +107,7 @@ _SHARED: list[Processor] = [
 _HANDLER = _Stderr()
 _HANDLER.setFormatter(
     structlog.stdlib.ProcessorFormatter(
-        foreign_pre_chain=[*_SHARED, _message, exception_type],
+        foreign_pre_chain=[*_SHARED, _message, structlog.stdlib.ExtraAdder(allow=EXTRAS), exception_type],
         processors=[structlog.stdlib.ProcessorFormatter.remove_processors_meta, structlog.processors.JSONRenderer()],
         use_get_message=False,
         pass_foreign_args=True,
@@ -121,6 +129,8 @@ def configure() -> None:
         if logger.handlers:
             logger.handlers.clear()
             logger.propagate = True
+    for name in HTTP:
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 _FAILED = ("lifespan.startup.failed", "lifespan.shutdown.failed")

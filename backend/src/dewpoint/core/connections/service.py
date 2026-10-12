@@ -249,7 +249,7 @@ def _checked(answer: dict[str, Any] | None) -> tuple[str, str, str | None]:
     if (
         not isinstance(ok, bool)
         or not isinstance(detail, str)
-        or not DETAIL_RE.match(detail)
+        or not DETAIL_RE.fullmatch(detail)
         or not (privilege is None or (isinstance(privilege, str) and len(privilege) <= 40 and privilege.isprintable()))
     ):
         return "error", "invalid_result", None
@@ -384,14 +384,14 @@ class _KeyringSealer:
 
 
 async def cooldowns(s: AsyncSession, keyring: Keyring, conn: Connection) -> list[dict[str, str]] | None:
-    """Each of the connection's quota scopes now cooling down (plugins-3 D10): its kind and its current cooldown, a live
-    value that can change, not a record of a failed attempt's deadline; never the scope's key. None when the scopes
-    can't be computed (an unknown type, an unreadable secret)."""
+    """Each of the connection's quota scopes now cooling down (plugins-3 D10), its stream's included (D26): its kind and
+    its current cooldown, a live value that can change, not a record of a failed attempt's deadline; never the scope's
+    key. None when the scopes can't be computed (an unknown type, an unreadable secret)."""
     try:
         kind = await declared(s, conn.type)
     except UnknownTypeError:
         return None
-    if not kind.rate_scopes:
+    if not kind.rate_scopes and not kind.stream:
         return []
     try:
         config = kind.config(conn.config)  # first: a config the declaration refuses never meets the secret
@@ -402,7 +402,7 @@ async def cooldowns(s: AsyncSession, keyring: Keyring, conn: Connection) -> list
         key = await rate_scopes.scope_key(s, _KeyringSealer(s, keyring), conn.tenant_id, create=False)
         # No scope key yet: no worker has charged a credential scope, so none can be cooling down; others still count.
         hasher = rate_scopes.credential_hasher(key) if key is not None else (lambda credential: "-")
-        scopes = kind.scopes(config, secret, hasher)
+        scopes = kind.scopes(config, secret, hasher) + kind.stream_scopes(config, secret, hasher)  # D26: a stream's
     except (InvalidTag, ValueError, KeyError, TypeError):
         return None
     found = await current_cooldowns(s, conn.tenant_id, [scope.key for scope in scopes])

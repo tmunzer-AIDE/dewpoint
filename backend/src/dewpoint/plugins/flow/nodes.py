@@ -30,7 +30,7 @@ def cel_widget() -> dict[str, Any]:
 
 
 class IfConfig(_Strict):
-    condition: bool = Field(json_schema_extra=cel_widget())
+    condition: bool = Field(title="Condition", json_schema_extra=cel_widget())
 
 
 class If(_Control):
@@ -44,12 +44,12 @@ class If(_Control):
 
 
 class SwitchCase(_Strict):
-    port: str = literal_only(pattern=r"^[a-z][a-z0-9_]{0,30}$")
-    when: bool = Field(json_schema_extra=cel_widget())
+    port: str = literal_only(pattern=r"^[a-z][a-z0-9_]{0,30}$", title="Port name")
+    when: bool = Field(title="Condition", json_schema_extra=cel_widget())
 
 
 class SwitchConfig(_Strict):
-    cases: list[SwitchCase] = Field(min_length=1, max_length=20)
+    cases: list[SwitchCase] = Field(min_length=1, max_length=20, title="Cases")
 
 
 class Switch(_Control):
@@ -64,11 +64,11 @@ class Switch(_Control):
 
 
 class LoopConfig(_Strict):
-    items: list[Any]
-    concurrency: int = literal_only(1, ge=1, le=10)
-    item_cap: int = literal_only(10_000, ge=1, le=10_000)
-    on_item_error: Literal["stop", "continue"] = literal_only("stop")
-    collect: Any = None
+    items: list[Any] = Field(title="Items")
+    concurrency: int = literal_only(1, ge=1, le=10, title="Items at a time, at most")
+    item_cap: int = literal_only(10_000, ge=1, le=10_000, title="Items, at most")
+    on_item_error: Literal["stop", "continue"] = literal_only("stop", title="When an item fails")
+    collect: Any = Field(None, title="Output for each item")
 
 
 class LoopFailure(BaseModel):
@@ -95,8 +95,8 @@ class Loop(_Control):
 
 
 class FilterConfig(_Strict):
-    items: list[Any]
-    predicate: bool = value_kinds("cel", json_schema_extra=cel_widget())
+    items: list[Any] = Field(title="Items")
+    predicate: bool = value_kinds("cel", title="Keep an item when", json_schema_extra=cel_widget())
 
 
 class FilterOutput(BaseModel):
@@ -115,7 +115,7 @@ class Filter(_Control):
 
 
 class SetVariablesConfig(_Strict):
-    assignments: dict[str, Any] = Field(min_length=1, max_length=50)
+    assignments: dict[str, Any] = Field(min_length=1, max_length=50, title="Variables")
 
 
 class SetVariables(_Control):
@@ -127,7 +127,7 @@ class SetVariables(_Control):
 
 
 class DelayConfig(_Strict):
-    duration_s: int = Field(ge=0, le=30 * 86_400)
+    duration_s: int = Field(ge=0, le=30 * 86_400, title="Duration, in seconds")
 
 
 class Delay(_Control):
@@ -139,7 +139,7 @@ class Delay(_Control):
 
 
 class WaitUntilConfig(_Strict):
-    until: datetime
+    until: datetime = Field(title="Date and time")
 
 
 class WaitUntil(_Control):
@@ -160,7 +160,7 @@ class Stop(_Control):
 
 
 class FailConfig(_Strict):
-    message: str = Field(min_length=1, max_length=500)
+    message: str = Field(min_length=1, max_length=500, title="Message")
 
 
 class Fail(_Control):
@@ -174,8 +174,8 @@ class Fail(_Control):
 
 
 class RunWorkflowConfig(_Strict):
-    workflow_id: uuid.UUID = literal_only()
-    input: dict[str, Any] = Field(default_factory=dict)
+    workflow_id: uuid.UUID = literal_only(title="Workflow")
+    input: dict[str, Any] = Field(default_factory=dict, title="Input")
 
 
 class RunWorkflow(_Control):
@@ -189,7 +189,7 @@ class RunWorkflow(_Control):
 
 
 class TransformConfig(_Strict):
-    fields: dict[str, Any] = Field(min_length=1, max_length=100)
+    fields: dict[str, Any] = Field(min_length=1, max_length=100, title="Fields")
 
 
 class Transform(_Control):

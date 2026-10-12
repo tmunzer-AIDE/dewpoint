@@ -27,11 +27,11 @@ UNFENCED = {"audit_log", "retention_sweep_tenants", "tenant_erasures", "tenant_e
 FENCED_TABLES = (
     "claim_grants", "connections", "csv_mappings", "csv_uploads", "data_keys", "egress_allowlist", "execution_evidence",
     "inbound_events", "ingress_outstanding", "memberships", "operator_command_holds", "operator_commands",
-    "plugin_calls", "rate_buckets",
-    "rate_scope_keys", "recovery_items", "run_inputs", "run_requests",
-    "run_secret_index", "run_slots", "run_steps", "runs", "schedule_firings", "schedule_incarnations",
-    "schedule_intervals", "schedules", "step_outputs", "tenant_event_counters", "tenant_event_keys", "tenant_retention",
-    "tenant_run_limits", "trigger_bindings", "webhook_endpoints", "work_failures", "workflow_versions", "workflows",
+    "plugin_calls", "rate_buckets", "rate_scope_keys", "recovery_items", "run_inputs", "run_requests",
+    "run_secret_index", "run_slots", "run_step_connections", "run_steps", "runs", "schedule_firings",
+    "schedule_incarnations", "schedule_intervals", "schedules", "step_outputs", "tenant_event_counters",
+    "tenant_event_keys", "tenant_retention", "tenant_run_limits", "trigger_bindings", "webhook_endpoints",
+    "work_failures", "workflow_versions", "workflows",
 )  # fmt: skip
 LIMITS = "insert into tenant_run_limits (tenant_id, max_concurrent) values (:t, 3)"
 

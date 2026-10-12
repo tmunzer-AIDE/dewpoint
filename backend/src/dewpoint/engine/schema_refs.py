@@ -80,7 +80,7 @@ def ref_problems(schema: Any) -> list[str]:
     problems: list[str] = [
         f"/$defs/{name}: `$defs` names may use only letters, digits, '_', '.' and '-'"
         for name in defs
-        if not isinstance(name, str) or not DEF_NAME.match(name)
+        if not isinstance(name, str) or not DEF_NAME.fullmatch(name)
     ]
     if problems:
         return problems

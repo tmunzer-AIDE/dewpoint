@@ -1,0 +1,17 @@
+{
+  "format": "dewpoint.workflow",
+  "format_version": 1,
+  "name": "Join up",
+  "graph": {
+    "graph_format": 1,
+    "nodes": [
+      { "id": "7a1c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e11", "key": "if", "type": "flow.if@1", "config": { "condition": { "$value": { "kind": "cel", "expr": "true" } } }, "position": { "x": 0, "y": 300 } },
+      { "id": "7a1c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e12", "key": "j", "type": "flow.transform@1", "config": { "fields": { "v": 1 } }, "position": { "x": 340, "y": 0 } }
+    ],
+    "edges": [
+      { "from": { "node": "7a1c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e11", "port": "true" }, "to": { "node": "7a1c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e12" } },
+      { "from": { "node": "7a1c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e11", "port": "false" }, "to": { "node": "7a1c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e12" } }
+    ]
+  },
+  "bindings": []
+}

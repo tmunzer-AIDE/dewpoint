@@ -62,11 +62,12 @@ class InvalidBody(FatalError):
 
 
 def routes(node: str) -> list[Route]:
-    """The operations the map allows to `node`, whatever their routes: the run refuses the always-refused ones."""
+    """The operations the map allows to `node`, whatever their routes: the run refuses the always-refused ones. Never a
+    device utility, which is its own node's only (D27; review L5)."""
     return [
         Route(op_id, e.method, tuple(e.path.split("/")), e.scope or "")
         for op_id, e in sorted(policy.load().entries.items())
-        if e.state == "allowed" and node in e.nodes
+        if e.state == "allowed" and node in e.nodes and e.utility is None
     ]
 
 

@@ -4,6 +4,7 @@ ambiguous) reach only what the policy map allows them, inside the connection's s
 site checked to be its org's; the always-refused routes refused whatever the map says; path values checked, the query
 and the body checked against the operation's description; the answer undeclared, so tainted whole."""
 
+import dataclasses
 import uuid
 from typing import Any
 
@@ -14,7 +15,7 @@ from pydantic import ValidationError
 from dewpoint.apps.worker.claims import config_secrets
 from dewpoint.engine.graph.validate import ValidationContext, validate
 from dewpoint.engine.sensitive import marked_positions
-from dewpoint.plugins.mist import PLUGIN, policy, routing
+from dewpoint.plugins.mist import PLUGIN, api, policy, routing
 from dewpoint.plugins.mist.schemas import secret_name
 from dewpoint.sdk import FatalError, Node, SideEffect, node_manifest
 from tests.plugins.mist.fakes import ORG, OTHER_ORG, SITE, FakeConnection, FakeHttp, FakeStep, Reply
@@ -247,3 +248,25 @@ async def test_a_generic_simulation_answers_a_value_its_operations_answer_schema
     assert list(Draft202012Validator(schema).iter_errors(out["body"])) == []
     deleted = await simulated("mist.api.write", {"method": "DELETE", "path": f"/api/v1/orgs/{ORG}/psks/{psk}"})
     assert deleted == {"status": 200, "body": None}
+
+
+async def test_a_device_utility_is_never_reached_by_the_generic_write() -> None:
+    """A utility is its own node's only (plugins-3 D27): the generic write would skip its review's parameters and its
+    contract, so it's refused at publish and at run time, before anything is sent."""
+    device = "00000000-0000-0000-1000-5c5b350e0060"
+    raw = {"method": "POST", "path": f"/api/v1/sites/{SITE}/devices/{device}/bounce_port", "body": {"ports": ["x"]}}
+    with pytest.raises(ValidationError):
+        node("mist.api.write").Config.model_validate({"connection": str(uuid.uuid4()), **raw})
+    with pytest.raises(FatalError) as e:
+        await call("mist.api.write", raw, {}, validated=False)
+    assert e.value.code == "mist.operation_unavailable"
+
+
+async def test_the_generic_nodes_skip_a_utility_even_if_a_map_names_them(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review L5: defence in depth, for a map the loader didn't read (built in code)."""
+    found = policy.load()
+    entries = dict(found.entries)
+    ping = entries["pingFromDevice"]
+    entries["pingFromDevice"] = dataclasses.replace(ping, nodes=(*ping.nodes, "mist.api.write"))
+    monkeypatch.setattr(policy, "load", lambda: policy.PolicyMap(found.oas_sha256, entries))
+    assert "pingFromDevice" not in {r.operation for r in api.routes("mist.api.write")}

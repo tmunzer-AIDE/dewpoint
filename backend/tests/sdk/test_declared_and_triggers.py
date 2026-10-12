@@ -40,8 +40,8 @@ EVENT = {
 }
 
 
-def test_the_sdk_is_0_4_0() -> None:
-    assert SDK_VERSION == "0.4.0"
+def test_the_sdk_is_0_8_0_already() -> None:
+    assert SDK_VERSION == "0.8.0"
 
 
 def test_a_declared_model_reports_its_schema_in_every_mode() -> None:
@@ -76,6 +76,27 @@ def test_a_declared_model_refuses_what_its_schema_refuses(value: Any, locations:
     with pytest.raises(ValidationError) as e:
         model.model_validate(value)
     assert {tuple(err["loc"]) for err in e.value.errors()} == locations
+
+
+def test_a_rule_a_declared_model_finds_broken_at_one_place_is_one_error() -> None:
+    """jsonschema reports `required` once per missing property, `dependentRequired` once per missing dependency and a
+    `propertyNames` rule once per name it refuses: each place and rule is one error."""
+    model = declared_model(
+        "Pairs",
+        {
+            "type": "object",
+            "required": ["a", "b"],
+            "dependentRequired": {"c": ["x", "y"]},
+            "propertyNames": {"maxLength": 1},
+        },
+    )
+    with pytest.raises(ValidationError) as e:
+        model.model_validate({"c": 1, "dd": 2, "ee": 3})
+    assert sorted((err["loc"], err["ctx"]["rule"]) for err in e.value.errors()) == [
+        ((), "dependentRequired"),
+        ((), "maxLength"),
+        ((), "required"),
+    ]
 
 
 def test_a_declared_models_error_never_quotes_the_value() -> None:
@@ -145,6 +166,9 @@ def test_a_plugin_lists_its_triggers_in_its_manifest_only_when_set() -> None:
         (Trigger("demo.webhook", "x", "bearer", "/topic", {"a": {"type": "array"}}), "object"),
         (Trigger("demo.webhook", "x", "bearer", "/topic", {"a": {"type": "nope"}}), "JSON Schema"),
         (Trigger("demo.webhook", "x", "bearer", "/topic", {"a": EVENT}, events_pointer="x"), "pointer"),
+        # `$` also matches before a final newline (the owner's review R3 of 3b-2): each name is matched whole
+        (Trigger("demo.webhook\n", "x", "bearer", "/topic", {"a": EVENT}), "must be named"),
+        (Trigger("demo.webhook", "x", "bearer", "/topic", {"a\n": EVENT}), "must be lowercase letters"),
     ],
 )
 def test_a_malformed_trigger_is_refused_by_the_sdk_and_the_catalog(trigger: Trigger, problem: str) -> None:

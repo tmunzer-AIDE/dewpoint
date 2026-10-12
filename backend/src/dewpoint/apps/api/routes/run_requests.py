@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps import admission, cancels
+from dewpoint.apps.api.responses import StartFormOut
 from dewpoint.apps.csv_slots import CsvBusyError, Slot
 from dewpoint.apps.forms import csv_form, form_fields
 from dewpoint.apps.inputs import INPUT_INVALID
@@ -179,7 +180,9 @@ async def start_run(
     return request_body(await admit(db, keys, ctx, workflow_id, "manual", body, key, slot=slot))
 
 
-@router.get("/t/{tenant_id}/workflows/{workflow_id}/start-form")
+@router.get(
+    "/t/{tenant_id}/workflows/{workflow_id}/start-form", response_model=StartFormOut, response_model_exclude_unset=True
+)
 async def start_form(
     workflow_id: uuid.UUID,
     ctx: TenantContext = Depends(require(P.RUN_START)),

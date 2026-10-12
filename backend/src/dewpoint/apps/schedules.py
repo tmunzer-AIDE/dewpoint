@@ -270,6 +270,9 @@ class Accounting:
 
     uncounted: list[dict[str, str | None]] = field(default_factory=list)
     misses_read_at: datetime | None = None  # the oldest read of the incarnations that may still miss a firing
+    # Whether nothing ever unpaused it (4c-3a ruling 6): its incarnations, read here for its waits, record an unpause
+    # before it's sent; one seen unpaused, or one from before 2b-4a, whose unpauses nobody recorded, may have fired.
+    never_unpaused: bool = True
 
     @property
     def complete(self) -> bool:
@@ -305,6 +308,7 @@ async def accounting(s: AsyncSession, schedule_id: uuid.UUID) -> Accounting:
             spans.append((start, {"from": start.isoformat(), "to": landed.isoformat() if landed else None,
                                   "class": "pending",
                                   "reason": "count_pending" if landed else "awaiting_first_update"}))  # fmt: skip
+    unpaused = any(i.backfilled or i.unpause_sent_at is not None or i.landed_paused is False for i in ids)
     # Missed firings are read every five minutes for each incarnation that may still miss one (D16): one not read
     # within that leaves the accounting stale, from its last read (never read: from its unpause, or its recording)
     relevant = [i for i in ids if i.retired_at is None and (i.backfilled or i.unpause_sent_at is not None
@@ -316,7 +320,8 @@ async def accounting(s: AsyncSession, schedule_id: uuid.UUID) -> Accounting:
                                   "reason": "misses_stale"}))  # fmt: skip
     read = [i.misses_checked_at for i in relevant]
     oldest = None if not read or None in read else min(r for r in read if r is not None)
-    return Accounting([span for _, span in sorted(spans, key=lambda pair: pair[0])], oldest)
+    return Accounting([span for _, span in sorted(spans, key=lambda pair: pair[0])], misses_read_at=oldest,
+                      never_unpaused=not unpaused)  # fmt: skip
 
 
 def body(schedule: Schedule, accounted: Accounting) -> dict[str, object]:
@@ -336,6 +341,9 @@ def body(schedule: Schedule, accounted: Accounting) -> dict[str, object]:
         "accounting_complete": accounted.complete,  # false: some span's firings are possibly missed, unknown or pending
         "uncounted_intervals": accounted.uncounted,  # those spans, never in `misses`
         "sync_error": schedule.sync_error,
+        # when it last failed: an edit doesn't clear a failure, so an earlier one shows beside the latest edit's time
+        "sync_error_at": schedule.sync_error_at.isoformat() if schedule.sync_error_at else None,
+        "never_unpaused": accounted.never_unpaused,  # never fired: only the sync unpauses, recording it first
         "created_at": schedule.created_at.isoformat(),
         "updated_at": schedule.updated_at.isoformat(),
     }

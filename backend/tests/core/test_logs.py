@@ -3,11 +3,13 @@
 through, never its text nor a frame's local variables. That holds for structlog's lines, for a standard library
 logger's records (uvicorn's, SQLAlchemy's, Temporal's) and for an ASGI app's lifespan failure."""
 
+import ast
 import json
 import logging
 import logging.config
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -19,7 +21,9 @@ from starlette.responses import PlainTextResponse
 from starlette.routing import Route
 from starlette.types import ASGIApp, Message
 
+import dewpoint
 from dewpoint.core import logs
+from dewpoint.engine.runtime import workflow as run_graph
 from tests.support.logs import records, rendered, stdlib_restored
 
 SECRET = "s3cr3t-value-91be"
@@ -137,6 +141,87 @@ def test_a_library_records_message_names_an_exception_by_its_type(
     assert SECRET not in err
     [record] = records(err.splitlines())
     assert record["event"] == event
+
+
+def test_a_library_records_bug_is_logged_by_the_type_and_where_it_names(capsys: pytest.CaptureFixture[str]) -> None:
+    """The workflow logs its own bug by its type and where it was raised as the record's `extra=` fields (engine 2b
+    spec §6.7): they're written."""
+    with stdlib_restored():
+        logs.configure()
+        logging.getLogger("temporalio.workflow").error(
+            "run_internal_error", extra={"error_type": "KeyError", "where": ["workflow.py:run:1"]}
+        )
+    [record] = records(capsys.readouterr().err.splitlines())
+    assert record["event"] == "run_internal_error"
+    assert record["error_type"] == "KeyError" and record["where"] == ["workflow.py:run:1"]
+
+
+def test_an_undelivered_budget_signal_is_logged_by_its_target_and_name(capsys: pytest.CaptureFixture[str]) -> None:
+    """A budget signal the engine couldn't deliver (its child ended meanwhile) is logged by the workflow it was for,
+    an id the server built, and the signal's name: both written."""
+    target = "t:00000000-0000-0000-0000-000000000001:run:00000000-0000-0000-0000-000000000002"
+    with stdlib_restored():
+        logs.configure()
+        logging.getLogger("temporalio.workflow").warning(
+            "budget_signal_undelivered", extra={"signal_to": target, "signal_name": "budget"}
+        )
+    [record] = records(capsys.readouterr().err.splitlines())
+    assert (record["signal_to"], record["signal_name"]) == (target, "budget")
+
+
+LEVELS = {"debug", "info", "warning", "error", "exception", "critical", "log"}
+
+
+def _logged_extras() -> tuple[set[str], set[str]]:
+    """What the code's log calls pass as `extra=`: the keys of each dict written out, and each other expression."""
+    keys: set[str] = set()
+    others: set[str] = set()
+    for path in Path(dewpoint.__file__).parent.rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in LEVELS):
+                continue
+            for kw in node.keywords:
+                if kw.arg == "extra" and isinstance(kw.value, ast.Dict):
+                    keys |= {k.value for k in kw.value.keys if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+                elif kw.arg == "extra":
+                    others.add(ast.unparse(kw.value))
+    return keys, others
+
+
+def test_every_field_the_code_logs_a_record_by_is_written() -> None:
+    """A record's `extra=` fields are written only if `EXTRAS` names them: a field the code logs by that it doesn't
+    name would be dropped without a word, as a workflow bug's type and frames once were."""
+    keys, others = _logged_extras()
+    assert keys and keys <= set(logs.EXTRAS), keys - set(logs.EXTRAS)
+    assert others == {"_bug(e)"}  # a workflow bug's fields, whose keys follow
+    assert set(run_graph._bug(ValueError()).keys()) <= set(logs.EXTRAS)
+
+
+def test_a_library_records_other_extra_fields_are_not_logged(capsys: pytest.CaptureFixture[str]) -> None:
+    """A record's other `extra=` fields are the library's to fill and may hold values (Temporal's workflow logger adds
+    the workflow's info as `temporal_workflow`): none is written."""
+    value = "a-librarys-value-7f3a"  # not SECRET: CodeQL reads a name like that, logged as it is here, as a finding
+    with stdlib_restored():
+        logs.configure()
+        logging.getLogger("temporalio.workflow").warning(
+            "noted", extra={"temporal_workflow": {"workflow_id": value}, "input": value}
+        )
+    err = capsys.readouterr().err
+    assert value not in err
+    [record] = records(err.splitlines())
+    assert not {"temporal_workflow", "input"} & record.keys()
+
+
+def test_an_http_librarys_request_line_never_names_its_url(capsys: pytest.CaptureFixture[str]) -> None:
+    """httpx logs each request's whole URL at INFO, and an incoming webhook's URL is its credential (the 3c-1 review,
+    finding 6): the HTTP libraries' records below WARNING aren't written, whatever the root's level."""
+    url = "https://hooks.example.com/services/T1/B2/an-http-url-part-5e1d"
+    with stdlib_restored():
+        logs.configure()
+        logging.getLogger().setLevel(logging.DEBUG)
+        with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200))) as client:
+            client.post(url)
+    assert "an-http-url-part" not in capsys.readouterr().err
 
 
 def test_a_record_is_written_once_however_often_the_process_is_configured(capsys: pytest.CaptureFixture[str]) -> None:

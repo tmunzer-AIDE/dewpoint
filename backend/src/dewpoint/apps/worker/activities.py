@@ -104,11 +104,14 @@ from dewpoint.engine.runtime.execution import INTERNAL_ERROR, VERSION_UNUSABLE
 from dewpoint.engine.runtime.ids import tenant_of
 from dewpoint.engine.runtime.projection import REDACTED, location
 from dewpoint.sdk import (
+    AuthUnavailable,
     ConnectionUnavailable,
     Cooldown,
     EgressRefused,
     FatalError,
+    HandshakeRejected,
     InvalidRequest,
+    MailRefused,
     MaybeSent,
     Node,
     NodeError,
@@ -123,6 +126,8 @@ from dewpoint.sdk import (
     RetryableError,
     SideEffect,
     SimulationSendsNothing,
+    StreamLost,
+    TlsUnavailable,
     TlsVerificationFailed,
     TransportError,
     dump_output,
@@ -197,9 +202,10 @@ def _fields(error: ValidationError, schema: Mapping[str, Any]) -> str:
     """Each failing field and its rule's stable code (`int_parsing`, `value_error`), nothing else: pydantic's
     messages quote the input, and so does a validator's own prose, whatever `include_input` says. A location shows
     only what the schema declares at each place (`projection.location`): a map key is data, even a numeric one. A
-    code shows only if pydantic defines it: a custom error's type is whatever its validator made it."""
+    code shows only if pydantic defines it: a custom error's type is whatever its validator made it. Each is said once:
+    keys breaking one rule show as one `*`."""
     problems = error.errors(include_url=False, include_context=True, include_input=False)
-    return "; ".join(f"{location(e['loc'], schema)} ({_code(e)})" for e in problems) + "."
+    return "; ".join(dict.fromkeys(f"{location(e['loc'], schema)} ({_code(e)})" for e in problems)) + "."
 
 
 def _code(error: Any) -> str:
@@ -226,11 +232,16 @@ def _declared(e: NodeError, node: type[Node]) -> tuple[str, str]:
 # the request may have arrived end an ambiguous node `outcome_unknown`; a node whose requests may repeat retries
 # `MaybeSent` and `RateLimited` and fails on the others. Nothing was sent after the rest: `NotSent` and `Cooldown`
 # are retried, the others fail.
-_SENT_MAYBE = (MaybeSent, RateLimited, RedirectRefused, ResponseTooLarge, ResponseUnreadable)
-_RETRIED = (NotSent, Cooldown, MaybeSent, RateLimited)
+# A stream (D26): a refused handshake sent nothing a node answers for, retried only when the provider asked to wait or
+# failed (429, 5xx); a lost stream may have carried a message the node sent, as `MaybeSent`.
+# Mail (D20): a mail server's refusal delivered nothing, retried when it's transient (4yz); no TLS or no usable
+# sign-in fails, having sent nothing.
+_SENT_MAYBE = (MaybeSent, RateLimited, RedirectRefused, ResponseTooLarge, ResponseUnreadable, StreamLost)
+_RETRIED = (NotSent, Cooldown, MaybeSent, RateLimited, StreamLost)
 _TRANSPORT = (
     EgressRefused, TlsVerificationFailed, InvalidRequest, ConnectionUnavailable, SimulationSendsNothing, NotSent,
-    Cooldown, MaybeSent, RateLimited, RedirectRefused, ResponseTooLarge, ResponseUnreadable,
+    Cooldown, MaybeSent, RateLimited, RedirectRefused, ResponseTooLarge, ResponseUnreadable, HandshakeRejected,
+    StreamLost, MailRefused, TlsUnavailable, AuthUnavailable,
 )  # fmt: skip
 
 
@@ -255,6 +266,12 @@ def _transport_failed(e: TransportError, node: type[Node]) -> _StepFailed:
         return _StepFailed(UNEXPECTED_ERROR, message, retryable=True)
     if isinstance(e, _SENT_MAYBE) and ambiguous:
         return _StepFailed(kind.code, kind.message, retryable=False, outcome=OUTCOME_UNKNOWN)
+    if isinstance(e, HandshakeRejected):
+        status = e.status if type(e.status) is int else 0  # a plugin's subclass can't make it retryable otherwise
+        return _StepFailed(kind.code, kind.message, retryable=status == 429 or 500 <= status < 600)
+    if isinstance(e, MailRefused):
+        reply = e.reply if type(e.reply) is int else 0  # a plugin's subclass can't make it retryable otherwise
+        return _StepFailed(kind.code, kind.message, retryable=400 <= reply < 500)
     return _StepFailed(kind.code, kind.message, retryable=isinstance(e, _RETRIED))
 
 
@@ -356,9 +373,10 @@ def step_activity_for(
         data = result.model_dump(mode="json", by_alias=True, warnings=False)
         problems = sorted(emitted.iter_errors(data), key=lambda e: [str(p) for p in e.absolute_path])
         if problems:
-            raise violation(
-                "; ".join(f"{location(list(e.absolute_path), output_schema)} ({e.validator})" for e in problems) + "."
-            )
+            # each place and rule said once: jsonschema reports `required` once per missing property, and keys
+            # breaking one rule show as one `*`
+            said = dict.fromkeys(f"{location(list(e.absolute_path), output_schema)} ({e.validator})" for e in problems)
+            raise violation("; ".join(said) + ".")
         return data
 
     @activity.defn(name=step_activity(ref))
@@ -401,6 +419,7 @@ def step_activity_for(
                     tenant_id=uuid.UUID(step.tenant_id), run_id=uuid.UUID(step.run_id),
                     step_id=uuid.UUID(step.step_id), root_run_id=uuid.UUID(root), node=node,
                     simulated=step.mode == SIMULATE, remember=answered.remember, beat=activity.heartbeat,
+                    iteration_key=step.iteration_key, attempt=step.attempt,
                 )
                 if network is not None
                 else None

@@ -10,16 +10,26 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps import webhooks
+from dewpoint.apps.api.responses import (
+    EndpointCreatedOut,
+    EndpointOut,
+    EndpointsOut,
+    SecretOut,
+    WebhookBindingOut,
+    WebhookBindingsOut,
+    WorkflowBindingsOut,
+)
 from dewpoint.apps.api.routes.run_requests import key_unusable
 from dewpoint.core.authz.permissions import ROLE_PERMISSIONS, P
 from dewpoint.core.crypto.ingress import IngressKey
 from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.http import TenantContext, get_db, require
 from dewpoint.core.models.ingress import TriggerBinding, WebhookEndpoint
+from dewpoint.core.models.workflows import Workflow
 from dewpoint.core.retention import cutoff as retention
 
 router = APIRouter(prefix="/api/v1", tags=["webhooks"])
@@ -40,11 +50,12 @@ class EndpointIn(BaseModel):
     id_pointer: str | None = None
     id_header: str | None = Field(default=None, max_length=64)
     events_pointer: str | None = None
+    trigger: str | None = Field(default=None, min_length=1, max_length=64)  # a trigger type's key (4c-3a ruling 1)
 
 
 class EndpointPatch(BaseModel):
     """Only the fields given change, never an endpoint's identity (how it authenticates, where its events and their ids
-    are)."""
+    are, the trigger it's for)."""
 
     model_config = ConfigDict(extra="forbid")
     name: str | None = Field(default=None, min_length=1, max_length=120)
@@ -84,7 +95,7 @@ def _refused(e: webhooks.WebhookRefusedError) -> HTTPException:
     return HTTPException(e.status, detail=e.detail)
 
 
-@router.post("/t/{tenant_id}/webhook-endpoints", status_code=201)
+@router.post("/t/{tenant_id}/webhook-endpoints", status_code=201, response_model=EndpointCreatedOut)
 async def create_endpoint(
     given: EndpointIn,
     ctx: TenantContext = Depends(require(P.TRIGGER_MANAGE)),
@@ -94,7 +105,8 @@ async def create_endpoint(
 ) -> dict[str, object]:
     try:
         endpoint, secret = await webhooks.create_endpoint(db, keyring, key, tenant_id=ctx.tenant_id,
-                                                          actor_id=ctx.user.id, given=given.model_dump())  # fmt: skip
+                                                          actor_id=ctx.user.id, given=given.model_dump(),
+                                                          written=frozenset(given.model_fields_set))  # fmt: skip
     except webhooks.WebhookRefusedError as e:
         raise _refused(e) from None
     except Exception as e:
@@ -102,7 +114,7 @@ async def create_endpoint(
     return webhooks.endpoint_body(endpoint) | {"secret": secret}  # shown this once
 
 
-@router.get("/t/{tenant_id}/webhook-endpoints")
+@router.get("/t/{tenant_id}/webhook-endpoints", response_model=EndpointsOut)
 async def list_endpoints(
     ctx: TenantContext = Depends(require(P.WORKFLOW_VIEW)),
     db: AsyncSession = Depends(get_db, scope="function"),
@@ -111,7 +123,7 @@ async def list_endpoints(
     return {"endpoints": [webhooks.endpoint_body(e) for e in found.scalars()]}
 
 
-@router.get("/t/{tenant_id}/webhook-endpoints/{endpoint_id}")
+@router.get("/t/{tenant_id}/webhook-endpoints/{endpoint_id}", response_model=EndpointOut)
 async def get_endpoint(
     endpoint_id: uuid.UUID,
     ctx: TenantContext = Depends(require(P.WORKFLOW_VIEW)),
@@ -123,7 +135,7 @@ async def get_endpoint(
         raise _refused(e) from None
 
 
-@router.patch("/t/{tenant_id}/webhook-endpoints/{endpoint_id}")
+@router.patch("/t/{tenant_id}/webhook-endpoints/{endpoint_id}", response_model=EndpointOut)
 async def update_endpoint(
     endpoint_id: uuid.UUID,
     given: EndpointPatch,
@@ -139,7 +151,7 @@ async def update_endpoint(
     return webhooks.endpoint_body(updated)
 
 
-@router.post("/t/{tenant_id}/webhook-endpoints/{endpoint_id}/secret")
+@router.post("/t/{tenant_id}/webhook-endpoints/{endpoint_id}/secret", response_model=SecretOut)
 async def rotate_secret(
     endpoint_id: uuid.UUID,
     ctx: TenantContext = Depends(require(P.TRIGGER_MANAGE)),
@@ -154,7 +166,9 @@ async def rotate_secret(
     return {"id": str(endpoint.id), "secret": secret}  # shown this once
 
 
-@router.post("/t/{tenant_id}/webhook-endpoints/{endpoint_id}/bindings", status_code=201)
+@router.post(
+    "/t/{tenant_id}/webhook-endpoints/{endpoint_id}/bindings", status_code=201, response_model=WebhookBindingOut
+)
 async def create_binding(
     endpoint_id: uuid.UUID,
     given: BindingIn,
@@ -170,7 +184,7 @@ async def create_binding(
     return webhooks.binding_body(binding)
 
 
-@router.get("/t/{tenant_id}/webhook-endpoints/{endpoint_id}/bindings")
+@router.get("/t/{tenant_id}/webhook-endpoints/{endpoint_id}/bindings", response_model=WebhookBindingsOut)
 async def list_bindings(
     endpoint_id: uuid.UUID,
     ctx: TenantContext = Depends(require(P.WORKFLOW_VIEW)),
@@ -181,7 +195,27 @@ async def list_bindings(
     return {"bindings": [webhooks.binding_body(b) for b in found.scalars()]}
 
 
-@router.patch("/t/{tenant_id}/webhook-bindings/{binding_id}")
+@router.get("/t/{tenant_id}/workflows/{workflow_id}/webhook-bindings", response_model=WorkflowBindingsOut)
+async def workflow_bindings(
+    workflow_id: uuid.UUID,
+    ctx: TenantContext = Depends(require(P.WORKFLOW_VIEW)),
+    db: AsyncSession = Depends(get_db, scope="function"),
+) -> dict[str, object]:
+    """The webhooks that start a workflow (B13; 4c-3a ruling 2), each with what its Triggers panel shows of the
+    endpoint, by the endpoint's name."""
+    if await db.get(Workflow, workflow_id) is None:  # row-level security: the caller's tenant's only
+        raise HTTPException(404, detail={"error": "not_found"})
+    found = await db.execute(
+        select(TriggerBinding, WebhookEndpoint)
+        .join(WebhookEndpoint, and_(WebhookEndpoint.id == TriggerBinding.endpoint_id,
+                                    WebhookEndpoint.tenant_id == TriggerBinding.tenant_id))
+        .where(TriggerBinding.workflow_id == workflow_id)
+        .order_by(WebhookEndpoint.name, WebhookEndpoint.id)
+    )  # fmt: skip
+    return {"bindings": [webhooks.binding_body(b) | {"endpoint": webhooks.endpoint_summary(e)} for b, e in found.all()]}
+
+
+@router.patch("/t/{tenant_id}/webhook-bindings/{binding_id}", response_model=WebhookBindingOut)
 async def update_binding(
     binding_id: uuid.UUID,
     given: BindingPatch,

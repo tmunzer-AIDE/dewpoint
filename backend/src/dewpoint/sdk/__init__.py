@@ -2,20 +2,37 @@
 """Dewpoint plugin SDK. Semver'd separately from the platform; plugins import only this package."""
 
 from dewpoint.sdk.calls import CallContext, Option, OptionsQuery, ReadOnly
-from dewpoint.sdk.connections import ConnectionType, HeaderAuth, HostMap, RateScope, UrlField, VerifyResult
+from dewpoint.sdk.connections import (
+    MAIL_ADDRESS,
+    BodyField,
+    ConnectionType,
+    HeaderAuth,
+    HostMap,
+    RateScope,
+    SecretUrl,
+    SmtpServer,
+    StreamEndpoint,
+    UrlField,
+    VerifyResult,
+)
 from dewpoint.sdk.context import StepContext, StepLogger
 from dewpoint.sdk.declared import DeclaredModel, declared_model
 from dewpoint.sdk.errors import FatalError, NodeError, OutcomeUnknownError, RetryableError
 from dewpoint.sdk.fields import connection_field, literal_only, options_field, sensitive, value_kinds
 from dewpoint.sdk.manifest import ManifestError, Plugin, dump_output, node_manifest
 from dewpoint.sdk.net import (
+    AuthUnavailable,
     Connection,
+    ConnectionSmtp,
     ConnectionUnavailable,
+    ConnectionWs,
     Cooldown,
     EgressRefused,
+    HandshakeRejected,
     HttpClient,
     HttpResponse,
     InvalidRequest,
+    MailRefused,
     MaybeSent,
     Net,
     NetStream,
@@ -25,29 +42,39 @@ from dewpoint.sdk.net import (
     ResponseTooLarge,
     ResponseUnreadable,
     SimulationSendsNothing,
+    StreamLost,
+    TlsUnavailable,
     TlsVerificationFailed,
     TransportError,
+    WebSocket,
 )
 from dewpoint.sdk.node import Empty, Node, NodeKind, RetryDefaults, SideEffect
 from dewpoint.sdk.triggers import Trigger
 from dewpoint.sdk.version import SDK_VERSION
 
 __all__ = [
+    "MAIL_ADDRESS",
     "SDK_VERSION",
+    "AuthUnavailable",
+    "BodyField",
     "CallContext",
     "Connection",
+    "ConnectionSmtp",
     "ConnectionType",
     "ConnectionUnavailable",
+    "ConnectionWs",
     "Cooldown",
     "DeclaredModel",
     "EgressRefused",
     "Empty",
     "FatalError",
+    "HandshakeRejected",
     "HeaderAuth",
     "HostMap",
     "HttpClient",
     "HttpResponse",
     "InvalidRequest",
+    "MailRefused",
     "ManifestError",
     "MaybeSent",
     "Net",
@@ -68,15 +95,21 @@ __all__ = [
     "ResponseUnreadable",
     "RetryDefaults",
     "RetryableError",
+    "SecretUrl",
+    "SmtpServer",
     "SideEffect",
     "SimulationSendsNothing",
     "StepContext",
     "StepLogger",
+    "StreamEndpoint",
+    "StreamLost",
+    "TlsUnavailable",
     "TlsVerificationFailed",
     "TransportError",
     "Trigger",
     "UrlField",
     "VerifyResult",
+    "WebSocket",
     "connection_field",
     "declared_model",
     "dump_output",

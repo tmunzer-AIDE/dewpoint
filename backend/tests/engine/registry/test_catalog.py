@@ -119,6 +119,10 @@ def test_annotation_names_inside_data_are_part_of_the_contract(path: tuple[str, 
         ("retry", {**ECHO["retry"], "max_interval_s": 0.5}, "retry must be"),
         ("retry", {**ECHO["retry"], "non_retryable": "testkit.bad"}, "retry must be"),
         ("retry", {**ECHO["retry"], "jitter": 1}, "retry must be"),
+        # `$` also matches before a final newline (the owner's review R3 of 3b-2): each name is matched whole
+        ("type", "testkit.echo\n", "type must start with 'testkit.'"),
+        ("ports", ["out\n"], "invalid ports"),
+        ("icon", "flag\n", "icon must name"),
     ],
 )
 def test_malformed_manifest_fields_are_problems_not_exceptions(field: str, value: Any, fragment: str) -> None:

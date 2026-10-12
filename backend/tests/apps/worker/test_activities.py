@@ -133,6 +133,26 @@ class Constructed(Node):
         return LiarOutput.model_construct(n="not-an-int", key="ok")
 
 
+class GapsOutput(BaseModel):
+    n: int
+    key: str
+    counts: dict[str, int]
+
+
+class Gaps(Node):
+    """Its output misses two required fields and holds two counts that aren't integers; its config refuses unknown
+    keys."""
+
+    type = "testkit.gaps"
+    version = 1
+    title = "Gaps"
+    Config = StrictConfig
+    Output = GapsOutput
+
+    async def run(self, ctx: StepContext, config: Any) -> Any:
+        return GapsOutput.model_construct(counts={f"a-{SECRET}": "x", f"b-{SECRET}": "y"})
+
+
 class FormatsConfig(BaseModel):
     valid: bool
 
@@ -303,6 +323,18 @@ async def test_a_location_names_only_declared_fields() -> None:
     assert bad_config.message == "The config doesn't match `testkit.keyed@1`: * (extra_forbidden)."
     assert listed.message == "The config doesn't match `testkit.liar@1`: pin (int_type)."
     assert all(SECRET not in e.message and "428319" not in e.message for e in (bad_output, bad_config, listed))
+
+
+async def test_a_rule_broken_at_one_place_is_said_once() -> None:
+    """jsonschema reports `required` once per missing property, and keys the data supplied that break one rule show as
+    one `*`: each place and rule is said once, in a config's message and an output's."""
+    bad_config = await failure(
+        step_activity_for(Gaps, MemoryStore()), step("testkit.gaps@1", {"pin": 1, f"a-{SECRET}": 2, f"b-{SECRET}": 3})
+    )
+    bad_output = await failure(step_activity_for(Gaps, MemoryStore()), step("testkit.gaps@1", {"pin": 1}))
+    assert bad_config.message == "The config doesn't match `testkit.gaps@1`: * (extra_forbidden)."
+    assert bad_output.message == "The output doesn't match `testkit.gaps@1`: (root) (required); counts.* (type)."
+    assert all(SECRET not in e.message for e in (bad_config, bad_output))
 
 
 async def test_a_rule_code_is_one_pydantic_defines() -> None:

@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """The `mist` connection type, now declared by the mist plugin (plugins-3 D11), keeps the shape it had in `core`: the
 same schemas, header and scope keys (the values below are `core`'s, from origin/main 15084df), and the same verify
-answers, now read through the connection's read-only HTTP."""
+answers, now read through the connection's read-only HTTP. 3b-2 adds its stream (D26): each cloud's websocket host
+from Mist's table (`guides/websocket/1_hosts`, docs clone 919c9b47), and a scope per token for Mist's 2,000
+connections an hour (`3_rate_limit`)."""
 
 import json
 import uuid
@@ -32,6 +34,21 @@ CLOUDS = {
     "apac_01": "api.ac5.mist.com",
     "apac_02": "api.gc5.mist.com",
     "apac_03": "api.gc7.mist.com",
+}
+# Mist's table (guides/websocket/1_hosts): each cloud's websocket host beside its API host.
+WS_CLOUDS = {
+    "global_01": "api-ws.mist.com",
+    "global_02": "api-ws.gc1.mist.com",
+    "global_03": "api-ws.ac2.mist.com",
+    "global_04": "api-ws.gc2.mist.com",
+    "global_05": "api-ws.gc4.mist.com",
+    "emea_01": "api-ws.eu.mist.com",
+    "emea_02": "api-ws.gc3.mist.com",
+    "emea_03": "api-ws.ac6.mist.com",
+    "emea_04": "api-ws.gc6.mist.com",
+    "apac_01": "api-ws.ac5.mist.com",
+    "apac_02": "api-ws.gc5.mist.com",
+    "apac_03": "api-ws.gc7.mist.com",
 }
 CONFIG_SCHEMA = {
     "additionalProperties": False,
@@ -70,7 +87,20 @@ def test_the_mist_type_keeps_its_shape() -> None:
             {"kind": "mist.token", "config": [], "secret": "api_token", "capacity": 50.0, "refill_per_s": 1.25},
         ],
         "verify": True,
+        "stream": {
+            "kind": "map",
+            "field": "cloud",
+            "hosts": WS_CLOUDS,
+            "path": "/api-ws/v1/stream",
+            "rate_scopes": [  # a burst of 50, then 1,800 an hour: under Mist's 2,000 connections an hour a token
+                {"kind": "mist.stream", "config": [], "secret": "api_token", "capacity": 50.0, "refill_per_s": 0.5},
+            ],
+        },
     }  # fmt: skip
+
+
+def test_every_clouds_stream_host_is_its_api_host_with_api_ws() -> None:
+    assert {cloud: host.replace("api.", "api-ws.", 1) for cloud, host in CLOUDS.items()} == WS_CLOUDS
 
 
 def test_the_mist_plugin_validates_and_is_installed() -> None:

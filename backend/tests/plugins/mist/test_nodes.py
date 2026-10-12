@@ -9,12 +9,16 @@ from typing import Any
 
 import pytest
 
-from dewpoint.engine.registry.catalog import validate_plugin_manifest
+from dewpoint.engine.graph.validate import ValidationContext, validate
+from dewpoint.engine.registry.catalog import Catalog, spec_from_manifest, validate_plugin_manifest
 from dewpoint.plugins.mist import PLUGIN, policy
+from dewpoint.plugins.mist.nodes import MistOperation
 from dewpoint.plugins.mist.schemas import SCHEMA_LIST, SCHEMA_MAP, SCHEMA_ONE
+from dewpoint.plugins.mist.utilities import MistUtility
 from dewpoint.sdk import FatalError, Node, node_manifest
 from dewpoint.sdk.fields import CONNECTION, LITERAL, SENSITIVE
 from tests.plugins.mist.fakes import ORG, SITE, FakeConnection, FakeHttp, FakeStep, Reply, Sent
+from tests.support.graphs import G
 
 WLAN = "7b2c4d6e-8f10-4a2b-9c3d-4e5f6a7b8c9d"
 
@@ -51,8 +55,10 @@ async def run(type_: str, config: dict[str, Any], script: Any, attempt: int = 1)
 
 def test_every_allowed_operation_has_its_node_and_no_other() -> None:
     entries = policy.load().entries
-    curated = {e.nodes[0]: op for op, e in entries.items() if e.state == "allowed"}
-    generated = {n.type: n for n in PLUGIN.nodes if n.type not in ("mist.api.read", "mist.api.write")}
+    curated = {e.nodes[0]: op for op, e in entries.items() if e.state == "allowed" and e.utility is None}
+    generated = {
+        n.type: n for n in PLUGIN.nodes if issubclass(n, MistOperation) and not issubclass(n, MistUtility)
+    }  # a utility's: test_utilities
     assert set(generated) == set(curated)
     for type_, n in generated.items():
         e = entries[curated[type_]]
@@ -67,6 +73,11 @@ def test_every_allowed_operation_has_its_node_and_no_other() -> None:
 
 def test_the_plugin_manifest_passes_the_catalog() -> None:
     assert validate_plugin_manifest(PLUGIN.manifest()) == []
+
+
+def test_the_rogue_aps_list_keeps_its_acronym_in_the_title() -> None:
+    """Seen 2026-10-09 in GET /node-types: "List site rogue ps"."""
+    assert node("mist.site_rogue_aps.list").title == "List site rogue APs"
 
 
 def test_a_config_names_the_connection_and_the_path_values_but_never_the_org() -> None:
@@ -87,6 +98,16 @@ def test_a_paged_list_takes_a_page_size_and_a_cap_but_not_a_page() -> None:
     insights = node_manifest(node("mist.site_insights.get"))["config_schema"]
     assert "page" in insights["properties"]["query"]["properties"] and "max_pages" not in insights["properties"]
     assert "query" in insights["required"]  # `metrics` is required
+
+
+def test_a_step_without_its_connection_and_site_is_told_so_once() -> None:
+    # The draft of the 2026-10-09 report, which /validate answered with this diagnostic twice.
+    rogues = Catalog([spec_from_manifest(node_manifest(node("mist.site_rogue_aps.list")))])
+    config = {"query": {"duration": "7d", "type": "spoof", "limit": 50}, "max_pages": 2}
+    found = validate(G().node("r", "mist.site_rogue_aps.list@1", config).build(), ValidationContext(catalog=rogues))
+    assert [(d.code, d.field, d.message) for d in found.diagnostics] == [
+        ("config.invalid", "", "Needs `connection`, `site_id`.")
+    ]
 
 
 def test_array_query_values_are_left_out() -> None:
@@ -119,6 +140,8 @@ def test_secret_named_fields_are_sensitive_in_config_and_output() -> None:
 
 def test_outputs_keep_the_shape_and_drop_what_a_provider_outgrows() -> None:
     for n in PLUGIN.nodes:
+        if issubclass(n, MistUtility):  # its output is its contract's, not the OAS's (test_utilities)
+            continue
         out = node_manifest(n)["output_schema"]
         assert out["type"] == "object"
         for s in walk(out):

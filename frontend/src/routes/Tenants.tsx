@@ -46,7 +46,7 @@ export function TenantsPage() {
           {tenants.data?.map((t) => (
             <tr key={t.id}>
               <Td>
-                <Link to="/t/$tenantId/connections" params={{ tenantId: t.id }} className="font-medium text-accent-ink">
+                <Link to="/t/$tenantId/workflows" params={{ tenantId: t.id }} className="font-medium text-accent-ink">
                   {t.name}
                 </Link>
               </Td>

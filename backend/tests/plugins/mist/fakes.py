@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""A Mist connection whose HTTP answers from a script and records what was sent, for the client's and the nodes'
-tests: no network, no runtime."""
+"""A Mist connection whose HTTP answers from a script and records what was sent, and whose stream delivers what a test
+queues, for the client's, the stream reader's and the nodes' tests: no network, no runtime."""
 
+import asyncio
 import json
 import uuid
 from collections.abc import Callable, Mapping
@@ -19,6 +20,7 @@ class Reply:
     body: Any = None
     headers: Mapping[str, str] = field(default_factory=dict)
     raw: bytes | None = None
+    delay_s: float = 0.0  # how long the answer takes
 
 
 @dataclass
@@ -86,7 +88,65 @@ class FakeHttp:
         reply = self._reply(sent)
         if isinstance(reply, BaseException):
             raise reply
+        if reply.delay_s:
+            await asyncio.sleep(reply.delay_s)
         return FakeResponse(reply)
+
+
+class FakeStream:
+    """One open stream: what the node sends is recorded (and `on_send` may answer it); `inbox` is what it receives, in
+    order: a text, an exception to raise, or None to close the stream."""
+
+    def __init__(self, on_send: Callable[[str], list[str]] | None = None) -> None:
+        self.inbox: asyncio.Queue[str | BaseException | None] = asyncio.Queue()
+        self.sent: list[tuple[str, bool]] = []
+        self.closed = False
+        self._on_send = on_send
+
+    def queue(self, *items: Any) -> None:
+        for item in items:
+            self.inbox.put_nowait(json.dumps(item) if isinstance(item, dict) else item)
+
+    async def send(self, text: str, *, probe: bool = False) -> None:
+        from dewpoint.sdk import StreamLost  # noqa: PLC0415
+
+        if self.closed:
+            raise StreamLost()
+        self.sent.append((text, probe))
+        for reply in self._on_send(text) if self._on_send is not None else []:
+            self.inbox.put_nowait(reply)
+
+    async def receive(self, timeout_s: float) -> str | None:
+        from dewpoint.sdk import StreamLost  # noqa: PLC0415
+
+        if self.closed:
+            raise StreamLost()
+        try:
+            item = await asyncio.wait_for(self.inbox.get(), timeout_s)
+        except TimeoutError:
+            return None
+        if item is None:
+            self.closed = True
+            raise StreamLost()
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class FakeWs:
+    """A connection's `ws`: each `connect()` gives the stream, or raises `error`."""
+
+    def __init__(self, stream: FakeStream | None = None, error: BaseException | None = None) -> None:
+        self.stream, self.error, self.opened = stream or FakeStream(), error, 0
+
+    async def connect(self) -> FakeStream:
+        self.opened += 1
+        if self.error is not None:
+            raise self.error
+        return self.stream
 
 
 @dataclass
@@ -95,6 +155,7 @@ class FakeConnection:
     config: Mapping[str, Any] = field(default_factory=lambda: {"cloud": "global_01", "org_id": ORG})
     id: uuid.UUID = field(default_factory=uuid.uuid4)
     type: str = "mist"
+    ws: FakeWs = field(default_factory=FakeWs)
 
 
 @dataclass
@@ -119,6 +180,7 @@ class FakeStep:
     cancelled: bool = False
     log: FakeLog = field(default_factory=FakeLog)
     opened: list[uuid.UUID] = field(default_factory=list)
+    beats: int = 0
 
     def idempotency_key(self) -> str:
         return "k"
@@ -129,4 +191,4 @@ class FakeStep:
         return self.connection_
 
     def heartbeat(self, *details: object) -> None:
-        pass
+        self.beats += 1

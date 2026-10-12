@@ -245,7 +245,10 @@ Every run starts as a durable `run_requests` row, unique on `(tenant_id, idempot
 
 - Outbound HTTP is a granted capability.
 - The SSRF guard resolves DNS and checks **every** resolved address and **every** redirect hop. It pins the vetted IP for the connection, and disallows cross-host redirects unless the destination is also permitted.
-- Private or local destinations (for example a local LLM or an internal MCP server) are allowed only if listed in the platform-admin `egress_allowlist`. This is checked at connection creation **and on every request**.
+- Private or local destinations (for example a local LLM or an internal MCP server) are allowed only if listed in the
+  platform-admin `egress_allowlist`. The worker's guard checks this **on every request**; that check is mandatory and
+  authoritative. An advisory preflight of tenant-chosen destinations, on creation and on updates that supply a
+  host-setting value, is deferred (plugins-3 D7).
 
 ### 6.8 Manual trigger inputs and CSV upload
 

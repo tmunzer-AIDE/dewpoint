@@ -1,0 +1,2045 @@
+// SPDX-License-Identifier: Apache-2.0
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { Outlet, RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter, redirect } from "@tanstack/react-router";
+import { act, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { GraphDoc } from "../../lib/workflows";
+import { idKey } from "../../lib/graph";
+import { onAnnounce } from "../../lib/announce";
+import { cancelLeaving, mayLeave } from "../../lib/leaving";
+import type { CanvasProps } from "./Canvas";
+import { EditorPage } from "./Editor";
+import { DELAY, IF, LOOP, REMOTE, SWITCH, TRANSFORM, typeWith } from "../../test/nodeTypes";
+import { formula } from "../../lib/config";
+import { STALE } from "../../lib/unapplied";
+import { SCHEDULE } from "../../test/triggers";
+
+// Every document the stand-in canvas was handed: what was drawn, and what never was.
+const { drawn } = vi.hoisted(() => ({ drawn: [] as { doc: GraphDoc; editable: boolean }[] }));
+
+vi.mock("./Canvas", async () => {
+  const { useEffect } = await import("react");
+  return {
+    Canvas: (props: CanvasProps) => {
+      drawn.push({ doc: props.doc, editable: props.editable });
+      useEffect(() => {
+        if (props.focusRequest) document.querySelector<HTMLElement>(`[data-item="${props.focusRequest.id}"]`)?.focus();
+      }, [props.focusRequest]);
+      return (
+        <div
+          role="group"
+          aria-label="Workflow steps"
+          onKeyDown={props.onKeyDown}
+          onFocus={(e) => {
+            // As the canvas does: the item that takes focus, by a click, Tab or a key, becomes the tab stop.
+            const id = (e.target as HTMLElement).dataset.item;
+            if (id) props.onFocusItem(id);
+          }}
+          data-editable={String(props.editable)}
+          data-problems={String(props.problems.size)}
+          data-problem-steps={[...props.problems.keys()].join(",")}
+          data-conditional={[...props.conditional].join(",")}
+        >
+          <button data-item="start" data-summary={props.start.summary} aria-expanded={props.start.open} onClick={props.start.onOpen}>Start</button>
+          <button onClick={() => props.onItem({ kind: "after", from: null })}>Add the first step</button>
+          {(props.doc.nodes ?? []).map((n) => (
+            <span key={n.id}>
+              <button data-item={`node:${n.id}`} onClick={() => props.onItem({ kind: "open", node: n.id })}>{n.key}</button>
+              <button data-item={`port:${n.id}:out`} onClick={() => props.onItem({ kind: "after", from: { node: n.id, port: "out" } })}>after {n.key}</button>
+            </span>
+          ))}
+          {props.placing && <button onClick={() => props.onPlace({ x: 400, y: 300 })}>place here</button>}
+        </div>
+      );
+    },
+  };
+});
+
+const TYPES = [{
+  ref: "flow.transform@1", type: "flow.transform", version: 1, kind: "control", state: "active", title: "Transform",
+  description: "", ports: ["out"], dynamic_ports: null, config_schema: {}, output_schema: {}, side_effect: "none",
+  credentials: [], capabilities: [], retry: { max_attempts: 3, initial_interval_s: 1, backoff: 2, max_interval_s: 60, non_retryable: [] }, timeout_s: 60,
+}];  // prettier-ignore
+/** A draft of transform steps with these keys, one under the other. */
+const draftWith = (...keys: string[]): GraphDoc => ({
+  graph_format: 1,
+  nodes: keys.map((key, i) => ({ id: `id-${key}`, key, type: "flow.transform@1", position: { x: 0, y: 140 * (i + 1) } })),
+  edges: [],
+});
+const WORKFLOW = {
+  id: "w1", name: "Nightly", enabled: true, draft_revision: 1, active_version_id: null, active_version_number: null,
+  executable: null, blocked_by: [], created_at: "", updated_at: "", unpublished_changes: true, draft_graph_hash: "h1",
+  last_run: null, last_simulation: null, runs_24h: { live: 0, simulate: 0 }, needs_attention: [], draft: draftWith(),
+  triggers: { schedules: 0, schedules_enabled: 0, webhook_bindings: 0, csv: false },
+};  // prettier-ignore
+const BASE = "/api/v1/t/t1/workflows/w1";
+type Answer = () => Response | Promise<Response>;
+const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
+let role = "editor";
+let answers: Map<string, Answer>; // "METHOD path" → its answer: a test sets what it needs
+let sent: { method: string; path: string; headers: Headers; body: unknown }[];
+let downloads: string[];
+
+beforeEach(() => {
+  role = "editor";
+  drawn.length = 0;
+  sent = [];
+  answers = new Map<string, Answer>([
+    ["GET /api/v1/node-types", () => json(TYPES)],
+    ["GET /api/v1/t/t1", () => json({ id: "t1", name: "Acme", slug: "acme", require_passkey: false, role })],
+    [`GET ${BASE}`, () => json(WORKFLOW)],
+    [`PUT ${BASE}/draft`, () =>
+      json({ draft_revision: 2, unpublished_changes: true, graph_hash: "h2", active_version_id: null, active_version_number: null })],
+    [`POST ${BASE}/validate`, () => json({ draft_revision: 1, valid: true, diagnostics: [], expressions: [], taint: { sites: [], declassified: [] } })],
+  ]);
+  answers.set(`GET ${BASE}/versions`, () => json([]));
+  answers.set(`POST ${BASE}/publish`, () => json({ version_id: "v1", number: 1, warnings: [] }, 201));
+  downloads = [];
+  Object.assign(URL, { createObjectURL: vi.fn(() => "blob:test"), revokeObjectURL: vi.fn() });
+  vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+    downloads.push(this.download);
+  });
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const request = input as Request;
+    const path = new URL(request.url).pathname;
+    const text = await request.text();
+    sent.push({ method: request.method, path, headers: request.headers, body: text ? JSON.parse(text) : null });
+    const answer = answers.get(`${request.method} ${path}`);
+    return answer ? answer() : json({ error: "not_found" }, 404);
+  });
+});
+
+/** The editor on its route, beside the list's; `seed` fills the query cache first, as an earlier visit would. */
+async function show({ seed, at = "/t/t1/workflows/w1" }: { seed?: (qc: QueryClient) => void; at?: string } = {}) {
+  const root = createRootRoute({ component: Outlet });
+  const list = createRoute({ getParentRoute: () => root, path: "/t/$tenantId/workflows", component: () => <p>list</p> });
+  const editor = createRoute({
+    getParentRoute: () => root,
+    path: "/t/$tenantId/workflows/$workflowId",
+    component: () => <EditorPage tenantId="t1" workflowId="w1" />,
+  });
+  // A page whose loading sends the person straight back to the editor: an exit that never completes.
+  const away = createRoute({
+    getParentRoute: () => root,
+    path: "/away",
+    beforeLoad: () => {
+      // eslint-disable-next-line @typescript-eslint/only-throw-error -- TanStack Router's redirect is thrown, by design
+      throw redirect({ to: "/t/$tenantId/workflows/$workflowId", params: { tenantId: "t1", workflowId: "w1" } });
+    },
+  });
+  const router = createRouter({
+    routeTree: root.addChildren([list, editor, away]),
+    history: createMemoryHistory({ initialEntries: [at] }),
+  });
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  seed?.(qc);
+  render(
+    <QueryClientProvider client={qc}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>,
+  );
+  await screen.findByRole("group", { name: "Workflow steps" });
+  return { router, qc };
+}
+
+it("heads the editor with the way back and the workflow's name", async () => {
+  await show();
+  expect(screen.getByRole("link", { name: "Workflows" })).toBeTruthy();
+  expect(screen.getByRole("heading", { level: 1, name: "Nightly" })).toBeTruthy();
+});
+
+it("adds a first step from the start card, then one after it, through the picker", async () => {
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "Add the first step" }));
+  await userEvent.click(await screen.findByRole("option", { name: /flow\.transform@1/ }));
+  await userEvent.click(await screen.findByRole("button", { name: "after transform" }));
+  await userEvent.click(await screen.findByRole("option", { name: /flow\.transform@1/ }));
+  expect(screen.getByRole("button", { name: "transform_2" })).toBeTruthy();
+});
+
+it("lays the toolbar out as 1c: the state beside the name, Add step first among the actions, Publish last", async () => {
+  await show();
+  await screen.findByRole("button", { name: "Publish v1" });
+  const follows = (a: Node, b: Node) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+  const name = screen.getByRole("heading", { level: 1, name: "Nightly" });
+  const state = screen.getByText(/^Saved/);
+  const buttons = [...name.parentElement!.querySelectorAll("button")];
+  expect(follows(name, state) && follows(state, buttons[0]!)).toBe(true);
+  expect(buttons[0]!.textContent).toMatch(/Add step/);
+  expect(buttons.at(-1)!.textContent).toBe("Publish v1");
+});
+
+it("offers a viewer no Add step", async () => {
+  role = "viewer";
+  await show();
+  expect(screen.queryByRole("button", { name: /Add step/ })).toBeNull();
+});
+
+async function withTwoSteps() {
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "Add the first step" }));
+  await userEvent.click(await screen.findByRole("option", { name: /flow\.transform@1/ }));
+  await userEvent.click(await screen.findByRole("button", { name: "after transform" }));
+  await userEvent.click(await screen.findByRole("option", { name: /flow\.transform@1/ }));
+  await screen.findByRole("button", { name: "transform_2" });
+}
+
+it("deletes the focused step with Delete, after asking, and heals the chain in words", async () => {
+  await withTwoSteps();
+  screen.getByRole("button", { name: "transform" }).focus();
+  await userEvent.keyboard("{Delete}");
+  const ask = screen.getByRole("dialog", { name: "Delete a step" });
+  expect(ask.textContent).toContain("transform and its edges are deleted.");
+  await userEvent.click(within(ask).getByRole("button", { name: "Delete" }));
+  expect(screen.queryByRole("button", { name: "transform" })).toBeNull();
+  expect(screen.getByRole("button", { name: "transform_2" })).toBeTruthy();
+});
+
+it("opens the picker after the focused step with A, and undoes and redoes", async () => {
+  await withTwoSteps();
+  screen.getByRole("button", { name: "transform_2" }).focus();
+  await userEvent.keyboard("a");
+  expect(screen.getByRole("dialog", { name: "Add a step" })).toBeTruthy();
+  await userEvent.keyboard("{Escape}");
+  screen.getByRole("button", { name: "transform_2" }).focus();
+  await userEvent.keyboard("{Control>}z{/Control}");
+  expect(screen.queryByRole("button", { name: "transform_2" })).toBeNull();
+  // Focus moved to the step before it by itself (the owner's review of M3): redo is heard without repairing it.
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "transform" })));
+  await userEvent.keyboard("{Control>}{Shift>}z{/Shift}{/Control}");
+  expect(screen.getByRole("button", { name: "transform_2" })).toBeTruthy();
+});
+
+it("opens a step's panel on Enter, its heading focused, and Escape gives focus back to the step", async () => {
+  await withTwoSteps();
+  const step = screen.getByRole("button", { name: "transform_2" });
+  step.focus();
+  await userEvent.keyboard("{Enter}");
+  const panel = screen.getByRole("complementary", { name: "transform_2" });
+  expect(document.activeElement).toBe(within(panel).getByRole("heading", { name: "transform_2" }));
+  expect(panel.textContent).toContain("Transform · flow.transform@1");
+  await userEvent.keyboard("{Escape}");
+  expect(screen.queryByRole("complementary")).toBeNull();
+  expect(document.activeElement).toBe(step);
+});
+
+const at = (key: string) => drawn.at(-1)!.doc.nodes!.find((n) => n.key === key)!.position;
+
+it("places a step where a single pointer clicks, never by dragging (WCAG 2.5.7)", async () => {
+  await withTwoSteps();
+  await userEvent.click(screen.getByRole("button", { name: "transform" })); // its panel
+  await userEvent.click(screen.getByRole("button", { name: "Place on the canvas…" }));
+  expect(screen.getByText("Click an empty place on the canvas to put transform there.")).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "place here" }));
+  expect(at("transform")).toEqual({ x: 400 - 130, y: 300 - 32 }); // centred on the click
+  expect(screen.queryByText(/Click an empty place/)).toBeNull();
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "transform" }));
+});
+
+it("stops placing on Escape, leaving the step where it was", async () => {
+  await withTwoSteps();
+  const before = at("transform");
+  await userEvent.click(screen.getByRole("button", { name: "transform" }));
+  await userEvent.click(screen.getByRole("button", { name: "Place on the canvas…" }));
+  await userEvent.keyboard("{Escape}");
+  expect(screen.queryByText(/Click an empty place/)).toBeNull();
+  expect(screen.queryByRole("button", { name: "place here" })).toBeNull();
+  expect(at("transform")).toEqual(before);
+});
+
+it("moves a step 20 px a click from its panel", async () => {
+  await withTwoSteps();
+  const before = at("transform")!;
+  await userEvent.click(screen.getByRole("button", { name: "transform" }));
+  await userEvent.click(screen.getByRole("button", { name: "Move transform right" }));
+  await userEvent.click(screen.getByRole("button", { name: "Move transform down" }));
+  expect(at("transform")).toEqual({ x: before.x! + 20, y: before.y! + 20 });
+});
+
+it("keeps focus in the editor through undo and redo, never repairing it by hand (the owner's review of M3)", async () => {
+  await withTwoSteps();
+  const second = screen.getByRole("button", { name: "transform_2" });
+  await vi.waitFor(() => expect(document.activeElement).toBe(second)); // the step just added has focus
+  await userEvent.keyboard("{Control>}z{/Control}"); // its addition undone: its card is gone
+  expect(screen.queryByRole("button", { name: "transform_2" })).toBeNull();
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "transform" })));
+  await userEvent.keyboard("{Control>}z{/Control}"); // and the first: focus falls back to the start card
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Start" })));
+  await userEvent.keyboard("{Control>}{Shift>}z{/Shift}{/Control}");
+  await userEvent.keyboard("{Control>}{Shift>}z{/Shift}{/Control}"); // both redone, the keys still heard
+  expect(screen.getByRole("button", { name: "transform_2" })).toBeTruthy();
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "Start" })); // it survived: focus stays
+});
+
+it("closes a step's panel when undo removes its step, and gives focus to what remains", async () => {
+  await withTwoSteps();
+  await userEvent.click(screen.getByRole("button", { name: "transform_2" })); // its panel, its heading focused
+  await userEvent.keyboard("{Control>}z{/Control}");
+  expect(screen.queryByRole("complementary")).toBeNull();
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "transform" })));
+});
+
+it("offers each of a step's + in its panel, at full size, opening the picker as the + does (WCAG 2.5.8)", async () => {
+  await withTwoSteps();
+  await userEvent.click(screen.getByRole("button", { name: "transform" }));
+  const adds = () => within(screen.getByRole("complementary", { name: "transform" })).getByRole("group", { name: "Add a step" });
+  expect(within(adds()).getAllByRole("button").map((b) => b.textContent)).toEqual([
+    "Insert a step before transform",
+    "Insert a step between transform and transform_2",
+  ]);
+  await userEvent.click(within(adds()).getByRole("button", { name: "Insert a step between transform and transform_2" }));
+  await userEvent.click(await screen.findByRole("option", { name: /flow\.transform@1/ }));
+  const doc = drawn.at(-1)!.doc;
+  const keyOf = (id: string) => doc.nodes!.find((n) => n.id === id)!.key;
+  expect(doc.edges!.map((e) => `${keyOf(e.from.node)}->${keyOf(e.to.node)}`).sort()).toEqual(["transform->transform_3", "transform_3->transform_2"]);
+  await userEvent.click(screen.getByRole("button", { name: "transform_2" }));
+  expect(within(screen.getByRole("complementary", { name: "transform_2" })).getByRole("group", { name: "Add a step" }).textContent).toBe("Add a step after transform_2");
+});
+
+it("leaves focus in a step's panel when undo keeps its step", async () => {
+  await withTwoSteps();
+  await userEvent.click(screen.getByRole("button", { name: "transform" })); // the first step's panel
+  const heading = within(screen.getByRole("complementary", { name: "transform" })).getByRole("heading", { name: "transform" });
+  await vi.waitFor(() => expect(document.activeElement).toBe(heading));
+  await userEvent.keyboard("{Control>}z{/Control}"); // the second step's addition undone; transform stays
+  expect(screen.getByRole("complementary", { name: "transform" })).toBeTruthy();
+  expect(document.activeElement).toBe(heading);
+});
+
+/** A draft of one step of `type`, with this config, and a transform after it. */
+const oneStep = (type: string, config: Record<string, unknown>, key = "wait") => ({
+  graph_format: 1,
+  nodes: [
+    { id: `id-${key}`, key, type, config, position: { x: 0, y: 140 } },
+    { id: "id-transform", key: "transform", type: "flow.transform@1", position: { x: 0, y: 280 } },
+  ],
+  edges: [],
+});  // prettier-ignore
+const stepConfig = (key: string) => drawn.at(-1)!.doc.nodes!.find((n) => n.key === key)!.config;
+
+it("makes a field's typing one undo step", async () => {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, DELAY]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.delay@1", {}) }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "wait" }));
+  const drawer = screen.getByRole("complementary", { name: "wait" });
+  expect(within(drawer).getByRole("tab", { name: "Setup" }).getAttribute("aria-selected")).toBe("true");
+  await userEvent.type(within(drawer).getByLabelText("Duration, in seconds"), "120");
+  expect(stepConfig("wait")).toEqual({ duration_s: 120 });
+  await userEvent.click(within(drawer).getByRole("heading", { name: "wait" })); // focus leaves the field
+  await userEvent.keyboard("{Control>}z{/Control}");
+  expect(stepConfig("wait")).toEqual({}); // the whole field's typing, in one step
+});
+
+it("keeps an unknown type's settings as they are", async () => {
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("acme.thing@1", { secret: "s3cr3t" }, "x") }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "x" }));
+  const drawer = screen.getByRole("complementary", { name: "x" });
+  expect(drawer.textContent).toContain("This server doesn't know this step's type, so its settings can't be shown. They're kept as they are.");
+  expect(drawer.textContent).not.toContain("s3cr3t");
+  expect(stepConfig("x")).toEqual({ secret: "s3cr3t" });
+});
+
+it("shows a step's settings read only to a viewer", async () => {
+  role = "viewer";
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, DELAY]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.delay@1", { duration_s: 5 }) }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "wait" }));
+  expect(screen.getByLabelText<HTMLInputElement>("Duration, in seconds").disabled).toBe(true);
+});
+
+it("opens on Options when the type requires nothing", async () => {
+  const note = typeWith({ type: "object", properties: { note: { type: "string", title: "Note" } } }, { ref: "acme.note@1", type: "acme.note", title: "Note" });
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, note]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("acme.note@1", {}, "n") }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "n" }));
+  expect(screen.getByRole("tab", { name: "Options" }).getAttribute("aria-selected")).toBe("true");
+  expect(screen.getByLabelText("Note")).toBeTruthy();
+});
+
+/** A step whose `routes` declare its ports, as a switch's cases do, held as JSON: route b leads to the transform. */
+const ROUTER = typeWith(
+  { type: "object", properties: { routes: { title: "Routes" } } },
+  { ref: "acme.router@1", type: "acme.router", title: "Router", ports: ["other"], dynamic_ports: "routes" },
+);
+const routed = () => {
+  const draft = oneStep("acme.router@1", { routes: [{ port: "a" }, { port: "b" }] }, "route");
+  return { ...draft, edges: [{ from: { node: "id-route", port: "b" }, to: { node: "id-transform" } }] };
+};
+
+async function dropRouteB() {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, ROUTER]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: routed() }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "route" }));
+  const routes = screen.getByLabelText("Routes");
+  await userEvent.clear(routes);
+  await userEvent.paste('[{"port": "a"}]');
+  await userEvent.tab(); // JSON applies when focus leaves
+  return screen.getByRole("dialog", { name: "Remove a port" });
+}
+
+it("asks before an edit takes a port with edges away", async () => {
+  const dialog = await dropRouteB();
+  expect(dialog.textContent).toContain("The port b goes with this change, and its edge to transform is deleted.");
+  await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  expect(drawn.at(-1)!.doc.edges).toHaveLength(1);
+  expect(stepConfig("route")).toEqual({ routes: [{ port: "a" }, { port: "b" }] });
+  // Canceled, the edit stays the person's: unapplied, its reason at its control (ruling 18).
+  expect(JSON.parse(screen.getByLabelText<HTMLTextAreaElement>("Routes").value)).toEqual([{ port: "a" }]);
+  expect(screen.getByText("Not applied: it removes the port b and its edge to transform.")).toBeTruthy();
+});
+
+it("keeps an unapplied edit when the tab changes or the drawer closes", async () => {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, DELAY]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.delay@1", {}) }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "wait" }));
+  await userEvent.type(screen.getByLabelText("Duration, in seconds"), "1x");
+  await userEvent.click(screen.getByRole("tab", { name: "Options" }));
+  await userEvent.click(screen.getByRole("tab", { name: "Setup" }));
+  expect(screen.getByLabelText<HTMLInputElement>("Duration, in seconds").value).toBe("1x");
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
+  await userEvent.click(screen.getByRole("button", { name: "wait" }));
+  expect(screen.getByLabelText<HTMLInputElement>("Duration, in seconds").value).toBe("1x");
+  expect(screen.getByText("A whole number, like 42.")).toBeTruthy();
+  expect(stepConfig("wait")).toEqual({ duration_s: 1 }); // "1" was a number; "1x" never reached the draft
+});
+
+it("undoes the edit and its edges together", async () => {
+  const dialog = await dropRouteB();
+  await userEvent.click(within(dialog).getByRole("button", { name: "Remove" }));
+  expect(drawn.at(-1)!.doc.edges).toEqual([]);
+  expect(stepConfig("route")).toEqual({ routes: [{ port: "a" }] });
+  await vi.waitFor(() => expect(document.activeElement?.id).toBe("step-drawer-title"));
+  await userEvent.keyboard("{Control>}z{/Control}");
+  expect(drawn.at(-1)!.doc.edges).toHaveLength(1);
+  expect(stepConfig("route")).toEqual({ routes: [{ port: "a" }, { port: "b" }] });
+});
+
+const steps = () => screen.getByRole("group", { name: "Workflow steps" });
+
+async function addTransform() {
+  await userEvent.click(screen.getByRole("button", { name: "Add the first step" }));
+  await userEvent.click(await screen.findByRole("option", { name: /flow\.transform@1/ }));
+  await screen.findByRole("button", { name: "transform" });
+}
+
+it("saves an edit with the revision it was loaded at, and says so", async () => {
+  await show();
+  await addTransform();
+  expect(screen.getByText("Unsaved changes")).toBeTruthy();
+  await vi.waitFor(() => expect(sent.find((r) => r.method === "PUT")).toBeTruthy(), { timeout: 3000 });
+  const put = sent.find((r) => r.method === "PUT")!;
+  expect(put.headers.get("If-Match")).toBe("1");
+  expect((put.body as GraphDoc).nodes!.map((n) => n.key)).toEqual(["transform"]);
+  await screen.findByText("Saved · not published");
+});
+
+it("opens on the server's draft, never a cached one", async () => {
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft_revision: 7, draft: draftWith("fresh") }));
+  await show({ seed: (qc) => qc.setQueryData(["workflow", "t1", "w1"], { ...WORKFLOW, draft: draftWith("old") }) });
+  expect(screen.getByRole("button", { name: "fresh" })).toBeTruthy();
+  expect(drawn.some((d) => d.doc.nodes?.some((n) => n.key === "old"))).toBe(false);
+});
+
+it("keeps its own document when the workflow is read again while it's open", async () => {
+  const { qc } = await show();
+  await addTransform();
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft_revision: 9, draft: draftWith("other") }));
+  await qc.refetchQueries({ queryKey: ["workflow", "t1", "w1"] });
+  expect(screen.getByRole("button", { name: "transform" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "other" })).toBeNull();
+});
+
+it("saves before leaving through a link, then leaves", async () => {
+  const { router } = await show();
+  await addTransform();
+  expect(screen.getByText("Unsaved changes")).toBeTruthy(); // inside the debounce
+  await userEvent.click(screen.getByRole("link", { name: "Workflows" }));
+  await screen.findByText("list");
+  expect(sent.filter((r) => r.method === "PUT")).toHaveLength(1);
+  expect(router.state.location.pathname).toBe("/t/t1/workflows");
+});
+
+it("asks before leaving work it couldn't save; staying keeps it", async () => {
+  answers.set(`PUT ${BASE}/draft`, () => json({ error: "http_error" }, 500));
+  await show();
+  await addTransform();
+  await userEvent.click(screen.getByRole("link", { name: "Workflows" }));
+  const ask = await screen.findByRole("dialog", { name: "Your latest changes aren't saved" });
+  expect(within(ask).getByRole("button", { name: "Download my version" })).toBeTruthy();
+  await userEvent.click(within(ask).getByRole("button", { name: "Stay" }));
+  expect(screen.getByRole("button", { name: "transform" })).toBeTruthy();
+  await userEvent.click(screen.getByRole("link", { name: "Workflows" }));
+  const again = await screen.findByRole("dialog", { name: "Your latest changes aren't saved" });
+  await userEvent.click(within(again).getByRole("button", { name: "Leave without saving" }));
+  await screen.findByText("list");
+});
+
+it("turns read-only on a conflict, keeping the work downloadable and leaving guarded", async () => {
+  answers.set(`PUT ${BASE}/draft`, () => json({ error: "draft_conflict", draft_revision: 5 }, 409));
+  await show();
+  await addTransform();
+  const alert = await screen.findByRole("alert", {}, { timeout: 3000 });
+  expect(alert.textContent).toContain("changed elsewhere");
+  expect(screen.queryByRole("button", { name: /Add step/ })).toBeNull();
+  expect(within(alert).getByRole("button", { name: "Download my version" })).toBeTruthy();
+  await userEvent.click(screen.getByRole("link", { name: "Workflows" }));
+  const ask = await screen.findByRole("dialog", { name: "Your latest changes aren't saved" });
+  expect(ask.textContent).toContain("changed elsewhere");
+  await userEvent.click(within(ask).getByRole("button", { name: "Stay" }));
+});
+
+it("answers sign-out's question with the same decision: staying keeps the work", async () => {
+  answers.set(`PUT ${BASE}/draft`, () => json({ error: "http_error" }, 500));
+  await show();
+  await addTransform();
+  const decision = mayLeave(); // what the shell's Sign out asks before it revokes anything
+  const ask = await screen.findByRole("dialog", { name: "Your latest changes aren't saved" });
+  await userEvent.click(within(ask).getByRole("button", { name: "Stay" }));
+  await expect(decision).resolves.toBe(false);
+  expect(screen.getByRole("button", { name: "transform" })).toBeTruthy();
+});
+
+it("asks once: a navigation after sign-out's \"leave\" goes without asking again", async () => {
+  answers.set(`PUT ${BASE}/draft`, () => json({ error: "http_error" }, 500));
+  await show();
+  await addTransform();
+  const decision = mayLeave();
+  const ask = await screen.findByRole("dialog", { name: "Your latest changes aren't saved" });
+  await userEvent.click(within(ask).getByRole("button", { name: "Leave without saving" }));
+  await expect(decision).resolves.toBe(true);
+  await userEvent.click(screen.getByRole("link", { name: "Workflows" })); // as sign-out's navigation to /login
+  await screen.findByText("list");
+  expect(screen.queryByRole("dialog", { name: "Your latest changes aren't saved" })).toBeNull();
+});
+
+it("lets overlapping exits share one question, and a Stay settles every one", async () => {
+  answers.set(`PUT ${BASE}/draft`, () => json({ error: "http_error" }, 500));
+  await show();
+  await addTransform();
+  const first = mayLeave();
+  const second = mayLeave(); // a second Sign out, or the router's blocker, while the first waits
+  const ask = await screen.findByRole("dialog", { name: "Your latest changes aren't saved" });
+  expect(screen.getAllByRole("dialog", { name: "Your latest changes aren't saved" })).toHaveLength(1);
+  await userEvent.click(within(ask).getByRole("button", { name: "Stay" }));
+  await expect(first).resolves.toBe(false);
+  await expect(second).resolves.toBe(false);
+  expect(sent.filter((r) => r.method === "PUT")).toHaveLength(1); // one decision, one save tried
+  expect(steps().dataset.editable).toBe("true"); // staying holds nothing
+});
+
+it("holds the document from an exit's consent until the exit is withdrawn", async () => {
+  await show();
+  await addTransform();
+  await expect(mayLeave()).resolves.toBe(true); // saved first: sign-out may go on, and now awaits logout's answer
+  await vi.waitFor(() => expect(steps().dataset.editable).toBe("false"));
+  await userEvent.click(screen.getByRole("button", { name: "after transform" })); // an edit, under that consent
+  expect(screen.queryByRole("dialog", { name: "Add a step" })).toBeNull();
+  await userEvent.keyboard("{Control>}z{/Control}");
+  expect(screen.getByRole("button", { name: "transform" })).toBeTruthy(); // undo is held too
+  act(() => cancelLeaving()); // logout failed: still signed in
+  await vi.waitFor(() => expect(steps().dataset.editable).toBe("true"));
+  await userEvent.click(screen.getByRole("button", { name: "after transform" }));
+  expect(await screen.findByRole("dialog", { name: "Add a step" })).toBeTruthy();
+});
+
+it("asks again after a sign-out that failed", async () => {
+  answers.set(`PUT ${BASE}/draft`, () => json({ error: "http_error" }, 500));
+  await show();
+  await addTransform();
+  const decision = mayLeave();
+  await userEvent.click(
+    within(await screen.findByRole("dialog", { name: "Your latest changes aren't saved" })).getByRole("button", { name: "Leave without saving" }),
+  );
+  await expect(decision).resolves.toBe(true);
+  act(() => cancelLeaving()); // what the shell does when signOut() fails
+  await userEvent.click(screen.getByRole("link", { name: "Workflows" }));
+  expect(await screen.findByRole("dialog", { name: "Your latest changes aren't saved" })).toBeTruthy();
+  expect(screen.queryByText("list")).toBeNull();
+});
+
+it("stays open, with its edits, when the step types fail to refresh", async () => {
+  const { qc } = await show();
+  await addTransform();
+  answers.set("GET /api/v1/node-types", () => json({ error: "http_error" }, 500));
+  await act(() => qc.refetchQueries({ queryKey: ["node-types"] }));
+  expect(await screen.findByText(/The step types couldn't be refreshed/)).toBeTruthy();
+  expect(screen.getByRole("button", { name: "transform" })).toBeTruthy();
+  expect(screen.getByRole("group", { name: "Workflow steps" })).toBeTruthy();
+});
+
+it("asks before Reload discards the version a conflict kept", async () => {
+  answers.set(`PUT ${BASE}/draft`, () => json({ error: "draft_conflict", draft_revision: 5 }, 409));
+  await show();
+  await addTransform();
+  const alert = await screen.findByRole("alert", {}, { timeout: 3000 });
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft_revision: 5, draft: draftWith("theirs") }));
+  await userEvent.click(within(alert).getByRole("button", { name: "Reload" }));
+  const ask = screen.getByRole("dialog", { name: "Reload the saved draft" });
+  await userEvent.click(within(ask).getByRole("button", { name: "Discard my version and reload" }));
+  expect(await screen.findByRole("button", { name: "theirs" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "transform" })).toBeNull();
+});
+
+const valid = (revision: number) => ({ draft_revision: revision, valid: true, diagnostics: [], expressions: [], taint: { sites: [], declassified: [] } });
+const invalid = (revision: number, node: string | null) => ({
+  draft_revision: revision, valid: false, expressions: [], taint: { sites: [], declassified: [] },
+  diagnostics: [{ code: "config.invalid", message: "fields needs at least one entry", node, field: "/fields", fix: null, severity: "error" }],
+});  // prettier-ignore
+const checks = () => sent.filter((r) => r.path.endsWith("/validate")).length;
+
+it("says it's checking before the first answer, never No problems", async () => {
+  let answer: ((r: Response) => void) | undefined;
+  answers.set(`POST ${BASE}/validate`, () => new Promise<Response>((r) => (answer = r)));
+  await show();
+  expect(screen.getByRole("button", { name: "Checking…" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "No problems" })).toBeNull();
+  await vi.waitFor(() => expect(answer).toBeDefined());
+  answer!(json(valid(1)));
+  expect(await screen.findByRole("button", { name: "No problems" })).toBeTruthy();
+});
+
+it("checks the saved revision once a save settles, and counts its problems on the steps", async () => {
+  answers.set(`POST ${BASE}/validate`, () => json(invalid(2, "x")));
+  await show();
+  await addTransform();
+  expect(await screen.findByRole("button", { name: "Problems · 1" }, { timeout: 3000 })).toBeTruthy();
+  expect(steps().dataset.problems).toBe("1");
+});
+
+it("calls an answer for an older revision stale, and never paints it on the steps", async () => {
+  answers.set(`POST ${BASE}/validate`, () => json(invalid(1, "x"))); // even after the save made revision 2
+  await show();
+  await screen.findByRole("button", { name: "Problems · 1" }); // revision 1, on the screen: current
+  expect(steps().dataset.problems).toBe("1");
+  await addTransform();
+  await screen.findByText("Saved · not published", {}, { timeout: 3000 });
+  await vi.waitFor(() => expect(checks()).toBe(2));
+  expect(screen.getByRole("button", { name: "Problems · 1, before your edits" })).toBeTruthy();
+  expect(steps().dataset.problems).toBe("0");
+});
+
+it("says when a check failed, and checks again when asked", async () => {
+  answers.set(`POST ${BASE}/validate`, () => json({ error: "http_error" }, 500));
+  await show();
+  await userEvent.click(await screen.findByRole("button", { name: "Check failed" }));
+  answers.set(`POST ${BASE}/validate`, () => json(valid(1)));
+  const panel = screen.getByRole("complementary", { name: "Problems" });
+  await userEvent.click(within(panel).getByRole("button", { name: "Check again" }));
+  expect(await screen.findByRole("button", { name: "No problems" })).toBeTruthy();
+});
+
+it("offers a viewer no checks", async () => {
+  role = "viewer";
+  await show();
+  expect(screen.queryByRole("button", { name: /Problems|Check|Not checked/ })).toBeNull();
+  expect(checks()).toBe(0);
+});
+
+it("finds a step whose id the draft spells otherwise by the server's canonical id (the owner's review of M3)", async () => {
+  const UPPER = "0B6C2F1E-1D1E-4C1E-8E1E-1E1E1E1E1E0A";
+  const draft = { graph_format: 1, nodes: [{ id: UPPER, key: "transform", type: "flow.transform@1", position: { x: 0, y: 140 } }], edges: [] };
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft }));
+  answers.set(`POST ${BASE}/validate`, () => json(invalid(1, UPPER.toLowerCase())));
+  await show();
+  await screen.findByRole("button", { name: "Problems · 1" });
+  expect(steps().dataset.problemSteps).toBe(UPPER.toLowerCase()); // keyed as the canvas looks it up (`idKey`)
+  await userEvent.click(screen.getByRole("button", { name: "transform" })); // its panel lists the problem
+  const panel = screen.getByRole("complementary", { name: "transform" });
+  expect(panel.textContent).toContain("fields needs at least one entry");
+  await userEvent.click(screen.getByRole("button", { name: "Problems · 1" }));
+  expect(within(screen.getByRole("complementary", { name: "Problems" })).getByRole("button", { name: "Go to transform" })).toBeTruthy();
+});
+
+/** A version as the list answers it; `hash` is its graph's, which says which draft it holds. */
+const version = (number: number, active: boolean, hash = "h") => ({
+  id: `v${number}`, number, published_at: "2026-10-06T10:00:00Z", published_by: null, graph_hash: hash, version_hash: "h",
+  cel_profile: "p", engine_abi: 6, node_refs: [], active, executable: true, blocked_by: [],
+});  // prettier-ignore
+const detail = (number: number, key: string) => ({ ...version(number, false), graph: draftWith(key), expressions: [] });
+const publishes = () => sent.filter((r) => r.path.endsWith("/publish"));
+
+async function confirmPublish(number: number) {
+  await userEvent.click(await screen.findByRole("button", { name: `Publish v${number}` }));
+  const ask = screen.getByRole("dialog", { name: `Publish version ${number}` });
+  await userEvent.click(within(ask).getByRole("button", { name: "Publish" }));
+  return ask;
+}
+
+it("publishes after saving, naming the version it confirms", async () => {
+  await show();
+  await addTransform();
+  await confirmPublish(1);
+  await screen.findByText("Saved · published as v1", {}, { timeout: 3000 });
+  const put = sent.findIndex((r) => r.method === "PUT");
+  const publish = sent.findIndex((r) => r.path.endsWith("/publish"));
+  expect(put).toBeGreaterThanOrEqual(0);
+  expect(publish).toBeGreaterThan(put); // flushed first
+  expect(sent[publish]!.headers.get("If-Match")).toBe("2");
+  expect(sent[publish]!.body).toEqual({ expected_latest_version: 0 });
+});
+
+it("names no number until the versions are read, and says when they can't be", async () => {
+  let list: ((r: Response) => void) | undefined;
+  answers.set(`GET ${BASE}/versions`, () => new Promise<Response>((r) => (list = r)));
+  await show();
+  expect(screen.getByRole("button", { name: "Publish" }).hasAttribute("disabled")).toBe(true);
+  await vi.waitFor(() => expect(list).toBeDefined());
+  list!(json({ error: "http_error" }, 500));
+  expect(await screen.findByText("The versions couldn't be read, so publishing waits.")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Publish" }).hasAttribute("disabled")).toBe(true);
+  answers.set(`GET ${BASE}/versions`, () => json([version(1, true)]));
+  await userEvent.click(screen.getByRole("button", { name: "Read them again" }));
+  expect(await screen.findByRole("button", { name: "Publish v2" })).toBeTruthy();
+});
+
+it("asks again, with the new number, when another version was published meanwhile", async () => {
+  answers.set(`POST ${BASE}/publish`, () => {
+    answers.set(`GET ${BASE}/versions`, () => json([version(1, true)]));
+    answers.set(`POST ${BASE}/publish`, () => json({ version_id: "v2", number: 2, warnings: [] }, 201));
+    return json({ error: "version_changed", latest_version: 1 }, 409);
+  });
+  await show();
+  await confirmPublish(1);
+  const again = await screen.findByRole("dialog", { name: "Publish version 2" });
+  expect(again.textContent).toContain("Version 1 was published since you opened this");
+  await vi.waitFor(() => expect(document.activeElement).toBe(within(again).getByRole("button", { name: "Cancel" })));
+  expect(screen.queryByText(/changed elsewhere/)).toBeNull(); // never a draft conflict
+  await userEvent.click(within(again).getByRole("button", { name: "Publish" }));
+  await vi.waitFor(() => expect(publishes()).toHaveLength(2));
+  expect(publishes()[1]!.body).toEqual({ expected_latest_version: 1 });
+});
+
+it("keeps the draft still while it's being published", async () => {
+  let done: ((r: Response) => void) | undefined;
+  answers.set(`POST ${BASE}/publish`, () => new Promise<Response>((r) => (done = r)));
+  await show();
+  await confirmPublish(1);
+  await vi.waitFor(() => expect(done).toBeDefined());
+  expect(steps().dataset.editable).toBe("false");
+  done!(json({ version_id: "v1", number: 1, warnings: [] }, 201));
+  await vi.waitFor(() => expect(steps().dataset.editable).toBe("true"));
+});
+
+it("reads what happened when a publish's answer is lost: the version holds the submitted graph, never who made it", async () => {
+  answers.set(`POST ${BASE}/publish`, () => {
+    answers.set(`GET ${BASE}/versions`, () => json([version(1, true, "h1")])); // "h1": the draft as loaded
+    answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, active_version_id: "v1", active_version_number: 1, unpublished_changes: false }));
+    return Promise.reject(new TypeError("Failed to fetch"));
+  });
+  await show();
+  await confirmPublish(1);
+  await vi.waitFor(() => expect(screen.getByRole("status", { name: "Notice" }).textContent).toContain("Version 1 holds the submitted graph. Your publish request's outcome wasn't received."));
+  expect(screen.getByText("Saved · published as v1")).toBeTruthy();
+  expect(screen.queryByText(/wasn't published|Not published/)).toBeNull();
+});
+
+it("never takes another's publication for this draft's when an answer is lost", async () => {
+  // Someone published version 1 from an earlier draft; this editor saved revision 2 ("h2"); its publish was refused,
+  // and the refusal lost. Version 1 exists and the draft is still at revision 2: neither says this draft is in it.
+  answers.set(`POST ${BASE}/publish`, () => {
+    answers.set(`GET ${BASE}/versions`, () => json([version(1, true, "h-theirs")]));
+    answers.set(`GET ${BASE}`, () =>
+      json({ ...WORKFLOW, draft_revision: 2, active_version_id: "v1", active_version_number: 1, unpublished_changes: true }));
+    return Promise.reject(new TypeError("Failed to fetch"));
+  });
+  await show();
+  await addTransform();
+  await confirmPublish(1);
+  expect((await screen.findByRole("alert")).textContent).toContain("Version 1 holds another draft: yours wasn't published");
+  expect(screen.getByText("Saved · unpublished changes since v1")).toBeTruthy();
+  expect(screen.queryByText(/published as v1|holds the submitted graph/)).toBeNull();
+});
+
+it("takes the active version from the read, never from the number it hoped for", async () => {
+  answers.set(`POST ${BASE}/publish`, () => {
+    answers.set(`GET ${BASE}/versions`, () => json([version(2, true, "h-later"), version(1, false, "h1")]));
+    answers.set(`GET ${BASE}`, () =>
+      json({ ...WORKFLOW, active_version_id: "v2", active_version_number: 2, unpublished_changes: true }));
+    return Promise.reject(new TypeError("Failed to fetch"));
+  });
+  await show();
+  await confirmPublish(1);
+  await vi.waitFor(() => expect(screen.getByRole("status", { name: "Notice" }).textContent).toContain("Version 1 holds the submitted graph. Your publish request's outcome wasn't received."));
+  expect(screen.getByText("Saved · unpublished changes since v2")).toBeTruthy(); // version 2 came after, and is active
+});
+
+it("says it isn't known when the draft submitted has no hash to compare", async () => {
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft_graph_hash: null }));
+  answers.set(`POST ${BASE}/publish`, () => {
+    answers.set(`GET ${BASE}/versions`, () => json([version(1, true, "h-any")]));
+    return Promise.reject(new TypeError("Failed to fetch"));
+  });
+  await show();
+  await confirmPublish(1);
+  expect((await screen.findByRole("alert")).textContent).toContain("it isn't known whether it holds your draft");
+  expect(screen.queryByText(/holds another draft|holds the submitted graph/)).toBeNull();
+});
+
+it("never calls a lost publish a failure when what happened can't be read", async () => {
+  answers.set(`POST ${BASE}/publish`, () => {
+    answers.set(`GET ${BASE}/versions`, () => json({ error: "http_error" }, 502));
+    answers.set(`GET ${BASE}`, () => json({ error: "http_error" }, 502));
+    return json({ error: "http_error" }, 504);
+  });
+  await show();
+  await confirmPublish(1);
+  expect((await screen.findByRole("alert")).textContent).toContain("It isn't known whether version 1 was published");
+  expect(screen.getByText("Saved · the active version isn't known")).toBeTruthy();
+});
+
+it("keeps what the workflow's read says when only the versions' read fails", async () => {
+  answers.set(`POST ${BASE}/publish`, () => {
+    answers.set(`GET ${BASE}/versions`, () => json({ error: "http_error" }, 502));
+    answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, active_version_id: "v3", active_version_number: 3, unpublished_changes: true }));
+    return Promise.reject(new TypeError("Failed to fetch"));
+  });
+  await show();
+  await confirmPublish(1);
+  expect((await screen.findByRole("alert")).textContent).toContain("It isn't known whether version 1 was published");
+  expect(screen.getByText("Saved · unpublished changes since v3")).toBeTruthy(); // the active version, as read
+});
+
+it("keeps an activation made when the read after it fails", async () => {
+  answers.set(`GET ${BASE}/versions`, () => json([version(2, true), version(1, false)]));
+  answers.set(`POST ${BASE}/activate`, () => {
+    answers.set(`GET ${BASE}`, () => json({ error: "http_error" }, 500));
+    return json({ active_version_id: "v1", number: 1, warnings: [] });
+  });
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "Versions" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Make version 1 active" }));
+  await userEvent.click(within(screen.getByRole("dialog", { name: "Make version 1 active" })).getByRole("button", { name: "Make active" }));
+  await vi.waitFor(() => expect(screen.getByRole("status", { name: "Notice" }).textContent).toContain("Version 1 is active."));
+  expect(screen.getByText("Saved · v1 is active")).toBeTruthy(); // the comparison isn't known: nothing claimed
+  expect(screen.queryByText(/wasn't made active/)).toBeNull();
+});
+
+it("shows the newest version asked for, whatever order the answers come in", async () => {
+  let first: ((r: Response) => void) | undefined;
+  answers.set(`GET ${BASE}/versions`, () => json([version(2, true), version(1, false)]));
+  answers.set(`GET ${BASE}/versions/v1`, () => new Promise<Response>((r) => (first = r)));
+  answers.set(`GET ${BASE}/versions/v2`, () => json(detail(2, "two")));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "Versions" }));
+  await userEvent.click(await screen.findByRole("button", { name: "View version 1" }));
+  await userEvent.click(screen.getByRole("button", { name: "View version 2" }));
+  expect(await screen.findByRole("button", { name: "two" })).toBeTruthy();
+  first!(json(detail(1, "one")));
+  await new Promise((r) => setTimeout(r, 20)); // the late answer has landed
+  expect(screen.queryByRole("button", { name: "one" })).toBeNull();
+  expect(screen.getByText("Viewing version 2, read only. The draft is unchanged.")).toBeTruthy();
+});
+
+it("carries no draft diagnostics onto a version's canvas", async () => {
+  answers.set(`POST ${BASE}/validate`, () => json(invalid(1, "x")));
+  answers.set(`GET ${BASE}/versions`, () => json([version(1, true)]));
+  answers.set(`GET ${BASE}/versions/v1`, () => json(detail(1, "one")));
+  await show();
+  await screen.findByRole("button", { name: "Problems · 1" });
+  await userEvent.click(screen.getByRole("button", { name: "Versions" }));
+  await userEvent.click(await screen.findByRole("button", { name: "View version 1" }));
+  await screen.findByRole("button", { name: "one" });
+  expect(steps().dataset.problems).toBe("0");
+  expect(screen.queryByRole("button", { name: /Problems/ })).toBeNull();
+});
+
+it("shows a version's own step in the step panel, never the draft's", async () => {
+  const theirs = draftWith("one");
+  theirs.nodes![0]!.options = { timeout_s: 30 }; // the draft's "one" keeps the type's 60 s
+  const expressions = [{ node: "id-one", field: "/fields/a", mode: "activity", reason: "builds a message" }];
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: draftWith("one") }));
+  answers.set(`GET ${BASE}/versions`, () => json([version(1, true)]));
+  answers.set(`GET ${BASE}/versions/v1`, () => json({ ...version(1, true), graph: theirs, expressions }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "Versions" }));
+  await userEvent.click(await screen.findByRole("button", { name: "View version 1" }));
+  await screen.findByText("Viewing version 1, read only. The draft is unchanged.");
+  await userEvent.click(screen.getByRole("button", { name: "one" }));
+  const panel = screen.getByRole("complementary", { name: "one" });
+  expect(panel.textContent).toContain("30 s");
+  expect(panel.textContent).toContain("Runs as a separate step: builds a message");
+  expect(panel.textContent).toContain("Not checked for what's on the screen.");
+});
+
+it("stops an export when the latest edits aren't saved, and offers the saved draft by name", async () => {
+  answers.set(`PUT ${BASE}/draft`, () => json({ error: "http_error" }, 500));
+  answers.set(`GET ${BASE}/export`, () => json({ format: "dewpoint.workflow", format_version: 1, name: "Nightly", graph: {}, bindings: [] }));
+  await show();
+  await addTransform();
+  await userEvent.click(screen.getByRole("button", { name: "Export" }));
+  const stop = await screen.findByRole("alert");
+  expect(stop.textContent).toContain("Not exported: your latest edits aren't saved");
+  expect(sent.some((r) => r.path.endsWith("/export"))).toBe(false);
+  await userEvent.click(within(stop).getByRole("button", { name: "Export the last saved draft" }));
+  await vi.waitFor(() => expect(downloads).toEqual(["nightly.dewpoint.json"]));
+});
+
+it("offers a draft that can't be made portable as it is, labelled", async () => {
+  answers.set(`GET ${BASE}/export`, () =>
+    json({ error: "not_portable", problems: [{ reason: "unknown_type", binding: null, node: "id-odd", field: null }] }, 422));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: draftWith("odd") }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "Export" }));
+  const stop = await screen.findByRole("alert");
+  expect(stop.textContent).toContain("can't be exported as a portable file");
+  expect(stop.textContent).toContain("odd");
+  await userEvent.click(within(stop).getByRole("button", { name: "Download this draft as it is (not portable)" }));
+  expect(downloads).toEqual(["nightly.draft.json"]);
+});
+
+it("shows what only publish checks, in the problems panel, marked", async () => {
+  answers.set(`POST ${BASE}/publish`, () =>
+    json({ error: "invalid", diagnostics: [{ code: "connection.unknown", message: "That connection doesn't exist.", node: null, field: null, fix: null, severity: "error" }] }, 422));
+  await show();
+  await confirmPublish(1);
+  const panel = await screen.findByRole("complementary", { name: "Problems" });
+  expect(within(panel).getByRole("region", { name: "Found at publish" }).textContent).toContain("That connection doesn't exist.");
+});
+
+// Editing that stops while an action is open stops the action too (the owner's review of 6d7766e, correction 1): its
+// dialog closes, nothing it would have added lands, and focus goes back to the canvas.
+describe("a conflict that arrives while an action is open", () => {
+  it.each([
+    { action: "the step picker", key: "a", dialog: "Add a step" },
+    { action: "the connect dialog", key: "c", dialog: "Connect transform_2 to" },
+    { action: "the delete question", key: "{Delete}", dialog: "Delete a step" },
+  ])("closes $action, changes nothing and gives focus back to the step", async ({ key, dialog }) => {
+    await withTwoSteps();
+    let release: ((r: Response) => void) | undefined;
+    answers.set(`PUT ${BASE}/draft`, () => new Promise<Response>((r) => (release = r)));
+    screen.getByRole("button", { name: "transform_2" }).focus();
+    await userEvent.keyboard("{Shift>}{ArrowDown}{/Shift}"); // an edit, whose save the server holds
+    await vi.waitFor(() => expect(release).toBeDefined(), { timeout: 3000 });
+    screen.getByRole("button", { name: "transform_2" }).focus();
+    await userEvent.keyboard(key);
+    const open = screen.getByRole("dialog", { name: dialog });
+    const keys = () => drawn.at(-1)!.doc.nodes!.map((n) => n.key);
+    const before = keys();
+    release!(json({ error: "draft_conflict", draft_revision: 5 }, 409));
+    await screen.findByRole("alert");
+    await vi.waitFor(() => expect(open.isConnected && open.hasAttribute("open")).toBe(false));
+    expect(steps().dataset.editable).toBe("false");
+    expect(keys()).toEqual(before);
+    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "transform_2" })));
+  });
+});
+
+// Exits that share one decision each keep their own consent (the owner's review of 315e19f): a router exit sent back
+// here releases only its own; a sign-out that joined keeps the document held until it fails or the editor goes.
+describe("a sign-out and a router exit sharing one decision", () => {
+  const saved = () => json({ draft_revision: 2, unpublished_changes: true, graph_hash: "h2", active_version_id: null, active_version_number: null });
+  async function overlapping(order: "router first" | "sign-out first", answer: () => Response) {
+    let release: ((r: Response) => void) | undefined;
+    answers.set(`PUT ${BASE}/draft`, () => new Promise<Response>((r) => (release = r)));
+    const { router } = await show();
+    await addTransform();
+    let signOut!: Promise<boolean>;
+    if (order === "router first") {
+      act(() => router.history.push("/away")); // waits for the save, then is sent back here
+      signOut = mayLeave();
+    } else {
+      signOut = mayLeave();
+      act(() => router.history.push("/away"));
+    }
+    await vi.waitFor(() => expect(release).toBeDefined(), { timeout: 3000 });
+    release!(answer());
+    return { router, signOut };
+  }
+
+  it.each(["router first", "sign-out first"] as const)("keeps sign-out's hold when the router exit comes back (%s)", async (order) => {
+    const { router, signOut } = await overlapping(order, saved);
+    expect(await signOut).toBe(true);
+    await vi.waitFor(() => expect(router.state.location.pathname).toBe("/t/t1/workflows/w1"));
+    await act(() => new Promise((r) => setTimeout(r, 50)));
+    expect(steps().dataset.editable).toBe("false"); // the sign-out may still be logging out: no edit may land
+    // The navigation that follows the logout asks nothing again.
+    act(() => router.history.push("/t/t1/workflows"));
+    await vi.waitFor(() => expect(router.state.location.pathname).toBe("/t/t1/workflows"));
+    expect(screen.queryByRole("dialog", { name: "Your latest changes aren't saved" })).toBeNull();
+  });
+
+  it.each(["router first", "sign-out first"] as const)("gives the document back when that sign-out fails (%s)", async (order) => {
+    const { router, signOut } = await overlapping(order, saved);
+    expect(await signOut).toBe(true);
+    await vi.waitFor(() => expect(router.state.location.pathname).toBe("/t/t1/workflows/w1"));
+    act(() => cancelLeaving());
+    await vi.waitFor(() => expect(steps().dataset.editable).toBe("true"));
+  });
+
+  it("asks its one question once, for both, and the router's return still leaves sign-out's hold", async () => {
+    const { router, signOut } = await overlapping("router first", () => json({ error: "http_error" }, 500));
+    const ask = await screen.findByRole("dialog", { name: "Your latest changes aren't saved" });
+    await userEvent.click(within(ask).getByRole("button", { name: "Leave without saving" }));
+    expect(await signOut).toBe(true);
+    await vi.waitFor(() => expect(router.state.location.pathname).toBe("/t/t1/workflows/w1"));
+    await act(() => new Promise((r) => setTimeout(r, 50)));
+    expect(steps().dataset.editable).toBe("false");
+    expect(screen.queryByRole("dialog", { name: "Your latest changes aren't saved" })).toBeNull();
+  });
+});
+
+// When editing stops, focus held by a control only editing draws goes somewhere drawn (the final checkpoint's second
+// review): never to the page.
+describe("focus when editing stops under it", () => {
+  function heldEdit() {
+    let release: ((r: Response) => void) | undefined;
+    answers.set(`PUT ${BASE}/draft`, () => new Promise<Response>((r) => (release = r)));
+    return {
+      held: () => vi.waitFor(() => expect(release).toBeDefined(), { timeout: 3000 }),
+      conflict: async () => {
+        release!(json({ error: "draft_conflict", draft_revision: 5 }, 409));
+        await screen.findByRole("alert");
+      },
+    };
+  }
+
+  it("goes to the panel's heading from a panel button that's gone", async () => {
+    await withTwoSteps();
+    const save = heldEdit();
+    await userEvent.click(screen.getByRole("button", { name: "transform_2" }));
+    const panel = screen.getByRole("complementary", { name: "transform_2" });
+    await userEvent.click(within(panel).getByRole("button", { name: "Move transform_2 down" })); // focus stays on it
+    await save.held();
+    await save.conflict();
+    await vi.waitFor(() => expect(document.activeElement).toBe(within(panel).getByRole("heading", { name: "transform_2" })));
+  });
+
+  it("stops placing a step, and says so", async () => {
+    const said: string[] = [];
+    const stop = onAnnounce((m) => said.push(m));
+    await withTwoSteps();
+    const save = heldEdit();
+    await userEvent.click(screen.getByRole("button", { name: "transform_2" }));
+    const panel = screen.getByRole("complementary", { name: "transform_2" });
+    await userEvent.click(within(panel).getByRole("button", { name: "Move transform_2 down" }));
+    await save.held();
+    await userEvent.click(within(panel).getByRole("button", { name: "Place on the canvas…" }));
+    await save.conflict();
+    await vi.waitFor(() => expect(screen.queryByRole("button", { name: "place here" })).toBeNull());
+    expect(said).toContain("Not placed: the draft can't be changed now");
+    stop();
+  });
+
+  it("goes back to the step from a + whose picker a conflict closed, not to the start card", async () => {
+    await withTwoSteps();
+    const save = heldEdit();
+    screen.getByRole("button", { name: "transform_2" }).focus();
+    await userEvent.keyboard("{Shift>}{ArrowDown}{/Shift}");
+    await save.held();
+    screen.getByRole("button", { name: "after transform_2" }).focus(); // the free port's "+"
+    await userEvent.keyboard("a");
+    expect(screen.getByRole("dialog", { name: "Add a step" })).toBeTruthy();
+    await save.conflict();
+    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "transform_2" })));
+  });
+});
+
+// Only leaving the editor is an exit (the owner's review of 6d7766e, correction 2): a navigation that keeps it asks
+// nothing and holds nothing, and an exit that never completes gives the document back.
+describe("navigations that keep the editor", () => {
+  it.each([
+    { what: "a hash", to: { hash: "notes" } },
+    { what: "a query", to: { search: { triggers: true as const } } },
+  ])("leave it editable when only $what changes", async ({ to }) => {
+    const { router } = await show();
+    await addTransform();
+    await act(() => router.navigate({ to: "/t/$tenantId/workflows/$workflowId", params: { tenantId: "t1", workflowId: "w1" }, ...to }));
+    expect(router.state.location.pathname).toBe("/t/t1/workflows/w1");
+    expect(steps().dataset.editable).toBe("true");
+    await userEvent.click(screen.getByRole("button", { name: "after transform" }));
+    await userEvent.click(await screen.findByRole("option", { name: /flow\.transform@1/ }));
+    expect(screen.getByRole("button", { name: "transform_2" })).toBeTruthy();
+  });
+
+  it("keeps it when the same workflow is reached by another spelling of its path", async () => {
+    // Opened as /…/w1/ (a bookmark), then picked in the palette as /…/w1: the same route and step, not an exit.
+    const { router } = await show({ at: "/t/t1/workflows/w1/" });
+    await addTransform();
+    act(() => router.history.push("/t/t1/workflows/w1"));
+    await vi.waitFor(() => expect(router.state.location.pathname).toBe("/t/t1/workflows/w1"));
+    await act(() => new Promise((r) => setTimeout(r, 50)));
+    expect(steps().dataset.editable).toBe("true");
+  });
+
+  it("gives the document back when an exit doesn't complete", async () => {
+    const { router } = await show();
+    await addTransform();
+    act(() => router.history.push("/away")); // through the blocker: agreed to, then sent back here
+    await vi.waitFor(() => expect(router.state.location.pathname).toBe("/t/t1/workflows/w1"));
+    await vi.waitFor(() => expect(steps().dataset.editable).toBe("true"));
+    await userEvent.click(screen.getByRole("button", { name: "after transform" }));
+    await userEvent.click(await screen.findByRole("option", { name: /flow\.transform@1/ }));
+    expect(screen.getByRole("button", { name: "transform_2" })).toBeTruthy();
+  });
+});
+
+// What changes without a key being pressed is said (WCAG 4.1.3): a save that failed, and a notice, through a live
+// region that's there before its text (one inserted already holding it often goes unsaid).
+describe("status messages", () => {
+  it("says when the latest edits aren't saved", async () => {
+    const said: string[] = [];
+    const stop = onAnnounce((m) => said.push(m));
+    answers.set(`PUT ${BASE}/draft`, () => json({ error: "http_error" }, 500));
+    await show();
+    await addTransform();
+    await screen.findByText("Not saved", {}, { timeout: 3000 });
+    expect(said).toContain("Your latest edits aren't saved. Retry is in the toolbar.");
+    stop();
+  });
+
+  it("keeps the notices' live region in place before any notice", async () => {
+    await show();
+    expect(screen.getByRole("status", { name: "Notice" }).textContent).toBe("");
+  });
+});
+
+// Where focus goes when what held it leaves (the final checkpoint's review, WCAG 2.4.3): never to the page. The test
+// setup's dialog returns no focus, as a native one can't when its opener is gone or disabled: the editor places it.
+describe("focus, when what held it goes", () => {
+  it("returns to the toolbar's button when the problems panel closes", async () => {
+    await show();
+    await userEvent.click(await screen.findByRole("button", { name: "No problems" }));
+    await userEvent.click(within(screen.getByRole("complementary", { name: "Problems" })).getByRole("button", { name: "Close" }));
+    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "No problems" })));
+  });
+
+  it("returns to the toolbar's button when Escape closes the versions panel", async () => {
+    await show();
+    await userEvent.click(screen.getByRole("button", { name: "Versions" }));
+    await screen.findByRole("complementary", { name: "Versions" });
+    await userEvent.keyboard("{Escape}");
+    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Versions" })));
+  });
+
+  it("lands on the versions panel's heading once a version is made active", async () => {
+    answers.set(`GET ${BASE}/versions`, () => json([version(2, true), version(1, false)]));
+    answers.set(`POST ${BASE}/activate`, () => json({ active_version_id: "v1", number: 1, warnings: [] }));
+    await show();
+    await userEvent.click(screen.getByRole("button", { name: "Versions" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Make version 1 active" }));
+    await userEvent.click(within(screen.getByRole("dialog", { name: "Make version 1 active" })).getByRole("button", { name: "Make active" }));
+    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("heading", { level: 2, name: "Versions" })));
+  });
+
+  it("returns to Publish, naming the next version, once a publish is done", async () => {
+    answers.set(`POST ${BASE}/publish`, () => {
+      answers.set(`GET ${BASE}/versions`, () => json([version(1, true)]));
+      return json({ version_id: "v1", number: 1, warnings: [] }, 201);
+    });
+    await show();
+    await confirmPublish(1);
+    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Publish v2" })));
+  });
+
+  it("lands on the problems panel's heading when a publish is refused for its problems", async () => {
+    answers.set(`POST ${BASE}/publish`, () =>
+      json({ error: "invalid", diagnostics: [{ code: "connection.unknown", message: "That connection doesn't exist.", node: null, field: null, fix: null, severity: "error" }] }, 422));
+    await show();
+    await confirmPublish(1);
+    await screen.findByRole("complementary", { name: "Problems" });
+    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("heading", { level: 2, name: "Problems" })));
+  });
+});
+
+it("keeps an older draft's publish findings out of the current problems", async () => {
+  // The owner's case: a clean check of revision 2 must not show revision 1's publish errors as current.
+  answers.set(`POST ${BASE}/publish`, () =>
+    json({ error: "invalid", diagnostics: [{ code: "connection.unknown", message: "That connection doesn't exist.", node: "x", field: null, fix: null, severity: "error" }] }, 422));
+  await show();
+  await confirmPublish(1);
+  expect(await screen.findByRole("button", { name: "Problems · 1" })).toBeTruthy(); // current: revision 1, no edits
+  expect(steps().dataset.problems).toBe("1");
+  answers.set(`POST ${BASE}/validate`, () => json(valid(2)));
+  await addTransform();
+  expect(screen.getByRole("button", { name: "Not checked since your edits" })).toBeTruthy(); // pending: revision 1 still
+  expect(steps().dataset.problems).toBe("0");
+  expect(await screen.findByRole("button", { name: "No problems" }, { timeout: 3000 })).toBeTruthy();
+  const panel = screen.getByRole("complementary", { name: "Problems" });
+  expect(within(panel).getByRole("region", { name: "Found at publish" }).textContent).toContain("before your latest edits");
+});
+
+it("offers no Publish to a viewer", async () => {
+  role = "viewer";
+  await show();
+  expect(screen.queryByRole("button", { name: /^Publish/ })).toBeNull();
+});
+
+/** a → b, c; b → d, e; c → d, f (the owner's review of revision 2): d is joined from b and from c. */
+function joins(): GraphDoc {
+  const at = { a: [0, 0], b: [0, 140], c: [300, 140], d: [0, 280], e: [300, 280], f: [600, 280] } as const;
+  const keys = Object.keys(at) as (keyof typeof at)[];
+  const link = (from: string, to: string) => ({ from: { node: `id-${from}`, port: "out" }, to: { node: `id-${to}` } });
+  return {
+    graph_format: 1,
+    nodes: keys.map((key) => ({ id: `id-${key}`, key, type: "flow.transform@1", position: { x: at[key][0], y: at[key][1] } })),
+    edges: [link("a", "b"), link("a", "c"), link("b", "d"), link("b", "e"), link("c", "d"), link("c", "f")],
+  };
+}
+
+it.each(["a viewer", "an editor after a conflict", "a viewed version"])(
+  "keeps to the branch the keys came by at a join, read only for %s",
+  async (who) => {
+    if (who === "a viewer") role = "viewer";
+    if (who === "a viewed version") {
+      answers.set(`GET ${BASE}/versions`, () => json([version(1, true)]));
+      answers.set(`GET ${BASE}/versions/v1`, () => json({ ...version(1, true), graph: joins(), expressions: [] }));
+    } else {
+      answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: joins() }));
+    }
+    if (who === "an editor after a conflict") answers.set(`PUT ${BASE}/draft`, () => json({ error: "draft_conflict", draft_revision: 5 }, 409));
+    await show();
+    if (who === "an editor after a conflict") {
+      await userEvent.click(screen.getByRole("button", { name: "after f" }));
+      await userEvent.click(await screen.findByRole("option", { name: /flow\.transform@1/ }));
+      await screen.findByRole("alert", {}, { timeout: 3000 }); // changed elsewhere: read only now
+    }
+    if (who === "a viewed version") {
+      await userEvent.click(screen.getByRole("button", { name: "Versions" }));
+      await userEvent.click(await screen.findByRole("button", { name: "View version 1" }));
+      await screen.findByRole("button", { name: "c" });
+    }
+    expect(steps().dataset.editable).toBe("false");
+    screen.getByRole("button", { name: "c" }).focus();
+    await userEvent.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "d" }));
+    await userEvent.keyboard("{ArrowRight}");
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "f" })); // never b's e
+    await userEvent.keyboard("{ArrowLeft}{ArrowUp}");
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "c" }));
+  },
+);
+
+/** The `wait` step's drawer, its duration holding text that isn't a number: an edit that can't be applied. */
+async function unappliedDuration() {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, DELAY]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.delay@1", { duration_s: 5 }) }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "wait" }));
+  await userEvent.type(screen.getByLabelText("Duration, in seconds"), "x");
+}
+
+it("counts the edits not applied in the toolbar, and lists them with their text", async () => {
+  await unappliedDuration();
+  await userEvent.click(screen.getByRole("button", { name: "1 edit not applied" }));
+  const list = screen.getByRole("complementary", { name: "Edits not applied" });
+  expect(list.textContent).toContain("wait · Duration, in seconds");
+  expect(list.textContent).toContain("5x");
+  expect(list.textContent).toContain("A whole number, like 42.");
+  await userEvent.click(within(list).getByRole("button", { name: "Discard: wait · Duration, in seconds" }));
+  expect(screen.queryByRole("button", { name: /edits? not applied/ })).toBeNull();
+  expect(stepConfig("wait")).toEqual({ duration_s: 5 });
+});
+
+it("applies what it can before publishing, and asks about the rest", async () => {
+  await unappliedDuration();
+  await userEvent.click(await screen.findByRole("button", { name: "Publish v1" }));
+  const ask = screen.getByRole("dialog", { name: "Edits not applied" });
+  expect(ask.textContent).toContain("wait · Duration, in seconds: A whole number, like 42.");
+  await userEvent.click(within(ask).getByRole("button", { name: "Discard and publish" }));
+  expect(screen.getByRole("dialog", { name: "Publish version 1" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /edits? not applied/ })).toBeNull();
+  expect(stepConfig("wait")).toEqual({ duration_s: 5 });
+});
+
+it("applies a JSON edit still being typed when the person leaves", async () => {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, ROUTER]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("acme.router@1", { routes: [{ port: "a" }] }, "route") }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "route" }));
+  await userEvent.clear(screen.getByLabelText("Routes"));
+  await userEvent.paste('[{"port": "a"}, {"port": "c"}]'); // focus stays: nothing has applied it yet
+  await act(async () => {
+    expect(await mayLeave()).toBe(true); // what the shell's Sign out asks
+  });
+  expect(stepConfig("route")).toEqual({ routes: [{ port: "a" }, { port: "c" }] });
+  act(() => cancelLeaving());
+});
+
+it("asks before leaving with an edit it can't apply", async () => {
+  await unappliedDuration();
+  const decision = mayLeave();
+  const ask = await screen.findByRole("dialog", { name: "Your latest changes aren't saved" });
+  expect(ask.textContent).toContain("wait · Duration, in seconds: A whole number, like 42.");
+  await userEvent.click(within(ask).getByRole("button", { name: "Stay" }));
+  expect(await decision).toBe(false);
+  expect(screen.getByLabelText<HTMLInputElement>("Duration, in seconds").value).toBe("5x"); // still there to fix
+});
+
+it("settles what's typed while leaving waits for a save", async () => {
+  let answer: () => void = () => undefined;
+  answers.set(`PUT ${BASE}/draft`, () =>
+    new Promise<Response>((resolve) => {
+      answer = () => resolve(json({ draft_revision: 2, unpublished_changes: true, graph_hash: "h2", active_version_id: null, active_version_number: null }));
+    }),
+  );
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, DELAY]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.delay@1", { duration_s: 5 }) }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "wait" }));
+  await userEvent.type(screen.getByLabelText("Duration, in seconds"), "0"); // 50: a save, held unanswered
+  const decision = mayLeave(); // waits on that save
+  await userEvent.type(screen.getByLabelText("Duration, in seconds"), "x"); // typed meanwhile: can't be applied
+  await act(() => Promise.resolve(answer())); // the held save answers, inside an async act
+  const ask = await screen.findByRole("dialog", { name: "Your latest changes aren't saved" });
+  expect(ask.textContent).toContain("wait · Duration, in seconds: A whole number, like 42.");
+  await userEvent.click(within(ask).getByRole("button", { name: "Stay" }));
+  expect(await decision).toBe(false);
+});
+
+it("settles what's typed during a save against the draft that save made, never an older one", async () => {
+  const PAIR = typeWith(
+    { type: "object", properties: { first: { title: "First" }, second: { title: "Second" } } },
+    { ref: "acme.pair@1", type: "acme.pair", title: "Pair" },
+  );
+  let answer: () => void = () => undefined;
+  let puts = 0;
+  answers.set(`PUT ${BASE}/draft`, () => {
+    puts++;
+    const saved = json({ draft_revision: puts + 1, unpublished_changes: true, graph_hash: `h${puts + 1}`, active_version_id: null, active_version_number: null });
+    return puts === 1 ? new Promise<Response>((resolve) => (answer = () => resolve(saved))) : saved;
+  });
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, PAIR]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("acme.pair@1", { first: [1], second: [2] }, "pair") }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "pair" }));
+  await userEvent.clear(screen.getByLabelText("First"));
+  await userEvent.paste("[11]"); // focus stays: not applied yet
+  const decision = mayLeave(); // applies it, then awaits its save
+  await userEvent.clear(screen.getByLabelText("Second"));
+  await userEvent.paste("[22]"); // typed while that save is awaited
+  await act(() => Promise.resolve(answer())); // the held save answers, inside an async act
+  expect(await decision).toBe(true);
+  expect(stepConfig("pair")).toEqual({ first: [11], second: [22] }); // never `first: [1]` again
+  const last = sent.filter((r) => r.method === "PUT").at(-1)!.body as GraphDoc;
+  expect(last.nodes![0]!.config).toEqual({ first: [11], second: [22] });
+  act(() => cancelLeaving());
+});
+
+it("keeps an edit not applied shown, and counted, when the editor turns read only", async () => {
+  answers.set(`PUT ${BASE}/draft`, () => json({ error: "draft_conflict" }, 409));
+  await unappliedDuration(); // "5x" held
+  await userEvent.click(screen.getByRole("button", { name: "Move wait right" })); // an edit whose save conflicts
+  await screen.findByText(/This draft was changed elsewhere, so your changes since then aren't saved/, {}, { timeout: 3000 }); // after the 1 s save delay
+  const field = screen.getByLabelText<HTMLInputElement>("Duration, in seconds");
+  expect([field.value, field.disabled]).toEqual(["5x", true]);
+  expect(screen.getByRole("button", { name: "1 edit not applied" })).toBeTruthy();
+});
+
+it("downloads the edits not applied as a file of their own, and says the draft's file doesn't hold them", async () => {
+  answers.set(`PUT ${BASE}/draft`, () => json({ error: "draft_conflict" }, 409));
+  await unappliedDuration();
+  await userEvent.click(screen.getByRole("button", { name: "Move wait right" }));
+  const banner = (await screen.findByText(/This draft was changed elsewhere, so your changes since then aren't saved/, {}, { timeout: 3000 })).closest<HTMLElement>("[role='alert']")!;
+  expect(banner.textContent).toContain("Your version's file doesn't hold the 1 edit not applied: download it separately.");
+  await userEvent.click(within(banner).getByRole("button", { name: "Download the edit not applied" }));
+  await userEvent.click(within(banner).getByRole("button", { name: "Download my version" }));
+  expect(downloads).toEqual(["nightly.unapplied.json", "nightly.draft.json"]);
+});
+
+it("goes back to the edits not applied, and from there to the field", async () => {
+  await unappliedDuration();
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
+  await userEvent.click(screen.getByRole("button", { name: "Export" }));
+  await userEvent.click(within(screen.getByRole("dialog", { name: "Edits not applied" })).getByRole("button", { name: "Go back to them" }));
+  const list = screen.getByRole("complementary", { name: "Edits not applied" });
+  await userEvent.click(within(list).getByRole("button", { name: "Go to it: wait · Duration, in seconds" }));
+  expect(within(screen.getByRole("complementary", { name: "wait" })).getByLabelText<HTMLInputElement>("Duration, in seconds").value).toBe("5x");
+  expect(downloads).toEqual([]);
+});
+
+it("discards a deleted step's edits not applied, and says so", async () => {
+  await unappliedDuration();
+  await userEvent.click(screen.getByRole("button", { name: "Delete step" }));
+  const ask = screen.getByRole("dialog", { name: "Delete a step" });
+  expect(ask.textContent).toContain("Its edits not applied yet are discarded too.");
+  await userEvent.click(within(ask).getByRole("button", { name: "Delete" }));
+  expect(screen.queryByRole("button", { name: /edits? not applied/ })).toBeNull();
+});
+
+/** A switch whose case b leads to a transform; `declassify`, the workflow's declassify entries, when given. */
+const switched = (declassify?: { node: string; field: string }[]) => ({
+  graph_format: 1,
+  nodes: [
+    { id: "id-pick", key: "pick", type: "flow.switch@1", config: { cases: [{ port: "a", when: formula("true") }, { port: "b", when: formula("false") }] }, position: { x: 0, y: 140 } },
+    { id: "id-transform", key: "transform", type: "flow.transform@1", position: { x: 0, y: 280 } },
+  ],
+  edges: [{ from: { node: "id-pick", port: "b" }, to: { node: "id-transform" } }],
+  ...(declassify ? { settings: { declassify } } : {}),
+});  // prettier-ignore
+
+async function openSwitch(declassify?: { node: string; field: string }[]) {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, SWITCH]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: switched(declassify) }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "pick" }));
+}
+
+const declassifyOf = () => drawn.at(-1)!.doc.settings?.declassify;
+const drawerNote = () => within(screen.getByRole("complementary", { name: "pick" })).queryByRole("status")?.textContent ?? null;
+const undoInDrawer = async () => {
+  await userEvent.click(screen.getByRole("heading", { name: "pick" }));
+  await userEvent.keyboard("{Control>}z{/Control}");
+};
+
+it("moves a case's declassify entry with the case, in the move's undo step", async () => {
+  await openSwitch([{ node: "id-pick", field: "/cases/0/when" }]); // a's decision
+  await userEvent.click(screen.getByRole("button", { name: "Move down: Cases, item 1" }));
+  expect(stepConfig("pick")).toEqual({ cases: [{ port: "b", when: formula("false") }, { port: "a", when: formula("true") }] });
+  expect(declassifyOf()).toEqual([{ node: "id-pick", field: "/cases/1/when" }]); // still a's, never b's
+  expect(drawerNote()).toBeNull(); // followed: nothing to say
+  await undoInDrawer();
+  expect(drawn.at(-1)!.doc).toEqual(switched([{ node: "id-pick", field: "/cases/0/when" }]));
+  await userEvent.keyboard("{Control>}{Shift>}z{/Shift}{/Control}"); // redone: the entry follows a again
+  expect(declassifyOf()).toEqual([{ node: "id-pick", field: "/cases/1/when" }]);
+});
+
+it("removes a declassify entry that named no case when a case is added where it points", async () => {
+  await openSwitch([{ node: "id-pick", field: "/cases/2/when" }]); // past the end: stale, a draft from before the fix
+  await userEvent.click(screen.getByRole("button", { name: "Add to Cases" }));
+  expect(stepConfig("pick")).toEqual({ cases: [{ port: "a", when: formula("true") }, { port: "b", when: formula("false") }, { port: "case_1" }] });
+  expect(declassifyOf()).toEqual([]); // never the new case's
+  expect(drawerNote()).toContain("Removed 1 declassify entry");
+});
+
+it("says a declassify entry's removal, beyond the drawer", async () => {
+  const said: string[] = [];
+  const stop = onAnnounce((m) => said.push(m));
+  await openSwitch([{ node: "id-pick", field: "/cases/0/when" }]);
+  await userEvent.click(screen.getByRole("button", { name: "Remove: Cases, item 1" }));
+  stop();
+  expect(said).toContain(
+    "pick: Removed 1 declassify entry: the list item it named is gone, or was changed in an edit of the whole list. That " +
+      "decision is no longer declassified; Undo puts the entry back.",
+  );
+});
+
+/** a's decision declassified, and a JSON edit changing it typed into the cases, not applied: the drawer closed on it. */
+async function holdChangedCase() {
+  await openSwitch([{ node: "id-pick", field: "/cases/0/when" }]);
+  await userEvent.click(within(screen.getByRole("group", { name: "Cases" })).getAllByRole("button", { name: "Edit as JSON" })[0]!);
+  await userEvent.clear(screen.getByLabelText("Cases"));
+  await userEvent.paste(JSON.stringify([{ port: "a", when: formula("trigger.n > 1") }, { port: "b", when: formula("false") }]));
+  await userEvent.keyboard("{Escape}");
+  expect(screen.queryByRole("complementary", { name: "pick" })).toBeNull();
+  expect(declassifyOf()).toEqual([{ node: "id-pick", field: "/cases/0/when" }]);
+}
+const removedOnScreen =
+  "pick: Removed 1 declassify entry: the list item it named is gone, or was changed in an edit of the whole list. That " +
+  "decision is no longer declassified; Undo puts the entry back.";
+
+it("shows a declassify entry's removal with its drawer closed: an edit applied on the way out", async () => {
+  answers.set(`GET ${BASE}/export`, () => json({ format: "dewpoint.workflow", format_version: 1, name: "Nightly", graph: {}, bindings: [] }));
+  await holdChangedCase();
+  await userEvent.click(screen.getByRole("button", { name: "Export" })); // applies it first, then exports
+  await vi.waitFor(() => expect(downloads).toHaveLength(1));
+  expect(declassifyOf()).toEqual([]);
+  expect(screen.getByText(removedOnScreen).closest(".sr-only")).toBeNull(); // on the screen, not only said
+  await userEvent.keyboard("{Control>}z{/Control}");
+  expect(declassifyOf()).toEqual([{ node: "id-pick", field: "/cases/0/when" }]);
+  expect(screen.queryByText(removedOnScreen)).toBeNull();
+});
+
+it("keeps showing a declassify entry's removal through the publication that applied it", async () => {
+  await holdChangedCase();
+  await confirmPublish(1); // applies it before asking, and clears the notices when it starts
+  await screen.findByText("Saved · published as v1", {}, { timeout: 3000 });
+  expect(declassifyOf()).toEqual([]);
+  expect(screen.getByText(removedOnScreen).closest(".sr-only")).toBeNull();
+});
+
+it("never says the draft's removed declassify entries in a version's drawer", async () => {
+  answers.set(`GET ${BASE}/versions`, () => json([version(1, true)]));
+  answers.set(`GET ${BASE}/versions/v1`, () => json({ ...version(1, true), graph: switched(), expressions: [] }));
+  await openSwitch([{ node: "id-pick", field: "/cases/0/when" }]);
+  await userEvent.click(screen.getByRole("button", { name: "Remove: Cases, item 1" }));
+  expect(drawerNote()).toContain("Removed 1 declassify entry"); // the draft's drawer
+  await userEvent.click(screen.getByRole("button", { name: "Versions" }));
+  await userEvent.click(await screen.findByRole("button", { name: "View version 1" }));
+  await screen.findByText("Viewing version 1, read only. The draft is unchanged.");
+  await userEvent.click(screen.getByRole("button", { name: "pick" }));
+  expect(drawerNote()).toBeNull(); // the version's drawer: nothing was removed from it
+});
+
+it("removes a removed case's declassify entry, says so in the drawer, and an undo brings both back", async () => {
+  await openSwitch([{ node: "id-pick", field: "/cases/0/when" }, { node: "id-pick", field: "/cases/1/when" }]);
+  await userEvent.click(screen.getByRole("button", { name: "Remove: Cases, item 1" })); // a, which has no edge
+  expect(stepConfig("pick")).toEqual({ cases: [{ port: "b", when: formula("false") }] });
+  expect(declassifyOf()).toEqual([{ node: "id-pick", field: "/cases/0/when" }]); // b's, never a's on b
+  expect(drawerNote()).toBe(
+    "Removed 1 declassify entry: the list item it named is gone, or was changed in an edit of the whole list. That " +
+      "decision is no longer declassified; Undo puts the entry back.",
+  );
+  await undoInDrawer();
+  expect(drawn.at(-1)!.doc).toEqual(switched([{ node: "id-pick", field: "/cases/0/when" }, { node: "id-pick", field: "/cases/1/when" }]));
+  expect(drawerNote()).toBeNull();
+});
+
+it("removes a case with edges and its declassify entry once asked", async () => {
+  await openSwitch([{ node: "id-pick", field: "/cases/1/when" }]); // b's
+  await userEvent.click(screen.getByRole("button", { name: "Remove: Cases, item 2" }));
+  await userEvent.click(within(screen.getByRole("dialog", { name: "Remove a port" })).getByRole("button", { name: "Remove" }));
+  expect(stepConfig("pick")).toEqual({ cases: [{ port: "a", when: formula("true") }] });
+  expect(declassifyOf()).toEqual([]);
+  expect(drawerNote()).toContain("Removed 1 declassify entry");
+});
+
+it("follows a case a JSON edit of the cases keeps as it was, and removes, saying so, the entry of one it changed", async () => {
+  await openSwitch([{ node: "id-pick", field: "/cases/0/when" }, { node: "id-pick", field: "/cases/1/when" }]);
+  await userEvent.click(within(screen.getByRole("group", { name: "Cases" })).getAllByRole("button", { name: "Edit as JSON" })[0]!);
+  const text = screen.getByLabelText("Cases");
+  await userEvent.clear(text);
+  // b as it was, now first; a after it, deciding on something else.
+  await userEvent.paste(JSON.stringify([{ port: "b", when: formula("false") }, { port: "a", when: formula("trigger.n > 1") }]));
+  await userEvent.tab();
+  expect(stepConfig("pick")).toEqual({ cases: [{ port: "b", when: formula("false") }, { port: "a", when: formula("trigger.n > 1") }] });
+  expect(declassifyOf()).toEqual([{ node: "id-pick", field: "/cases/0/when" }]); // b's; a's changed decision isn't declassified
+  expect(drawerNote()).toContain("Removed 1 declassify entry");
+});
+
+it("renames a case's port in place, its edges following", async () => {
+  await openSwitch();
+  const port = within(screen.getByRole("group", { name: "Cases, item 2" })).getByLabelText("Port name");
+  await userEvent.clear(port);
+  await userEvent.type(port, "big{Enter}"); // applies on Enter, or when focus leaves
+  expect(drawn.at(-1)!.doc.edges).toEqual([{ from: { node: "id-pick", port: "big" }, to: { node: "id-transform" } }]);
+});
+
+it("lists an edit whose field an undo removed, and discards it without bringing the field back", async () => {
+  const SIZES = typeWith(
+    { type: "object", properties: { sizes: { type: "array", title: "Sizes", items: { type: "integer" } } } },
+    { ref: "acme.sizes@1", type: "acme.sizes", title: "Sizes" },
+  );
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, SIZES]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("acme.sizes@1", { sizes: [] }, "sz") }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "sz" }));
+  await userEvent.click(screen.getByRole("button", { name: "Add to Sizes" }));
+  await userEvent.click(screen.getByLabelText("Sizes, item 1"));
+  await userEvent.paste("1x"); // held: no number
+  await userEvent.click(screen.getByRole("heading", { name: "sz" }));
+  await userEvent.keyboard("{Control>}z{/Control}"); // the item's addition undone: its field is gone
+  expect(screen.queryByLabelText("Sizes, item 1")).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "1 edit not applied" }));
+  const list = screen.getByRole("complementary", { name: "Edits not applied" });
+  expect(list.textContent).toContain("sz · Sizes, item 1");
+  expect(list.textContent).toContain("1x");
+  await userEvent.click(within(list).getByRole("button", { name: "Discard: sz · Sizes, item 1" }));
+  expect(stepConfig("sz")).toEqual({ sizes: [] }); // never recreated
+  expect(screen.queryByRole("button", { name: /edits? not applied/ })).toBeNull();
+});
+
+it("never moves a held edit to an equal item when a removal is undone", async () => {
+  const SIZES = typeWith(
+    { type: "object", properties: { sizes: { type: "array", title: "Sizes", items: { type: "integer" } } } },
+    { ref: "acme.sizes@1", type: "acme.sizes", title: "Sizes" },
+  );
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, SIZES]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("acme.sizes@1", { sizes: [5, 5, 7] }, "sz") }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "sz" }));
+  await userEvent.click(screen.getByRole("button", { name: "Remove: Sizes, item 1" })); // [5, 7]
+  // The removal sends focus to Add a frame later: typing before it lands would type into the button (the review of f2bd150).
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Add to Sizes" })));
+  await userEvent.type(screen.getByLabelText("Sizes, item 1"), "x"); // "5x", over the second 5
+  expect(screen.getByLabelText<HTMLInputElement>("Sizes, item 1").value).toBe("5x");
+  expect(screen.getByRole("button", { name: "1 edit not applied" })).toBeTruthy(); // held, before the undo
+  await userEvent.click(screen.getByRole("heading", { name: "sz" }));
+  await userEvent.keyboard("{Control>}z{/Control}"); // the removal undone: [5, 5, 7]
+  await userEvent.type(screen.getByLabelText("Sizes, item 1"), "{Backspace}0"); // "50"
+  expect(stepConfig("sz")).toEqual({ sizes: [5, 5, 7] }); // never [50, 5, 7] unasked
+  expect(screen.getByText(STALE)).toBeTruthy();
+});
+
+it("asks before removing a case with edges", async () => {
+  await openSwitch();
+  await userEvent.click(screen.getByRole("button", { name: "Remove: Cases, item 2" }));
+  const dialog = screen.getByRole("dialog", { name: "Remove a port" });
+  expect(dialog.textContent).toContain("The port b goes with this change, and its edge to transform is deleted.");
+  await userEvent.click(within(dialog).getByRole("button", { name: "Remove" }));
+  expect(drawn.at(-1)!.doc.edges).toEqual([]);
+  expect(stepConfig("pick")).toEqual({ cases: [{ port: "a", when: formula("true") }] });
+});
+
+/** The `wait` step's draft at 5 and its version 1 at 3, whose read the test answers: `answer()`. */
+async function slowVersionOfWait() {
+  let answer: () => void = () => undefined;
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, DELAY]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.delay@1", { duration_s: 5 }) }));
+  answers.set(`GET ${BASE}/versions`, () => json([version(1, true)]));
+  answers.set(`GET ${BASE}/versions/v1`, () =>
+    new Promise<Response>((resolve) => {
+      answer = () => resolve(json({ ...version(1, true), graph: oneStep("flow.delay@1", { duration_s: 3 }), expressions: [] }));
+    }),
+  );
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "Versions" }));
+  await userEvent.click(await screen.findByRole("button", { name: "View version 1" })); // its read is held
+  await userEvent.click(screen.getByRole("button", { name: "wait" })); // the draft's drawer, meanwhile
+  await userEvent.type(screen.getByLabelText("Duration, in seconds"), "x"); // "5x": typed while the version is read
+  await act(() => Promise.resolve(answer())); // the version arrives
+  return screen.getByRole("dialog", { name: "Edits not applied" });
+}
+
+it("asks about an edit typed while a version is read, and never shows it in the version", async () => {
+  const ask = await slowVersionOfWait();
+  expect(ask.textContent).toContain("wait · Duration, in seconds: A whole number, like 42.");
+  await userEvent.click(within(ask).getByRole("button", { name: "Discard and view the version" }));
+  await screen.findByText("Viewing version 1, read only. The draft is unchanged.");
+  await userEvent.click(screen.getByRole("button", { name: "wait" }));
+  const field = within(screen.getByRole("complementary", { name: "wait" })).getByLabelText<HTMLInputElement>("Duration, in seconds");
+  expect([field.value, field.disabled]).toEqual(["3", true]); // the version's own value, never the draft's "5x"
+  expect(screen.queryByRole("button", { name: /edits? not applied/ })).toBeNull();
+});
+
+it("keeps an edit typed while a version is read, when the person goes back to it", async () => {
+  const ask = await slowVersionOfWait();
+  await userEvent.click(within(ask).getByRole("button", { name: "Go back to them" }));
+  expect(screen.queryByText(/Viewing version 1/)).toBeNull(); // the draft stays on the screen
+  expect(screen.getByRole("complementary", { name: "Edits not applied" }).textContent).toContain("5x");
+  expect(stepConfig("wait")).toEqual({ duration_s: 5 });
+});
+
+it("asks about an edit typed while an export waits for its save", async () => {
+  let answer: () => void = () => undefined;
+  answers.set(`PUT ${BASE}/draft`, () =>
+    new Promise<Response>((resolve) => {
+      answer = () => resolve(json({ draft_revision: 2, unpublished_changes: true, graph_hash: "h2", active_version_id: null, active_version_number: null }));
+    }),
+  );
+  answers.set(`GET ${BASE}/export`, () => json({ format: "dewpoint.workflow", format_version: 1, name: "Nightly", graph: {}, bindings: [] }));
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, DELAY]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.delay@1", { duration_s: 5 }) }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "wait" }));
+  await userEvent.type(screen.getByLabelText("Duration, in seconds"), "0"); // 50: a save, held unanswered
+  await userEvent.click(screen.getByRole("button", { name: "Export" })); // waits on that save
+  await userEvent.type(screen.getByLabelText("Duration, in seconds"), "x"); // typed meanwhile: can't be applied
+  await act(() => Promise.resolve(answer())); // the save answers
+  const ask = await screen.findByRole("dialog", { name: "Edits not applied" });
+  expect(ask.textContent).toContain("wait · Duration, in seconds: A whole number, like 42.");
+  expect(sent.some((r) => r.path.endsWith("/export"))).toBe(false); // nothing asked for before the person decides
+  await userEvent.click(within(ask).getByRole("button", { name: "Discard and export" }));
+  await vi.waitFor(() => expect(downloads).toEqual(["nightly.dewpoint.json"]));
+});
+
+it("gives focus back to the count when the list of edits not applied closes", async () => {
+  await unappliedDuration();
+  const count = screen.getByRole("button", { name: "1 edit not applied" });
+  await userEvent.click(count);
+  await userEvent.click(within(screen.getByRole("complementary", { name: "Edits not applied" })).getByRole("button", { name: "Close" }));
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "1 edit not applied" })));
+});
+
+it("keeps focus in the list when its last entry is discarded", async () => {
+  await unappliedDuration();
+  await userEvent.click(screen.getByRole("button", { name: "1 edit not applied" }));
+  const list = screen.getByRole("complementary", { name: "Edits not applied" });
+  await userEvent.click(within(list).getByRole("button", { name: "Discard: wait · Duration, in seconds" })); // the count goes too
+  await vi.waitFor(() => expect(document.activeElement).toBe(within(list).getByRole("heading", { name: "Edits not applied" })));
+});
+
+it("asks before errors stop going to a port", async () => {
+  const draft = {
+    graph_format: 1,
+    nodes: [
+      { id: "id-check", key: "check", type: "flow.if@1", options: { on_error: "port" }, position: { x: 0, y: 140 } },
+      { id: "id-transform", key: "transform", type: "flow.transform@1", position: { x: 0, y: 280 } },
+    ],
+    edges: [{ from: { node: "id-check", port: "error" }, to: { node: "id-transform" } }],
+  };  // prettier-ignore
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, IF]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "check" }));
+  const chip = screen.getByRole("button", { name: "On error: route to the error port" });
+  await userEvent.click(chip);
+  expect(chip.getAttribute("aria-expanded")).toBe("true");
+  await userEvent.selectOptions(screen.getByLabelText("When it fails"), "Fail the run");
+  const dialog = screen.getByRole("dialog", { name: "Remove a port" });
+  expect(dialog.textContent).toContain("The port error goes with this change, and its edge to transform is deleted.");
+  await userEvent.click(within(dialog).getByRole("button", { name: "Remove" }));
+  expect(drawn.at(-1)!.doc.edges).toEqual([]);
+  expect(drawn.at(-1)!.doc.nodes![0]).not.toHaveProperty("options");
+});
+
+/** `fetch`, read by a formula in `use` and a reference in `copy`. */
+const readers = () => ({
+  graph_format: 1,
+  nodes: [
+    { id: "id-fetch", key: "fetch", type: "flow.transform@1", position: { x: 0, y: 140 } },
+    { id: "id-use", key: "use", type: "flow.if@1", config: { condition: formula("steps.fetch.output.n > 1") }, position: { x: 0, y: 280 } },
+    { id: "id-copy", key: "copy", type: "flow.transform@1", config: { fields: { x: { $value: { kind: "ref", path: "steps.fetch.output" } } } }, position: { x: 0, y: 420 } },
+  ],
+  edges: [],
+});  // prettier-ignore
+
+async function openFetch() {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, IF]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: readers() }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "fetch" }));
+  await userEvent.click(screen.getByRole("button", { name: "Rename" }));
+}
+
+async function renameTo(key: string) {
+  const field = screen.getByLabelText("Key");
+  await userEvent.clear(field);
+  await userEvent.type(field, `${key}{Enter}`);
+}
+
+it("says which formulas mention the old key, until the next edit", async () => {
+  await openFetch();
+  await renameTo("load");
+  const heading = screen.getByRole("heading", { name: "load" });
+  await vi.waitFor(() => expect(document.activeElement).toBe(heading));
+  expect(screen.getByText("1 formula mentions fetch and keeps its text: check it.")).toBeTruthy();
+  expect(stepConfig("copy")).toEqual({ fields: { x: { $value: { kind: "ref", path: "steps.load.output" } } } });
+  await userEvent.keyboard("{Control>}z{/Control}"); // one step: the key and its references
+  expect(stepConfig("copy")).toEqual({ fields: { x: { $value: { kind: "ref", path: "steps.fetch.output" } } } });
+  expect(screen.getByRole("heading", { name: "fetch" })).toBeTruthy();
+  expect(screen.queryByText(/mentions fetch/)).toBeNull(); // said only while it's true of the draft
+});
+
+it("refuses a key another step has, and keeps its own", async () => {
+  await openFetch();
+  await renameTo("use");
+  expect(screen.getByText("Another step is already called use.")).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "fetch" })).toBeTruthy();
+});
+
+it("disables an open rename when the draft can't change, and never says it renamed", async () => {
+  answers.set(`PUT ${BASE}/draft`, () => json({ error: "draft_conflict" }, 409));
+  await openFetch();
+  await userEvent.type(screen.getByLabelText("Key"), "_v2"); // typed, not applied
+  await userEvent.click(screen.getByRole("button", { name: "Move fetch right" })); // an edit, whose save conflicts
+  await vi.waitFor(() => expect(screen.getByLabelText<HTMLInputElement>("Key").disabled).toBe(true), { timeout: 3000 });
+  expect(screen.getByRole<HTMLButtonElement>("button", { name: "Rename" }).disabled).toBe(true);
+  expect(screen.getByLabelText<HTMLInputElement>("Key").value).toBe("fetch_v2"); // kept, never lost
+  expect(screen.getByRole("heading", { name: "fetch" })).toBeTruthy();
+  expect(screen.queryByText(/^Renamed/)).toBeNull();
+});
+
+/** A check that found these problems. */
+const found = (...diagnostics: { message: string; field: string }[]) => ({
+  draft_revision: 1, valid: false, expressions: [], taint: { sites: [], declassified: [] },
+  diagnostics: diagnostics.map((d) => ({ code: "config.invalid", node: "id-each", fix: null, severity: "error", ...d })),
+});  // prettier-ignore
+
+async function goTo(field: string) {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, LOOP]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.loop@1", { items: formula("trigger.list") }, "each") }));
+  answers.set(`POST ${BASE}/validate`, () => json(found({ message: "Must be at most 10.", field })));
+  await show();
+  await userEvent.click(await screen.findByRole("button", { name: "Problems · 1" }));
+  await userEvent.click(within(screen.getByRole("complementary", { name: "Problems" })).getByRole("button", { name: "Go to each" }));
+}
+
+it("goes to a problem's field: the drawer opens on its tab, the field focused (ruling 83)", async () => {
+  await goTo("/concurrency");
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Items at a time, at most")));
+  expect(screen.getByRole("tab", { name: "Options · 1 problem" }).getAttribute("aria-selected")).toBe("true");
+});
+
+it("goes to the step's own problems when no field shows the one named", async () => {
+  await goTo("/nope");
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Problems with this step" })));
+});
+
+it("goes to the step itself for a problem about it as a whole, as in 4b", async () => {
+  await goTo("");
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "each" })));
+});
+
+it("goes to an edit not applied from its list, at its field", async () => {
+  await unappliedDuration();
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
+  await userEvent.click(screen.getByRole("button", { name: "1 edit not applied" }));
+  const list = screen.getByRole("complementary", { name: "Edits not applied" });
+  await userEvent.click(within(list).getByRole("button", { name: "Go to it: wait · Duration, in seconds" }));
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Duration, in seconds")));
+});
+
+it("gives a viewer's drawer controls a disabled look, their values legible (the owner's ruling O2)", async () => {
+  role = "viewer";
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, DELAY]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.delay@1", { duration_s: 5 }) }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "wait" }));
+  const drawer = screen.getByRole("complementary", { name: "wait" });
+  // The drawer's own: 4a's forms keep their look. The value's ink stays muted, never the fainter disabled ink.
+  for (const look of ["bg-disabled-bg", "border-disabled-line", "text-muted"]) {
+    expect(drawer.className).toContain(`[&_:is(input,select,textarea):disabled]:${look}`);
+  }
+  const fixed = within(drawer).getByRole<HTMLButtonElement>("button", { name: "Fixed" });
+  expect(fixed.disabled).toBe(true);
+  expect(fixed.className).toContain("disabled:bg-disabled-bg");
+  expect(fixed.className).toContain("font-semibold"); // the chosen mode still reads, by its weight
+});
+
+it("says how a formula runs once, under its field, and lists only what no field says (the owner's ruling O4)", async () => {
+  const runs = (field: string) => ({ node: "id-check", field, mode: "activity", reason: "it reads a large value" });
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, IF]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.if@1", { condition: formula("trigger.n > 1") }, "check") }));
+  answers.set(`POST ${BASE}/validate`, () => json({ ...valid(1), expressions: [runs("/condition"), runs("/elsewhere")] }));
+  await show();
+  await screen.findByRole("button", { name: "No problems" }, { timeout: 3000 });
+  await userEvent.click(screen.getByRole("button", { name: "check" }));
+  const drawer = screen.getByRole("complementary", { name: "check" });
+  await vi.waitFor(() => expect(within(drawer).getAllByText(/it reads a large value/)).toHaveLength(2));
+  const list = within(drawer).getByRole("heading", { name: "How its formulas run" }).parentElement!;
+  expect(list.textContent).toContain("/elsewhere"); // no field shows it: listed
+  expect(list.textContent).not.toContain("/condition"); // its field says it
+});
+
+// The review of 66fc658: a rename settled with the rest keeps its word on formulas; "Go to it" reaches a held key, a
+// held limit, and a field whose control is still loading.
+
+it("keeps a rename's word on formulas when it's applied with the rest, as before an export", async () => {
+  answers.set(`GET ${BASE}/export`, () => json({ format: "dewpoint.workflow", format_version: 1, name: "Nightly", graph: {}, bindings: [] }));
+  await openFetch();
+  await userEvent.clear(screen.getByLabelText("Key"));
+  await userEvent.type(screen.getByLabelText("Key"), "load"); // typed, never applied: no Enter
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
+  await userEvent.click(screen.getByRole("button", { name: "Export" })); // applies it, with every other edit
+  await vi.waitFor(() => expect(downloads).toEqual(["nightly.dewpoint.json"]), { timeout: 3000 });
+  expect(stepConfig("copy")).toEqual({ fields: { x: { $value: { kind: "ref", path: "steps.load.output" } } } });
+  await userEvent.click(screen.getByRole("button", { name: "load" }));
+  expect(screen.getByText("1 formula mentions fetch and keeps its text: check it.")).toBeTruthy();
+});
+
+it("says a rename's word only in the renamed step's drawer", async () => {
+  await openFetch();
+  await renameTo("load");
+  await screen.findByText("1 formula mentions fetch and keeps its text: check it.");
+  await userEvent.click(screen.getByRole("button", { name: "use" }));
+  expect(within(screen.getByRole("complementary", { name: "use" })).queryByText(/mentions fetch/)).toBeNull();
+});
+
+/** The list of edits not applied, opened from the toolbar with the drawer closed, then its entry's "Go to it". */
+async function goBackTo(entry: string) {
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
+  await userEvent.click(screen.getByRole("button", { name: "1 edit not applied" }));
+  await userEvent.click(within(screen.getByRole("complementary", { name: "Edits not applied" })).getByRole("button", { name: `Go to it: ${entry}` }));
+}
+
+it("goes to a held key from the list of edits not applied, at its field", async () => {
+  await openFetch();
+  await userEvent.type(screen.getByLabelText("Key"), "_v2"); // held
+  await goBackTo("fetch · Key");
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Key")));
+});
+
+it("goes to a held limit from the list of edits not applied, its section open", async () => {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, DELAY]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.delay@1", { duration_s: 5 }) }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "wait" }));
+  await userEvent.click(screen.getByRole("button", { name: "On error: fail the run" }));
+  await userEvent.type(screen.getByLabelText("Attempts"), "25"); // "2" written, "25" held: past 20
+  await goBackTo("wait · Attempts");
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Attempts")));
+});
+
+/** A step whose connection field's list is answered when the test says: `answer()`. A check names its connection. */
+async function goToLoadingConnection() {
+  let answer: () => void = () => undefined;
+  const prod = { id: "c1", name: "Prod", type: "acme", status: "ok", revision: 1, config: {}, secret_set: true, status_detail: "", privilege: null, last_verified_at: null };
+  answers.set("GET /api/v1/t/t1/connections", () => new Promise<Response>((resolve) => (answer = () => resolve(json([prod])))));
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, REMOTE]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("acme.sites@1", { site_id: "s1" }, "sites") }));
+  answers.set(`POST ${BASE}/validate`, () =>
+    json({ ...valid(1), valid: false, diagnostics: [{ code: "config.invalid", node: "id-sites", field: "/connection", fix: null, severity: "error", message: "Choose one." }] }),
+  );
+  await show();
+  await userEvent.click(await screen.findByRole("button", { name: "Problems · 1" }, { timeout: 3000 }));
+  await userEvent.click(within(screen.getByRole("complementary", { name: "Problems" })).getByRole("button", { name: "Go to sites" }));
+  await screen.findByText("Loading connections…");
+  await new Promise((r) => setTimeout(r, 50)); // several frames pass while the list is still on its way
+  return () => act(() => Promise.resolve(answer()));
+}
+
+it("goes to a field whose control is still loading, once it's there", async () => {
+  const arrive = await goToLoadingConnection();
+  await arrive();
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Connection")));
+});
+
+it("drops a pending Go to when the person moves on before the field's control loads", async () => {
+  const arrive = await goToLoadingConnection();
+  await userEvent.click(screen.getByRole("button", { name: "Rename" })); // the person's own move: the key field
+  await arrive();
+  await new Promise((r) => setTimeout(r, 50)); // the list has landed, and a frame has passed
+  expect(document.activeElement).toBe(screen.getByLabelText("Key"));
+});
+
+it("goes to a held entry name from the list of edits not applied, at its name", async () => {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES.filter((t) => t.ref !== "flow.transform@1"), TRANSFORM]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.transform@1", { fields: { old: 1, other: 2 } }, "map") }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "map" }));
+  await userEvent.clear(screen.getByLabelText("Name: old"));
+  await userEvent.type(screen.getByLabelText("Name: old"), "other"); // another entry's: refused when focus leaves, held
+  await goBackTo("map · Fields, the name old");
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Name: old")));
+});
+
+it("keeps a formula past the limit out of the draft, held and counted, never cut (the review of 97235e3)", async () => {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, IF]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.if@1", { condition: formula("false") }, "check") }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "check" }));
+  await userEvent.click(screen.getByLabelText("Condition"));
+  await userEvent.keyboard("{Control>}a{/Control}");
+  await userEvent.paste(`true${" ".repeat(16_380)}&& false`); // over the whole formula: cut, it would read `true`
+  expect(stepConfig("check")).toEqual({ condition: formula("false") });
+  expect(screen.getByRole("button", { name: "1 edit not applied" })).toBeTruthy();
+});
+
+// 4c-2b: the steps a check says may not run (ledger ruling 116), and declassifying a decision from the toolbar.
+it("tells the canvas the steps the current check says may not run", async () => {
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: draftWith("a", "b") }));
+  answers.set(`POST ${BASE}/validate`, () =>
+    json({ draft_revision: 1, valid: true, diagnostics: [], expressions: [], conditional_steps: ["id-b"], taint: { sites: [], declassified: [] } }));
+  await show();
+  const canvas = await screen.findByRole("group", { name: "Workflow steps" });
+  await vi.waitFor(() => expect(canvas.dataset.conditional).toBe(idKey("id-b")));
+});
+
+it("declassifies a decision from the toolbar's Declassify, and the draft saves the entry", async () => {
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: draftWith("a") }));
+  answers.set(`POST ${BASE}/validate`, () =>
+    json({
+      // The revision checked: the saved one, 2 once the entry is saved (the PUT's answer).
+      draft_revision: sent.some((r) => r.method === "PUT") ? 2 : 1,
+      valid: false, expressions: [], conditional_steps: [], taint: { sites: [{ node: "id-a", field: "/x" }], declassified: [] },
+      diagnostics: [{ code: "taint.undeclassified", severity: "error", node: "id-a", field: "/x", message: "This decision reads sensitive data, so the branch taken becomes visible.", fix: null }],
+    }));  // prettier-ignore
+  await show();
+  await userEvent.click(await screen.findByRole("button", { name: "Declassify" }));
+  const panel = screen.getByRole("complementary", { name: "Declassify" });
+  await userEvent.click(within(panel).getByLabelText(/may be visible in run history/));
+  await userEvent.click(within(panel).getByRole("button", { name: "Declassify this decision" }));
+  await vi.waitFor(() => expect(sent.find((r) => r.method === "PUT")).toBeTruthy(), { timeout: 3000 });
+  const put = sent.find((r) => r.method === "PUT")!;
+  expect((put.body as GraphDoc).settings?.declassify).toEqual([{ node: "id-a", field: "/x" }]);
+  expect(within(panel).getByText("Declassified · 1")).toBeTruthy();
+  // Checked again after the save: the server still names the decision (the fake does), listed now: none to make.
+  expect(await within(panel).findByText("Needs your decision · 0")).toBeTruthy();
+});
+
+it("lands on Versions when Declassify closes after its last entry is removed (the final review)", async () => {
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: { ...draftWith("a"), settings: { declassify: [{ node: "id-a", field: "/x" }] } } }));
+  answers.set(`POST ${BASE}/validate`, () =>
+    json({
+      draft_revision: sent.some((r) => r.method === "PUT") ? 2 : 1,
+      valid: true, expressions: [], conditional_steps: [], taint: { sites: [], declassified: [] },
+      diagnostics: [{ code: "taint.stale_declassify", severity: "warning", node: null, field: "/settings/declassify/0", message: "This entry declassifies nothing: it isn't a decision that reads sensitive data.", fix: "Remove it." }],
+    }));  // prettier-ignore
+  await show();
+  await userEvent.click(await screen.findByRole("button", { name: "Declassify" }));
+  const panel = screen.getByRole("complementary", { name: "Declassify" });
+  await userEvent.click(within(panel).getByRole("button", { name: /^Remove / }));
+  await userEvent.click(within(panel).getByRole("button", { name: "Close" }));
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Versions" })));
+});
+
+describe("the Triggers panel (4c-3b)", () => {
+  const settings = () => drawn.at(-1)!.doc.settings;
+  beforeEach(() => {
+    answers.set(`GET ${BASE}/schedules`, () => json({ schedules: [] }));
+    answers.set(`GET ${BASE}/webhook-bindings`, () => json({ bindings: [] }));
+    answers.set("GET /api/v1/trigger-types", () => json([]));
+  });
+
+  it("opens from the start card, its heading focused, and gives focus back to the card when it closes", async () => {
+    await show();
+    const start = screen.getByRole("button", { name: "Start" });
+    await userEvent.click(start);
+    expect(start.getAttribute("aria-expanded")).toBe("true");
+    const panel = screen.getByRole("complementary", { name: "Triggers" });
+    await vi.waitFor(() => expect(document.activeElement).toBe(within(panel).getByRole("heading", { name: "Triggers" })));
+    await userEvent.click(within(panel).getByRole("button", { name: "Close" }));
+    await vi.waitFor(() => expect(document.activeElement).toBe(start));
+    expect(start.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("sums up what starts a run on the start card: the workflow's own counts, then the live rows", async () => {
+    answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, triggers: { schedules: 1, schedules_enabled: 1, webhook_bindings: 1, csv: false } }));
+    answers.set(`GET ${BASE}/schedules`, () => json({ schedules: [SCHEDULE, { ...SCHEDULE, id: "s2" }] }));
+    answers.set(`GET ${BASE}/webhook-bindings`, () => json({ bindings: [] }));
+    await show();
+    await vi.waitFor(() => expect(screen.getByRole("button", { name: "Start" }).dataset.summary).toBe("By hand · 2 schedules"));
+  });
+
+  it("writes the input to the draft through undo, a field's typing one step", async () => {
+    await show();
+    await userEvent.click(screen.getByRole("button", { name: "Start" }));
+    const panel = screen.getByRole("complementary", { name: "Triggers" });
+    await userEvent.click(within(panel).getByRole("button", { name: "＋ Field" }));
+    expect(settings()?.input_schema).toEqual({ type: "object", properties: { field_1: { type: "string" } } });
+    await userEvent.type(within(panel).getByRole("textbox", { name: "Label" }), "Site");
+    expect(settings()?.input_schema).toMatchObject({ properties: { field_1: { type: "string", title: "Site" } } });
+    await userEvent.click(within(panel).getByRole("heading", { name: "Triggers" })); // focus leaves the field
+    await userEvent.keyboard("{Control>}z{/Control}");
+    expect(settings()?.input_schema).toEqual({ type: "object", properties: { field_1: { type: "string" } } }); // the label's typing, whole
+    await userEvent.keyboard("{Control>}z{/Control}");
+    expect(settings()?.input_schema).toBeUndefined();
+  });
+
+  it("keeps JSON it can't save as an edit not applied: counted, listed as Triggers', and gone to in the panel", async () => {
+    await show();
+    await userEvent.click(screen.getByRole("button", { name: "Start" }));
+    const panel = screen.getByRole("complementary", { name: "Triggers" });
+    await userEvent.click(within(panel).getByRole("button", { name: "Edit as JSON" }));
+    const box = within(panel).getByRole("textbox", { name: "The input's schema and CSV columns" });
+    await userEvent.clear(box);
+    await userEvent.type(box, "{{");
+    expect(panel.textContent).toContain("This isn't valid JSON, so it isn't saved.");
+    await userEvent.click(screen.getByRole("button", { name: "1 edit not applied" }));
+    const list = screen.getByRole("complementary", { name: "Edits not applied" });
+    expect(list.textContent).toContain("Triggers · The input as JSON");
+    await userEvent.click(within(list).getByRole("button", { name: "Go to it: Triggers · The input as JSON" }));
+    const back = screen.getByRole("complementary", { name: "Triggers" });
+    expect(within(back).getByRole<HTMLTextAreaElement>("textbox", { name: "The input's schema and CSV columns" }).value).toBe("{");
+  });
+
+  it("never writes JSON typed over an input an undo changed since, until Apply here", async () => {
+    // The review of revision 1, through the editor's own actions: its stale check, and Apply here.
+    await show();
+    await userEvent.click(screen.getByRole("button", { name: "Start" }));
+    const panel = screen.getByRole("complementary", { name: "Triggers" });
+    await userEvent.click(within(panel).getByRole("button", { name: "＋ Field" }));
+    await userEvent.click(within(panel).getByRole("button", { name: "Done" }));
+    await userEvent.click(within(panel).getByRole("button", { name: "Edit as JSON" }));
+    const box = within(panel).getByRole("textbox", { name: "The input's schema and CSV columns" });
+    await userEvent.clear(box);
+    await userEvent.paste("{");
+    await userEvent.click(within(panel).getByRole("heading", { name: "Triggers" })); // focus leaves the text
+    await userEvent.keyboard("{Control>}z{/Control}"); // the field's addition undone, under the JSON
+    expect(settings()?.input_schema).toBeUndefined();
+    await userEvent.click(box);
+    await userEvent.paste('"input_schema": {"type": "object"}}');
+    expect(settings()?.input_schema).toBeUndefined();
+    expect(panel.textContent).toContain(STALE);
+    await userEvent.click(within(panel).getByRole("button", { name: "Apply here: The input as JSON" }));
+    expect(settings()?.input_schema).toEqual({ type: "object" });
+  });
+
+  it("shows a viewer the triggers read only, and says why", async () => {
+    role = "viewer";
+    await show();
+    await userEvent.click(screen.getByRole("button", { name: "Start" }));
+    const panel = screen.getByRole("complementary", { name: "Triggers" });
+    expect(panel.textContent).toContain("You can see this workflow's triggers; changing them needs the editor role.");
+    expect(within(panel).queryByRole("button", { name: "＋ Field" })).toBeNull();
+    expect(within(panel).queryByRole("button", { name: "＋ Schedule" })).toBeNull();
+    expect(within(panel).getByRole("button", { name: "Show as JSON" })).toBeTruthy();
+  });
+});

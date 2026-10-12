@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 import { Navigate, Outlet, createRootRoute, createRoute, createRouter, useParams } from "@tanstack/react-router";
 import { Shell } from "./components/Shell";
+import { unsavedWork } from "./lib/leaving";
 import { useSession } from "./lib/session";
 import { useAfterAuth } from "./lib/useAfterAuth";
 import { ConnectionsPage } from "./routes/Connections";
+import { LazyEditor } from "./routes/editor/LazyEditor";
 import { EnrollPage } from "./routes/Enroll";
 import { LoginPage } from "./routes/Login";
 import { MembersPage } from "./routes/Members";
@@ -11,12 +13,23 @@ import { MfaPage } from "./routes/Mfa";
 import { SecurityPage } from "./routes/Security";
 import { SettingsLayout } from "./routes/Settings";
 import { TenantsPage } from "./routes/Tenants";
+import { WebhookEndpointsPage } from "./routes/WebhookEndpoints";
+import { WorkflowsPage } from "./routes/Workflows";
+
+declare module "@tanstack/react-router" {
+  interface StaticDataRouteOption {
+    /** The editor's 60 px icon rail at every width (outline §2): the canvas needs the room. */
+    compactRail?: boolean;
+  }
+}
 
 /** Sends each session state to its screen; renders children only for fully signed-in sessions. */
 function RequireActive() {
   const session = useSession();
   if (session.isPending) return <p className="p-6 text-body text-muted">Loading…</p>;
-  if (!session.data) return <Navigate to="/login" />;
+  // Work an editor couldn't save stays on screen when the session ends (4b ruling 22): never swapped for the sign-in
+  // page under it. "Sign in again" is a router navigation, so the editor has its say first.
+  if (!session.data) return unsavedWork() ? <Shell sessionEnded /> : <Navigate to="/login" />;
   if (session.data.state === "mfa_pending") return <Navigate to="/mfa" />;
   if (session.data.state === "enroll_required") return <Navigate to="/enroll" />;
   return <Shell />;
@@ -31,6 +44,23 @@ function Login() {
 // connection's token, a member's email) can be sent to another, and an answer still on its way for the old tenant
 // lands on a screen that is gone rather than on the new tenant's form. The router alone reuses a screen whose route
 // stays the same and only its parameters change.
+
+function TenantHome() {
+  const { tenantId } = useParams({ from: "/app/t/$tenantId" });
+  return <Navigate to="/t/$tenantId/workflows" params={{ tenantId }} />;
+}
+
+function Workflows() {
+  const { tenantId } = useParams({ from: "/app/t/$tenantId/workflows" });
+  const search = workflowsRoute.useSearch();
+  return <WorkflowsPage key={tenantId} tenantId={tenantId} startNew={search.new === true} />;
+}
+
+function Editor() {
+  const { tenantId, workflowId } = useParams({ from: "/app/t/$tenantId/workflows/$workflowId" });
+  const search = editorRoute.useSearch();
+  return <LazyEditor key={`${tenantId}:${workflowId}`} tenantId={tenantId} workflowId={workflowId} openTriggers={search.triggers === true} />;
+}
 
 function Connections() {
   const { tenantId } = useParams({ from: "/app/t/$tenantId/connections" });
@@ -52,6 +82,11 @@ function Members() {
   return <MembersPage key={tenantId} tenantId={tenantId} />;
 }
 
+function WebhookEndpoints() {
+  const { tenantId } = useParams({ from: "/app/t/$tenantId/settings/webhooks" });
+  return <WebhookEndpointsPage key={tenantId} tenantId={tenantId} />;
+}
+
 const rootRoute = createRootRoute({ component: Outlet });
 const loginRoute = createRoute({ getParentRoute: () => rootRoute, path: "/login", component: Login });
 const mfaRoute = createRoute({ getParentRoute: () => rootRoute, path: "/mfa", component: MfaPage });
@@ -60,6 +95,23 @@ const appRoute = createRoute({ getParentRoute: () => rootRoute, id: "app", compo
 const indexRoute = createRoute({ getParentRoute: () => appRoute, path: "/", component: () => <Navigate to="/tenants" /> });
 const tenantsRoute = createRoute({ getParentRoute: () => appRoute, path: "/tenants", component: TenantsPage });
 const securityRoute = createRoute({ getParentRoute: () => appRoute, path: "/account/security", component: SecurityPage });
+const tenantHomeRoute = createRoute({ getParentRoute: () => appRoute, path: "/t/$tenantId", component: TenantHome });
+const workflowsRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: "/t/$tenantId/workflows",
+  component: Workflows,
+  validateSearch: (search: Record<string, unknown>): { new?: true } =>
+    search.new === true || search.new === "true" ? { new: true } : {},
+});
+const editorRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: "/t/$tenantId/workflows/$workflowId",
+  component: Editor,
+  staticData: { compactRail: true },
+  // A new workflow opens on its Triggers (4c-3b, 1b's "What starts it?").
+  validateSearch: (search: Record<string, unknown>): { triggers?: true } =>
+    search.triggers === true || search.triggers === "true" ? { triggers: true } : {},
+});
 const connectionsRoute = createRoute({
   getParentRoute: () => appRoute,
   path: "/t/$tenantId/connections",
@@ -69,6 +121,7 @@ const connectionsRoute = createRoute({
 const settingsRoute = createRoute({ getParentRoute: () => appRoute, path: "/t/$tenantId/settings", component: Settings });
 const settingsIndexRoute = createRoute({ getParentRoute: () => settingsRoute, path: "/", component: SettingsIndex });
 const membersRoute = createRoute({ getParentRoute: () => settingsRoute, path: "members", component: Members });
+const webhooksRoute = createRoute({ getParentRoute: () => settingsRoute, path: "webhooks", component: WebhookEndpoints });
 
 /** The app's routes; the router below serves them from the browser's history (tests serve them from memory). */
 export const routeTree = rootRoute.addChildren([
@@ -79,8 +132,11 @@ export const routeTree = rootRoute.addChildren([
     indexRoute,
     tenantsRoute,
     securityRoute,
+    tenantHomeRoute,
+    workflowsRoute,
+    editorRoute,
     connectionsRoute,
-    settingsRoute.addChildren([settingsIndexRoute, membersRoute]),
+    settingsRoute.addChildren([settingsIndexRoute, membersRoute, webhooksRoute]),
   ]),
 ]);
 

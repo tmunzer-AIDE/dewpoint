@@ -9,6 +9,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from dewpoint.core.models import Base
+from migrations import equivalents
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -51,6 +52,8 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
     )
+    # Main's 0047, 0045 and 0070 run online only (D15): a script would hold their original bodies, so each refuses
+    equivalents.refuse_offline(context.script)
 
     with context.begin_transaction():
         context.run_migrations()
@@ -73,6 +76,9 @@ def do_run_migrations(connection: Connection) -> None:
         expected_database=expected or None,
         after_change=config.attributes.get("after_change"),
     )
+    # Main's 0047, 0045 and 0070, byte-identical, run their online equivalents on a database that hasn't applied them
+    # (D15, the owner's rulings at the merge): each checked against its original's file first, refusing if one changed
+    equivalents.install(context.script)
 
     with context.begin_transaction():
         context.run_migrations()

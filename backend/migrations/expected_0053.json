@@ -1,6 +1,7 @@
 {
  "source": {
-  "run4_expected_snapshot_sha256": "2c1b6bf633210e4834b1483c0060c1040a3935573dc5a6bbdc2007ed1d78e156"
+  "reference_snapshot": "run 5",
+  "reference_snapshot_sha256": "37af679e24321731b818b19e385715da7044da412f90cb3f154fc0d0b0e73b48"
  },
  "EXPECTED_OBJECTS": [
   [
@@ -2281,6 +2282,13 @@
   [
    "relation:r",
    "public.run_slots",
+   "<migrator>",
+   "explicit",
+   ""
+  ],
+  [
+   "relation:r",
+   "public.run_step_connections",
    "<migrator>",
    "explicit",
    ""
@@ -10173,6 +10181,86 @@
   [
    "relation:r",
    "public.run_slots",
+   "UPDATE",
+   "<migrator>",
+   "<migrator>",
+   false
+  ],
+  [
+   "relation:r",
+   "public.run_step_connections",
+   "DELETE",
+   "<migrator>",
+   "<migrator>",
+   false
+  ],
+  [
+   "relation:r",
+   "public.run_step_connections",
+   "INSERT",
+   "<migrator>",
+   "<migrator>",
+   false
+  ],
+  [
+   "relation:r",
+   "public.run_step_connections",
+   "INSERT",
+   "dewpoint_worker",
+   "<migrator>",
+   false
+  ],
+  [
+   "relation:r",
+   "public.run_step_connections",
+   "REFERENCES",
+   "<migrator>",
+   "<migrator>",
+   false
+  ],
+  [
+   "relation:r",
+   "public.run_step_connections",
+   "SELECT",
+   "<migrator>",
+   "<migrator>",
+   false
+  ],
+  [
+   "relation:r",
+   "public.run_step_connections",
+   "SELECT",
+   "dewpoint_api",
+   "<migrator>",
+   false
+  ],
+  [
+   "relation:r",
+   "public.run_step_connections",
+   "SELECT",
+   "dewpoint_worker",
+   "<migrator>",
+   false
+  ],
+  [
+   "relation:r",
+   "public.run_step_connections",
+   "TRIGGER",
+   "<migrator>",
+   "<migrator>",
+   false
+  ],
+  [
+   "relation:r",
+   "public.run_step_connections",
+   "TRUNCATE",
+   "<migrator>",
+   "<migrator>",
+   false
+  ],
+  [
+   "relation:r",
+   "public.run_step_connections",
    "UPDATE",
    "<migrator>",
    "<migrator>",

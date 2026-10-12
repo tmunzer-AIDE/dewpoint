@@ -565,19 +565,44 @@ async def _write(c: asyncpg.Connection, role: str, write: str, run: Any, other: 
         return f"{e.sqlstate}: {e}"
 
 
+# A root with another run in its tenant, which "change a run's tree" points it at: a tenant holding one run alone (the
+# seed makes some) has none, and the write would set its parent NULL to NULL, changing nothing
+ROOT_WITH_ANOTHER = """SELECT * FROM public.runs r WHERE r.parent_run_id IS NULL
+  AND EXISTS (SELECT 1 FROM public.runs o WHERE o.tenant_id = r.tenant_id AND o.id <> r.id) ORDER BY r.id LIMIT 1"""
+FIRST_ROOT = "SELECT id, tenant_id FROM public.runs WHERE parent_run_id IS NULL ORDER BY id LIMIT 1"
+
+
 async def _writes(url: str) -> dict[tuple[str, str], str]:
     """Each writer role's write that fires one of the three trigger functions: what happened (the root
     runs_set_root sets, the row deleted, or the error a trigger raises)."""
     c = await asyncpg.connect(url)
     try:
-        run = await c.fetchrow("SELECT * FROM public.runs WHERE parent_run_id IS NULL ORDER BY id LIMIT 1")
+        run = await c.fetchrow(ROOT_WITH_ANOTHER)
+        assert run is not None, "no root run whose tenant has another run"
         other = await c.fetchval("SELECT id FROM public.runs WHERE id <> $1 AND tenant_id = $2 ORDER BY id LIMIT 1",
                                  run["id"], run["tenant_id"])  # fmt: skip
+        assert other is not None, run
         version = await c.fetchrow("SELECT * FROM public.workflow_versions ORDER BY id LIMIT 1")
         return {(role, write): await _write(c, role, write, run, other, version)
                 for role, writes in TRIGGERED.items() for write in writes}  # fmt: skip
     finally:
         await c.close()
+
+
+async def test_the_writes_change_the_tree_of_a_root_whose_tenant_has_another_run(db: str) -> None:
+    """The seed spreads its roots over tenants, and some hold one run alone. When the first root by id is one of those,
+    a write taking it has no other run to point it at: it sets its parent NULL to NULL, changes nothing, and the trigger
+    rightly doesn't fire (the serial run's failure). The writes take a root whose tenant has another run."""
+    c = await asyncpg.connect(db)
+    try:
+        first = await c.fetchrow(FIRST_ROOT)
+    finally:
+        await c.close()
+    alone = f"DELETE FROM public.runs WHERE tenant_id = '{first['tenant_id']}' AND id <> '{first['id']}'"  # noqa: S608
+    await _sql(db, "SET session_replication_role = replica", alone)  # its other runs gone, whatever references them
+    writes = await _writes(db)
+    for role in ("dewpoint_dispatch", "dewpoint_worker"):
+        assert "a run's tree never changes" in writes[(role, "change a run's tree")], writes
 
 
 async def test_the_trigger_functions_fire_for_their_writers_without_execute(db: str) -> None:

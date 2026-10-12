@@ -158,6 +158,9 @@ async def test_a_binding_cant_point_to_another_tenants_workflow(owner_sessionmak
         ({}, {"events_pointer": "/events"}),
         ({"events_pointer": "/events"}, {"events_pointer": None}),
         ({"events_pointer": "/events"}, {"events_pointer": "/items"}),
+        ({}, {"trigger_key": "demo.webhook"}),
+        ({"trigger_key": "demo.webhook"}, {"trigger_key": None}),
+        ({"trigger_key": "demo.webhook"}, {"trigger_key": "other.webhook"}),
     ],
 )
 async def test_the_api_cant_change_where_an_endpoints_events_and_ids_are(
@@ -165,7 +168,8 @@ async def test_the_api_cant_change_where_an_endpoints_events_and_ids_are(
 ) -> None:
     """The owner's docs review and ruling D10: where an endpoint's events and their ids are decides how its later
     deliveries are split and deduplicated, so it never changes. Not even the API's own update, scoped to its tenant, can
-    change it: its role has no grant on `id_source`, `id_pointer`, `id_header` or `events_pointer`."""
+    change it: its role has no grant on `id_source`, `id_pointer`, `id_header` or `events_pointer`. Nor on
+    `trigger_key`, the trigger an endpoint was made for (4c-3a ruling 1), which its settings came from."""
     tenant, endpoint_id = await endpoint(owner_sessionmaker, **columns)
     refused: DBAPIError | None = None
     try:
@@ -208,8 +212,8 @@ async def test_the_apis_role_has_no_grant_to_update_an_endpoints_rates(
 
 async def test_the_api_still_makes_endpoints_and_changes_what_it_manages(owner_sessionmaker, api_sessionmaker) -> None:
     """The control for the test above, as the API's role: it still makes an endpoint, with where its events and their
-    ids are, and changes every column the API changes (a PATCH's fields, a rotated secret, the byte burst a larger body
-    limit needs, the time)."""
+    ids are and the trigger it's for, and changes every column the API changes (a PATCH's fields, a rotated secret,
+    the byte burst a larger body limit needs, the time)."""
     tenant, bearer = await endpoint(owner_sessionmaker)
     async with owner_sessionmaker() as s:
         user = (await s.execute(text("select created_by from webhook_endpoints where id = :e"),
@@ -219,9 +223,9 @@ async def test_the_api_still_makes_endpoints_and_changes_what_it_manages(owner_s
         await tenant_scope(s, tenant)
         await s.execute(
             text("insert into webhook_endpoints (id, tenant_id, name, created_by, auth_kind, hmac_secret, "
-                 "signature_header, timestamp_header, id_source, id_pointer, events_pointer, dedupe_key) values (:i, "
-                 ":t, 'signed', :u, 'hmac', 'sealed', 'x-signature', 'x-timestamp', 'pointer', '/id', '/events', "
-                 "'sealed-dedupe-key')"),
+                 "signature_header, timestamp_header, id_source, id_pointer, events_pointer, dedupe_key, trigger_key) "
+                 "values (:i, :t, 'signed', :u, 'hmac', 'sealed', 'x-signature', 'x-timestamp', 'pointer', '/id', "
+                 "'/events', 'sealed-dedupe-key', 'demo.webhook')"),
             {"i": signed, "t": tenant, "u": user},
         )  # fmt: skip
         await s.execute(
@@ -238,6 +242,7 @@ async def test_the_api_still_makes_endpoints_and_changes_what_it_manages(owner_s
     made, changed = await state(owner_sessionmaker, signed), await state(owner_sessionmaker, bearer)
     assert (made["hmac_secret"], made["signature_header"], made["timestamp_header"]) == (b"resealed", "x-sig", "x-ts")
     assert (made["id_source"], made["id_pointer"], made["events_pointer"]) == ("pointer", "/id", "/events")
+    assert made["trigger_key"] == "demo.webhook" and changed["trigger_key"] is None
     assert (changed["name"], changed["enabled"], changed["tolerance_s"], changed["body_limit"]) == (
         "renamed", False, 600, 5242880,
     )  # fmt: skip

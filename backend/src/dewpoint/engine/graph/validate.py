@@ -13,6 +13,8 @@ from typing import Any
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 
+from dewpoint.engine.cel import ast as cel_ast
+from dewpoint.engine.cel import runtime as cel_runtime
 from dewpoint.engine.cel.record import ExpressionRecord
 from dewpoint.engine.graph import cel_check
 from dewpoint.engine.graph import liveness as lv
@@ -21,12 +23,14 @@ from dewpoint.engine.graph.csv import RESERVED as CSV_RESERVED
 from dewpoint.engine.graph.csv import is_canonical, trigger_schema
 from dewpoint.engine.graph.diagnostics import Diagnostic, Severity
 from dewpoint.engine.graph.model import CsvSettings, Graph, GraphNode
+from dewpoint.engine.graph.schema_messages import problems
 from dewpoint.engine.graph.schemas import (
     PathError,
     Resolved,
     allowed_kinds,
     compatible,
     contains_literal,
+    declared_non_object,
     declared_nullable,
     declared_optional,
     describe,
@@ -63,7 +67,15 @@ from dewpoint.engine.registry import control as C
 from dewpoint.engine.registry.catalog import Catalog, NodeTypeSpec, marked_below_top
 from dewpoint.engine.schema_refs import PREFIX as REF_PREFIX
 from dewpoint.engine.schema_refs import ref_problems, subschemas
-from dewpoint.engine.sensitive import SENSITIVE, expand, is_marked, marked_positions, resolve
+from dewpoint.engine.sensitive import (
+    SENSITIVE,
+    expand,
+    is_marked,
+    keys_sensitive,
+    map_values,
+    marked_positions,
+    resolve,
+)
 from dewpoint.engine.taint import CLEAN, TAINTED, Shape, from_schema, make
 from dewpoint.sdk.fields import CONNECTION, KINDS
 
@@ -129,6 +141,7 @@ class ValidationResult:
     connections: tuple[tuple[str, str, uuid.UUID, str], ...] = ()
     # (input field, node ref, options field, connection id, the types it may be) of every start-form picker (D19)
     pickers: tuple[tuple[str, str, str, uuid.UUID, tuple[str, ...]], ...] = ()
+    conditional_steps: tuple[str, ...] = ()  # the steps that may not run (ruling 70's badge), by id, sorted
 
     @property
     def ok(self) -> bool:
@@ -158,6 +171,18 @@ class _Site:
     item_node: uuid.UUID | None = None  # whose `item` and `index` are in scope: the innermost loop, or a filter
 
 
+def site_of(s: Structure, node: uuid.UUID, field: str) -> _Site:
+    """Where a value at `field` (a JSON pointer) of `node`'s config is evaluated: its scope, and whose `item` it sees.
+    A filter's predicate sees the filter's; a loop's `collect` is evaluated as each body ends; anything else sees the
+    innermost loop's, if any."""
+    first = field.split("/")[1] if field.startswith("/") else ""
+    ref = s.specs[node].ref
+    if ref == C.LOOP and first == "collect":
+        return _Site(node, field, node, at_exit=True, item_node=node)
+    region = s.region_of[node]
+    return _Site(node, field, region, item_node=node if ref == C.FILTER and first == "predicate" else region)
+
+
 def _descendants(s: Structure) -> dict[uuid.UUID, frozenset[uuid.UUID]]:
     desc: dict[uuid.UUID, frozenset[uuid.UUID]] = {}
     for n in reversed(s.topo):
@@ -167,6 +192,21 @@ def _descendants(s: Structure) -> dict[uuid.UUID, frozenset[uuid.UUID]]:
             acc |= desc[e.to.node]
         desc[n] = frozenset(acc)
     return desc
+
+
+def conditional_steps(s: Structure, live: Mapping[uuid.UUID | None, lv.RegionLiveness]) -> tuple[uuid.UUID, ...]:
+    """The steps that may not run (4c-2a ruling 3): their liveness in their region isn't "always", or can't be
+    analysed; or the loop whose body holds them may not run."""
+    memo: dict[uuid.UUID, bool] = {}
+
+    def may_skip(n: uuid.UUID) -> bool:
+        if n not in memo:
+            region = s.region_of[n]
+            cond = live[region].live[n]
+            memo[n] = cond is None or frozenset() not in cond or (region is not None and may_skip(region))
+        return memo[n]
+
+    return tuple(n for n in s.topo if may_skip(n))
 
 
 def _static_delay(node: GraphNode, spec: NodeTypeSpec) -> float:
@@ -317,20 +357,62 @@ def _declassify(
     return out, tuple(declassified)
 
 
+_RUN_ROOTS = frozenset((*cel_check.ROOTS, *cel_check.ITEM_ROOTS))
+
+
+def _reads_nothing(expr: str) -> bool:
+    """Whether a CEL expression reads no run data: none of its free identifiers is a root (a comprehension's own
+    variable isn't free, and `string` or `int` is a built-in type). fn-1 is pure, so it gives the same value every
+    run, written into the workflow as a literal would be. One that doesn't parse is reported where it's checked."""
+    try:
+        parsed = cel_runtime.parse(expr)
+    except cel_runtime.CompileError:
+        return False
+    names = cel_ast.global_idents(parsed.expr)
+    return not any(n.lstrip(".").split(".")[0] in _RUN_ROOTS for n in names)  # `.trigger`: the root, named from the top
+
+
+def _holds_marked(schema: Mapping[str, Any]) -> bool:
+    """Whether a standalone schema can mark a part of its instances sensitive, by the rules a literal is checked with
+    (`marked_positions`): behind a local `$ref`, in a union's branch, under a property, a pattern,
+    `additionalProperties`, `items` or a tuple position, or a map whose keys are. Other keywords (`not`, `if`, a
+    definition nothing reaches) mark nothing."""
+    seen: set[int] = set()
+    stack: list[Any] = [schema]
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        branches = expand(node, schema)
+        if any(b.get(SENSITIVE) is True for b in branches) or keys_sensitive(branches, schema):
+            return True
+        stack += map_values(branches)
+        for b in branches:
+            props, prefix = b.get("properties"), b.get("prefixItems")
+            stack += list(props.values()) if isinstance(props, Mapping) else []
+            stack += prefix if isinstance(prefix, list) else []
+            stack += [b["items"]] if isinstance(b.get("items"), Mapping) else []
+    return False
+
+
 def _writes_sensitive(
     value: Value, root: Mapping[str, Any], pointer: Pointer, target: Mapping[str, Any] | None
 ) -> bool:
-    """Whether a value envelope writes a literal at a sensitive position (§3.8): the literal itself, a part of it the
-    target schema marks, or a reference's or a template's default. Null and the empty string are written too."""
+    """Whether a value envelope writes a literal at a sensitive position (§3.8): the literal itself or a reference's
+    default, at it or holding a part the target schema marks; a template's default or text (all of it, without a
+    reference); a CEL expression that reads nothing, wherever the target marks a part, since publish can't tell which
+    parts it writes. Null and the empty string are written too; empty text beside a reference writes nothing."""
+    marked = is_marked(root, pointer)
     if isinstance(value, LiteralValue):
-        return is_marked(root, pointer) or bool(target is not None and marked_positions(value.value, target))
-    if not is_marked(root, pointer):
-        return False
+        return marked or bool(target is not None and marked_positions(value.value, target))
     if isinstance(value, RefValue):
-        return value.has_default
-    if isinstance(value, TemplateValue):
-        return any(isinstance(p, TemplateRef) and p.default is not None for p in value.parts)
-    return False
+        return value.has_default and (marked or bool(target is not None and marked_positions(value.default, target)))
+    if isinstance(value, CelValue):
+        return (marked or (target is not None and _holds_marked(target))) and _reads_nothing(value.expr)
+    refs = [p for p in value.parts if isinstance(p, TemplateRef)]
+    text = "".join(p for p in value.parts if isinstance(p, str))
+    return marked and (not refs or bool(text) or any(p.default is not None for p in refs))
 
 
 _SCHEMA_LITERALS = ("default", "enum", "const", "examples")  # what a schema writes of its instances
@@ -384,7 +466,7 @@ def _csv_declaration(csv: CsvSettings | None) -> list[Diagnostic]:
             out.append(Diagnostic(code="csv.duplicate_header", field=f"{where}/header", message=_CSV_HEADER))
         if c.name in names:
             out.append(Diagnostic(code="csv.duplicate_name", field=f"{where}/name", message=_CSV_NAME))
-        elif not IDENT.match(c.name) or c.name in CEL_KEYWORDS:
+        elif not IDENT.fullmatch(c.name) or c.name in CEL_KEYWORDS:
             out.append(Diagnostic(code="csv.invalid_name", field=f"{where}/name", message=_CSV_IDENT))
         headers.add(c.header)
         names.add(c.name)
@@ -460,7 +542,7 @@ def _settings(graph: Graph) -> list[Diagnostic]:
     defs = st.vars_schema.get("$defs", {})
     for name, schema in props.items() if isinstance(props, Mapping) else ():
         where = f"/settings/vars_schema/properties/{name}"
-        if not IDENT.match(name) or name in CEL_KEYWORDS:
+        if not IDENT.fullmatch(name) or name in CEL_KEYWORDS:
             out.append(
                 Diagnostic(
                     code="vars.invalid_name",
@@ -483,7 +565,7 @@ def _settings(graph: Graph) -> list[Diagnostic]:
         if contains_marker(value):
             out.append(Diagnostic(code="value.reserved_key", field=where, message=RESERVED, fix=_RESERVED_FIX))
     for name in st.outputs:
-        if not IDENT.match(name):
+        if not IDENT.fullmatch(name):
             out.append(
                 Diagnostic(
                     code="settings.output_name",
@@ -584,7 +666,6 @@ class _Validator:
         spec = self.s.specs[n.id]
         self._check_literals(n, spec)
         resolved: dict[Pointer, Resolved | None] = {}
-        region = self.s.region_of[n.id]
         values = list(iter_values(n.config))
         if spec.ref in (C.LOOP, C.FILTER):  # `items` first: the predicate and `collect` read its element type
             values.sort(key=lambda pv: pv[0][:1] != ("items",))
@@ -595,11 +676,10 @@ class _Validator:
                 self.err("value.literal_only", _LITERAL_ONLY, node=n.id, fld=where)
                 continue
             if spec.ref == C.LOOP and pointer[0] == "collect":
-                self.deferred.append((_Site(n.id, where, n.id, at_exit=True, item_node=n.id), value))
+                self.deferred.append((site_of(self.s, n.id, where), value))
                 continue
-            item_node = n.id if spec.ref == C.FILTER and pointer[0] == "predicate" else region
             root, inner = self._value_root(n, spec, pointer)
-            resolved[pointer] = self._value(_Site(n.id, where, region, item_node=item_node), value, root, inner)
+            resolved[pointer] = self._value(site_of(self.s, n.id, where), value, root, inner)
             if spec.ref in (C.LOOP, C.FILTER) and pointer == ("items",):
                 items = resolved[pointer]
                 self.item_schema[n.id] = element_schema(items.schema) if items is not None else None
@@ -766,12 +846,11 @@ class _Validator:
     def _schema_errors(
         self, node: uuid.UUID, prefix: str, schema: Mapping[str, Any], instance: Any, envelopes: list[Pointer]
     ) -> None:
-        errors = sorted(Draft202012Validator(schema).iter_errors(instance), key=lambda e: str(list(e.absolute_path)))
-        for e in errors:
-            path = tuple(e.absolute_path)
+        for path, message in problems(schema, instance):
             if any(path[: len(p)] == p for p in envelopes):
                 continue  # computed at run time; checked through its reference type instead
-            self.err("config.invalid", e.message, node=node, fld=prefix + pointer_str(path))
+            # Said without the value: jsonschema quotes it, and it may be sensitive (ledger M25).
+            self.err("config.invalid", message, node=node, fld=prefix + pointer_str(path))
 
     def _output_schema(
         self, n: GraphNode, spec: NodeTypeSpec, resolved: Mapping[Pointer, Resolved | None]
@@ -869,8 +948,8 @@ class _Validator:
     def _check_instance(self, site: _Site, schema: Mapping[str, Any] | None, instance: Any) -> None:
         if schema is None:
             return
-        for e in sorted(Draft202012Validator(schema).iter_errors(instance), key=lambda e: str(list(e.absolute_path))):
-            self.err("config.invalid", e.message, node=site.node, fld=site.field + pointer_str(tuple(e.absolute_path)))
+        for path, message in problems(schema, instance):
+            self.err("config.invalid", message, node=site.node, fld=site.field + pointer_str(path))
 
     def _ref_value(self, site: _Site, value: RefValue, target: Mapping[str, Any] | None) -> Resolved | None:
         resolved = self._resolve(site, value.path)
@@ -1016,7 +1095,7 @@ class _Validator:
             return Resolved({"type": "integer"}, False)
         item = self.item_schema.get(loop)
         if item is None:
-            return Resolved(None, bool(p.rest))
+            return Resolved(None, bool(p.rest), missing=bool(p.rest))
         return navigate(item, p.rest)
 
     def _resolve_step(self, site: _Site, p: RefPath) -> Resolved | None:
@@ -1062,15 +1141,17 @@ class _Validator:
                 return None
             available = on_error == "port" and self._implies(home, consumer_key, consumer, producer, "err", region)
             r = navigate(ERROR_SCHEMA, p.rest)
-            return Resolved(r.schema, r.conditional or not available)
+            return dataclasses.replace(
+                r, conditional=r.conditional or not available, missing=r.missing or not available
+            )
         available = on_error != "continue" and self._implies(home, consumer_key, consumer, producer, "ok", region)
         if site.at_exit and site.region is None and self.has_stop:
             available = False  # `stop` may end the run while this step is still pending
         schema = self.out_schema.get(producer)
         if schema is None:  # only when the producer is already reported (unknown sub-flow): don't add noise
-            return Resolved(None, not available)
+            return Resolved(None, not available, missing=not available)
         r = navigate(schema, p.rest)
-        return Resolved(r.schema, r.conditional or not available)
+        return dataclasses.replace(r, conditional=r.conditional or not available, missing=r.missing or not available)
 
     def _consumer(
         self, site: _Site, home: uuid.UUID | None, producer: uuid.UUID
@@ -1104,6 +1185,10 @@ class _Validator:
     def _declared_optional(self, site: _Site, p: RefPath) -> tuple[int, ...]:
         """Positions in `p.rest` the schema declares optional (spec §4.3): CEL guards them, references default them."""
         return self._declared(site, p, declared_optional)
+
+    def _declared_non_object(self, site: _Site, p: RefPath) -> tuple[int, ...]:
+        """Positions in `p.rest` the schema declares may not be objects: CEL guards reads below them (4c-2a)."""
+        return self._declared(site, p, declared_non_object)
 
     def _declared_nullable(self, site: _Site, p: RefPath) -> tuple[int, ...]:
         """Positions in `p.rest` the schema declares may be null (spec §4.3): CEL guards reads below them."""
@@ -1260,6 +1345,9 @@ class _CelSite:
     def nullable_fields(self, path: RefPath) -> tuple[int, ...]:
         return self.v._declared_nullable(self.site, path)
 
+    def non_object_fields(self, path: RefPath) -> tuple[int, ...]:
+        return self.v._declared_non_object(self.site, path)
+
     def error(self, code: str, message: str, *, fix: str | None = None, severity: Severity = "error") -> None:
         self.v.err(code, message, node=self.site.node, fld=self.site.field, fix=fix, severity=severity)
 
@@ -1329,7 +1417,19 @@ def picker_problems(diagnostics: Sequence[Diagnostic]) -> bool:
     return any(d.code.startswith("picker.") for d in diagnostics)
 
 
-def validate(graph: Graph, ctx: ValidationContext) -> ValidationResult:
+@dataclass(frozen=True)
+class Analysis:
+    """The validator's converged analysis (the taint fixpoint's last pass), for the questions validation itself
+    doesn't ask: what a field can read (B6, `scope.py`). `validator` is None when the graph's structure stops it."""
+
+    settings: tuple[Diagnostic, ...]
+    pickers: tuple[tuple[str, str, str, uuid.UUID, tuple[str, ...]], ...]
+    structural: tuple[Diagnostic, ...]
+    structure: Structure | None
+    validator: _Validator | None
+
+
+def analyze(graph: Graph, ctx: ValidationContext) -> Analysis:
     settings = _settings(graph)
     if not any((d.field or "").startswith("/settings/input_schema") for d in settings):
         picker_diags, pickers = _pickers(graph, ctx.catalog)
@@ -1337,9 +1437,8 @@ def validate(graph: Graph, ctx: ValidationContext) -> ValidationResult:
     else:
         pickers = []
     structure, structural = analyze_structure(graph, ctx.catalog)
-    node_refs = tuple(sorted({n.type for n in graph.nodes}))
     if structure is None:
-        return ValidationResult(tuple([*settings, *structural]), node_refs)
+        return Analysis(tuple(settings), tuple(pickers), tuple(structural), None, None)
     unusable = ("settings.invalid_schema", "settings.unresolvable_ref", "settings.unsupported_keyword")
     settings_ok = not any(d.code in unusable for d in settings)
     facts = NO_FACTS
@@ -1350,9 +1449,18 @@ def validate(graph: Graph, ctx: ValidationContext) -> ValidationResult:
         if learned == facts:
             break
         facts = learned
-    declassify, declassified = _declassify(graph, structure, v.site_taint)
+    return Analysis(tuple(settings), tuple(pickers), tuple(structural), structure, v)
+
+
+def validate(graph: Graph, ctx: ValidationContext) -> ValidationResult:
+    a = analyze(graph, ctx)
+    node_refs = tuple(sorted({n.type for n in graph.nodes}))
+    if a.structure is None or a.validator is None:
+        return ValidationResult(tuple([*a.settings, *a.structural]), node_refs)
+    v = a.validator
+    declassify, declassified = _declassify(graph, a.structure, v.site_taint)
     return ValidationResult(
-        diagnostics=tuple([*settings, *structural, *v.diags, *declassify]),
+        diagnostics=tuple([*a.settings, *a.structural, *v.diags, *declassify]),
         node_refs=node_refs,
         subflow_pins=dict(v.pins),
         failure_handler_version_id=v.failure_handler_version_id,
@@ -1367,5 +1475,6 @@ def validate(graph: Graph, ctx: ValidationContext) -> ValidationResult:
         output_taint=dict(v.output_taint),
         declassified=declassified,
         connections=tuple(sorted(v.connections, key=lambda c: (c[0], c[1]))),
-        pickers=tuple(pickers) if not picker_problems(settings) else (),
+        pickers=a.pickers if not picker_problems(list(a.settings)) else (),
+        conditional_steps=tuple(sorted(str(n) for n in conditional_steps(a.structure, v.live))),
     )

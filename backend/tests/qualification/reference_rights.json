@@ -1464,6 +1464,11 @@
   ],
   [
    "relation:r",
+   "public.run_step_connections",
+   "SELECT"
+  ],
+  [
+   "relation:r",
    "public.run_steps",
    "SELECT"
   ],
@@ -3692,6 +3697,16 @@
   [
    "relation:r",
    "public.run_slots",
+   "SELECT"
+  ],
+  [
+   "relation:r",
+   "public.run_step_connections",
+   "INSERT"
+  ],
+  [
+   "relation:r",
+   "public.run_step_connections",
    "SELECT"
   ],
   [

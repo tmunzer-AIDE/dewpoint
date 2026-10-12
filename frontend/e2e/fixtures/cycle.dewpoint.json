@@ -1,0 +1,18 @@
+{
+  "format": "dewpoint.workflow",
+  "format_version": 1,
+  "name": "Cycle",
+  "graph": {
+    "graph_format": 1,
+    "nodes": [
+      { "id": "0b6c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e01", "key": "entry", "type": "flow.transform@1", "config": { "fields": { "v": 1 } }, "position": { "x": 0, "y": 140 } },
+      { "id": "0b6c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e02", "key": "a", "type": "flow.transform@1", "config": { "fields": { "v": 2 } }, "position": { "x": 300, "y": 300 } },
+      { "id": "0b6c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e03", "key": "b", "type": "flow.transform@1", "config": { "fields": { "v": 3 } }, "position": { "x": 300, "y": 440 } }
+    ],
+    "edges": [
+      { "from": { "node": "0b6c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e02", "port": "out" }, "to": { "node": "0b6c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e03" } },
+      { "from": { "node": "0b6c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e03", "port": "out" }, "to": { "node": "0b6c2f1e-1d1e-4c1e-8e1e-1e1e1e1e1e02" } }
+    ]
+  },
+  "bindings": []
+}

@@ -79,6 +79,33 @@
         "title": "ActivateIn",
         "type": "object"
       },
+      "ActivatedOut": {
+        "additionalProperties": false,
+        "properties": {
+          "active_version_id": {
+            "title": "Active Version Id",
+            "type": "string"
+          },
+          "number": {
+            "title": "Number",
+            "type": "integer"
+          },
+          "warnings": {
+            "items": {
+              "$ref": "#/components/schemas/DiagnosticOut"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "active_version_id",
+          "number",
+          "warnings"
+        ],
+        "title": "ActivatedOut",
+        "type": "object"
+      },
       "AddIn": {
         "properties": {
           "email": {
@@ -105,6 +132,111 @@
           "role"
         ],
         "title": "AddIn",
+        "type": "object"
+      },
+      "Binding": {
+        "additionalProperties": false,
+        "description": "One id of the exporting tenant's (a connection, a workflow), as a placeholder an import binds or leaves.",
+        "properties": {
+          "id": {
+            "pattern": "^[a-z][a-z0-9_]{0,31}$",
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "connection",
+              "workflow"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "label": {
+            "maxLength": 200,
+            "title": "Label",
+            "type": "string"
+          },
+          "sites": {
+            "items": {
+              "$ref": "#/components/schemas/BindingSite"
+            },
+            "maxItems": 10000,
+            "minItems": 1,
+            "title": "Sites",
+            "type": "array"
+          },
+          "type": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Type"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "type",
+          "label",
+          "sites"
+        ],
+        "title": "Binding",
+        "type": "object"
+      },
+      "BindingEndpointOut": {
+        "additionalProperties": false,
+        "description": "What a workflow's Triggers panel shows of a binding's endpoint (B13; 4c-3a ruling 2).",
+        "properties": {
+          "auth": {
+            "enum": [
+              "bearer",
+              "hmac"
+            ],
+            "title": "Auth",
+            "type": "string"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "trigger": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trigger"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "enabled",
+          "auth",
+          "path",
+          "trigger"
+        ],
+        "title": "BindingEndpointOut",
         "type": "object"
       },
       "BindingIn": {
@@ -160,6 +292,35 @@
           }
         },
         "title": "BindingPatch",
+        "type": "object"
+      },
+      "BindingSite": {
+        "additionalProperties": false,
+        "properties": {
+          "field": {
+            "maxLength": 200,
+            "minLength": 2,
+            "title": "Field",
+            "type": "string"
+          },
+          "node": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node"
+          }
+        },
+        "required": [
+          "node",
+          "field"
+        ],
+        "title": "BindingSite",
         "type": "object"
       },
       "BoundaryIn": {
@@ -662,6 +823,154 @@
         "title": "CsrfOut",
         "type": "object"
       },
+      "CsvColumn": {
+        "additionalProperties": false,
+        "description": "One column of a CSV declaration (engine 2b spec \u00a78.1). Its `default` is omitted unless written: an omitted\ndefault is allowed on a sensitive column, a written one (even null) isn't (\u00a73.8), so the two stay distinct.",
+        "properties": {
+          "default": {
+            "default": null,
+            "title": "Default"
+          },
+          "header": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Header",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 63,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "required": {
+            "default": false,
+            "title": "Required",
+            "type": "boolean"
+          },
+          "sensitive": {
+            "default": false,
+            "title": "Sensitive",
+            "type": "boolean"
+          },
+          "type": {
+            "enum": [
+              "string",
+              "integer",
+              "number",
+              "boolean",
+              "mac",
+              "ip",
+              "cidr",
+              "enum"
+            ],
+            "title": "Type",
+            "type": "string"
+          },
+          "values": {
+            "anyOf": [
+              {
+                "items": {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                "maxItems": 200,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Values"
+          }
+        },
+        "required": [
+          "header",
+          "name",
+          "type"
+        ],
+        "title": "CsvColumn",
+        "type": "object"
+      },
+      "CsvColumnFormOut": {
+        "additionalProperties": false,
+        "properties": {
+          "default": {
+            "title": "Default"
+          },
+          "header": {
+            "title": "Header",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "required": {
+            "title": "Required",
+            "type": "boolean"
+          },
+          "sensitive": {
+            "title": "Sensitive",
+            "type": "boolean"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          },
+          "values": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Values"
+          }
+        },
+        "required": [
+          "header",
+          "name",
+          "type",
+          "required",
+          "sensitive"
+        ],
+        "title": "CsvColumnFormOut",
+        "type": "object"
+      },
+      "CsvFormOut": {
+        "additionalProperties": false,
+        "properties": {
+          "columns": {
+            "items": {
+              "$ref": "#/components/schemas/CsvColumnFormOut"
+            },
+            "title": "Columns",
+            "type": "array"
+          },
+          "max_bytes": {
+            "title": "Max Bytes",
+            "type": "integer"
+          },
+          "max_rows": {
+            "title": "Max Rows",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "max_rows",
+          "max_bytes",
+          "columns"
+        ],
+        "title": "CsvFormOut",
+        "type": "object"
+      },
       "CsvIn": {
         "additionalProperties": false,
         "description": "A staged upload (`POST \u2026/csv-uploads`), the mapping from declared column names to its headers, and whether rows\nthat break a rule are skipped (and recorded) rather than refusing the start (engine 2b spec \u00a78.1).",
@@ -694,6 +1003,433 @@
           "mapping"
         ],
         "title": "CsvIn",
+        "type": "object"
+      },
+      "CsvSettings": {
+        "additionalProperties": false,
+        "properties": {
+          "columns": {
+            "items": {
+              "$ref": "#/components/schemas/CsvColumn"
+            },
+            "maxItems": 200,
+            "minItems": 1,
+            "title": "Columns",
+            "type": "array"
+          },
+          "max_bytes": {
+            "default": 5242880,
+            "maximum": 5242880,
+            "minimum": 1,
+            "title": "Max Bytes",
+            "type": "integer"
+          },
+          "max_rows": {
+            "default": 10000,
+            "maximum": 10000,
+            "minimum": 1,
+            "title": "Max Rows",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "columns"
+        ],
+        "title": "CsvSettings",
+        "type": "object"
+      },
+      "DeclassifiedOut": {
+        "additionalProperties": false,
+        "properties": {
+          "field": {
+            "title": "Field",
+            "type": "string"
+          },
+          "node": {
+            "title": "Node",
+            "type": "string"
+          },
+          "reveals": {
+            "title": "Reveals",
+            "type": "string"
+          }
+        },
+        "required": [
+          "node",
+          "field",
+          "reveals"
+        ],
+        "title": "DeclassifiedOut",
+        "type": "object"
+      },
+      "DeclassifySite": {
+        "additionalProperties": false,
+        "description": "A decision that may turn tainted input into plain output (engine 2b spec \u00a74.3): a node and its field.",
+        "properties": {
+          "field": {
+            "maxLength": 200,
+            "title": "Field",
+            "type": "string"
+          },
+          "node": {
+            "format": "uuid",
+            "title": "Node",
+            "type": "string"
+          }
+        },
+        "required": [
+          "node",
+          "field"
+        ],
+        "title": "DeclassifySite",
+        "type": "object"
+      },
+      "DiagnosticOut": {
+        "additionalProperties": false,
+        "description": "A problem with a graph: `node` is a node's id, or null for the workflow; `field` is a JSON pointer inside the\nnode's config, `/settings/...` for the workflow's, or into the whole document for `graph.format`.",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "field": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Field"
+          },
+          "fix": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fix"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "node": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node"
+          },
+          "severity": {
+            "enum": [
+              "error",
+              "warning"
+            ],
+            "title": "Severity",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "node",
+          "field",
+          "fix",
+          "severity"
+        ],
+        "title": "DiagnosticOut",
+        "type": "object"
+      },
+      "DraftSavedOut": {
+        "additionalProperties": false,
+        "properties": {
+          "active_version_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Version Id"
+          },
+          "active_version_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Version Number"
+          },
+          "draft_revision": {
+            "title": "Draft Revision",
+            "type": "integer"
+          },
+          "graph_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Graph Hash"
+          },
+          "unpublished_changes": {
+            "title": "Unpublished Changes",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "draft_revision",
+          "unpublished_changes",
+          "graph_hash",
+          "active_version_id",
+          "active_version_number"
+        ],
+        "title": "DraftSavedOut",
+        "type": "object"
+      },
+      "Edge": {
+        "additionalProperties": false,
+        "properties": {
+          "from": {
+            "$ref": "#/components/schemas/EdgeFrom"
+          },
+          "to": {
+            "$ref": "#/components/schemas/EdgeTo"
+          }
+        },
+        "required": [
+          "from",
+          "to"
+        ],
+        "title": "Edge",
+        "type": "object"
+      },
+      "EdgeFrom": {
+        "additionalProperties": false,
+        "properties": {
+          "node": {
+            "format": "uuid",
+            "title": "Node",
+            "type": "string"
+          },
+          "port": {
+            "default": "out",
+            "pattern": "^[a-z][a-z0-9_]{0,30}$",
+            "title": "Port",
+            "type": "string"
+          }
+        },
+        "required": [
+          "node"
+        ],
+        "title": "EdgeFrom",
+        "type": "object"
+      },
+      "EdgeTo": {
+        "additionalProperties": false,
+        "properties": {
+          "node": {
+            "format": "uuid",
+            "title": "Node",
+            "type": "string"
+          }
+        },
+        "required": [
+          "node"
+        ],
+        "title": "EdgeTo",
+        "type": "object"
+      },
+      "EndpointCreatedOut": {
+        "additionalProperties": false,
+        "properties": {
+          "allowlist": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Allowlist",
+            "type": "array"
+          },
+          "auth": {
+            "enum": [
+              "bearer",
+              "hmac"
+            ],
+            "title": "Auth",
+            "type": "string"
+          },
+          "body_limit": {
+            "title": "Body Limit",
+            "type": "integer"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "events_pointer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Events Pointer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "id_header": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id Header"
+          },
+          "id_pointer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id Pointer"
+          },
+          "id_source": {
+            "enum": [
+              "pointer",
+              "header",
+              "none"
+            ],
+            "title": "Id Source",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "pending_bytes": {
+            "title": "Pending Bytes",
+            "type": "integer"
+          },
+          "pending_events": {
+            "title": "Pending Events",
+            "type": "integer"
+          },
+          "retained_bytes": {
+            "title": "Retained Bytes",
+            "type": "integer"
+          },
+          "retained_events": {
+            "title": "Retained Events",
+            "type": "integer"
+          },
+          "secret": {
+            "title": "Secret",
+            "type": "string"
+          },
+          "signature_header": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Signature Header"
+          },
+          "timestamp_header": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timestamp Header"
+          },
+          "tolerance_s": {
+            "title": "Tolerance S",
+            "type": "integer"
+          },
+          "trigger": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trigger"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "enabled",
+          "auth",
+          "signature_header",
+          "timestamp_header",
+          "tolerance_s",
+          "allowlist",
+          "body_limit",
+          "id_source",
+          "id_pointer",
+          "id_header",
+          "events_pointer",
+          "trigger",
+          "path",
+          "pending_events",
+          "pending_bytes",
+          "retained_events",
+          "retained_bytes",
+          "created_at",
+          "secret"
+        ],
+        "title": "EndpointCreatedOut",
         "type": "object"
       },
       "EndpointIn": {
@@ -807,6 +1543,19 @@
             "minimum": 60.0,
             "title": "Tolerance S",
             "type": "integer"
+          },
+          "trigger": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trigger"
           }
         },
         "required": [
@@ -815,9 +1564,180 @@
         "title": "EndpointIn",
         "type": "object"
       },
+      "EndpointOut": {
+        "additionalProperties": false,
+        "description": "A webhook endpoint (engine 2b spec \u00a78.3), never its secret, its digest or its dedupe key. `path` is relative:\nits URL is this path on the deployment's webhook address.",
+        "properties": {
+          "allowlist": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Allowlist",
+            "type": "array"
+          },
+          "auth": {
+            "enum": [
+              "bearer",
+              "hmac"
+            ],
+            "title": "Auth",
+            "type": "string"
+          },
+          "body_limit": {
+            "title": "Body Limit",
+            "type": "integer"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "events_pointer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Events Pointer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "id_header": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id Header"
+          },
+          "id_pointer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id Pointer"
+          },
+          "id_source": {
+            "enum": [
+              "pointer",
+              "header",
+              "none"
+            ],
+            "title": "Id Source",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "pending_bytes": {
+            "title": "Pending Bytes",
+            "type": "integer"
+          },
+          "pending_events": {
+            "title": "Pending Events",
+            "type": "integer"
+          },
+          "retained_bytes": {
+            "title": "Retained Bytes",
+            "type": "integer"
+          },
+          "retained_events": {
+            "title": "Retained Events",
+            "type": "integer"
+          },
+          "signature_header": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Signature Header"
+          },
+          "timestamp_header": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timestamp Header"
+          },
+          "tolerance_s": {
+            "title": "Tolerance S",
+            "type": "integer"
+          },
+          "trigger": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trigger"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "enabled",
+          "auth",
+          "signature_header",
+          "timestamp_header",
+          "tolerance_s",
+          "allowlist",
+          "body_limit",
+          "id_source",
+          "id_pointer",
+          "id_header",
+          "events_pointer",
+          "trigger",
+          "path",
+          "pending_events",
+          "pending_bytes",
+          "retained_events",
+          "retained_bytes",
+          "created_at"
+        ],
+        "title": "EndpointOut",
+        "type": "object"
+      },
       "EndpointPatch": {
         "additionalProperties": false,
-        "description": "Only the fields given change, never an endpoint's identity (how it authenticates, where its events and their ids\nare).",
+        "description": "Only the fields given change, never an endpoint's identity (how it authenticates, where its events and their ids\nare, the trigger it's for).",
         "properties": {
           "allowlist": {
             "anyOf": [
@@ -911,6 +1831,23 @@
         "title": "EndpointPatch",
         "type": "object"
       },
+      "EndpointsOut": {
+        "additionalProperties": false,
+        "properties": {
+          "endpoints": {
+            "items": {
+              "$ref": "#/components/schemas/EndpointOut"
+            },
+            "title": "Endpoints",
+            "type": "array"
+          }
+        },
+        "required": [
+          "endpoints"
+        ],
+        "title": "EndpointsOut",
+        "type": "object"
+      },
       "ErasureStartIn": {
         "properties": {
           "confirm": {
@@ -924,6 +1861,278 @@
           "confirm"
         ],
         "title": "ErasureStartIn",
+        "type": "object"
+      },
+      "ExpressionOut": {
+        "additionalProperties": false,
+        "description": "How one CEL value runs (engine-core \u00a75.10): \"local\" inline, \"activity\" as a separate step, with why.",
+        "properties": {
+          "field": {
+            "title": "Field",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "local",
+              "activity"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "node": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "required": [
+          "node",
+          "field",
+          "mode",
+          "reason"
+        ],
+        "title": "ExpressionOut",
+        "type": "object"
+      },
+      "FilterClauseOut": {
+        "additionalProperties": false,
+        "properties": {
+          "pointer": {
+            "title": "Pointer",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "pointer",
+          "value"
+        ],
+        "title": "FilterClauseOut",
+        "type": "object"
+      },
+      "FormulaUseOut": {
+        "additionalProperties": false,
+        "properties": {
+          "guards": {
+            "items": {
+              "$ref": "#/components/schemas/GuardOut"
+            },
+            "title": "Guards",
+            "type": "array"
+          },
+          "null_test": {
+            "title": "Null Test",
+            "type": "boolean"
+          },
+          "sensitive": {
+            "title": "Sensitive",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "guards",
+          "sensitive",
+          "null_test"
+        ],
+        "title": "FormulaUseOut",
+        "type": "object"
+      },
+      "Graph": {
+        "additionalProperties": false,
+        "properties": {
+          "edges": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/Edge"
+            },
+            "maxItems": 2000,
+            "title": "Edges",
+            "type": "array"
+          },
+          "graph_format": {
+            "const": 1,
+            "default": 1,
+            "title": "Graph Format",
+            "type": "integer"
+          },
+          "nodes": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/GraphNode"
+            },
+            "maxItems": 500,
+            "title": "Nodes",
+            "type": "array"
+          },
+          "settings": {
+            "$ref": "#/components/schemas/GraphSettings"
+          }
+        },
+        "title": "Graph",
+        "type": "object"
+      },
+      "GraphNode": {
+        "additionalProperties": false,
+        "properties": {
+          "config": {
+            "additionalProperties": true,
+            "title": "Config",
+            "type": "object"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "key": {
+            "pattern": "^[a-z][a-z0-9_]{0,62}$",
+            "title": "Key",
+            "type": "string"
+          },
+          "options": {
+            "$ref": "#/components/schemas/Options"
+          },
+          "position": {
+            "$ref": "#/components/schemas/Position"
+          },
+          "type": {
+            "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+@[1-9][0-9]{0,3}$",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "key",
+          "type"
+        ],
+        "title": "GraphNode",
+        "type": "object"
+      },
+      "GraphSettings": {
+        "additionalProperties": false,
+        "properties": {
+          "csv": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CsvSettings"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "declassify": {
+            "items": {
+              "$ref": "#/components/schemas/DeclassifySite"
+            },
+            "maxItems": 200,
+            "title": "Declassify",
+            "type": "array"
+          },
+          "failure_handler": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Failure Handler"
+          },
+          "input_schema": {
+            "additionalProperties": true,
+            "title": "Input Schema",
+            "type": "object"
+          },
+          "outputs": {
+            "additionalProperties": true,
+            "title": "Outputs",
+            "type": "object"
+          },
+          "vars_schema": {
+            "additionalProperties": true,
+            "title": "Vars Schema",
+            "type": "object"
+          }
+        },
+        "title": "GraphSettings",
+        "type": "object"
+      },
+      "GuardOut": {
+        "additionalProperties": false,
+        "description": "A test a formula makes before it reads a path (4c-2a ruling 6). `size`, for `min_size`: the list's size must\nexceed it.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "present",
+              "not_null",
+              "is_map",
+              "is_list",
+              "min_size"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "size": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size"
+          }
+        },
+        "required": [
+          "kind",
+          "path",
+          "size"
+        ],
+        "title": "GuardOut",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -958,6 +2167,32 @@
           "field"
         ],
         "title": "InputOptionsIn",
+        "type": "object"
+      },
+      "LastRunOut": {
+        "additionalProperties": false,
+        "properties": {
+          "at": {
+            "title": "At",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "running",
+              "succeeded",
+              "failed",
+              "cancelled",
+              "deadline_exceeded"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "at"
+        ],
+        "title": "LastRunOut",
         "type": "object"
       },
       "LoginIn": {
@@ -1063,6 +2298,148 @@
         "title": "MemberRoleOut",
         "type": "object"
       },
+      "NodeTypeOut": {
+        "additionalProperties": false,
+        "description": "A node type the editor may place (active) or still draws (deprecated), and how a step of it runs (B5): what it\nmay change, the connection types it takes, what it may reach, and its retry and timeout defaults.",
+        "properties": {
+          "capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Capabilities",
+            "type": "array"
+          },
+          "config_schema": {
+            "additionalProperties": true,
+            "title": "Config Schema",
+            "type": "object"
+          },
+          "credentials": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Credentials",
+            "type": "array"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "dynamic_ports": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dynamic Ports"
+          },
+          "icon": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Icon"
+          },
+          "kind": {
+            "enum": [
+              "action",
+              "control"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "options": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Options",
+            "type": "array"
+          },
+          "output_schema": {
+            "additionalProperties": true,
+            "title": "Output Schema",
+            "type": "object"
+          },
+          "ports": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Ports",
+            "type": "array"
+          },
+          "ref": {
+            "title": "Ref",
+            "type": "string"
+          },
+          "retry": {
+            "$ref": "#/components/schemas/RetryOut"
+          },
+          "side_effect": {
+            "enum": [
+              "none",
+              "idempotent",
+              "keyed",
+              "reconcilable",
+              "ambiguous"
+            ],
+            "title": "Side Effect",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "active",
+              "deprecated"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "timeout_s": {
+            "title": "Timeout S",
+            "type": "number"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "ref",
+          "type",
+          "version",
+          "kind",
+          "state",
+          "title",
+          "description",
+          "icon",
+          "ports",
+          "dynamic_ports",
+          "config_schema",
+          "output_schema",
+          "options",
+          "side_effect",
+          "credentials",
+          "capabilities",
+          "retry",
+          "timeout_s"
+        ],
+        "title": "NodeTypeOut",
+        "type": "object"
+      },
       "OptionOut": {
         "additionalProperties": false,
         "properties": {
@@ -1080,6 +2457,51 @@
           "label"
         ],
         "title": "OptionOut",
+        "type": "object"
+      },
+      "Options": {
+        "additionalProperties": false,
+        "properties": {
+          "max_attempts": {
+            "anyOf": [
+              {
+                "maximum": 20,
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Max Attempts"
+          },
+          "on_error": {
+            "default": "fail",
+            "enum": [
+              "fail",
+              "continue",
+              "port"
+            ],
+            "title": "On Error",
+            "type": "string"
+          },
+          "timeout_s": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0,
+                "maximum": 86400,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Timeout S"
+          }
+        },
+        "title": "Options",
         "type": "object"
       },
       "OptionsIn": {
@@ -1238,6 +2660,70 @@
           "production_runs"
         ],
         "title": "PlatformStatusOut",
+        "type": "object"
+      },
+      "Position": {
+        "additionalProperties": false,
+        "properties": {
+          "x": {
+            "default": 0,
+            "title": "X",
+            "type": "number"
+          },
+          "y": {
+            "default": 0,
+            "title": "Y",
+            "type": "number"
+          }
+        },
+        "title": "Position",
+        "type": "object"
+      },
+      "PublishIn": {
+        "additionalProperties": false,
+        "description": "What the editor showed when it asked to publish (4b ruling 17). Extra keys are refused: a misspelt expectation\nmust never be dropped silently, publishing what nobody confirmed.",
+        "properties": {
+          "expected_latest_version": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Latest Version"
+          }
+        },
+        "title": "PublishIn",
+        "type": "object"
+      },
+      "PublishedOut": {
+        "additionalProperties": false,
+        "properties": {
+          "number": {
+            "title": "Number",
+            "type": "integer"
+          },
+          "version_id": {
+            "title": "Version Id",
+            "type": "string"
+          },
+          "warnings": {
+            "items": {
+              "$ref": "#/components/schemas/DiagnosticOut"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "version_id",
+          "number",
+          "warnings"
+        ],
+        "title": "PublishedOut",
         "type": "object"
       },
       "RecoveryCodesOut": {
@@ -1422,6 +2908,43 @@
         "title": "RetentionIn",
         "type": "object"
       },
+      "RetryOut": {
+        "additionalProperties": false,
+        "properties": {
+          "backoff": {
+            "title": "Backoff",
+            "type": "number"
+          },
+          "initial_interval_s": {
+            "title": "Initial Interval S",
+            "type": "number"
+          },
+          "max_attempts": {
+            "title": "Max Attempts",
+            "type": "integer"
+          },
+          "max_interval_s": {
+            "title": "Max Interval S",
+            "type": "number"
+          },
+          "non_retryable": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Non Retryable",
+            "type": "array"
+          }
+        },
+        "required": [
+          "max_attempts",
+          "initial_interval_s",
+          "backoff",
+          "max_interval_s",
+          "non_retryable"
+        ],
+        "title": "RetryOut",
+        "type": "object"
+      },
       "RoleChange": {
         "properties": {
           "role": {
@@ -1440,6 +2963,280 @@
           "role"
         ],
         "title": "RoleChange",
+        "type": "object"
+      },
+      "RunCountOut": {
+        "additionalProperties": false,
+        "properties": {
+          "live": {
+            "title": "Live",
+            "type": "integer"
+          },
+          "simulate": {
+            "title": "Simulate",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "live",
+          "simulate"
+        ],
+        "title": "RunCountOut",
+        "type": "object"
+      },
+      "SampleConnectionOut": {
+        "additionalProperties": false,
+        "properties": {
+          "connection_id": {
+            "title": "Connection Id",
+            "type": "string"
+          },
+          "context": {
+            "additionalProperties": true,
+            "title": "Context",
+            "type": "object"
+          },
+          "current_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Revision"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "unchanged",
+              "changed",
+              "deleted"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "connection_id",
+          "type",
+          "name",
+          "revision",
+          "current_revision",
+          "state",
+          "context"
+        ],
+        "title": "SampleConnectionOut",
+        "type": "object"
+      },
+      "SampleConnectionsOut": {
+        "additionalProperties": false,
+        "description": "What the sample's attempt used: `recorded` (each one, as it was and as it is now), `none` (the step names\nnone), `simulated` (a simulation opens none) or `unknown` (it names one, but the run predates records).",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SampleConnectionOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "state": {
+            "enum": [
+              "recorded",
+              "none",
+              "simulated",
+              "unknown"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state",
+          "items"
+        ],
+        "title": "SampleConnectionsOut",
+        "type": "object"
+      },
+      "SampleOut": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt": {
+            "title": "Attempt",
+            "type": "integer"
+          },
+          "captured_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Captured At"
+          },
+          "connections": {
+            "$ref": "#/components/schemas/SampleConnectionsOut"
+          },
+          "iteration_key": {
+            "title": "Iteration Key",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "live",
+              "simulate"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "output": {
+            "title": "Output"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "run_kind": {
+            "enum": [
+              "run",
+              "subflow",
+              "failure_handler"
+            ],
+            "title": "Run Kind",
+            "type": "string"
+          },
+          "same_config": {
+            "title": "Same Config",
+            "type": "boolean"
+          },
+          "same_type": {
+            "title": "Same Type",
+            "type": "boolean"
+          },
+          "stale": {
+            "title": "Stale",
+            "type": "boolean"
+          },
+          "type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Type"
+          },
+          "version_id": {
+            "title": "Version Id",
+            "type": "string"
+          },
+          "version_number": {
+            "title": "Version Number",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "run_id",
+          "run_kind",
+          "mode",
+          "version_id",
+          "version_number",
+          "iteration_key",
+          "attempt",
+          "captured_at",
+          "type",
+          "same_type",
+          "same_config",
+          "output",
+          "connections",
+          "stale"
+        ],
+        "title": "SampleOut",
+        "type": "object"
+      },
+      "SamplesOut": {
+        "additionalProperties": false,
+        "description": "A step's newest sample (B7), against the saved draft at this revision.",
+        "properties": {
+          "draft_revision": {
+            "title": "Draft Revision",
+            "type": "integer"
+          },
+          "node": {
+            "title": "Node",
+            "type": "string"
+          },
+          "sample": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SampleOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "search_limit": {
+            "title": "Search Limit",
+            "type": "integer"
+          },
+          "searched_runs": {
+            "title": "Searched Runs",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "draft_revision",
+          "node",
+          "sample",
+          "searched_runs",
+          "search_limit"
+        ],
+        "title": "SamplesOut",
+        "type": "object"
+      },
+      "ScheduleBreakOut": {
+        "additionalProperties": false,
+        "description": "A live schedule the draft, published, would make fail at every firing (4c-3a ruling 7): why, by its stored\ninput's shape, in the draft's own words; never what the input holds.",
+        "properties": {
+          "more": {
+            "title": "More",
+            "type": "boolean"
+          },
+          "reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reasons",
+            "type": "array"
+          },
+          "schedule_id": {
+            "title": "Schedule Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schedule_id",
+          "reasons",
+          "more"
+        ],
+        "title": "ScheduleBreakOut",
         "type": "object"
       },
       "ScheduleIn": {
@@ -1505,6 +3302,163 @@
           }
         },
         "title": "ScheduleIn",
+        "type": "object"
+      },
+      "ScheduleOut": {
+        "additionalProperties": false,
+        "description": "A schedule (engine 2b spec \u00a78.2), never its input; its sync's state and its missed-firing accounting (D3f).",
+        "properties": {
+          "accounting_complete": {
+            "title": "Accounting Complete",
+            "type": "boolean"
+          },
+          "catchup_window_s": {
+            "title": "Catchup Window S",
+            "type": "integer"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "cron": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cron"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "every_s": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Every S"
+          },
+          "generation": {
+            "title": "Generation",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "missed_while_created": {
+            "title": "Missed While Created",
+            "type": "integer"
+          },
+          "misses": {
+            "title": "Misses",
+            "type": "integer"
+          },
+          "misses_read_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Misses Read At"
+          },
+          "mode": {
+            "enum": [
+              "live",
+              "simulate"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "never_unpaused": {
+            "title": "Never Unpaused",
+            "type": "boolean"
+          },
+          "offset_s": {
+            "title": "Offset S",
+            "type": "integer"
+          },
+          "sync_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sync Error"
+          },
+          "sync_error_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sync Error At"
+          },
+          "synced_generation": {
+            "title": "Synced Generation",
+            "type": "integer"
+          },
+          "time_zone": {
+            "title": "Time Zone",
+            "type": "string"
+          },
+          "uncounted_intervals": {
+            "items": {
+              "$ref": "#/components/schemas/UncountedOut"
+            },
+            "title": "Uncounted Intervals",
+            "type": "array"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          },
+          "workflow_id": {
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "workflow_id",
+          "cron",
+          "every_s",
+          "offset_s",
+          "time_zone",
+          "catchup_window_s",
+          "mode",
+          "enabled",
+          "generation",
+          "synced_generation",
+          "misses",
+          "missed_while_created",
+          "misses_read_at",
+          "accounting_complete",
+          "uncounted_intervals",
+          "sync_error",
+          "sync_error_at",
+          "never_unpaused",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ScheduleOut",
         "type": "object"
       },
       "SchedulePatch": {
@@ -1610,6 +3564,245 @@
         "title": "SchedulePatch",
         "type": "object"
       },
+      "SchedulesOut": {
+        "additionalProperties": false,
+        "properties": {
+          "schedules": {
+            "items": {
+              "$ref": "#/components/schemas/ScheduleOut"
+            },
+            "title": "Schedules",
+            "type": "array"
+          }
+        },
+        "required": [
+          "schedules"
+        ],
+        "title": "SchedulesOut",
+        "type": "object"
+      },
+      "ScopeEntryOut": {
+        "additionalProperties": false,
+        "properties": {
+          "children": {
+            "title": "Children",
+            "type": "boolean"
+          },
+          "format": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Format"
+          },
+          "formula": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FormulaUseOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "missing": {
+            "title": "Missing",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "nameable": {
+            "title": "Nameable",
+            "type": "boolean"
+          },
+          "nullable": {
+            "title": "Nullable",
+            "type": "boolean"
+          },
+          "parent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "problem": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DiagnosticOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "root": {
+            "enum": [
+              "trigger",
+              "steps",
+              "vars",
+              "item",
+              "index",
+              "loops",
+              "run"
+            ],
+            "title": "Root",
+            "type": "string"
+          },
+          "sensitive": {
+            "title": "Sensitive",
+            "type": "boolean"
+          },
+          "step": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Step"
+          },
+          "types": {
+            "items": {
+              "enum": [
+                "string",
+                "integer",
+                "number",
+                "boolean",
+                "array",
+                "object",
+                "null"
+              ],
+              "type": "string"
+            },
+            "title": "Types",
+            "type": "array"
+          }
+        },
+        "required": [
+          "path",
+          "parent",
+          "name",
+          "root",
+          "step",
+          "types",
+          "format",
+          "missing",
+          "nullable",
+          "sensitive",
+          "nameable",
+          "children",
+          "formula",
+          "problem"
+        ],
+        "title": "ScopeEntryOut",
+        "type": "object"
+      },
+      "ScopeOut": {
+        "additionalProperties": false,
+        "description": "What one field of the saved draft's step can read (B6), at the revision it was computed for: an editor drops an\nanswer for an older revision (D17).",
+        "properties": {
+          "draft_revision": {
+            "title": "Draft Revision",
+            "type": "integer"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/ScopeEntryOut"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "field": {
+            "title": "Field",
+            "type": "string"
+          },
+          "more": {
+            "title": "More",
+            "type": "boolean"
+          },
+          "node": {
+            "title": "Node",
+            "type": "string"
+          },
+          "problem": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DiagnosticOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "state": {
+            "enum": [
+              "ok",
+              "unavailable"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "draft_revision",
+          "node",
+          "field",
+          "state",
+          "reason",
+          "entries",
+          "more",
+          "problem"
+        ],
+        "title": "ScopeOut",
+        "type": "object"
+      },
+      "SecretOut": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "secret": {
+            "title": "Secret",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "secret"
+        ],
+        "title": "SecretOut",
+        "type": "object"
+      },
       "SessionOut": {
         "additionalProperties": false,
         "properties": {
@@ -1670,6 +3863,145 @@
         "title": "SessionUserOut",
         "type": "object"
       },
+      "StartFieldOut": {
+        "additionalProperties": false,
+        "description": "A start form's field (engine 2b spec \u00a77.7). A key it doesn't have is left out of the answer (the route excludes\nwhat's unset): a sensitive field's default and enum are masked, never sent.",
+        "properties": {
+          "default": {
+            "title": "Default"
+          },
+          "default_masked": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Masked"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "enum": {
+            "anyOf": [
+              {
+                "items": {},
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enum"
+          },
+          "enum_masked": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enum Masked"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "picker": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Picker"
+          },
+          "required": {
+            "title": "Required",
+            "type": "boolean"
+          },
+          "sensitive": {
+            "title": "Sensitive",
+            "type": "boolean"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "type": {
+            "title": "Type"
+          }
+        },
+        "required": [
+          "name",
+          "type",
+          "required",
+          "sensitive"
+        ],
+        "title": "StartFieldOut",
+        "type": "object"
+      },
+      "StartFormOut": {
+        "additionalProperties": false,
+        "description": "The active version's input, as a form: what a schedule's input is entered on (4c-3a ruling 5).",
+        "properties": {
+          "csv": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CsvFormOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "fields": {
+            "items": {
+              "$ref": "#/components/schemas/StartFieldOut"
+            },
+            "title": "Fields",
+            "type": "array"
+          },
+          "version_id": {
+            "title": "Version Id",
+            "type": "string"
+          },
+          "workflow_id": {
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workflow_id",
+          "version_id",
+          "fields",
+          "csv"
+        ],
+        "title": "StartFormOut",
+        "type": "object"
+      },
       "StartIn": {
         "additionalProperties": false,
         "properties": {
@@ -1723,6 +4055,57 @@
           "csrf_token"
         ],
         "title": "StateOut",
+        "type": "object"
+      },
+      "TaintOut": {
+        "additionalProperties": false,
+        "properties": {
+          "declassified": {
+            "items": {
+              "$ref": "#/components/schemas/DeclassifiedOut"
+            },
+            "title": "Declassified",
+            "type": "array"
+          },
+          "sites": {
+            "items": {
+              "$ref": "#/components/schemas/TaintSiteOut"
+            },
+            "title": "Sites",
+            "type": "array"
+          }
+        },
+        "required": [
+          "sites",
+          "declassified"
+        ],
+        "title": "TaintOut",
+        "type": "object"
+      },
+      "TaintSiteOut": {
+        "additionalProperties": false,
+        "properties": {
+          "field": {
+            "title": "Field",
+            "type": "string"
+          },
+          "node": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node"
+          }
+        },
+        "required": [
+          "node",
+          "field"
+        ],
+        "title": "TaintSiteOut",
         "type": "object"
       },
       "TemporalResponse": {
@@ -1952,6 +4335,78 @@
         "title": "TriggerTypeOut",
         "type": "object"
       },
+      "TriggersOut": {
+        "additionalProperties": false,
+        "description": "What starts a workflow besides a person (4c-3a ruling 3): by hand is always possible once it's published.",
+        "properties": {
+          "csv": {
+            "title": "Csv",
+            "type": "boolean"
+          },
+          "schedules": {
+            "title": "Schedules",
+            "type": "integer"
+          },
+          "schedules_enabled": {
+            "title": "Schedules Enabled",
+            "type": "integer"
+          },
+          "webhook_bindings": {
+            "title": "Webhook Bindings",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "schedules",
+          "schedules_enabled",
+          "webhook_bindings",
+          "csv"
+        ],
+        "title": "TriggersOut",
+        "type": "object"
+      },
+      "UncountedOut": {
+        "additionalProperties": false,
+        "description": "A span of a schedule's life whose missed firings aren't counted (D3f): possibly missed, unknown, or pending\nuntil its count is read. `from` and `class` are Python keywords, so the fields are aliased to them.",
+        "properties": {
+          "class": {
+            "enum": [
+              "possibly_missed",
+              "unknown",
+              "pending"
+            ],
+            "title": "Class",
+            "type": "string"
+          },
+          "from": {
+            "title": "From",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "To"
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "class",
+          "reason"
+        ],
+        "title": "UncountedOut",
+        "type": "object"
+      },
       "UserIn": {
         "properties": {
           "email": {
@@ -2015,6 +4470,62 @@
         "title": "ValidationError",
         "type": "object"
       },
+      "ValidationOut": {
+        "additionalProperties": false,
+        "description": "The saved draft's diagnostics, at the revision they were computed for: an editor shows an answer for an older\nrevision as stale, never as current (D17; 4b ruling 24).",
+        "properties": {
+          "conditional_steps": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Conditional Steps",
+            "type": "array"
+          },
+          "diagnostics": {
+            "items": {
+              "$ref": "#/components/schemas/DiagnosticOut"
+            },
+            "title": "Diagnostics",
+            "type": "array"
+          },
+          "draft_revision": {
+            "title": "Draft Revision",
+            "type": "integer"
+          },
+          "expressions": {
+            "items": {
+              "$ref": "#/components/schemas/ExpressionOut"
+            },
+            "title": "Expressions",
+            "type": "array"
+          },
+          "schedule_breaks": {
+            "items": {
+              "$ref": "#/components/schemas/ScheduleBreakOut"
+            },
+            "title": "Schedule Breaks",
+            "type": "array"
+          },
+          "taint": {
+            "$ref": "#/components/schemas/TaintOut"
+          },
+          "valid": {
+            "title": "Valid",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "draft_revision",
+          "valid",
+          "diagnostics",
+          "expressions",
+          "taint",
+          "conditional_steps",
+          "schedule_breaks"
+        ],
+        "title": "ValidationOut",
+        "type": "object"
+      },
       "VerifyIn": {
         "properties": {
           "challenge_id": {
@@ -2039,6 +4550,295 @@
           "credential"
         ],
         "title": "VerifyIn",
+        "type": "object"
+      },
+      "VersionDetailOut": {
+        "additionalProperties": false,
+        "description": "One version whole (B4a): its graph, verbatim as published (documented as a Graph), and how each of its\nexpressions runs.",
+        "properties": {
+          "active": {
+            "title": "Active",
+            "type": "boolean"
+          },
+          "blocked_by": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Blocked By",
+            "type": "array"
+          },
+          "cel_profile": {
+            "title": "Cel Profile",
+            "type": "string"
+          },
+          "engine_abi": {
+            "title": "Engine Abi",
+            "type": "integer"
+          },
+          "executable": {
+            "title": "Executable",
+            "type": "boolean"
+          },
+          "expressions": {
+            "items": {
+              "$ref": "#/components/schemas/ExpressionOut"
+            },
+            "title": "Expressions",
+            "type": "array"
+          },
+          "graph": {
+            "$ref": "#/components/schemas/Graph"
+          },
+          "graph_hash": {
+            "title": "Graph Hash",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "node_refs": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Node Refs",
+            "type": "array"
+          },
+          "number": {
+            "title": "Number",
+            "type": "integer"
+          },
+          "published_at": {
+            "title": "Published At",
+            "type": "string"
+          },
+          "published_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Published By"
+          },
+          "version_hash": {
+            "title": "Version Hash",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "number",
+          "published_at",
+          "published_by",
+          "graph_hash",
+          "version_hash",
+          "cel_profile",
+          "engine_abi",
+          "node_refs",
+          "active",
+          "executable",
+          "blocked_by",
+          "graph",
+          "expressions"
+        ],
+        "title": "VersionDetailOut",
+        "type": "object"
+      },
+      "VersionOut": {
+        "additionalProperties": false,
+        "properties": {
+          "active": {
+            "title": "Active",
+            "type": "boolean"
+          },
+          "blocked_by": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Blocked By",
+            "type": "array"
+          },
+          "cel_profile": {
+            "title": "Cel Profile",
+            "type": "string"
+          },
+          "engine_abi": {
+            "title": "Engine Abi",
+            "type": "integer"
+          },
+          "executable": {
+            "title": "Executable",
+            "type": "boolean"
+          },
+          "graph_hash": {
+            "title": "Graph Hash",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "node_refs": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Node Refs",
+            "type": "array"
+          },
+          "number": {
+            "title": "Number",
+            "type": "integer"
+          },
+          "published_at": {
+            "title": "Published At",
+            "type": "string"
+          },
+          "published_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Published By"
+          },
+          "version_hash": {
+            "title": "Version Hash",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "number",
+          "published_at",
+          "published_by",
+          "graph_hash",
+          "version_hash",
+          "cel_profile",
+          "engine_abi",
+          "node_refs",
+          "active",
+          "executable",
+          "blocked_by"
+        ],
+        "title": "VersionOut",
+        "type": "object"
+      },
+      "WebhookBindingOut": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "endpoint_id": {
+            "title": "Endpoint Id",
+            "type": "string"
+          },
+          "filter": {
+            "items": {
+              "$ref": "#/components/schemas/FilterClauseOut"
+            },
+            "title": "Filter",
+            "type": "array"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "workflow_id": {
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "endpoint_id",
+          "workflow_id",
+          "filter",
+          "enabled"
+        ],
+        "title": "WebhookBindingOut",
+        "type": "object"
+      },
+      "WebhookBindingsOut": {
+        "additionalProperties": false,
+        "properties": {
+          "bindings": {
+            "items": {
+              "$ref": "#/components/schemas/WebhookBindingOut"
+            },
+            "title": "Bindings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "bindings"
+        ],
+        "title": "WebhookBindingsOut",
+        "type": "object"
+      },
+      "WorkflowBindingOut": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "endpoint": {
+            "$ref": "#/components/schemas/BindingEndpointOut"
+          },
+          "endpoint_id": {
+            "title": "Endpoint Id",
+            "type": "string"
+          },
+          "filter": {
+            "items": {
+              "$ref": "#/components/schemas/FilterClauseOut"
+            },
+            "title": "Filter",
+            "type": "array"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "workflow_id": {
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "endpoint_id",
+          "workflow_id",
+          "filter",
+          "enabled",
+          "endpoint"
+        ],
+        "title": "WorkflowBindingOut",
+        "type": "object"
+      },
+      "WorkflowBindingsOut": {
+        "additionalProperties": false,
+        "properties": {
+          "bindings": {
+            "items": {
+              "$ref": "#/components/schemas/WorkflowBindingOut"
+            },
+            "title": "Bindings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "bindings"
+        ],
+        "title": "WorkflowBindingsOut",
         "type": "object"
       },
       "WorkflowCreateIn": {
@@ -2066,6 +4866,365 @@
           "name"
         ],
         "title": "WorkflowCreateIn",
+        "type": "object"
+      },
+      "WorkflowDetailOut": {
+        "additionalProperties": false,
+        "properties": {
+          "active_version_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Version Id"
+          },
+          "active_version_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Version Number"
+          },
+          "blocked_by": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Blocked By",
+            "type": "array"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "draft": {
+            "$ref": "#/components/schemas/Graph"
+          },
+          "draft_graph_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Draft Graph Hash"
+          },
+          "draft_revision": {
+            "title": "Draft Revision",
+            "type": "integer"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "executable": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Executable"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "last_run": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LastRunOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_simulation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LastRunOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "needs_attention": {
+            "items": {
+              "enum": [
+                "last_run_failed",
+                "not_executable",
+                "schedule_sync_failed"
+              ],
+              "type": "string"
+            },
+            "title": "Needs Attention",
+            "type": "array"
+          },
+          "runs_24h": {
+            "$ref": "#/components/schemas/RunCountOut"
+          },
+          "triggers": {
+            "$ref": "#/components/schemas/TriggersOut"
+          },
+          "unpublished_changes": {
+            "title": "Unpublished Changes",
+            "type": "boolean"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "enabled",
+          "draft_revision",
+          "active_version_id",
+          "active_version_number",
+          "executable",
+          "blocked_by",
+          "created_at",
+          "updated_at",
+          "unpublished_changes",
+          "draft_graph_hash",
+          "last_run",
+          "last_simulation",
+          "runs_24h",
+          "triggers",
+          "needs_attention",
+          "draft"
+        ],
+        "title": "WorkflowDetailOut",
+        "type": "object"
+      },
+      "WorkflowDocument": {
+        "additionalProperties": false,
+        "description": "A workflow as a file (B12): its graph without the tenant's ids (documented as a Graph), and their bindings.",
+        "properties": {
+          "bindings": {
+            "items": {
+              "$ref": "#/components/schemas/Binding"
+            },
+            "maxItems": 10000,
+            "title": "Bindings",
+            "type": "array"
+          },
+          "format": {
+            "const": "dewpoint.workflow",
+            "title": "Format",
+            "type": "string"
+          },
+          "format_version": {
+            "const": 1,
+            "title": "Format Version",
+            "type": "integer"
+          },
+          "graph": {
+            "$ref": "#/components/schemas/Graph"
+          },
+          "name": {
+            "maxLength": 100,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "format",
+          "format_version",
+          "name",
+          "graph",
+          "bindings"
+        ],
+        "title": "WorkflowDocument",
+        "type": "object"
+      },
+      "WorkflowImportIn": {
+        "additionalProperties": false,
+        "properties": {
+          "bind": {
+            "additionalProperties": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Bind",
+            "type": "object"
+          },
+          "document": {
+            "$ref": "#/components/schemas/WorkflowDocument"
+          },
+          "name": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "document"
+        ],
+        "title": "WorkflowImportIn",
+        "type": "object"
+      },
+      "WorkflowOut": {
+        "additionalProperties": false,
+        "properties": {
+          "active_version_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Version Id"
+          },
+          "active_version_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Version Number"
+          },
+          "blocked_by": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Blocked By",
+            "type": "array"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "draft_graph_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Draft Graph Hash"
+          },
+          "draft_revision": {
+            "title": "Draft Revision",
+            "type": "integer"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "executable": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Executable"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "last_run": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LastRunOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_simulation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LastRunOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "needs_attention": {
+            "items": {
+              "enum": [
+                "last_run_failed",
+                "not_executable",
+                "schedule_sync_failed"
+              ],
+              "type": "string"
+            },
+            "title": "Needs Attention",
+            "type": "array"
+          },
+          "runs_24h": {
+            "$ref": "#/components/schemas/RunCountOut"
+          },
+          "triggers": {
+            "$ref": "#/components/schemas/TriggersOut"
+          },
+          "unpublished_changes": {
+            "title": "Unpublished Changes",
+            "type": "boolean"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "enabled",
+          "draft_revision",
+          "active_version_id",
+          "active_version_number",
+          "executable",
+          "blocked_by",
+          "created_at",
+          "updated_at",
+          "unpublished_changes",
+          "draft_graph_hash",
+          "last_run",
+          "last_simulation",
+          "runs_24h",
+          "triggers",
+          "needs_attention"
+        ],
+        "title": "WorkflowOut",
         "type": "object"
       },
       "WorkflowPatchIn": {
@@ -2096,6 +5255,157 @@
           }
         },
         "title": "WorkflowPatchIn",
+        "type": "object"
+      },
+      "WorkflowUpdatedOut": {
+        "additionalProperties": false,
+        "properties": {
+          "active_version_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Version Id"
+          },
+          "active_version_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Version Number"
+          },
+          "blocked_by": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Blocked By",
+            "type": "array"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "draft_graph_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Draft Graph Hash"
+          },
+          "draft_revision": {
+            "title": "Draft Revision",
+            "type": "integer"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "executable": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Executable"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "last_run": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LastRunOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_simulation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LastRunOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "needs_attention": {
+            "items": {
+              "enum": [
+                "last_run_failed",
+                "not_executable",
+                "schedule_sync_failed"
+              ],
+              "type": "string"
+            },
+            "title": "Needs Attention",
+            "type": "array"
+          },
+          "runs_24h": {
+            "$ref": "#/components/schemas/RunCountOut"
+          },
+          "triggers": {
+            "$ref": "#/components/schemas/TriggersOut"
+          },
+          "unpublished_changes": {
+            "title": "Unpublished Changes",
+            "type": "boolean"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          },
+          "warnings": {
+            "items": {
+              "$ref": "#/components/schemas/DiagnosticOut"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "enabled",
+          "draft_revision",
+          "active_version_id",
+          "active_version_number",
+          "executable",
+          "blocked_by",
+          "created_at",
+          "updated_at",
+          "unpublished_changes",
+          "draft_graph_hash",
+          "last_run",
+          "last_simulation",
+          "runs_24h",
+          "triggers",
+          "needs_attention",
+          "warnings"
+        ],
+        "title": "WorkflowUpdatedOut",
         "type": "object"
       }
     }
@@ -3494,7 +6804,7 @@
     },
     "/api/v1/node-types": {
       "get": {
-        "description": "The editor's palette: node types that new versions may use (active) or still carry (deprecated).",
+        "description": "The editor's palette: node types that new versions may use (active) or still carry (deprecated). A raw Response\nskips FastAPI's response model, so each row is checked against NodeTypeOut here, as /trigger-types does (the owner's\nreview of #60), off the event loop as the compression is: the catalog runs to megabytes.",
         "operationId": "node_types_api_v1_node_types_get",
         "responses": {
           "200": {
@@ -3502,8 +6812,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "additionalProperties": true,
-                    "type": "object"
+                    "$ref": "#/components/schemas/NodeTypeOut"
                   },
                   "title": "Response Node Types Api V1 Node Types Get",
                   "type": "array"
@@ -4923,9 +8232,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Schedule Api V1 T  Tenant Id  Schedules  Schedule Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/ScheduleOut"
                 }
               }
             },
@@ -4986,9 +8293,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Update Schedule Api V1 T  Tenant Id  Schedules  Schedule Id  Patch",
-                  "type": "object"
+                  "$ref": "#/components/schemas/ScheduleOut"
                 }
               }
             },
@@ -5095,9 +8400,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Update Binding Api V1 T  Tenant Id  Webhook Bindings  Binding Id  Patch",
-                  "type": "object"
+                  "$ref": "#/components/schemas/WebhookBindingOut"
                 }
               }
             },
@@ -5140,9 +8443,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Endpoints Api V1 T  Tenant Id  Webhook Endpoints Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/EndpointsOut"
                 }
               }
             },
@@ -5193,9 +8494,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Create Endpoint Api V1 T  Tenant Id  Webhook Endpoints Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/EndpointCreatedOut"
                 }
               }
             },
@@ -5248,9 +8547,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Endpoint Api V1 T  Tenant Id  Webhook Endpoints  Endpoint Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/EndpointOut"
                 }
               }
             },
@@ -5311,9 +8608,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Update Endpoint Api V1 T  Tenant Id  Webhook Endpoints  Endpoint Id  Patch",
-                  "type": "object"
+                  "$ref": "#/components/schemas/EndpointOut"
                 }
               }
             },
@@ -5366,9 +8661,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Bindings Api V1 T  Tenant Id  Webhook Endpoints  Endpoint Id  Bindings Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/WebhookBindingsOut"
                 }
               }
             },
@@ -5429,9 +8722,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Create Binding Api V1 T  Tenant Id  Webhook Endpoints  Endpoint Id  Bindings Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/WebhookBindingOut"
                 }
               }
             },
@@ -5617,9 +8908,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Rotate Secret Api V1 T  Tenant Id  Webhook Endpoints  Endpoint Id  Secret Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/SecretOut"
                 }
               }
             },
@@ -5663,8 +8952,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "additionalProperties": true,
-                    "type": "object"
+                    "$ref": "#/components/schemas/WorkflowOut"
                   },
                   "title": "Response List Workflows Api V1 T  Tenant Id  Workflows Get",
                   "type": "array"
@@ -5718,9 +9006,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Create Api V1 T  Tenant Id  Workflows Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/WorkflowDetailOut"
                 }
               }
             },
@@ -5738,6 +9024,60 @@
           }
         },
         "summary": "Create",
+        "tags": [
+          "workflows"
+        ]
+      }
+    },
+    "/api/v1/t/{tenant_id}/workflows/import": {
+      "post": {
+        "description": "A new workflow from a file (B12), checked whole before anything is written (4b ruling 18): the graph's format;\neach step's type and each binding's sites against this server's schemas, with no id embedded where a binding goes;\nthen each chosen id against this tenant's own connections (of the binding's type) and workflows.",
+        "operationId": "import_workflow_api_v1_t__tenant_id__workflows_import_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkflowImportIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowDetailOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Import Workflow",
         "tags": [
           "workflows"
         ]
@@ -5773,9 +9113,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get One Api V1 T  Tenant Id  Workflows  Workflow Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/WorkflowDetailOut"
                 }
               }
             },
@@ -5836,9 +9174,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Patch Api V1 T  Tenant Id  Workflows  Workflow Id  Patch",
-                  "type": "object"
+                  "$ref": "#/components/schemas/WorkflowUpdatedOut"
                 }
               }
             },
@@ -5901,9 +9237,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Activate Api V1 T  Tenant Id  Workflows  Workflow Id  Activate Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/ActivatedOut"
                 }
               }
             },
@@ -6093,9 +9427,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "additionalProperties": true,
-                "title": "Draft",
-                "type": "object"
+                "$ref": "#/components/schemas/Graph"
               }
             }
           },
@@ -6106,9 +9438,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Put Draft Api V1 T  Tenant Id  Workflows  Workflow Id  Draft Put",
-                  "type": "object"
+                  "$ref": "#/components/schemas/DraftSavedOut"
                 }
               }
             },
@@ -6126,6 +9456,267 @@
           }
         },
         "summary": "Put Draft",
+        "tags": [
+          "workflows"
+        ]
+      }
+    },
+    "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/samples": {
+      "get": {
+        "description": "A step's newest sample against the saved draft (B7; 4c-2a rulings 9, 10). Run data: `run.view`, and the\ntenant's retention.",
+        "operationId": "draft_samples_api_v1_t__tenant_id__workflows__workflow_id__draft_samples_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "node",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Node",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "iteration",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 2000,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Iteration"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SamplesOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Draft Samples",
+        "tags": [
+          "workflows"
+        ]
+      }
+    },
+    "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/scope": {
+      "get": {
+        "description": "What one field of the saved draft's step can read (B6; 4c-2a rulings 4\u20137): the top of each root, the children\nof one path (`under`), one path (`at`), or fields by name (`find`).",
+        "operationId": "draft_scope_api_v1_t__tenant_id__workflows__workflow_id__draft_scope_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "node",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Node",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "field",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "title": "Field",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "under",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 512,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Under"
+            }
+          },
+          {
+            "in": "query",
+            "name": "at",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 512,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "At"
+            }
+          },
+          {
+            "in": "query",
+            "name": "find",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 100,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Find"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScopeOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Draft Scope",
+        "tags": [
+          "workflows"
+        ]
+      }
+    },
+    "/api/v1/t/{tenant_id}/workflows/{workflow_id}/export": {
+      "get": {
+        "description": "The saved draft as a file, every id of this tenant's replaced by a typed placeholder (B12). Refused, never\napproximated, when that can't be done for certain (4b ruling 18), or when the draft holds a value written into a\nfield marked sensitive, which the file would carry (ledger M25): every reason at once, by the validator's rule.",
+        "operationId": "export_api_v1_t__tenant_id__workflows__workflow_id__export_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowDocument"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Export",
         "tags": [
           "workflows"
         ]
@@ -6236,14 +9827,29 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/PublishIn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "201": {
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Publish Api V1 T  Tenant Id  Workflows  Workflow Id  Publish Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/PublishedOut"
                 }
               }
             },
@@ -6378,9 +9984,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Schedules Api V1 T  Tenant Id  Workflows  Workflow Id  Schedules Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/SchedulesOut"
                 }
               }
             },
@@ -6441,9 +10045,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Create Schedule Api V1 T  Tenant Id  Workflows  Workflow Id  Schedules Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/ScheduleOut"
                 }
               }
             },
@@ -6497,9 +10099,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Start Form Api V1 T  Tenant Id  Workflows  Workflow Id  Start Form Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/StartFormOut"
                 }
               }
             },
@@ -6552,9 +10152,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Validate Draft Api V1 T  Tenant Id  Workflows  Workflow Id  Validate Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/ValidationOut"
                 }
               }
             },
@@ -6608,8 +10206,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "additionalProperties": true,
-                    "type": "object"
+                    "$ref": "#/components/schemas/VersionOut"
                   },
                   "title": "Response Versions Api V1 T  Tenant Id  Workflows  Workflow Id  Versions Get",
                   "type": "array"
@@ -6632,6 +10229,123 @@
         "summary": "Versions",
         "tags": [
           "workflows"
+        ]
+      }
+    },
+    "/api/v1/t/{tenant_id}/workflows/{workflow_id}/versions/{version_id}": {
+      "get": {
+        "operationId": "version_api_v1_t__tenant_id__workflows__workflow_id__versions__version_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "version_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Version Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VersionDetailOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Version",
+        "tags": [
+          "workflows"
+        ]
+      }
+    },
+    "/api/v1/t/{tenant_id}/workflows/{workflow_id}/webhook-bindings": {
+      "get": {
+        "description": "The webhooks that start a workflow (B13; 4c-3a ruling 2), each with what its Triggers panel shows of the\nendpoint, by the endpoint's name.",
+        "operationId": "workflow_bindings_api_v1_t__tenant_id__workflows__workflow_id__webhook_bindings_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowBindingsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Workflow Bindings",
+        "tags": [
+          "webhooks"
         ]
       }
     },

@@ -52,6 +52,7 @@ class Tls:
 
     def client_context(self) -> ssl.SSLContext:
         ctx = ssl.create_default_context(cadata=self.ca_pem.decode())
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2  # as the platform's own context (httpx's)
         return ctx
 
     def server_context(self) -> ssl.SSLContext:
