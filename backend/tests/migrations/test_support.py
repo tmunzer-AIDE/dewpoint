@@ -6,8 +6,8 @@ session (the disconnect, 2026-10-12). Alembic's command is a probe here: no data
 
 import gc
 import threading
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 
 import pytest
 from alembic import command
@@ -90,6 +90,80 @@ def test_a_process_with_collection_off_keeps_it_off(monkeypatch: pytest.MonkeyPa
     gc.disable()
     try:
         support.upgrade(URL, "0052")
+        assert not gc.isenabled()
+    finally:
+        gc.enable()
+
+
+# D15's steps that tests run through `autocommitted` (online.py's own tests), not through Alembic: the same pause (the
+# owner's go, 2026-10-13), after a disconnect in that path (test_online's slow-backfill test, CI, 2026-10-12).
+
+
+class _Connection:
+    async def execution_options(self, **options: object) -> "_Connection":
+        return self
+
+    async def run_sync(self, fn: Callable[["_Connection"], object]) -> object:
+        return fn(self)
+
+
+class _Engine:
+    """What `autocommitted` needs of an engine, with no database behind it."""
+
+    @asynccontextmanager
+    async def connect(self) -> AsyncIterator[_Connection]:
+        yield _Connection()
+
+    async def dispose(self) -> None:
+        pass
+
+
+@pytest.fixture
+def no_database(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(support, "create_async_engine", lambda *args, **kwargs: _Engine())
+
+
+def test_no_automatic_collection_runs_while_a_step_runs_through_autocommitted(no_database: None) -> None:
+    def step(conn: object) -> list[int]:
+        with _collections() as started:
+            _garbage()
+        return started
+
+    with _collections() as outside:
+        _garbage()
+    assert outside  # the same garbage does start collections outside a step
+
+    assert support.autocommitted(URL, step) == []
+    assert gc.isenabled()
+
+
+def test_overlapping_steps_and_migrations_keep_collection_paused_until_the_last_ends(
+    no_database: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inside, release = threading.Event(), threading.Event()
+
+    def held(conn: object) -> None:
+        inside.set()
+        release.wait(10)
+
+    first = threading.Thread(target=support.autocommitted, args=(URL, held))
+    first.start()
+    assert inside.wait(10)
+    support.autocommitted(URL, lambda conn: None)  # another step, begun and ended inside the first
+    monkeypatch.setattr(command, "upgrade", lambda config, target: None)
+    support.upgrade(URL, "0052")  # and a migration
+    paused = not gc.isenabled()
+    release.set()
+    first.join(10)
+
+    assert paused
+    assert gc.isenabled()
+
+
+def test_a_process_with_collection_off_keeps_it_off_through_autocommitted(no_database: None) -> None:
+    gc.disable()
+    try:
+        support.autocommitted(URL, lambda conn: None)
         assert not gc.isenabled()
     finally:
         gc.enable()
