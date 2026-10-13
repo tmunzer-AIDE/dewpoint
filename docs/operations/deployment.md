@@ -10,7 +10,7 @@ breaking the runs already going. Runs of a build from before versioning aren't p
 
 ## Builds and versions
 
-- Each build of Dewpoint has a build ID, `dewpoint-<version>+abi<engine ABI>`, for example `dewpoint-0.1.0+abi7`. The
+- Each build of Dewpoint has a build ID, `dewpoint-<version>+abi<engine ABI>`, for example `dewpoint-0.1.0+abi8`. The
   engine ABI changes whenever a build could execute a workflow differently, so such a build always has a new ID.
 - Every engine worker joins one Temporal **Worker Deployment**, `dewpoint-engine`, as its build's version.
 - New runs start on the deployment's **current** version. Nothing becomes current by itself: making a build current
@@ -23,9 +23,9 @@ breaking the runs already going. Runs of a build from before versioning aren't p
 `dewpoint deployment status` shows the current build and every version Temporal knows:
 
 ```text
-current: dewpoint-0.1.0+abi7
-dewpoint-0.1.0+abi6  draining
-dewpoint-0.1.0+abi7  current
+current: dewpoint-0.1.0+abi8
+dewpoint-0.1.0+abi7  draining
+dewpoint-0.1.0+abi8  current
 ```
 
 A `draining` version still has runs pinned to it. A `drained` one has none left.
@@ -168,7 +168,7 @@ changes and its recorded revision commit together or not at all. It locks no app
 
 ## A build with a new engine ABI
 
-A build ID ends with its engine ABI (`+abi7`), which changes whenever a build could execute a workflow differently. A
+A build ID ends with its engine ABI (`+abi8`), which changes whenever a build could execute a workflow differently. A
 version runs only on a build of the ABI it was published for. So when a new build changes it:
 
 - Runs already started on the old build finish there, pinned to it, with their sub-flows and failure handlers. (A
@@ -248,6 +248,19 @@ build's runs keep `abi6`'s until they end. What a run does differently:
   handle of: a filter over a large plain string no longer sends a copy with each item.
 - A step whose CEL requests would take the run's history past 32 MiB fails with `history_too_large`, rather than
   Temporal terminating the run at its own limit.
+
+### ABI 8: what changes
+
+ABI 8 (#16's extra workflow-task failure) changes only how an execution closes, not what publishing accepts: a
+workflow published under ABI 7 publishes again unchanged, as every workflow must once the ABI 8 build is current
+(above). Its CEL queue is `dewpoint-cel.abi8.<profile>`: deploy the new build's evaluator workers with it, while the old
+build's runs keep `abi7`'s until they end. What a run does differently:
+
+- An execution that closes (its run or batch ends, fails, or continues as new) while the 1 ms timer that ends a
+  workflow task is still pending cancels it with its close. Before, that timer could fire while the closing task was in
+  flight, and Temporal refused the close (`UNHANDLED_COMMAND`, by the worker): the run closed a task later, after its
+  worker replayed its history. Such a close now shows a `TimerCanceled` event and the `cancel-pending-yield` patch
+  marker in the history.
 - An execution continues as new once it has added 8 MiB of history, whatever Temporal suggests.
 
 ## Upgrading from a build without versioning
