@@ -25,13 +25,14 @@ from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.engine.runtime.activities import cel_queue
 from dewpoint.engine.runtime.execution import SUBFLOW_GRANT
 from dewpoint.engine.runtime.workflow import LoopBatch, RunGraph
+from dewpoint.sdk import Empty, StepContext
 from tests.apps.worker.harness import MemoryStore, in_process, run_id_of, start
 from tests.apps.worker.test_deployment import build
 from tests.apps.worker.test_main import settings
 from tests.engine.replay.record import executions
 from tests.support.graphs import G, cel, ref
 from tests.support.keys import FIXTURE_CONVERTER
-from tests.support.plugins.testkit import TESTKIT
+from tests.support.plugins.testkit import TESTKIT, EchoOutput, FailN, FailNConfig, SlowEcho, SlowEchoConfig
 
 
 @asynccontextmanager
@@ -423,6 +424,75 @@ async def test_issue_16s_run_ends_the_same_through_the_servers_force_close_of_a_
     assert {(e.workflow_task_failed_event_attributes.cause, e.workflow_task_failed_event_attributes.identity)
             for e in forced} == {(FORCED, SERVER)}  # fmt: skip
     assert unpermitted_task_failures(events) == []
+
+
+async def test_a_run_ending_as_its_running_activity_completes_cancels_it_and_ends(
+    dev_env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:  # fmt: skip
+    """A root step fails while a loop's body step runs, and the body's activity completes while the workflow task
+    that sees the failure is in flight. Forced, in order: the root fails only once the body runs; the body completes
+    only once that task is held, before its activation runs; the task is held until the server no longer has the
+    body's activity pending. The run ends, so it cancels the body's activity, which the worker can't know has completed
+    (the server holds the completion back for the next task). The server records the cancel and then the completion;
+    the body's step ends `cancelled`, the run `failed` with the root's error, and its history replays. Temporal's
+    time-skipping test server refuses that cancel (`ACTIVITY_UNKNOWN for scheduledEventId=…`) and the run stalls
+    there, its workflow task never completing: a test whose run may end as a quick activity completes needs this
+    server."""
+    from temporalio.worker import _workflow as running
+
+    BODY = "testkit.slow_echo.v1"  # the body's activity type
+    real, real_fail, real_echo = running._WorkflowWorker._handle_activation, FailN.run, SlowEcho.run
+    runs: list[WorkflowHandle[Any, Any]] = []
+    body_runs, root_held = asyncio.Event(), asyncio.Event()
+
+    async def fail(self: FailN, ctx: StepContext, config: FailNConfig) -> Empty:
+        await asyncio.wait_for(body_runs.wait(), 30)
+        return await real_fail(self, ctx, config)
+
+    async def echo(self: SlowEcho, ctx: StepContext, config: SlowEchoConfig) -> EchoOutput:
+        body_runs.set()
+        await asyncio.wait_for(root_held.wait(), 30)
+        return await real_echo(self, ctx, config)
+
+    async def completed(handle: WorkflowHandle[Any, Any], activity_type: str) -> None:
+        for _ in range(200):
+            pending = (await handle.describe()).raw_description.pending_activities
+            if not any(p.activity_type.name == activity_type for p in pending):
+                return
+            await asyncio.sleep(0.05)
+        raise AssertionError(f"{activity_type} never completed")
+
+    def root_failed(act: Any) -> bool:  # the only activity that fails is the root's
+        return any(j.HasField("resolve_activity") and j.resolve_activity.result.HasField("failed") for j in act.jobs)
+
+    async def handled(self: Any, act: Any) -> None:
+        if not root_held.is_set() and root_failed(act):
+            root_held.set()  # the body may complete now
+            await completed(runs[0], BODY)  # held, its activation not yet started
+        return await real(self, act)
+
+    monkeypatch.setattr(FailN, "run", fail)
+    monkeypatch.setattr(SlowEcho, "run", echo)
+    monkeypatch.setattr(running._WorkflowWorker, "_handle_activation", handled)
+    client, store = dev_env.client, MemoryStore()
+    g = graph().node("f", "testkit.fail_n@1", {"failures": 10}).node("l", "flow.loop@1", {"items": [0]})
+    g.nodes[0]["options"]["max_attempts"] = 1
+    g.node("e", "testkit.slow_echo@1", {"seconds": 0, "value": 1}).edge("l", "e", "body")
+    async with serving(client, store):
+        runs.append(handle := await start(client, store, g, {}))
+        result = await asyncio.wait_for(handle.result(), 60)
+        events = await replays(handle)
+    assert (result.status, result.error["code"] if result.error else None) == ("failed", "testkit.transient")
+    [body] = [e.event_id for e in events if e.activity_task_scheduled_event_attributes.activity_type.name == BODY]
+    cancel = [
+        e.event_id for e in events if e.activity_task_cancel_requested_event_attributes.scheduled_event_id == body
+    ]
+    done = [e.event_id for e in events if e.activity_task_completed_event_attributes.scheduled_event_id == body]
+    assert len(cancel) == len(done) == 1 and cancel[0] < done[0], (cancel, done)  # the race happened, as forced
+    assert not any(e.HasField("workflow_task_failed_event_attributes") for e in events)
+    rows = {(r.node_key, r.iteration_key, r.attempt): (r.status, r.error_code) for r in store.steps(run_id_of(handle))}
+    assert rows == {("f", "", 1): ("failed", "testkit.transient"), ("e", "l:0", 1): ("cancelled", None)}
+    assert store.runs[run_id_of(handle)].status == "failed"
 
 
 async def test_issue_18s_thousand_views_of_a_large_string_end_on_the_dev_server(dev_env: WorkflowEnvironment) -> None:
