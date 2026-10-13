@@ -404,8 +404,8 @@ loader, the projection, and one activity per installed plugin node type. It need
   `DEWPOINT_CEL_MAX_CONCURRENT` activities at a time (default 2; match the evaluator's slots,
   [`cel-evaluator.md`](cel-evaluator.md)).
 - `DEWPOINT_WORKER_SHUTDOWN_GRACE_S` (default 30): a stopping worker lets running attempts finish this long, then
-  cancels them. A cancelled attempt ends as on a lost worker: `outcome_unknown` for an `ambiguous` node. Give the
-  process manager a stop timeout longer than this.
+  cancels them. A cancelled attempt ends as on a lost worker: `outcome_unknown` for an `ambiguous` node (a simulated
+  attempt sends nothing: `simulated`). Give the process manager a stop timeout longer than this.
 - `DEWPOINT_WORKER_SET_CURRENT` (default off): the worker makes its own build the one new runs start on. Only where
   one build runs at a time, as in Docker Compose; elsewhere, promote builds with `dewpoint deployment set-current`
   ([`deployment.md`](deployment.md)).

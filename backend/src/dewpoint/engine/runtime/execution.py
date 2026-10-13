@@ -53,6 +53,8 @@ with workflow.unsafe.imports_passed_through():
         OUTCOME_UNKNOWN,
         PROJECT,
         REQUEST_BUDGET,
+        SIMULATE,
+        SIMULATED,
         SUBFLOW,
         BatchInput,
         BatchResult,
@@ -1770,7 +1772,9 @@ class Execution:
         retry = manifest["retry"]
         attempts = step.max_attempts or int(retry["max_attempts"])
         timeout = timedelta(seconds=step.timeout_s or float(manifest["timeout_s"]))
-        ambiguous = manifest["side_effect"] == AMBIGUOUS
+        simulated = self.mode == SIMULATE  # nothing is sent: never ambiguous, every end `simulated` (§4.1)
+        ambiguous = manifest["side_effect"] == AMBIGUOUS and not simulated
+        outcome_if_sent = SIMULATED if simulated else None
         attempt = 1
         self._attempted.add(inst)  # from here, each way it ends is rowed below
         while True:
@@ -1816,14 +1820,16 @@ class Execution:
                 ended = workflow.now().isoformat()
                 self._queue(
                     replace(
-                        row, status="failed", ended_at=ended, error_code=failure.code, error_message=failure.message
+                        row, status="failed", ended_at=ended, error_code=failure.code, error_message=failure.message,
+                        outcome=outcome_if_sent,
                     )
-                )
+                )  # fmt: skip
                 return _Effect(failure=failure, cel_mode=cel_mode)
             try:
                 await self._send(sent)
             except asyncio.CancelledError:  # the run or the scope ended before it was sent: nothing ran
-                self._queue(replace(row, status="cancelled", ended_at=workflow.now().isoformat()))
+                ended = workflow.now().isoformat()
+                self._queue(replace(row, status="cancelled", ended_at=ended, outcome=outcome_if_sent))
                 raise
             try:
                 result = await workflow.execute_activity(
@@ -1847,7 +1853,7 @@ class Execution:
                     attempt += 1
                     continue
                 # The run or the scope ended: the SDK reports our own cancel as an ActivityError. Never retry it.
-                outcome = OUTCOME_UNKNOWN if ambiguous else None  # its request may have been sent
+                outcome = OUTCOME_UNKNOWN if ambiguous else outcome_if_sent  # its request may have been sent
                 self._queue(replace(row, status="cancelled", ended_at=workflow.now().isoformat(), outcome=outcome))
                 raise asyncio.CancelledError from None
             if tainted_positions(result.output, self._output_shape(step.ref)):  # the tripwire (engine 2b spec §3.6)
@@ -1893,6 +1899,8 @@ class Execution:
         failure, outcome, retryable = _attempt_failed(
             e, key, row.attempt, ambiguous=ambiguous, non_retryable=retry["non_retryable"]
         )
+        if self.mode == SIMULATE:  # nothing was sent (the simulation design §4.1)
+            outcome = SIMULATED
         self._queue(
             replace(
                 row,

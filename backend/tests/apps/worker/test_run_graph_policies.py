@@ -414,6 +414,36 @@ async def test_a_timeout_after_an_ambiguous_send_is_never_retried(own_env: Workf
     assert (row.attempt, row.status, row.error_code, row.outcome) == (1, "failed", "timeout", "outcome_unknown")
 
 
+async def test_a_simulated_ambiguous_attempt_that_times_out_is_retried_by_its_policy(
+    own_env: WorkflowEnvironment,
+) -> None:
+    """The simulation design §4.1: a simulated attempt sends nothing, so its timeout is no unknown outcome. It's
+    retried as the configured policy says, and each row records `simulated`."""
+    store = MemoryStore()
+    g = graph().node("s", "testkit.slow_simulator@1", {"seconds": 3})
+    g.nodes[0]["options"].update(timeout_s=1, max_attempts=2)
+    async with workers(own_env.client, store):
+        handle = await start(own_env.client, store, g, TRIGGER, mode="simulate")
+        result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
+    assert result.status == "failed" and result.error and result.error["code"] == "timeout"
+    rows = [(r.attempt, r.status, r.error_code, r.outcome) for r in store.steps(run_id_of(handle))]
+    assert rows == [(1, "failed", "timeout", "simulated"), (2, "failed", "timeout", "simulated")]
+    assert all("may have been sent" not in (r.error_message or "") for r in store.steps(run_id_of(handle)))
+
+
+async def test_a_simulated_ambiguous_attempt_stopped_by_the_deadline_records_simulated(
+    own_env: WorkflowEnvironment,
+) -> None:
+    store = MemoryStore()
+    g = graph().node("s", "testkit.slow_simulator@1", {"seconds": 30})
+    async with workers(own_env.client, store):
+        handle = await start(own_env.client, store, g, TRIGGER, mode="simulate", max_run_duration_s=2)
+        result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
+    assert result.status == "deadline_exceeded"
+    [row] = store.steps(run_id_of(handle))
+    assert (row.status, row.outcome) == ("cancelled", "simulated")
+
+
 async def sent(run_id: str) -> None:
     for _ in range(200):
         if run_id in SlowSend.sent:

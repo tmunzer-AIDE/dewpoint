@@ -640,3 +640,54 @@ async def test_a_declared_configs_failure_names_the_keyword_never_the_value() ->
     bad = await failure(step_activity_for(DeclaredNode, MemoryStore()),
                         step("testkit.declared@1", {"body": {"ssid": "SuperSecretValue"}}))  # fmt: skip
     assert bad.message == "The config doesn't match `testkit.declared@1`: body.ssid (schema_maxLength)."
+
+
+class _SimulatorConfig(BaseModel):
+    fails: str
+
+
+class _AmbiguousSimulator(Node):
+    """An ambiguous node whose simulator fails as `fails` says: a simulated attempt sends nothing, so none of it is an
+    unknown outcome (the simulation design §4.1)."""
+
+    type = "testkit.ambiguous_simulator"
+    version = 1
+    title = "Ambiguous simulator"
+    Config = _SimulatorConfig
+    side_effect = SideEffect.AMBIGUOUS
+
+    async def run(self, ctx: StepContext, config: _SimulatorConfig) -> BaseModel:
+        raise AssertionError("a simulated attempt never runs the node")
+
+    async def simulate(self, ctx: StepContext, config: _SimulatorConfig) -> BaseModel:
+        if config.fails == "unknown":
+            from dewpoint.sdk.errors import OutcomeUnknownError
+
+            raise OutcomeUnknownError("testkit.lost", "its answer was lost")
+        if config.fails == "transport":
+            from dewpoint.sdk.net import TransportError
+
+            class _Odd(TransportError):
+                pass
+
+            raise _Odd()
+        raise RuntimeError("a bug in the simulator")
+
+
+@pytest.mark.parametrize(
+    ("fails", "code", "retryable", "outcome"),
+    [
+        ("bug", "unexpected_error", True, None),  # as a step that isn't ambiguous: retried by the configured policy
+        ("transport", "unexpected_error", True, None),
+        ("unknown", "node_failed", False, "simulated"),  # the simulator's own failure (its code undeclared), fatal
+    ],
+)
+async def test_a_simulated_ambiguous_attempt_is_never_an_unknown_outcome(
+    fails: str, code: str, retryable: bool, outcome: str | None
+) -> None:
+    e = await failure(
+        step_activity_for(_AmbiguousSimulator, MemoryStore()),
+        step("testkit.ambiguous_simulator@1", {"fails": fails}, mode="simulate"),
+    )
+    details = e.details[0] if e.details else {}
+    assert (e.type, not e.non_retryable, details.get("outcome")) == (code, retryable, outcome)
