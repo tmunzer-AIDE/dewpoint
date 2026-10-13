@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Storage for runs and their per-step projection (engine spec §8). Rows arrive as plain mappings: `core` knows
-nothing of the engine. Every write is idempotent, so a retried projection changes nothing twice, and a late
-`running` row never overwrites a finished attempt."""
+nothing of the engine. Every write is idempotent, so a retried projection changes nothing twice, and a known
+outcome is never replaced (`upsert_steps`)."""
 
 import math
 import re
@@ -33,6 +33,7 @@ STEP_FIELDS = (
     "error_message",
     "outcome",
     "cel_mode",
+    "effect_preview",
 )
 
 
@@ -259,7 +260,32 @@ async def close_unconfirmed(s: AsyncSession, run_id: uuid.UUID, *, scopes: Seque
     await s.execute(query.values(**closed, ended_at=func.now()).execution_options(synchronize_session=False))
 
 
-async def upsert_steps(s: AsyncSession, tenant_id: uuid.UUID, rows: Iterable[Mapping[str, Any]]) -> None:
+@dataclass(frozen=True)
+class StepConflict:
+    """A genuine final row that met a different genuine final row of its attempt: the first was kept."""
+
+    run_id: uuid.UUID
+    step_id: uuid.UUID
+    iteration_key: str
+    attempt: int
+    kept: str  # the stored row's status
+    refused: str  # the incoming row's
+
+
+_COMPARED = ("status", "outcome", "error_code", "error_message", "output_preview", "effect_preview")
+
+
+def _provisional(status: Any, error_code: Any) -> Any:
+    """A row closed `outcome_unconfirmed` (a reconciler's or a late projection's close): terminal, not a known end."""
+    return (status == "failed") & (error_code == OUTCOME_UNCONFIRMED)
+
+
+async def upsert_steps(s: AsyncSession, tenant_id: uuid.UUID, rows: Iterable[Mapping[str, Any]]) -> list[StepConflict]:
+    """Each row by the precedence of the simulation design §3.4: a `running` row takes anything, keeping its first
+    `started_at`; a provisional close (`outcome_unconfirmed`) gives way only to a genuine final row; a genuine final
+    row is never replaced. The same final row again changes nothing; a different genuine final row is refused and
+    returned, for the caller to report."""
+    conflicts: list[StepConflict] = []
     for row in rows:
         values = {
             "tenant_id": tenant_id,
@@ -273,15 +299,47 @@ async def upsert_steps(s: AsyncSession, tenant_id: uuid.UUID, rows: Iterable[Map
         values["error_message"] = sanitize(values["error_message"])
         values["input_preview"] = storable(values["input_preview"])
         values["output_preview"] = storable(values["output_preview"])
+        values["effect_preview"] = storable(values["effect_preview"])
         statement = insert(RunStep).values(**values)
         fresh = statement.excluded
-        await s.execute(
+        set_ = {k: getattr(fresh, k) for k in STEP_FIELDS}
+        set_["started_at"] = func.coalesce(RunStep.started_at, fresh.started_at)  # the first start stands
+        genuine = (fresh.status != "running") & ~_provisional(fresh.status, fresh.error_code)
+        written = await s.execute(
             statement.on_conflict_do_update(
                 index_elements=["run_id", "step_id", "iteration_key", "attempt"],
-                set_={k: getattr(fresh, k) for k in STEP_FIELDS},
-                where=(RunStep.status == "running") | (fresh.status != "running"),
-            )
+                set_=set_,
+                where=(RunStep.status == "running") | (_provisional(RunStep.status, RunStep.error_code) & genuine),
+            ).returning(RunStep.run_id)
         )
+        incoming_genuine = values["status"] != "running" and not (
+            values["status"] == "failed" and values["error_code"] == OUTCOME_UNCONFIRMED
+        )
+        if written.first() is not None or not incoming_genuine:
+            continue
+        stored = (
+            await s.execute(
+                select(*(getattr(RunStep, k) for k in _COMPARED)).where(
+                    RunStep.run_id == values["run_id"],
+                    RunStep.step_id == values["step_id"],
+                    RunStep.iteration_key == values["iteration_key"],
+                    RunStep.attempt == values["attempt"],
+                )
+            )
+        ).one()
+        provisional = stored.status == "failed" and stored.error_code == OUTCOME_UNCONFIRMED
+        if not provisional and tuple(stored) != tuple(values[k] for k in _COMPARED):
+            conflicts.append(
+                StepConflict(
+                    values["run_id"],
+                    values["step_id"],
+                    values["iteration_key"],
+                    values["attempt"],
+                    stored.status,
+                    values["status"],
+                )
+            )
+    return conflicts
 
 
 async def get_run(s: AsyncSession, run_id: uuid.UUID) -> Run | None:

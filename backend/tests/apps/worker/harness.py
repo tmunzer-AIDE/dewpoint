@@ -77,6 +77,10 @@ class HeldClaim:
     kind: str
 
 
+def _provisional(row: StepRow) -> bool:
+    return row.status == "failed" and row.error_code == OUTCOME_UNCONFIRMED
+
+
 def unconfirmed(row: StepRow) -> StepRow:
     """A step whose outcome no one recorded, as the stores close it (2b-4b M2)."""
     return dataclasses.replace(row, status="failed", error_code=OUTCOME_UNCONFIRMED, error_message=UNCONFIRMED_MESSAGE,
@@ -97,6 +101,7 @@ class MemoryStore:
     grants: set[tuple[str, str]] = field(default_factory=set)  # (claim, run) (2b spec §3.4)
     index_of: dict[str, set[str]] = field(default_factory=dict)  # root run -> its secret index (2b spec §3.7)
     versions_of: dict[str, int] = field(default_factory=dict)  # root run -> its index's version
+    conflicts: list[tuple[tuple[str, str, str, int], str, str]] = field(default_factory=list)  # §3.4 refusals
 
     def add(self, g: G, workflow_id: uuid.UUID | None = None, *, engine_abi: int = ENGINE_ABI) -> str:
         """Publish `g` as a version, pinned to the sub-flows it runs (as `publish` registered them). `engine_abi`:
@@ -153,7 +158,7 @@ class MemoryStore:
             if row.status == "running" and (row.run_id in self.runs or any(in_batch(row.iteration_key, b)
                                                                             for b in closed)):  # fmt: skip
                 row = unconfirmed(row)
-            self.rows[(row.run_id, row.step_id, row.iteration_key, row.attempt)] = row
+            self._upsert(row)
         if data.run is not None and not (data.run.if_running and data.run.run_id in self.runs):
             self.runs[data.run.run_id] = data.run
         if data.run is not None:
@@ -170,6 +175,25 @@ class MemoryStore:
             )
             if key[0] == run_id and row.status == "running" and inside:
                 self.rows[key] = unconfirmed(row)
+
+    def _upsert(self, row: StepRow) -> None:
+        """As `upsert_steps` writes it (the simulation design §3.4): `running` takes anything, keeping its first start;
+        a provisional close gives way only to a genuine final row; a genuine final row is never replaced, and a
+        different one is recorded in `conflicts`."""
+        key = (row.run_id, row.step_id, row.iteration_key, row.attempt)
+        stored = self.rows.get(key)
+        if stored is None or stored.status == "running":
+            started = stored.started_at if stored is not None and stored.started_at else row.started_at
+            self.rows[key] = dataclasses.replace(row, started_at=started)
+            return
+        genuine = row.status != "running" and not _provisional(row)
+        if _provisional(stored):
+            if genuine:
+                self.rows[key] = dataclasses.replace(row, started_at=stored.started_at or row.started_at)
+            return
+        compared = ("status", "outcome", "error_code", "error_message", "output_preview", "effect_preview")
+        if genuine and any(getattr(stored, k) != getattr(row, k) for k in compared):
+            self.conflicts.append((key, stored.status, row.status))
 
     def steps(self, run_id: str) -> list[StepRow]:
         return [r for k, r in sorted(self.rows.items()) if k[0] == run_id]
