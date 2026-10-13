@@ -16,6 +16,7 @@ import dataclasses
 import hashlib
 import json
 import uuid
+from collections import deque
 from collections.abc import Generator, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -130,6 +131,9 @@ with workflow.unsafe.imports_passed_through():
 
 IN_FLIGHT_CAP = 100  # activities and child workflows outstanding per execution (spec §6)
 PROJECT_BYTES = 256 * 1024  # a projection's rows at most, as JSON: far below Temporal's 2 MiB payload limit
+# Ends without settling (B4b) made into rows per projection, at most: a run that ends with thousands of open instances
+# rows them over several workflow tasks, each projection's, never in one (a workflow task's CPU, engine 2b spec §5.3)
+ENDS_PER_PROJECTION = 500
 CEL_BATCH = 1_000  # binding sets per cel.evaluate request
 CEL_REQUEST_BYTES = 1_835_008  # a cel.evaluate request's JSON bytes, a margin under Temporal's 2 MiB limit (#15)
 REQUEST_TOO_LARGE = "The values this expression reads are too large to send to the CEL evaluator (over 1.75 MiB)."
@@ -299,6 +303,8 @@ class Execution:
         self._finished: set[Instance] = set()
         self._effects: dict[Instance, dict[str, Any]] = {}
         self._not_waited: dict[Instance, Any] = {}  # a simulated timer's resolved config, for its row (§4.2)
+        self._ends_pending: deque[tuple[Instance, str, str]] = deque()  # (instance, how, when): rowed as projected
+        self._end_keys: set[tuple[str, str, int]] = set()  # the rows made of them that wait for a projection
         self.seeds: Seeds | None = None  # a single-step run's (S2): its scope, in place of the scheduler's
         self._projects = 0
         self._timers: dict[Instance, datetime] = {}  # a timer step asleep -> its wake time
@@ -427,7 +433,7 @@ class Execution:
                 for unit in startable[: max(0, IN_FLIGHT_CAP - self._in_flight(tasks))]:
                     waiting.remove(unit)
                     tasks[unit] = asyncio.create_task(self._unit(unit))
-                if self._rows and not any(key[0] == "project" for key in tasks):  # one at a time: rows wait for it
+                if not any(key[0] == "project" for key in tasks) and self._rows_ready():  # one at a time
                     self._projects += 1
                     tasks[("project", self._projects)] = asyncio.create_task(self._project(self._take_rows()))
                 if not tasks and self._ask is None and self.sched.queued_left():
@@ -702,7 +708,7 @@ class Execution:
 
     # --- the projection -------------------------------------------------------------------------------------------
 
-    def _queue(self, row: StepRow) -> None:
+    def _queue(self, row: StepRow) -> tuple[str, str, int]:
         """Queue a row for the next projection, as storage will write it: `_take_rows` sizes the rows it sends, and a
         character strict UTF-8 can't encode would fail that in workflow code, on every retry. A later row of the same
         attempt replaces it."""
@@ -714,7 +720,9 @@ class Execution:
             error_code=sanitize(row.error_code),
             error_message=sanitize(row.error_message),
         )
-        self._rows[(row.step_id, row.iteration_key, row.attempt)] = row
+        key = (row.step_id, row.iteration_key, row.attempt)
+        self._rows[key] = row
+        return key
 
     def _take_rows(self) -> list[StepRow]:
         """The next projection's rows, oldest first, within PROJECT_BYTES; one row at least. A backlog (after a
@@ -726,6 +734,7 @@ class Execution:
             if taken and size + row_size > PROJECT_BYTES:
                 break
             taken.append(self._rows.pop(key))
+            self._end_keys.discard(key)
             size += row_size
         return taken
 
@@ -760,8 +769,16 @@ class Execution:
                     effect_preview=self._effects.pop(inst, None),
                 )
             )
-        for inst, kind in self.sched.take_ends():
-            self._queue_end(inst, kind, now)
+        self._ends_pending.extend((inst, kind, now) for inst, kind in self.sched.take_ends())
+
+    def _rows_ready(self) -> bool:
+        """Ends made into rows, up to ENDS_PER_PROJECTION waiting at once (what a byte-cut projection left counts),
+        so no projection carries more; then whether any row waits for one."""
+        for _ in range(min(ENDS_PER_PROJECTION - len(self._end_keys), len(self._ends_pending))):
+            key = self._queue_end(*self._ends_pending.popleft())
+            if key is not None:
+                self._end_keys.add(key)
+        return bool(self._rows)
 
     def _row(self, inst: Instance, status: str, **fields: Any) -> StepRow:
         step = self.sched.step(inst)
@@ -775,21 +792,20 @@ class Execution:
             **fields,
         )
 
-    def _queue_end(self, inst: Instance, kind: str, now: str) -> None:
+    def _queue_end(self, inst: Instance, kind: str, now: str) -> tuple[str, str, int] | None:
         """An instance that ended without settling (B4b; the simulation design §3.3): `skipped` and `not_started`
         record attempt 1 and no start. A stopped one was handed out: `cancelled` once it began (a control step, or a
         plugin step still resolving its values), `not_started` if it never did. A plugin step that reached an attempt
-        rows its own end, and a unit that finished has its real outcome (D-a3)."""
+        rows its own end, and a unit that finished has its real outcome (D-a3). The row's key, if it made one."""
         step = self.sched.step(inst)
         if kind == live_state.STOPPED:
             if inst in self._finished or (not step.control and inst in self._attempted):
-                return
+                return None
             if inst in self._started:
-                self._queue(self._row(inst, "cancelled", started_at=self._started[inst], ended_at=now,
-                                      cel_mode=self._cel_modes.get(inst)))  # fmt: skip
-                return
+                return self._queue(self._row(inst, "cancelled", started_at=self._started[inst], ended_at=now,
+                                             cel_mode=self._cel_modes.get(inst)))  # fmt: skip
         status = "skipped" if kind == live_state.SKIPPED else "not_started"
-        self._queue(self._row(inst, status, ended_at=now))
+        return self._queue(self._row(inst, status, ended_at=now))
 
     @staticmethod
     def _effect_of(effect: "_Effect") -> dict[str, Any] | None:
@@ -858,8 +874,9 @@ class Execution:
         self._queue_settled()
         cancelled = False
         while True:
+            self._rows_ready()
             rows = self._take_rows()
-            last = not self._rows
+            last = not self._rows and not self._ends_pending
             if rows or (last and summary is not None):
                 cancelled = await self._shielded(rows, summary if last else None) or cancelled
             if last:

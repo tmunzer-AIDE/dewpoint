@@ -249,3 +249,40 @@ async def test_a_simulated_delay_that_resolves_to_a_bad_value_fails_as_live(env:
     (live, simulated) = results
     assert live.status == simulated.status == "failed"
     assert live.error and simulated.error and live.error["code"] == simulated.error["code"]
+
+
+@dataclasses.dataclass
+class Batches(MemoryStore):
+    """Each projection's count of `not_started` rows: how a run's ends are spread."""
+
+    unstarted: list[int] = dataclasses.field(default_factory=list)
+
+    async def project(self, data: ProjectInput) -> None:
+        self.unstarted.append(sum(1 for r in data.steps if r.status == "not_started"))
+        await super().project(data)
+
+
+async def test_a_run_that_ends_with_many_open_instances_rows_them_over_several_projections(
+    env: WorkflowEnvironment,
+) -> None:
+    """A workflow task's CPU (engine 2b spec §5.3): ends are made into rows at most ENDS_PER_PROJECTION at a time, one
+    projection each, never all in the activation that ended the run. `f` fails at once; of the 1,197 steps the loop
+    opened beside it (3 iterations of 399: a graph holds 500 steps), the in-flight cap starts 100 or fewer, and the
+    rest never start."""
+    store = Batches()
+    g = graph().node("f", FAIL_N, {"failures": 10})
+    g.nodes[0]["options"]["max_attempts"] = 1
+    g.node("l", LOOP, {"items": [0, 1, 2], "concurrency": 3})
+    for n in range(399):  # slow: a quick body beside the failure meets a known hang on main (its own task)
+        g.node(f"e{n}", SLOW, {"seconds": 30}).edge("l", f"e{n}", "body")
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, {})
+        result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
+    assert result.status == "failed"
+    rows = store.steps(run_id_of(handle))
+    assert len({(r.node_key, r.iteration_key) for r in rows}) == 2 + 3 * 399  # every instance has its row
+    unstarted = [n for n in store.unstarted if n]
+    assert sum(unstarted) >= 1_000 and max(unstarted) <= 500 and len(unstarted) >= 3
+    from dewpoint.engine.runtime.execution import ENDS_PER_PROJECTION
+
+    assert ENDS_PER_PROJECTION == 500  # below what a projection's bytes allow (about 700 such rows): it's what cuts
