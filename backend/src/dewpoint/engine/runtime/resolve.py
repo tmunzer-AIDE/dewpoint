@@ -77,9 +77,14 @@ def _base(v: ScopeView, path: RefPath) -> Any:
             return claimed.extend(str(path.section)).to_json()
         return entry.get(str(path.section), MISSING) if isinstance(entry, Mapping) else MISSING
     if path.root == "vars":
+        claimed = ClaimRef.of(v.vars)
+        if claimed is not None:  # the variables given whole, as one claim (a single step's seeds, S2): read by handle
+            return claimed.extend(str(path.name)).to_json()
         return v.vars.get(str(path.name), MISSING)
-    if path.root in ("item", "index"):
-        return MISSING if v.index is None else (v.item if path.root == "item" else v.index)
+    if path.root == "item":
+        return v.item if v.framed or v.index is not None else MISSING
+    if path.root == "index":
+        return MISSING if v.index is None else v.index
     if path.root == "loops":
         loop = v.loops.get(str(path.name))
         return loop.get(str(path.section), MISSING) if loop is not None else MISSING

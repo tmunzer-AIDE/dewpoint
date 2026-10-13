@@ -530,6 +530,7 @@ class Scheduler:
         self.scopes: dict[ScopeKey, Scope] = {}
         self.loops: dict[Instance, LoopRun] = {}
         self.ended: RunEnd | None = None
+        self.target: uuid.UUID | None = None  # a single-step run's one step (S2)
         self.batch_loop: Instance | None = None  # a batch child: the loop whose slice it runs
         self.outcome: BatchOutcome | None = None  # a batch child: its slice's result, once it's done
         self._ready: list[Instance] = []
@@ -595,6 +596,15 @@ class Scheduler:
     @_then_wake
     def start(self) -> None:
         self._open_scope((), None)
+
+    @_then_wake
+    def start_target(self, step: uuid.UUID) -> None:
+        """A single-step run (S2; the simulation design §5.3): `step` alone, in the root scope, with no edges, so
+        nothing else is ever instantiated. The run ends with it: its failure fails the run, whatever its `on_error`."""
+        self.target = step
+        scope = Scope((), self.program.steps[step].region, {step: NodeState.WAITING}, {}, {})
+        self.scopes[()] = scope
+        self._check_ready(scope, step)
 
     def start_batch(
         self,
@@ -782,6 +792,9 @@ class Scheduler:
             return
         scope.nodes[step.id] = NodeState.FAILED
         self._settled.append((inst, {"error": failure.to_json()}))
+        if self.target is not None:  # a single step's failure is its run's (S2)
+            self._fail_scope(scope, failure)
+            return
         if step.on_error == "port":
             scope.results[step.key] = {"error": failure.to_json()}
             self._live += size(scope.results[step.key])

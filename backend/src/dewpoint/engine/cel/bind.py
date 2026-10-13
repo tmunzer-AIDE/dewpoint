@@ -34,6 +34,7 @@ class ScopeView:
     run: Mapping[str, str]  # id, started_at, now: RFC 3339 UTC strings
     item: Any = None  # the innermost loop's item, or the filter item in a predicate
     index: int | None = None
+    framed: bool = False  # an item in scope without its index: a single step's seeds give only what it reads (S2)
 
     def roots(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -43,8 +44,10 @@ class ScopeView:
             "loops": self.loops,
             "run": self.run,
         }
+        if self.framed or self.index is not None:
+            out["item"] = self.item
         if self.index is not None:
-            out.update(item=self.item, index=self.index)
+            out["index"] = self.index
         return out
 
 

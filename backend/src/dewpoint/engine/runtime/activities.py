@@ -81,6 +81,9 @@ class RunInput:
     checkpoint_events: int = CHECKPOINT_EVENTS
     drain_events: int = DRAIN_EVENTS
     iterations: int = 0  # a continued run: what it had used, readable even when its snapshot isn't
+    # a single-step run (S2; the simulation design §5.4): its one step, simulated; its `trigger` is then its seeds,
+    # `{"values": {pointer: value}, "absent": [pointer]}`, and `version_id` may name a draft snapshot
+    target_step_id: str | None = None
 
 
 @dataclass(frozen=True)

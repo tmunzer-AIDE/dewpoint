@@ -113,6 +113,7 @@ with workflow.unsafe.imports_passed_through():
         count,
         iteration_key,
     )
+    from dewpoint.engine.runtime.seeds import SEED_MISSING, Seeds, cel_paths, read_paths
     from dewpoint.engine.runtime.size import (
         BATCH_ITEM_TOO_LARGE,
         PAYLOAD_TOO_LARGE,
@@ -298,6 +299,7 @@ class Execution:
         self._finished: set[Instance] = set()
         self._effects: dict[Instance, dict[str, Any]] = {}
         self._not_waited: dict[Instance, Any] = {}  # a simulated timer's resolved config, for its row (§4.2)
+        self.seeds: Seeds | None = None  # a single-step run's (S2): its scope, in place of the scheduler's
         self._projects = 0
         self._timers: dict[Instance, datetime] = {}  # a timer step asleep -> its wake time
         self._resume: list[Instance] = []  # timer steps a snapshot carried over: they re-arm first
@@ -492,6 +494,8 @@ class Execution:
         is counted out, so a continued run never drains at once), or Temporal suggests continuing. The drive loop
         wakes for it too, so a drain begins at the first workflow task past the threshold, not at the next unit's
         end."""
+        if self.seeds is not None:  # a single step: its history is its attempts', and it never continues as new
+            return False
         info = workflow.info()
         return (
             info.get_current_history_length() >= self.drain_events
@@ -890,6 +894,8 @@ class Execution:
             "started_at": self.run_started_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
             "now": workflow.now().astimezone(UTC).isoformat().replace("+00:00", "Z"),
         }
+        if self.seeds is not None:  # a single step's scope is its seeds and the run (S2)
+            return self.seeds.view(run, item)
         variables = self.vars if variables is None else variables
         return resolve.view(self.sched, scope, trigger=self.trigger, variables=variables, run=run, item=item)
 
@@ -906,6 +912,8 @@ class Execution:
         values: dict[str, Any] = {}
         mode: str | None = None
         v = self._view(scope, variables=variables)
+        if self.seeds is not None and owner is not None:
+            self._seeded(owner, pairs)
         for pointer, value in pairs:
             if isinstance(value, RefValue):
                 values[pointer] = await self._ref(v, value, owner, scope)
@@ -938,6 +946,28 @@ class Execution:
             else:
                 values[pointer] = value.value
         return values, mode
+
+    def _seeded(self, owner: Step, pairs: list[tuple[str, Any]]) -> None:
+        """A single step reads only what its seeds cover (S2): a value given, or one left absent. Anything else is a
+        guard's failure, `seed_missing`, before any value is computed; admission's check makes it unreachable. The
+        run's own `run` is always there."""
+        seeds = self.seeds
+        if seeds is None:
+            return
+        for pointer, value in pairs:
+            if isinstance(value, RefValue):
+                paths = [read_paths(value.path)]
+            elif isinstance(value, TemplateValue):
+                paths = [read_paths(part.path) for part in value.parts if not isinstance(part, str)]
+            elif isinstance(value, CelValue):
+                paths = list(cel_paths(self.program.record(owner.id, pointer)))
+            else:
+                continue
+            for path in paths:
+                if path and path[0] != "run" and not seeds.covers(path):
+                    shown = ".".join(str(p) for p in path)
+                    message = f"`{shown}` has no seed: give it a value, or leave it absent."
+                    raise resolve.ValueFailure(SEED_MISSING, message)
 
     # --- handles (engine 2b spec §3.2–3.3): never read here, resolved in activities ------------------------------
 

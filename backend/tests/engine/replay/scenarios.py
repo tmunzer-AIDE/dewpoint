@@ -6,8 +6,9 @@ error policy; variables and timers; stop, fail, simulation and the deadline; CEL
 batched loops, sub-flows, the failure handler, grants, continue-as-new and drain mode. 2a-3c turns local CEL on:
 expressions run in the workflow, with the yield-point timer, and the rest go to `cel.evaluate`. It also records a
 cancelled run and a version this build can't compile. 2b-4b's engine blockers add a value several binding sets share,
-claimed once (#26). Editor 4d-1a adds a simulated timer, not waited (the simulation design §4.2). A scenario that
-runs sub-flows builds its graph against the recorder's store, which publishes them first."""
+claimed once (#26). Editor 4d-1a adds a simulated timer, not waited, and a single step run alone with its seeds (the
+simulation design §4.2, §5). A scenario that runs sub-flows builds its graph against the recorder's store, which
+publishes them first."""
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -16,7 +17,7 @@ from typing import Any
 from dewpoint.engine.graph.validate import ValidationContext, validate
 from tests.apps.worker.harness import CATALOG, EVALUATOR_ONLY, MemoryStore
 from tests.engine.cel.test_gate_cost import ADVERSARIAL
-from tests.support.graphs import G, cel, ref
+from tests.support.graphs import G, cel, nid, ref
 
 ECHO, IF, SWITCH, LOOP = "testkit.echo@1", "flow.if@1", "flow.switch@1", "flow.loop@1"
 SCHEMA: dict[str, Any] = {
@@ -252,5 +253,13 @@ def scenarios() -> dict[str, Scenario]:
         "simulated_timer": Scenario(
             _graph().node("d", "flow.delay@1", {"duration_s": 3_600}).node("a", ECHO, {"value": 1}).edge("d", "a"),
             options={"mode": "simulate"},
+        ),
+        "single_step": Scenario(
+            _graph()
+            .node("a", ECHO, {"value": 1})
+            .node("b", ECHO, {"value": ref("steps.a.output.value")})
+            .edge("a", "b"),
+            trigger={"values": {"/steps/a/output/value": 5}, "absent": []},
+            options={"mode": "simulate", "target_step_id": str(nid("b"))},
         ),
     }
