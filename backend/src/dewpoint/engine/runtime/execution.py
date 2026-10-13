@@ -289,6 +289,12 @@ class Execution:
         self._rows: dict[tuple[str, str, int], StepRow] = {}  # queued for the next projection, per attempt
         self._started: dict[Instance, str] = {}
         self._cel_modes: dict[Instance, str] = {}
+        # B4b: how each instance's end is rowed. A plugin step that reached an attempt rows every way it ends itself
+        # (`_attempted`); a unit whose task completed (`_finished`) has its real outcome, even when the run ended in
+        # the same activation; what a control step did besides its output waits for its row (`_effects`).
+        self._attempted: set[Instance] = set()
+        self._finished: set[Instance] = set()
+        self._effects: dict[Instance, dict[str, Any]] = {}
         self._projects = 0
         self._timers: dict[Instance, datetime] = {}  # a timer step asleep -> its wake time
         self._resume: list[Instance] = []  # timer steps a snapshot carried over: they re-arm first
@@ -450,6 +456,8 @@ class Execution:
                     if key[0] == "cancelled" and task.cancelled():
                         continue  # a unit we cancelled ended so: its cancel isn't this execution's
                     effect = task.result()
+                    if key[0] == "step" and effect is not None and effect.loop is None:
+                        self._finished.add(key[1])  # its outcome is known, whatever the run did meanwhile (D-a3)
                     if effect is not None and key[0] != "cancelled":
                         self._apply(key, effect)
         except GeneratorExit:
@@ -560,8 +568,12 @@ class Execution:
 
     async def _unit(self, key: tuple[Any, ...]) -> _Effect | None:
         if key[0] == "step":
-            self._started[key[1]] = workflow.now().isoformat()
-            return await self._step(key[1])
+            inst = key[1]
+            self._started[inst] = workflow.now().isoformat()
+            step = self.sched.step(inst)
+            if step.control:  # replaced by its end row before it's sent, unless it waits on something (D-a2)
+                self._queue(self._row(inst, "running", started_at=self._started[inst]))
+            return await self._step(inst)
         if key[0] == "batch":
             return await self._batch(self._batches.pop((key[1], key[2])))
         if key[0] == "spill":
@@ -602,6 +614,13 @@ class Execution:
         inst: Instance = key[1]
         if effect.cel_mode is not None:
             self._cel_modes[inst] = effect.cel_mode
+        if self.sched.step(inst).control and effect.loop is None:
+            done = self._effect_of(effect)
+            if done is not None:
+                self._effects[inst] = done
+            scope = self.sched.scopes.get(inst.scope)
+            if self.sched.ended is not None or scope is None or scope.failure is not None:
+                self._queue_late(inst, effect)  # finished as the run or its scope ended: its real outcome (D-a3)
         if effect.loop is not None:
             self.sched.open_loop(
                 inst,
@@ -710,7 +729,8 @@ class Execution:
         return preview(value, schema)
 
     def _queue_settled(self) -> None:
-        """Control steps that settled since the last call. Plugin steps queue their own attempts (`_activity`)."""
+        """Control steps that settled since the last call (plugin steps queue their own attempts, `_activity`), and
+        every instance that ended without settling (B4b): skipped, not started, or cancelled once it began."""
         now = workflow.now().isoformat()
         for inst, result in self.sched.take_settled():
             step = self.sched.step(inst)
@@ -718,21 +738,75 @@ class Execution:
                 continue
             error = result.get("error")
             self._queue(
-                StepRow(
-                    run_id=self.run_id,
-                    step_id=str(step.id),
-                    node_key=step.key,
-                    iteration_key=iteration_key(inst.scope),
-                    attempt=1,
-                    status="failed" if error else "succeeded",
+                self._row(
+                    inst,
+                    "failed" if error else "succeeded",
                     started_at=self._started.get(inst),
                     ended_at=now,
                     output_preview=self._preview(result.get("output")),
                     error_code=error["code"] if error else None,
                     error_message=error["message"] if error else None,
                     cel_mode=self._cel_modes.get(inst),
+                    effect_preview=self._effects.pop(inst, None),
                 )
             )
+        for inst, kind in self.sched.take_ends():
+            self._queue_end(inst, kind, now)
+
+    def _row(self, inst: Instance, status: str, **fields: Any) -> StepRow:
+        step = self.sched.step(inst)
+        return StepRow(
+            run_id=self.run_id,
+            step_id=str(step.id),
+            node_key=step.key,
+            iteration_key=iteration_key(inst.scope),
+            attempt=fields.pop("attempt", 1),
+            status=status,
+            **fields,
+        )
+
+    def _queue_end(self, inst: Instance, kind: str, now: str) -> None:
+        """An instance that ended without settling (B4b; the simulation design §3.3): `skipped` and `not_started`
+        record attempt 1 and no start. A stopped one was handed out: `cancelled` once it began (a control step, or a
+        plugin step still resolving its values), `not_started` if it never did. A plugin step that reached an attempt
+        rows its own end, and a unit that finished has its real outcome (D-a3)."""
+        step = self.sched.step(inst)
+        if kind == live_state.STOPPED:
+            if inst in self._finished or (not step.control and inst in self._attempted):
+                return
+            if inst in self._started:
+                self._queue(self._row(inst, "cancelled", started_at=self._started[inst], ended_at=now,
+                                      cel_mode=self._cel_modes.get(inst)))  # fmt: skip
+                return
+        status = "skipped" if kind == live_state.SKIPPED else "not_started"
+        self._queue(self._row(inst, status, ended_at=now))
+
+    @staticmethod
+    def _effect_of(effect: "_Effect") -> dict[str, Any] | None:
+        """What a control step did besides its output (0071's `effect_preview`): the port an `if` or a `switch` took,
+        the variables a `set_variables` assigned (handles where they're sensitive)."""
+        if effect.variables:
+            return {"assignments": preview(dict(effect.variables))}
+        if effect.ports is not None and len(effect.ports) == 1:
+            return {"port": effect.ports[0]}
+        return None
+
+    def _queue_late(self, inst: Instance, effect: "_Effect") -> None:
+        """A control step that finished as its run or scope ended (D-a3): its row records what it did."""
+        failure = effect.failure or (effect.end.failure if effect.end is not None else None)
+        self._queue(
+            self._row(
+                inst,
+                "failed" if failure is not None else "succeeded",
+                started_at=self._started.get(inst),
+                ended_at=workflow.now().isoformat(),
+                output_preview=None if failure is not None else self._preview(effect.output),
+                error_code=failure.code if failure is not None else None,
+                error_message=failure.message if failure is not None else None,
+                cel_mode=effect.cel_mode or self._cel_modes.get(inst),
+                effect_preview=self._effects.pop(inst, None),
+            )
+        )
 
     async def _close_batch(self, batch: UnconfirmedBatch) -> None:
         """A batch of this run's that a bug failed (the owner's ruling, 2b-4b M2): its rows still `running` close,
@@ -1698,6 +1772,7 @@ class Execution:
         timeout = timedelta(seconds=step.timeout_s or float(manifest["timeout_s"]))
         ambiguous = manifest["side_effect"] == AMBIGUOUS
         attempt = 1
+        self._attempted.add(inst)  # from here, each way it ends is rowed below
         while True:
             row = StepRow(
                 run_id=self.run_id,
@@ -1763,7 +1838,12 @@ class Execution:
                     failure, outcome, retryable = self._failed_attempt(e, row, step.key, ambiguous, retry)
                     if not retryable or attempt >= attempts:
                         return _Effect(failure=failure, cel_mode=cel_mode)
-                    await asyncio.sleep(_backoff(retry, attempt))  # a durable timer
+                    try:
+                        await asyncio.sleep(_backoff(retry, attempt))  # a durable timer
+                    except asyncio.CancelledError:  # stopped before the retry began: it never ran (D-a1)
+                        self._queue(replace(row, attempt=attempt + 1, status="not_started", started_at=None,
+                                            ended_at=workflow.now().isoformat(), input_preview=None))  # fmt: skip
+                        raise
                     attempt += 1
                     continue
                 # The run or the scope ended: the SDK reports our own cancel as an ActivityError. Never retry it.
@@ -1829,7 +1909,8 @@ class Execution:
 
     async def _snapshot(self) -> dict[str, Any]:
         """Where a continued run carries on (spec §6; `snapshot_format` 2, engine 2b spec §5.3). The projection is
-        written first, so no row is carried; timers carry their wake times."""
+        written first, so no row is carried; timers carry their wake times. Timers and open loops carry their start:
+        they began in an earlier execution, so one that ends now is `cancelled`, never `not_started` (B4b)."""
         return {
             "snapshot_format": SNAPSHOT_FORMAT,
             "scheduler": await self._stepwise(self.sched.encoding()),
@@ -1845,6 +1926,11 @@ class Execution:
                     self._cel_modes.get(i),
                 ]
                 for i, wake in self._timers.items()
+            ],
+            "loops": [
+                [[[k, n] for k, n in i.scope], str(i.step), self._started[i], self._cel_modes.get(i)]
+                for i in self.sched.loops
+                if i in self._started
             ],
         }
 
@@ -1862,6 +1948,11 @@ class Execution:
             if mode:
                 self._cel_modes[inst] = mode
             self._resume.append(inst)
+        for key, step, started, mode in snapshot["loops"]:
+            inst = Instance(tuple((str(k), int(n)) for k, n in key), uuid.UUID(step))
+            self._started[inst] = started
+            if mode:
+                self._cel_modes[inst] = mode
 
     async def _flush(self) -> None:
         """Before continuing as new: every queued row written, and every signal sent. A cancel that arrived meanwhile

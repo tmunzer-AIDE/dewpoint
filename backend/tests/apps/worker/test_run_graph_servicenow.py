@@ -240,4 +240,5 @@ async def test_a_created_answer_too_deep_to_decode_creates_no_second_incident(
     async with worker_sessionmaker() as s, s.begin():
         await tenant_scope(s, ctx.tenant_id)
         rows = (await s.execute(text("select node_key, status, error_code from run_steps"))).all()
-    assert [tuple(r) for r in rows] == [("create", "failed", "servicenow.created_unreadable")]
+    ended_rows = [tuple(r) for r in rows if r[1] != "not_started"]  # the steps after it never started (B4b)
+    assert ended_rows == [("create", "failed", "servicenow.created_unreadable")]

@@ -111,7 +111,8 @@ async def test_a_cancel_while_the_run_gets_ready_to_continue_as_new_ends_it_canc
             await asyncio.wait_for(handle.result(), 30)
         runs = await chain(env.client, handle.id, handle.first_execution_run_id or "")
     assert len(runs) == 1 and store.runs[run_id_of(handle)].status == "cancelled"
-    assert [(r.node_key, r.status) for r in store.steps(run_id_of(handle))] == [("a", "succeeded")]  # `b` never started
+    rows = sorted((r.node_key, r.status) for r in store.steps(run_id_of(handle)))
+    assert rows == [("a", "succeeded"), ("b", "not_started")]  # `b` never started (B4b)
 
 
 @dataclasses.dataclass
@@ -161,7 +162,8 @@ async def test_a_cancel_while_the_run_settles_for_continue_as_new_lets_its_proje
         history = await first.fetch_history()
     requested = [e for e in history.events if e.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_CANCEL_REQUESTED]
     assert requested == [] and store.runs[run_id_of(handle)].status == "cancelled"
-    assert sorted(r.node_key for r in store.steps(run_id_of(handle))) == ["a", "c"]  # `b` never started
+    rows = sorted((r.node_key, r.status) for r in store.steps(run_id_of(handle)))
+    assert rows == [("a", "succeeded"), ("b", "not_started"), ("c", "succeeded")]  # `b` never started (B4b)
 
 
 def doubler() -> G:
@@ -239,7 +241,8 @@ async def test_the_headroom_draining_adds_is_measured_and_bounded(own_env: Workf
     assert result.status == "succeeded", result.error
     assert len(runs) >= 2, "it never drained"
     drained = (await snapshot(runs[0]))["drained"]
-    assert drained["units"] == {"activities": 90, "children": 10}  # the cap was saturated when draining began
+    units = {k: n for k, n in drained["units"].items() if k != "project"}  # the loops' `running` rows may be in flight
+    assert units == {"activities": 90, "children": 10}  # the cap was saturated when draining began
     (began, continued), (size_began, size_continued) = drained["events"], drained["bytes"]
     during = [e for e in runs[0].events if began < e.event_id <= continued]
     retried = [

@@ -10,5 +10,8 @@
 # the build's ABI. 6: 2b-1b's claims: a run's sensitive and large values held as handles, resolved in activities and
 # the evaluator; taint routing and declassified decisions; the exact workflow-id grammar. 7: 2b-4b's engine blockers:
 # binding charged the bytes measuring its views serialized (#18); a value several CEL binding sets share claimed once
-# and sent as its handle (#26); a step's CEL requests stopped before the run's history passes 32 MiB.
-ENGINE_ABI = 7
+# and sent as its handle (#26); a step's CEL requests stopped before the run's history passes 32 MiB. 8: editor 4d-1a
+# (the simulation design): every step instance's end projected (`skipped`, `not_started`, `cancelled`) with control
+# steps' `running` rows and effects; simulated attempts never of unknown outcome; flow timers not waited in a
+# simulation; single-step runs (`RunInput.target_step_id`).
+ENGINE_ABI = 8

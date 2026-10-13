@@ -1,0 +1,208 @@
+# SPDX-License-Identifier: Apache-2.0
+"""B4b (the simulation design §3): every instance of every opened scope ends with a row. A branch not taken is
+`skipped`; work discarded before it began is `not_started`, with no start; work stopped once it began is `cancelled`;
+a retry stopped in its backoff is `not_started` at the attempt it waited for; a control step that waits on something
+says `running` first; a control step that finished as its run ended keeps its outcome; an `if`'s port and a
+`set_variables`'s assignments are its `effect_preview`."""
+
+import asyncio
+import dataclasses
+from typing import Any
+
+import pytest
+from temporalio.client import WorkflowFailureError
+from temporalio.testing import WorkflowEnvironment
+
+from dewpoint.engine.runtime.activities import ProjectInput
+from tests.apps.worker.harness import RESULT_TIMEOUT_S, MemoryStore, run_id_of, start, workers
+from tests.support.graphs import G, cel
+from tests.support.plugins.testkit import Slow
+
+ECHO, SLOW, FAIL_N = "testkit.echo@1", "testkit.slow@1", "testkit.fail_n@1"
+IF, LOOP, SET, DELAY, STOP = "flow.if@1", "flow.loop@1", "flow.set_variables@1", "flow.delay@1", "flow.stop@1"
+FAIL = "flow.fail@1"
+
+
+def graph() -> G:
+    g = G()
+    g.settings = {"input_schema": {"type": "object"}}
+    return g
+
+
+def ended(store: MemoryStore, run_id: str) -> dict[tuple[str, str, int], tuple[str, bool]]:
+    """Each row's (status, whether it has a start), by (step, iteration, attempt)."""
+    return {(r.node_key, r.iteration_key, r.attempt): (r.status, r.started_at is not None) for r in store.steps(run_id)}
+
+
+@dataclasses.dataclass
+class Seen(MemoryStore):
+    """Every (step, status) a projection carried, in order: what a run said while it ran."""
+
+    seen: list[tuple[str, str]] = dataclasses.field(default_factory=list)
+    said: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
+
+    async def project(self, data: ProjectInput) -> None:
+        self.seen += [(r.node_key, r.status) for r in data.steps]
+        if ("d", "running") in self.seen:
+            self.said.set()
+        await super().project(data)
+
+
+async def test_the_deadline_cancels_running_work_and_ends_waiting_work_not_started(env: WorkflowEnvironment) -> None:
+    store = MemoryStore()
+    g = graph().node("a", SLOW, {"seconds": 60}).node("b", ECHO, {"value": 1}).edge("a", "b")
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, {}, max_run_duration_s=5)
+        result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
+    assert result.status == "deadline_exceeded"
+    assert ended(store, run_id_of(handle)) == {("a", "", 1): ("cancelled", True), ("b", "", 1): ("not_started", False)}
+
+
+async def test_a_retry_stopped_in_its_backoff_is_not_started_at_the_attempt_it_waited_for(
+    env: WorkflowEnvironment,
+) -> None:
+    """D-a1: attempt 1 keeps its failure; attempt 2 never began (the backoff is 1 s, the deadline half of it)."""
+    store = MemoryStore()
+    g = graph().node("f", FAIL_N, {"failures": 1})
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, {}, max_run_duration_s=0.5)
+        result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
+    assert result.status == "deadline_exceeded"
+    rows = {r.attempt: r for r in store.steps(run_id_of(handle))}
+    assert (rows[1].status, rows[1].error_code) == ("failed", "testkit.transient")
+    assert (rows[2].status, rows[2].started_at, rows[2].input_preview) == ("not_started", None, None)
+
+
+async def test_a_stop_cancels_a_sleeping_timer_that_said_it_was_running(env: WorkflowEnvironment) -> None:
+    """D-a2: a control step that waits on something says `running` first; stopped, it's `cancelled` with its start."""
+    store = Seen()
+    g = graph().node("d", DELAY, {"duration_s": 3600}).node("s", SLOW, {"seconds": 1}).node("stop", STOP)
+    g.edge("s", "stop")
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, {})
+        result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
+    assert result.status == "succeeded"  # a stop ends the run as succeeded
+    assert ("d", "running") in store.seen
+    assert ended(store, run_id_of(handle))[("d", "", 1)] == ("cancelled", True)
+
+
+async def test_a_failed_iteration_ends_its_own_steps_and_leaves_the_other_iterations(env: WorkflowEnvironment) -> None:
+    store = MemoryStore()
+    g = graph().node("l", LOOP, {"items": [0, 1]}, on_error="continue")
+    g.nodes[0]["config"]["on_item_error"] = "continue"
+    g.node("x", IF, {"condition": cel("item == 0")}).node("f", FAIL_N, {"failures": 10}).node("e", ECHO, {"value": 1})
+    g.node("after_f", ECHO, {"value": 2})
+    g.edge("l", "x", "body").edge("x", "f", "true").edge("x", "e", "false").edge("f", "after_f")
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, {})
+        result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
+    assert result.status == "succeeded"
+    rows = ended(store, run_id_of(handle))
+    finals = {(k, it): rows[(k, it, max(a for kk, ii, a in rows if (kk, ii) == (k, it)))][0] for k, it, _ in rows}
+    assert finals == {
+        ("l", ""): "succeeded",
+        ("x", "l:0"): "succeeded", ("f", "l:0"): "failed", ("e", "l:0"): "skipped", ("after_f", "l:0"): "not_started",
+        ("x", "l:1"): "succeeded", ("f", "l:1"): "skipped", ("e", "l:1"): "succeeded", ("after_f", "l:1"): "skipped",
+    }  # fmt: skip
+
+
+async def test_the_port_an_if_took_and_what_set_variables_assigned_are_recorded(env: WorkflowEnvironment) -> None:
+    store = MemoryStore()
+    g = graph()
+    g.settings["vars_schema"] = {"type": "object", "properties": {"n": {"type": "integer", "default": 0}}}
+    g.node("v", SET, {"assignments": {"n": 3}}).node("c", IF, {"condition": cel("vars.n > 2")})
+    g.node("yes", ECHO, {"value": 1}).edge("v", "c").edge("c", "yes", "true")
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, {})
+        await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
+    rows = {r.node_key: r for r in store.steps(run_id_of(handle))}
+    assert rows["v"].effect_preview == {"assignments": {"n": 3}}
+    assert rows["c"].effect_preview == {"port": "true"}
+    assert rows["yes"].effect_preview is None
+
+
+async def test_a_control_step_that_finished_as_the_run_ended_keeps_its_outcome(env: WorkflowEnvironment) -> None:
+    """D-a3: `stop` and `v` start together and finish in the same activation; `stop` is applied first and ends the
+    run, and `v`'s outcome, known by then, is its row."""
+    store = MemoryStore()
+    g = graph()
+    g.settings["vars_schema"] = {"type": "object", "properties": {"n": {"type": "integer", "default": 0}}}
+    g.node("stop", STOP).node("v", SET, {"assignments": {"n": 1}})
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, {})
+        await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
+    rows: dict[str, Any] = {r.node_key: r for r in store.steps(run_id_of(handle))}
+    assert (rows["stop"].status, rows["v"].status) == ("succeeded", "succeeded")
+    assert rows["v"].effect_preview == {"assignments": {"n": 1}}
+
+
+async def test_a_cancel_ends_started_work_cancelled_and_queued_work_not_started(env: WorkflowEnvironment) -> None:
+    """101 steps ready at once: the in-flight cap starts 100 and queues one. A cancel stops the 100 that began
+    (`cancelled`, with their start); the one queued never began (`not_started`, no start). About 30 s: a cancel reaches
+    a running activity with its next heartbeat the SDK sends, and no step sets a heartbeat timeout."""
+    store = MemoryStore()
+    g = graph()
+    for n in range(101):
+        g.node(f"s{n}", SLOW, {"seconds": 120})
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, {})
+        run_id = run_id_of(handle)
+        for _ in range(600):  # until the cap's 100 have begun: each beats once a second
+            if sum(1 for run, _ in Slow.beats if run == run_id) >= 100:
+                break
+            await asyncio.sleep(0.05)
+        await handle.cancel()
+        with pytest.raises(WorkflowFailureError):
+            await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
+    assert store.runs[run_id].status == "cancelled"
+    rows = ended(store, run_id)
+    assert sorted(rows.values()).count(("cancelled", True)) == 100
+    assert [v for v in rows.values() if v != ("cancelled", True)] == [("not_started", False)]
+
+
+async def test_a_loop_open_across_a_continue_as_new_ends_cancelled_with_its_first_start(
+    env: WorkflowEnvironment,
+) -> None:
+    """A loop whose iterations still sleep when the run continues as new began in the first execution: a cancel in
+    the continued one ends it `cancelled`, with the start the first one recorded, never `not_started`."""
+    from tests.apps.worker.test_run_graph_continue import chain
+
+    store = MemoryStore()
+    g = graph()
+    g.node("l", LOOP, {"items": list(range(10)), "concurrency": 10}).node("d", DELAY, {"duration_s": 3600})
+    g.edge("l", "d", "body")
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, {}, drain_events=15)
+        for _ in range(200):
+            if len(await chain(env.client, handle.id, handle.first_execution_run_id or "")) >= 2:
+                break
+            await asyncio.sleep(0.05)
+        else:
+            raise AssertionError("it never continued as new")
+        first = [r.started_at for r in store.steps(run_id_of(handle)) if r.node_key == "l"]
+        await handle.cancel()
+        with pytest.raises(WorkflowFailureError):
+            await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
+    [loop] = [r for r in store.steps(run_id_of(handle)) if r.node_key == "l"]
+    assert (loop.status, loop.started_at) == ("cancelled", first[0])
+    assert {r.status for r in store.steps(run_id_of(handle)) if r.node_key == "d"} == {"cancelled"}
+
+
+async def test_inside_a_batch_every_opened_iteration_ends_each_of_its_steps(env: WorkflowEnvironment) -> None:
+    """A loop of 150 items runs its iterations in batches (child runs), which row their ends as the run does: item
+    130's `if` takes `true` and fails the run; the branch it didn't take is `skipped`; every step of every iteration
+    that opened has its final row, and no iteration that never opened has any."""
+    store = MemoryStore()
+    g = graph()
+    g.node("l", LOOP, {"items": list(range(150))})
+    g.node("i", IF, {"condition": cel("item == 130")}).node("f", FAIL, {"message": "item 130"}).node("e", ECHO)
+    g.edge("l", "i", "body").edge("i", "f", "true").edge("i", "e", "false")
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, {})
+        result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
+    assert (result.status, result.error["code"]) == ("failed", "workflow_failed")
+    rows = ended(store, run_id_of(handle))
+    assert rows[("e", "l:130", 1)] == ("skipped", False) and rows[("f", "l:130", 1)][0] == "failed"
+    opened = {key for (_, key, _) in rows if key.startswith("l:")}
+    assert "l:130" in opened and all({n for (n, k, _) in rows if k == key} == {"i", "f", "e"} for key in opened)
+    assert all(status != "running" for status, _ in rows.values())

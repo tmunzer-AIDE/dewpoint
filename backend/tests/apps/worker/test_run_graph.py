@@ -53,7 +53,9 @@ async def test_a_cel_branch_runs_one_side_and_projects_control_steps(env: Workfl
     assert (result.status, result.outputs) == ("succeeded", {"side": "yes"})
     rows = {r.node_key: r for r in store.steps(run_id_of(handle))}
     assert rows["c"].status == "succeeded" and rows["c"].cel_mode == "local"  # this build runs its profile in-process
-    assert "no" not in rows and store.runs[run_id_of(handle)].status == "succeeded"
+    assert rows["c"].effect_preview == {"port": "true"}  # the branch it took (0071)
+    assert (rows["no"].status, rows["no"].started_at) == ("skipped", None)  # the branch not taken (B4b)
+    assert store.runs[run_id_of(handle)].status == "succeeded"
 
 
 async def test_a_loop_collects_per_item_and_a_filter_keeps_matches(env: WorkflowEnvironment) -> None:
