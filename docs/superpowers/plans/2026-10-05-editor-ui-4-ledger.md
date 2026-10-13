@@ -33,9 +33,9 @@ cover local work only: anything outward-facing (push, PR, issues) is confirmed i
 | 0045 | B7: per-attempt connection provenance, with sub-project 3 |
 | 0046 | B9: preview consumption and durable live-test execution |
 | 0047 | 4b: `runs_workflow_last` (ruling 72; merged in #60, chained after 0044: M36) |
-| 0048–0065 | 2b-4b's work (#90, not merged). B4b and B8, reserved at 0048 and 0049 on 2026-10-08, moved to 0071 and 0072 (the owner, 2026-10-11) |
+| 0048–0065 | 2b-4b's work (#90, merged 2026-10-12, chained 0044 → 0047 → 0045 → 0070 → 0048 → … → 0065). B4b and B8, reserved at 0048 and 0049 on 2026-10-08, moved to 0071 and 0072 (the owner, 2026-10-11) |
 | 0070 | 4c-3a: `webhook_endpoints.trigger_key`, an endpoint's sender (the owner; it was 0054 until 2026-10-11, which 2b-4b's work also names) |
-| 0071 | B4b: `skipped` and `not_started` projection statuses (the owner, 2026-10-08; the slot, 2026-10-11) |
+| 0071 | B4b: `skipped` and `not_started` projection statuses and `run_steps.effect_preview` (the owner, 2026-10-08; the slot, 2026-10-11); 4d-1a, chained after 0065 |
 | 0072 | B8: draft and single-step simulation (the owner, 2026-10-08; the slot, 2026-10-11) |
 
 - One Alembic chain: before merging, the first unmerged migration's `down_revision` is reconciled with the actual head.
@@ -2645,3 +2645,51 @@ count and says so. The unit suite 995 passed (72 files); typecheck, lint, check:
 Migration slots (the owner, 2026-10-11): B4b moves to 0071 and B8 to 0072, as the table above records: 2b-4b's work
 (#90) uses 0048–0065. #90's own chain is reconciled with main by its session when it lands.
 
+### Owner, 4d-1 design, mockups and spec (2026-10-12 and 2026-10-13, in chat)
+
+4d-1 is Simulate workflow and Simulate step (outline §2 4d, D14). The owner chose, one decision at a time:
+- three plans: 4d-1a (the engine: B4b, simulated attempts and timers, S2's engine part; ABI 8; 0071), 4d-1b (B8:
+  draft snapshots, admission, readers; 0072), 4d-1c (the UI);
+- B4b's statuses `skipped` and `not_started`, and S2, a single step from supplied values (seeds), engine-run.
+
+Through the question prompt, the owner accepted:
+- section 1 (B4b), with D-a1–D-a7, the upsert precedence and 0071's refusing downgrade;
+- capacity (b): no draft cap; flow timers aren't waited in any simulate run of an ABI-8 version;
+- section 2a (B8), and section 2b (S2's engine contract), which closed D-a8;
+- section 3 (the UI) as the mockups' direction.
+
+D8: pasted reviews held the "4d-1 Simulation Mockups" canvas at versions 16 and 19. The owner signed off version 20
+(16 boards, light and dark, two true 320 px boards). The spec,
+`docs/superpowers/specs/2026-10-13-editor-4d1-simulation-design.md`, was approved by the owner and committed on
+`docs/editor-ui-4d1-spec` (99fda408, 2026-10-13).
+
+### 4d-1a plan accepted (2026-10-13, in chat)
+
+`docs/superpowers/plans/2026-10-13-editor-ui-4d1a-engine.md`, revision 7 (008c4be4). Pasted reviews held revisions 1
+to 6; a pasted review found revision 7 clean. The owner, in their own words: "I accept rulings 2, 3, 13 and 16; commit
+the plan, inline". The plan's rulings 1–16 join this ledger as 159–174; the plan says each one's why and its cost.
+Rulings 160, 161, 171 and 174 change the spec, amended in the same commit (§3.6, §5.2).
+
+159. **Accepted. Seed obligations, per use** (plan ruling 1): the validator's own guard facts decide what a read
+     tolerates; the strictest use wins.
+160. **Accepted. A seed's value** (plan ruling 2): its schema's types and value rules, as the schema stands; presence
+     and null inside it from its uses, held where their conditions are; a choice judged by its branches. Spec §5.2.
+161. **Accepted. Normalized reads** (plan ruling 3): a read through a list index is the whole list; a read of every
+     step's results refuses the target. Spec §5.2.
+162. **Accepted. Codes beside the spec's** (plan ruling 4): `seed_invalid`; `seed_alias` below an alias too;
+     `seeded_live_refused`, `target_invalid`.
+163. **Accepted. An absent seed keeps its containers** (plan ruling 5).
+164. **Accepted. A single-step run never continues as new**, evaluates no outputs and starts no failure handler (plan
+     ruling 6).
+165. **Accepted. End rows lazily, at most 500 waiting** (plan ruling 7).
+166. **Accepted. `testkit.slow_simulator`** for the simulated timeout path (plan ruling 8).
+167. **Accepted. The privilege reference stays as it is** (plan ruling 9).
+168. **Accepted. The headroom test counts work units, not projections** (plan ruling 10).
+169. **Accepted. The spread test's loop body is slow** (plan ruling 11).
+170. **Accepted. A cancel reaches a running activity in about 30 s**, unchanged by 4d-1a (plan ruling 12).
+171. **Accepted. A build ahead of 0071 drops nothing**: its projections retry until the migration lands (plan ruling
+     13). Spec §3.6.
+172. **Accepted. An item in scope without its index** (`ScopeView.framed`, plan ruling 14).
+173. **Accepted. A continued run knows which open loops began** (the snapshot's `loops`, plan ruling 15).
+174. **Accepted. A filter over a computed list** keeps its sources' `required` for a strict predicate read (plan
+     ruling 16). Spec §5.2.

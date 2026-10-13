@@ -117,8 +117,8 @@ same `storable()` and redaction): `{"port": "<name>"}` for `flow.if` and `flow.s
 - Its downgrade refuses while any `skipped` or `not_started` row, or any non-null `effect_preview`, exists (after the
   ABI-8 workers are stopped), in #90's `REFUSE_DOWNGRADE` style. Clearing such rows is a recovery procedure the owner
   approves, never automatic.
-- If 0071 lags a new build, rejected rows are dropped with a log (`apps/worker/store.py`): the deploy order is migration
-  first, as for every ABI bump.
+- If 0071 lags a new build, its projections fail on the missing column and are retried until the migration lands:
+  nothing is dropped, and runs' ends wait for it. The deploy order is migration first, as for every ABI bump.
 
 ## 4. Simulated attempts and flow timers (4d-1a, ABI 8)
 
@@ -179,6 +179,9 @@ tree's display shapes.
 - **Overlaps:** a parent read and a child read merge into the parent, one coherent value, carrying the children's
   obligations (a whole `/steps/a/output` must contain every path a use reads strictly). Contradictory types refuse: a
   validator bug.
+- **Lists and every step's results:** a read through a list index is a read of the whole list (a seed never builds a
+  list with gaps). A CEL value that reads `steps` or `loops` without naming a step's section reads every step's
+  results, so its step can't be simulated alone.
 - **Loop aliases:** outside a filter predicate, the innermost loop's frame has one canonical pair, `/item` and `/index`;
   reads of `loops.<innermost>.item` and `.index` map to them, absence states included. Outer loops' `loops.<key>…`
   stay separate entries. The contract lists only canonical pointers; a submission naming an alias is refused with 422
@@ -186,6 +189,9 @@ tree's display shapes.
 - **Evaluation contexts:** the contract covers the target's own context only. Names bound per element, such as a
   filter predicate's `item` and `index`, are never seeds: they bind per element of the filtered list, as today
   (`bind_item`).
+- **A filter over a computed list:** what its predicate reads strictly of each element can't be traced to a seed, so
+  the values its items are computed from keep their schema's `required` there. A guarded or defaulted predicate read
+  keeps nothing.
 - **Three states:** a value (`null` only where nullable); explicitly absent (only where optional: `has()` is false and
   defaults apply exactly as in a run; a ref default replaces a missing or null value, `resolve.defaulted`); omitted
   (refused at admission, 422 `seed_missing`, naming the pointers). The body is `{values: {pointer: value}, absent:
@@ -193,6 +199,9 @@ tree's display shapes.
 - **Nothing outside the contract:** a pointer the contract doesn't list, in `values` or in `absent`, a `/run…` pointer
   included, is refused at admission with 422 `seed_unknown`, naming it. An alias of a canonical pointer is
   `seed_alias`.
+- **A value given:** checked against its entry's schema for types and value rules (enum, pattern, bounds, closed
+  objects); inside it, presence and null follow the uses, never what the schema's `required` obliges (`required`
+  inside `not` or `if` still tests the value).
 - **`/trigger/rows`:** a seed may supply it when an eligible target reads it. Admission's reservation of `rows` and
   `row_count` (only a CSV upload supplies them, `apps/admission.py`) applies to whole-workflow input, not to seeds.
 
