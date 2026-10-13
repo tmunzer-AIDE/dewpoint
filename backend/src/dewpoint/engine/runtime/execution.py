@@ -297,6 +297,7 @@ class Execution:
         self._attempted: set[Instance] = set()
         self._finished: set[Instance] = set()
         self._effects: dict[Instance, dict[str, Any]] = {}
+        self._not_waited: dict[Instance, Any] = {}  # a simulated timer's resolved config, for its row (§4.2)
         self._projects = 0
         self._timers: dict[Instance, datetime] = {}  # a timer step asleep -> its wake time
         self._resume: list[Instance] = []  # timer steps a snapshot carried over: they re-arm first
@@ -739,12 +740,15 @@ class Execution:
             if not step.control:
                 continue
             error = result.get("error")
+            waited = self._not_waited.pop(inst, None)  # a simulated timer: nothing waited, so nothing happened (§4.2)
             self._queue(
                 self._row(
                     inst,
                     "failed" if error else "succeeded",
                     started_at=self._started.get(inst),
                     ended_at=now,
+                    input_preview=self._preview(waited) if waited is not None else None,
+                    outcome=SIMULATED if waited is not None else None,
                     output_preview=self._preview(result.get("output")),
                     error_code=error["code"] if error else None,
                     error_message=error["message"] if error else None,
@@ -1341,6 +1345,9 @@ class Execution:
         if wake is not None:
             if cel_mode is not None:
                 self._cel_modes[inst] = cel_mode
+            if self.mode == SIMULATE:  # resolved and checked as live, then not waited (the simulation design §4.2)
+                self._not_waited[inst] = config
+                return _Effect(output={}, cel_mode=self._cel_modes.get(inst))
             return await self._timer(inst, wake)
         return _Effect(
             output=decision.output,

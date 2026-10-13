@@ -6,8 +6,8 @@ error policy; variables and timers; stop, fail, simulation and the deadline; CEL
 batched loops, sub-flows, the failure handler, grants, continue-as-new and drain mode. 2a-3c turns local CEL on:
 expressions run in the workflow, with the yield-point timer, and the rest go to `cel.evaluate`. It also records a
 cancelled run and a version this build can't compile. 2b-4b's engine blockers add a value several binding sets share,
-claimed once (#26). A scenario that runs sub-flows builds its graph against the
-recorder's store, which publishes them first."""
+claimed once (#26). Editor 4d-1a adds a simulated timer, not waited (the simulation design §4.2). A scenario that
+runs sub-flows builds its graph against the recorder's store, which publishes them first."""
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -249,4 +249,8 @@ def scenarios() -> dict[str, Scenario]:
         "shared": Scenario(_shared(), trigger={"s": "x" * 20_000}),
         "cancelled": Scenario(_graph().node("d", "flow.delay@1", {"duration_s": 3_600}), cancel=True),
         "version_unusable": Scenario(_graph().node("a", ECHO, {"value": 1}), unusable=True),
+        "simulated_timer": Scenario(
+            _graph().node("d", "flow.delay@1", {"duration_s": 3_600}).node("a", ECHO, {"value": 1}).edge("d", "a"),
+            options={"mode": "simulate"},
+        ),
     }

@@ -206,3 +206,46 @@ async def test_inside_a_batch_every_opened_iteration_ends_each_of_its_steps(env:
     opened = {key for (_, key, _) in rows if key.startswith("l:")}
     assert "l:130" in opened and all({n for (n, k, _) in rows if k == key} == {"i", "f", "e"} for key in opened)
     assert all(status != "running" for status, _ in rows.values())
+
+
+# --- flow timers in a simulation (the simulation design §4.2) ------------------------------------------------------
+
+
+def timers(history: Any) -> list[float]:
+    """Each timer the run started: its duration, in seconds."""
+    from temporalio.api.enums.v1 import EventType
+
+    return [
+        e.timer_started_event_attributes.start_to_fire_timeout.ToTimedelta().total_seconds()
+        for e in history.events
+        if e.event_type == EventType.EVENT_TYPE_TIMER_STARTED
+    ]
+
+
+async def test_a_simulated_delay_is_resolved_but_not_waited(env: WorkflowEnvironment) -> None:
+    """No timer of its hour (the run's deadline has its own), and its row says so: `simulated`, its resolved duration
+    as its input, its output `{}` as live."""
+    store = MemoryStore()
+    g = graph().node("d", DELAY, {"duration_s": 3600}).node("e", ECHO, {"value": 1}).edge("d", "e")
+    async with workers(env.client, store):
+        simulated = await start(env.client, store, g, {}, mode="simulate")
+        await asyncio.wait_for(simulated.result(), RESULT_TIMEOUT_S)
+        started = timers(await simulated.fetch_history())
+    assert 3600 not in started
+    [row] = [r for r in store.steps(run_id_of(simulated)) if r.node_key == "d"]
+    assert (row.status, row.outcome, row.input_preview, row.output_preview) == (
+        "succeeded", "simulated", {"duration_s": 3600}, {},
+    )  # fmt: skip
+
+
+async def test_a_simulated_delay_that_resolves_to_a_bad_value_fails_as_live(env: WorkflowEnvironment) -> None:
+    store = MemoryStore()
+    g = graph().node("d", DELAY, {"duration_s": cel("0 - 5")})
+    async with workers(env.client, store):
+        results = []
+        for mode in ("live", "simulate"):
+            handle = await start(env.client, store, g, {}, mode=mode)
+            results.append(await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S))
+    (live, simulated) = results
+    assert live.status == simulated.status == "failed"
+    assert live.error and simulated.error and live.error["code"] == simulated.error["code"]
