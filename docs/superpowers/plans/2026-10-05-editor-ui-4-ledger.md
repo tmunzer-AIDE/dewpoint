@@ -2693,3 +2693,28 @@ Rulings 160, 161, 171 and 174 change the spec, amended in the same commit (§3.6
 173. **Accepted. A continued run knows which open loops began** (the snapshot's `loops`, plan ruling 15).
 174. **Accepted. A filter over a computed list** keeps its sources' `required` for a strict predicate read (plan
      ruling 16). Spec §5.2.
+
+### 4d-1a, milestone 1 (2026-10-13)
+
+On `feat/editor-4d1a`, cut from origin/main ba31c3d3 with the docs branch merged (6e4ba376). Each task's tests ran red
+on its test diff alone, then green with its implementation, as the plan says; ruff (check and format), mypy (309
+files) and the import contracts (11 kept) were clean after each.
+- Task 1, e4304849: the ledger and the spec's four amendments.
+- Task 2, 5fb1bc31: migration 0071. 5 failed, then 11 passed; the privilege reference unchanged.
+- Task 3, 98d72846: the upsert precedence. 6 failed (the late close replacing a genuine result among them), then 35
+  passed.
+- Task 4, eb3e9012: the scheduler's ends. 5 failed, then 227 passed.
+- Task 5, 4741eae1: every instance's end projected, `ENGINE_ABI` 8. 13 failed, then 108 passed; 19 scenarios
+  recorded, 42 abi8 histories.
+
+M90. **The branch was cut from ba31c3d3, not d4ab0dbe**: #94 and #95 landed meanwhile, both test-only. The plan's 18
+     diffs were applied on ba31c3d3 first; each applies unchanged.
+M91. **Ruling 169's hang is the test server's**: #94 found the `ACTIVITY_UNKNOWN` stall is Temporal's time-skipping
+     test server, not the engine. The spread test's slow body still avoids it; nothing else changes.
+M92. **The worktree's environment is CPython 3.12** (`uv sync --frozen --python 3.12`, uv's installed 3.12), as CI's
+     backend job runs; uv's first pick was 3.14.
+M93. **Task 1 says "accepted"**: the owner accepted the plan and its rulings before Task 1 ran, so its ledger section
+     and commit say so, not "proposed".
+
+Open: `fix/pending-yield-timer` (51866a26, issue #16; local, not pushed) also makes `ENGINE_ABI` 8, with abi8 histories
+of its own. Whichever merges second moves to ABI 9 and records its histories again: the owner decides the order.
