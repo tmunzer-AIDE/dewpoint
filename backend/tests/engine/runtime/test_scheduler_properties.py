@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Spec §10, on random graphs with if/switch/joins/error ports/loops, completed in random orders:
-- every node runs or dies exactly once per scope;
+- every node runs or dies exactly once per scope, and every instance of every opened scope is reported exactly once:
+  settled, or ended (skipped, unstarted or stopped: B4b);
 - dead paths never run;
 - a step runs in its own region's scope, so branches that reconverge meet in the same scope;
 - no edge is left pending when a run succeeds, so nothing deadlocks.
@@ -123,15 +124,30 @@ def run(g: G, data: st.DataObject) -> None:
     collects: list[Any] = []
     batches: list[Batch] = []
     handed: dict[Instance, int] = {}
+    reported: dict[Instance, int] = {}
+    seen: set[Instance] = set()
+
+    def drain() -> None:
+        for inst, _ in s.take_settled():
+            reported[inst] = reported.get(inst, 0) + 1
+        for inst, kind in s.take_ends():
+            reported[inst] = reported.get(inst, 0) + 1
+            if kind == S.STOPPED:
+                assert inst in handed, "a step never handed out was reported stopped"
+            else:
+                assert inst not in handed, f"a step handed out was reported {kind}"
+        seen.update(Instance(k, n) for k, sc in s.scopes.items() if not sc.frozen for n in sc.nodes)
+
     while s.ended is None:
         assert s.open_scopes <= s.cap + s.reserve, "open iteration scopes passed the cap and the reservation"
         assert s.live == s.recount(), "the live-state counter drifted from what the state holds"
         cancelled = set(s.take_cancels())
         running = [r for r in running if r not in cancelled]
+        drain()
         batches = [b for b in batches if b.loop not in cancelled]
         # continue-as-new: carry on from a snapshot, taken with work still queued, as drain mode leaves it
         if data.draw(st.integers(0, 7), label="snapshot") == 0 and s.live <= S.LIVE_BUDGET:
-            s.take_settled()
+            drain()
             s = Scheduler.from_json(s.program, json.loads(json.dumps(s.to_json(check=True))), prefix="t:1:run:2")
         for inst in s.take_ready():
             handed[inst] = handed.get(inst, 0) + 1
@@ -187,6 +203,10 @@ def run(g: G, data: st.DataObject) -> None:
             s.fail(inst, Failure("testkit.boom", "it broke"))
         else:
             s.succeed(inst, {"n": "x" * data.draw(st.sampled_from([0, 50, 400, 700]), label="output")})
+    s.take_cancels()
+    drain()
+    assert all(n == 1 for n in reported.values()), "an instance was reported twice"
+    assert all(reported.get(i) == 1 for i in seen), "an instance of an opened scope was never reported"
     # dead steps never ran; every step of a scope that finished normally settled, with no edge left pending
     for scope in s.scopes.values():
         for node_id, state in scope.nodes.items():
