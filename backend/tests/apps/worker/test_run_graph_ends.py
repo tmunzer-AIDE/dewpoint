@@ -136,6 +136,43 @@ async def test_a_control_step_that_finished_as_the_run_ended_keeps_its_outcome(e
     assert rows["v"].effect_preview == {"assignments": {"n": 1}}
 
 
+async def test_a_control_step_that_finished_as_the_deadline_passed_keeps_its_outcome(
+    dev_env: WorkflowEnvironment,
+) -> None:
+    """D-a3 in the deadline's order: `d` sleeps as long as the run may last, so its timer and the deadline's fire in one
+    workflow task; `d`'s row says what it did, never `cancelled`. On the dev server: the time-skipping one stalls on
+    the two (the env fixture says where it does)."""
+    from temporalio.api.enums.v1 import EventType
+
+    from tests.apps.worker.test_real_server import serving
+
+    store = MemoryStore()
+    g = graph().node("d", DELAY, {"duration_s": 5})
+    async with serving(dev_env.client, store):
+        handle = await start(dev_env.client, store, g, {}, max_run_duration_s=5)
+        result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
+        kinds = [e.event_type for e in (await handle.fetch_history()).events]
+    assert result.status == "deadline_exceeded"
+    fired = kinds.index(EventType.EVENT_TYPE_TIMER_FIRED)
+    assert kinds[fired + 1] == EventType.EVENT_TYPE_TIMER_FIRED, "the two timers fired in different workflow tasks"
+    [row] = [r for r in store.steps(run_id_of(handle)) if r.node_key == "d"]
+    assert (row.status, row.started_at is not None) == ("succeeded", True)
+
+
+async def test_a_simulated_timer_that_finished_as_the_run_stopped_says_it_wasnt_waited(
+    env: WorkflowEnvironment,
+) -> None:
+    """D-a3 for a simulated timer: its row is the one it would have had otherwise, `simulated`, with its resolved
+    duration as its input (the simulation design §4.2)."""
+    store = MemoryStore()
+    g = graph().node("stop", STOP).node("wait", DELAY, {"duration_s": 3600})  # `stop` is applied first, as it ranks
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, {}, mode="simulate")
+        await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
+    [row] = [r for r in store.steps(run_id_of(handle)) if r.node_key == "wait"]
+    assert (row.status, row.outcome, row.input_preview) == ("succeeded", "simulated", {"duration_s": 3600})
+
+
 async def test_a_cancel_ends_started_work_cancelled_and_queued_work_not_started(env: WorkflowEnvironment) -> None:
     """101 steps ready at once: the in-flight cap starts 100 and queues one. A cancel stops the 100 that began
     (`cancelled`, with their start); the one queued never began (`not_started`, no start). About 30 s: a cancel reaches

@@ -457,11 +457,10 @@ class Execution:
                     cut.append(self._yield_timer)
                 done, _ = await workflow.wait([*tasks.values(), clock, wake, *cut], return_when=asyncio.FIRST_COMPLETED)
                 wake.cancel()
-                if clock in done:
+                if clock in done:  # the run ends; what completed beside the deadline keeps its outcome (D-a3)
                     self.sched.end(
                         RunEnd(DEADLINE_EXCEEDED, Failure(DEADLINE_EXCEEDED, "The run passed its deadline."))
                     )
-                    break
                 for key in sorted((k for k, t in tasks.items() if t in done), key=self._rank):
                     task = tasks.pop(key)
                     if key[0] == "cancelled" and task.cancelled():
@@ -818,14 +817,18 @@ class Execution:
         return None
 
     def _queue_late(self, inst: Instance, effect: "_Effect") -> None:
-        """A control step that finished as its run or scope ended (D-a3): its row records what it did."""
+        """A control step that finished as its run or scope ended (D-a3): its row records what it did, as it would
+        have otherwise (a simulated timer's `simulated` and resolved config too, §4.2)."""
         failure = effect.failure or (effect.end.failure if effect.end is not None else None)
+        waited = self._not_waited.pop(inst, None)
         self._queue(
             self._row(
                 inst,
                 "failed" if failure is not None else "succeeded",
                 started_at=self._started.get(inst),
                 ended_at=workflow.now().isoformat(),
+                input_preview=self._preview(waited) if waited is not None else None,
+                outcome=SIMULATED if waited is not None else None,
                 output_preview=None if failure is not None else self._preview(effect.output),
                 error_code=failure.code if failure is not None else None,
                 error_message=failure.message if failure is not None else None,
