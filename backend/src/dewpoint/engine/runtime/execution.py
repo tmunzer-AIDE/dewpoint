@@ -684,6 +684,7 @@ class Execution:
             row,
             input_preview=storable(row.input_preview),
             output_preview=storable(row.output_preview),
+            effect_preview=storable(row.effect_preview),
             error_code=sanitize(row.error_code),
             error_message=sanitize(row.error_message),
         )

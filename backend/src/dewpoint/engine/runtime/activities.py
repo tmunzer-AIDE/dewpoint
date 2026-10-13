@@ -291,7 +291,7 @@ class StepRow:
     node_key: str
     iteration_key: str
     attempt: int
-    status: str  # running | succeeded | failed | cancelled
+    status: str  # running | succeeded | failed | cancelled | skipped | not_started
     started_at: str | None = None
     ended_at: str | None = None
     input_preview: Any = None
@@ -300,6 +300,7 @@ class StepRow:
     error_message: str | None = None
     outcome: str | None = None
     cel_mode: str | None = None
+    effect_preview: Any = None  # a control step's effect besides its output: {"port"} or {"assignments"}
 
 
 @dataclass(frozen=True)
