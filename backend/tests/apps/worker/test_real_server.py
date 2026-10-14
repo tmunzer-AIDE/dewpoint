@@ -36,15 +36,19 @@ from tests.support.plugins.testkit import TESTKIT, EchoOutput, FailN, FailNConfi
 
 
 @asynccontextmanager
-async def serving(client: Client, store: MemoryStore, *, grace_s: float | None = None) -> AsyncIterator[None]:
+async def serving(
+    client: Client, store: MemoryStore, *, grace_s: float | None = None, again: str | None = None
+) -> AsyncIterator[str]:
     """A build of this test's own, current: the dev server keeps the deployment's routing between tests. `grace_s`: how
-    long its stopping worker lets running attempts finish."""
-    this = build("real")
+    long its stopping worker lets running attempts finish. `again`: a build this test served before, served again (its
+    runs are pinned to it, and it's still current). Yields the build."""
+    this = again or build("real")
     evaluator = Worker(client, task_queue=cel_queue(CURRENT_CEL_PROFILE), activities=[cel_activity(in_process, store)])
     grace = {} if grace_s is None else {"worker_shutdown_grace_s": grace_s}
     async with evaluator, engine_worker(client, store, [TESTKIT], settings(**grace), build=this, identity=this):
-        await set_current(client, this)
-        yield
+        if again is None:
+            await set_current(client, this)
+        yield this
 
 
 def graph(**outputs: Any) -> G:

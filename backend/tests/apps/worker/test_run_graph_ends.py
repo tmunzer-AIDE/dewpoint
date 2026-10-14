@@ -49,11 +49,15 @@ class Seen(MemoryStore):
         await super().project(data)
 
 
-async def test_the_deadline_cancels_running_work_and_ends_waiting_work_not_started(env: WorkflowEnvironment) -> None:
+async def test_the_deadline_cancels_running_work_and_ends_waiting_work_not_started(
+    own_env: WorkflowEnvironment,
+) -> None:
+    """On a test server of its own: the run ends while `a`'s activity runs, and a shared server would stop skipping
+    time."""
     store = MemoryStore()
     g = graph().node("a", SLOW, {"seconds": 60}).node("b", ECHO, {"value": 1}).edge("a", "b")
-    async with workers(env.client, store):
-        handle = await start(env.client, store, g, {}, max_run_duration_s=5)
+    async with workers(own_env.client, store):
+        handle = await start(own_env.client, store, g, {}, max_run_duration_s=5)
         result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
     assert result.status == "deadline_exceeded"
     assert ended(store, run_id_of(handle)) == {("a", "", 1): ("cancelled", True), ("b", "", 1): ("not_started", False)}
@@ -140,22 +144,34 @@ async def test_a_control_step_that_finished_as_the_run_ended_keeps_its_outcome(e
 async def test_a_control_step_that_finished_as_the_deadline_passed_keeps_its_outcome(
     dev_env: WorkflowEnvironment,
 ) -> None:
-    """D-a3 in the deadline's order: `d` sleeps as long as the run may last, so its timer and the deadline's fire in one
-    workflow task; `d`'s row says what it did, never `cancelled`. On the dev server: the time-skipping one stalls on
-    the two (the env fixture says where it does)."""
+    """D-a3 in the deadline's order: `d` sleeps as long as the run may last, and its timer and the deadline's fire in
+    one workflow task; `d`'s row says what it did, never `cancelled`. Forced, as the server's timing won't: the run's
+    build stops once both timers are started and serves again once both have fired, so its next task carries both. On
+    the dev server: the time-skipping one stalls on the two (the env fixture says where it does)."""
     from temporalio.api.enums.v1 import EventType
 
     from tests.apps.worker.test_real_server import serving
 
+    async def history(handle: Any, kind: int, count: int) -> list[int]:
+        for _ in range(200):  # in real time: the timers are 5 s
+            kinds = [e.event_type for e in (await handle.fetch_history()).events]
+            if kinds.count(kind) >= count:
+                return kinds
+            await asyncio.sleep(0.1)
+        raise AssertionError(f"fewer than {count} events of type {kind}")
+
     store = MemoryStore()
     g = graph().node("d", DELAY, {"duration_s": 5})
-    async with serving(dev_env.client, store):
+    async with serving(dev_env.client, store) as this:
         handle = await start(dev_env.client, store, g, {}, max_run_duration_s=5)
+        await history(handle, EventType.EVENT_TYPE_TIMER_STARTED, 2)
+    await history(handle, EventType.EVENT_TYPE_TIMER_FIRED, 2)  # no worker polls: both wait for the same task
+    async with serving(dev_env.client, store, again=this):
         result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
         kinds = [e.event_type for e in (await handle.fetch_history()).events]
     assert result.status == "deadline_exceeded"
-    fired = kinds.index(EventType.EVENT_TYPE_TIMER_FIRED)
-    assert kinds[fired + 1] == EventType.EVENT_TYPE_TIMER_FIRED, "the two timers fired in different workflow tasks"
+    first, second = [i for i, k in enumerate(kinds) if k == EventType.EVENT_TYPE_TIMER_FIRED]
+    assert EventType.EVENT_TYPE_WORKFLOW_TASK_STARTED not in kinds[first:second], "the timers fired in different tasks"
     [row] = [r for r in store.steps(run_id_of(handle)) if r.node_key == "d"]
     assert (row.status, row.started_at is not None) == ("succeeded", True)
 
@@ -211,16 +227,17 @@ class HeldSpills(MemoryStore):
 
 
 async def test_a_control_step_whose_result_was_being_claimed_as_the_run_ended_keeps_its_outcome(
-    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+    own_env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """D-a3 while a claim is written: `f`'s result passes the budget, so it's claimed before it merges; `stop` ends the
-    run a second later, with the claim still being written. `f`'s row is what it did."""
+    run a second later, with the claim still being written. `f`'s row is what it did. On a test server of its own: the
+    claim's activity never completes against the closed run, and a shared server would stop skipping time."""
     monkeypatch.setattr(scheduler, "LIVE_BUDGET", 3_000)
     store = HeldSpills()
     g = graph().node("f", FILTER, {"items": BIG, "predicate": cel("true")}).node("s", SLOW, {"seconds": 1})
     g.node("stop", STOP).edge("s", "stop")
-    async with workers(env.client, store):
-        handle = await start(env.client, store, g, {})
+    async with workers(own_env.client, store):
+        handle = await start(own_env.client, store, g, {})
         result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
         store.release.set()
     assert result.status == "succeeded"
@@ -383,20 +400,21 @@ class Batches(MemoryStore):
 
 
 async def test_a_run_that_ends_with_many_open_instances_rows_them_over_several_projections(
-    env: WorkflowEnvironment,
+    own_env: WorkflowEnvironment,
 ) -> None:
     """A workflow task's CPU (engine 2b spec §5.3): ends are made into rows at most ENDS_PER_PROJECTION at a time, one
     projection each, never all in the activation that ended the run. `f` fails at once; of the 1,197 steps the loop
     opened beside it (3 iterations of 399: a graph holds 500 steps), the in-flight cap starts 100 or fewer, and the
-    rest never start."""
+    rest never start. On a test server of its own: the run ends while those activities run, and a shared server would
+    stop skipping time."""
     store = Batches()
     g = graph().node("f", FAIL_N, {"failures": 10})
     g.nodes[0]["options"]["max_attempts"] = 1
     g.node("l", LOOP, {"items": [0, 1, 2], "concurrency": 3})
     for n in range(399):  # slow: a quick body beside the failure meets a known hang on main (its own task)
         g.node(f"e{n}", SLOW, {"seconds": 30}).edge("l", f"e{n}", "body")
-    async with workers(env.client, store):
-        handle = await start(env.client, store, g, {})
+    async with workers(own_env.client, store):
+        handle = await start(own_env.client, store, g, {})
         result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
     assert result.status == "failed"
     rows = store.steps(run_id_of(handle))
