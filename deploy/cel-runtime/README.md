@@ -20,6 +20,10 @@ Three, for CPython 3.12: Linux x86_64 and aarch64 (`manylinux_2_28` images, pinn
 `backend/uv.lock` pins each by URL and sha256: a changed file fails every install.
 `backend/tests/engine/cel/test_runtime_build.py` checks that the lock and this record agree.
 
+Never delete this release or its files. Every `uv sync`, CI run and image build downloads the wheels from it, and the
+lock pins their exact bytes. A rebuild has the same files inside but different zip timestamps, so replacing a lost
+wheel also means changing the lock and `manifest.json`.
+
 ## Rebuilding
 
 ```bash

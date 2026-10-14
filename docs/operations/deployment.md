@@ -267,8 +267,10 @@ old build's runs keep `dewpoint-cel.abi7.cel-cpp-0.1.3/fn-1/cls-1` until they en
   `cel-cpp-0.1.3+dewpoint.1/fn-1/cls-1`. 0.1.3 kept the arguments and the result of every call to one of Dewpoint's
   CEL functions for the life of the process: a worker's memory, and the work of each full garbage collection, grew
   with every such call. `dewpoint plugins sync` registers the new profile (step 1 of a rollout). Keep the old
-  profile's evaluators until no run of the old build is left, then retire it:
-  `dewpoint lifecycle retire --cel-profile cel-cpp-0.1.3/fn-1/cls-1`.
+  profile's evaluators until no run of the old build is left. Retire it
+  (`dewpoint lifecycle retire --cel-profile cel-cpp-0.1.3/fn-1/cls-1`) only once you no longer want to roll back to the
+  ABI 7 build: rolling back publishes every workflow again under the old profile, which a retired profile refuses, and
+  no command makes a retired profile active again.
 
 ## Upgrading from a build without versioning
 
