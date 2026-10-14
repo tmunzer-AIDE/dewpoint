@@ -213,7 +213,9 @@ change, with its fix:
   `x-sensitive`.
 - **A decision over sensitive data must be listed** in `graph.settings.declassify`: a `flow.if` condition, a switch
   case's `when`, a loop's items, a filter's items or predicate (`taint.undeclassified`; an entry that declassifies
-  nothing is `taint.stale_declassify`). Publishing a workflow with entries needs the `workflow.declassify` permission
+  nothing is `taint.stale_declassify`, a repeated one `taint.repeated_declassify`, and a switch case's entry that
+  doesn't name the port of the case at its index `taint.case_declassify`: re-declassify it in the editor, which writes
+  the port). Publishing a workflow with entries needs the `workflow.declassify` permission
   (tenant admins and owners, `declassify.forbidden` otherwise), and the audit log lists what each site reveals. Fix:
   list the site, or decide on plain data.
 - **A sensitive variable has no default** and is null until a step sets it: a read before a step sure to have set it

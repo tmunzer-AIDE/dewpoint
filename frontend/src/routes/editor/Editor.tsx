@@ -9,7 +9,7 @@ import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { LoadError } from "../../components/LoadError";
 import { announce } from "../../lib/announce";
 import { ApiError, client, ok } from "../../lib/client";
-import { admission, declassify, setConfig, setOptions, undeclassify, unlisted, unlistedNote, valueAt, type Changed } from "../../lib/config";
+import { admission, casePort, declassify, setConfig, setOptions, undeclassify, unlisted, unlistedNote, valueAt, type Changed } from "../../lib/config";
 import { csvOf, csvProblem } from "../../lib/csv";
 import { downloadJson, fileName } from "../../lib/download";
 import { ConflictError, DraftSync, type SyncState } from "../../lib/draftSync";
@@ -1334,8 +1334,9 @@ function Editor({
             types={typeMap}
             check={trusted && {
               ...trusted,
-              // A decision listed since the check isn't one to make: it shows as listed at once.
-              diagnostics: trusted.diagnostics.filter((d) => d.code !== "taint.undeclassified" || !listed.some((e) => d.node !== null && sameId(e.node, d.node) && e.field === d.field)),
+              // A decision listed since the check isn't one to make: it shows as listed at once. A switch case's entry
+              // lists it only naming the case's port (#78): one written before, or moved by another client, is offered again.
+              diagnostics: trusted.diagnostics.filter((d) => d.code !== "taint.undeclassified" || !listed.some((e) => d.node !== null && sameId(e.node, d.node) && e.field === d.field && (e.port ?? undefined) === casePort(doc, e))),
             }}
             editable={editable}
             onDeclassify={(site) => {

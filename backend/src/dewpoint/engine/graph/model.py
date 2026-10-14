@@ -74,10 +74,19 @@ def _vars_schema() -> dict[str, Any]:
 
 
 class DeclassifySite(_Strict):
-    """A decision that may turn tainted input into plain output (engine 2b spec §4.3): a node and its field."""
+    """A decision that may turn tainted input into plain output (engine 2b spec §4.3): a node and its field, and for a
+    switch case's `when` the case's port (#78), so a reordered case keeps or loses its own entry, never another's."""
 
     node: uuid.UUID
     field: str = Field(max_length=200)
+    port: str | None = Field(default=None, pattern=PORT_PATTERN)
+
+    @model_serializer(mode="wrap")
+    def _written_port(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:  # so a document keeps its hash
+        data: dict[str, Any] = handler(self)
+        if self.port is None:
+            data.pop("port", None)
+        return data
 
 
 class CsvColumn(_Strict):

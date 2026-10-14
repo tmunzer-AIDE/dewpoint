@@ -1966,7 +1966,8 @@ export interface components {
         };
         /**
          * DeclassifySite
-         * @description A decision that may turn tainted input into plain output (engine 2b spec §4.3): a node and its field.
+         * @description A decision that may turn tainted input into plain output (engine 2b spec §4.3): a node and its field, and for a
+         *     switch case's `when` the case's port (#78), so a reordered case keeps or loses its own entry, never another's.
          */
         DeclassifySite: {
             /** Field */
@@ -1976,6 +1977,11 @@ export interface components {
              * Format: uuid
              */
             node: string;
+            /**
+             * Port
+             * @default null
+             */
+            port?: string | null;
         };
         /**
          * DiagnosticOut

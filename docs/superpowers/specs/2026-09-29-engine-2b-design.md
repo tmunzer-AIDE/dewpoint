@@ -587,6 +587,15 @@ Only these sites may turn tainted input into plain output:
 
 - **Each declassifying site must be listed** in `graph.settings.declassify` (node and field). Publish refuses an
   unlisted tainted decision, and a listed site that isn't tainted (a stale entry).
+- **Each entry is listed once, and a switch case's names its case** (#78; the owner's rulings, 2026-10-14). A repeat
+  of an earlier entry is refused (`taint.repeated_declassify`): removing one copy must stop the declassification. A
+  switch case's entry names the case's port beside its pointer (`{node, field: "/cases/2/when", port: "approved"}`)
+  and counts only while the case at that index has that port; an entry without it, with another case's, or with a
+  port on a site that isn't a switch case's is refused (`taint.case_declassify`) and declassifies nothing, so cases
+  reordered outside the editor are reported, never followed to another case. An entry written before this rule is
+  confirmed again once (the editor writes the port, and renaming a case's port rewrites its entry); published
+  versions keep theirs, the runtime never reading the list. `port` is written only when set, so a graph without one
+  keeps its hash.
 - Publishing a version whose `declassify` list is non-empty requires the permission `workflow.declassify` (tenant
   admins and owners by default). The publish audit entry records every listed site and what it reveals.
 - **A decision comes back plain only as a decision:** a boolean for a condition or a case, a whole number for a

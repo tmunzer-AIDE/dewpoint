@@ -23,7 +23,7 @@ from dewpoint.engine.graph.csv import INPUT_ROOT as CSV_INPUT_ROOT
 from dewpoint.engine.graph.csv import RESERVED as CSV_RESERVED
 from dewpoint.engine.graph.csv import is_canonical, trigger_schema
 from dewpoint.engine.graph.diagnostics import Diagnostic, Severity
-from dewpoint.engine.graph.model import CsvSettings, Graph, GraphNode
+from dewpoint.engine.graph.model import CsvSettings, DeclassifySite, Graph, GraphNode
 from dewpoint.engine.graph.schema_messages import problems
 from dewpoint.engine.graph.schemas import (
     PathError,
@@ -313,6 +313,27 @@ def _decision_sites(graph: Graph, s: Structure) -> dict[tuple[uuid.UUID, str], s
     return out
 
 
+def _case_ports(graph: Graph, s: Structure) -> dict[tuple[uuid.UUID, str], str | None]:
+    """Every switch case's decision site, with its case's port, or None where the case has no literal one (refused as
+    the step's structure): what an entry declassifying it names (#78)."""
+    out: dict[tuple[uuid.UUID, str], str | None] = {}
+    for n in graph.nodes:
+        cases = n.config.get("cases")
+        if s.specs[n.id].ref == C.SWITCH and isinstance(cases, list):
+            for i, case in enumerate(cases):
+                port = case.get("port") if isinstance(case, Mapping) else None
+                out[(n.id, f"/cases/{i}/when")] = port if isinstance(port, str) else None
+    return out
+
+
+def _names_its_case(entry: DeclassifySite, ports: Mapping[tuple[uuid.UUID, str], str | None]) -> bool:
+    """Whether an entry names what it must (#78): a switch case's, the case's literal port; any other, no port."""
+    site = (entry.node, entry.field)
+    if site in ports:
+        return entry.port is not None and entry.port == ports[site]
+    return entry.port is None
+
+
 def _public_length(graph: Graph, n: GraphNode) -> bool:
     """A loop over `trigger.rows` itself, in a version declaring a CSV: its length is already public
     (`trigger.row_count`), so it needs no entry. A derived or filtered list doesn't inherit that (§4.3), and without a
@@ -327,8 +348,15 @@ def _public_length(graph: Graph, n: GraphNode) -> bool:
 def _declassify(
     graph: Graph, s: Structure, site_taint: Mapping[tuple[uuid.UUID | None, str], bool]
 ) -> tuple[list[Diagnostic], tuple[tuple[str, str, str], ...]]:
-    """Every tainted decision must be listed in `settings.declassify`, and every entry must be one (§4.3)."""
-    listed = [(e.node, e.field) for e in graph.settings.declassify]
+    """Every tainted decision must be listed in `settings.declassify`, and every entry must be one (§4.3), once: a
+    repeat would keep its decision declassified after a person removes the copy they see (#78), so it's refused and
+    the first copy alone counts. A switch case's entry names its case's port, and counts only while the case at its
+    index has it: a reorder outside the editor is reported, never followed (#78)."""
+    entries = [(e.node, e.field) for e in graph.settings.declassify]
+    repeats = {i for i, site in enumerate(entries) if site in entries[:i]}
+    ports = _case_ports(graph, s)
+    misnamed = {i for i, e in enumerate(graph.settings.declassify) if not _names_its_case(e, ports)}
+    listed = {site for i, site in enumerate(entries) if i not in repeats and i not in misnamed}
     sites = _decision_sites(graph, s)
     out: list[Diagnostic] = []
     for (node, fld), ref in sites.items():
@@ -346,9 +374,29 @@ def _declassify(
             )
         )
     declassified: list[tuple[str, str, str]] = []
-    for i, (node, fld) in enumerate(listed):
+    for i, (node, fld) in enumerate(entries):
         kind = sites.get((node, fld))
-        if kind is None or not site_taint.get((node, fld)):
+        if i in repeats:
+            out.append(
+                Diagnostic(
+                    code="taint.repeated_declassify",
+                    field=f"/settings/declassify/{i}",
+                    message="This entry repeats an earlier one: removing one copy wouldn't stop declassifying the "
+                    "decision.",
+                    fix="Remove it.",
+                )
+            )
+        elif kind is not None and i in misnamed:
+            out.append(
+                Diagnostic(
+                    code="taint.case_declassify",
+                    field=f"/settings/declassify/{i}",
+                    message="This entry doesn't name the case at its place: a switch case's decision is declassified "
+                    "by its port, so a reordered case keeps or loses its own.",
+                    fix="Declassify the case's decision again.",
+                )
+            )
+        elif kind is None or not site_taint.get((node, fld)):
             out.append(
                 Diagnostic(
                     code="taint.stale_declassify",
