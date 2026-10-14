@@ -305,3 +305,25 @@ async def test_a_workflow_declaring_a_csv_isnt_started_without_one(
         await admit(api_sessionmaker, ctx, wf)
     assert refused.value.reason == "input_invalid"
     assert any("its root: it breaks `required`" in m for m in refused.value.messages)
+
+
+async def test_an_input_past_the_limit_is_refused_before_its_key_is_read(ready, api_sessionmaker) -> None:
+    """The review's L2: an exact retry's digest, computed before the input's depth was read, raised `RecursionError`
+    for an input past the encoder's limit (a re-run's identity wraps it 2 levels deeper). The depth is read first,
+    whatever the key holds."""
+    from dewpoint.apps.inputs import TOO_DEEP
+
+    ctx, wf = ready
+    await admit(api_sessionmaker, ctx, wf, key="used")
+    deep: dict[str, Any] = {}
+    for _ in range(20_000):
+        deep = {"n": deep}
+    with pytest.raises(admission.AdmissionRefusedError) as raised:
+        await admit(api_sessionmaker, ctx, wf, key="used", input={"token": TOKEN, "n": deep})
+    assert (raised.value.reason, raised.value.messages) == ("input_invalid", [TOO_DEEP])
+    async with api_sessionmaker() as s, s.begin():
+        with pytest.raises(admission.AdmissionRefusedError) as raised:
+            await admission.admitted_under(s, KEYS, tenant_id=ctx.tenant_id, idempotency_key="used", source="rerun",
+                                           workflow_id=wf, mode="live",
+                                           rerun=admission.Rerun(uuid.uuid4(), deep))  # fmt: skip
+    assert (raised.value.reason, raised.value.messages) == ("input_invalid", [TOO_DEEP])

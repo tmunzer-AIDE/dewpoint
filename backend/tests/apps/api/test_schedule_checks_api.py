@@ -369,20 +369,27 @@ def unchecked(diagnostics: list[dict[str, Any]]) -> list[str]:
     return [d["message"] for d in diagnostics if d["code"] == "schedule.unchecked"]
 
 
-async def test_a_stored_input_nested_deeper_than_the_check_follows_never_fails_publishing(
+async def test_a_stored_input_nested_past_the_input_limit_is_a_break_and_publishing_still_succeeds(
     keyed_app, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
 ) -> None:
     """The final review: under a draft whose input recurses through a reference, a stored input nested 300 deep
-    raised `RecursionError` out of the check, so validate answered 500, and publish too, its version undone. The
-    schedule is counted unchecked, and the version is published."""
+    raised `RecursionError` out of the check, so validate answered 500, and publish too, its version undone. Since
+    issue #88 such an input can't be written (the API refuses it); one stored before (sealed here) is past the input
+    limit, which admission refuses at every firing: validate names that schedule a break, publish warns and publishes,
+    and nothing is counted unchecked."""
+    from dewpoint.apps import schedules
+
     ctx, wf = await published(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings,
                               TOKEN_GRAPH | {"settings": {"input_schema": SCHEMA | {
                                   "properties": SCHEMA["properties"] | {"n": {"type": "object"}}}}})  # fmt: skip
     editor = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "editor")
+    schedule_id = await scheduled(editor, ctx, wf)
     deep: dict[str, Any] = {}
     for _ in range(300):
         deep = {"n": deep}
-    await scheduled(editor, ctx, wf, BODY | {"input": {"token": TOKEN, "n": deep}})
+    sealed = await schedules._sealed(KEYS, ctx.tenant_id, uuid.UUID(schedule_id), {"token": TOKEN, "n": deep})
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text("update schedules set input = :i where id = :id"), {"i": sealed, "id": schedule_id})
     recursive = SCHEMA | {
         "properties": SCHEMA["properties"] | {"n": {"$ref": "#/$defs/n"}},
         "$defs": {"n": {"type": "object", "properties": {"n": {"$ref": "#/$defs/n"}}}},
@@ -390,12 +397,15 @@ async def test_a_stored_input_nested_deeper_than_the_check_follows_never_fails_p
     await drafted(editor, ctx, wf, {"input_schema": recursive})
     checked = await editor.post(url(ctx, f"/workflows/{wf}/validate"))
     assert checked.status_code == 200, checked.text
-    assert checked.json()["schedule_breaks"] == []
-    assert unchecked(checked.json()["diagnostics"]) == [schedule_checks.UNCHECKED.format(n=1, s="")]
+    assert checked.json()["schedule_breaks"] == [
+        {"schedule_id": schedule_id, "reasons": [schedule_checks.TOO_DEEP_STORED], "more": False}
+    ]
+    assert unchecked(checked.json()["diagnostics"]) == []
     revision = (await editor.get(url(ctx, f"/workflows/{wf}"))).json()["draft_revision"]
     answer = await editor.post(url(ctx, f"/workflows/{wf}/publish"), headers={"If-Match": str(revision)})
     assert answer.status_code == 201, answer.text
-    assert unchecked(answer.json()["warnings"]) == [schedule_checks.UNCHECKED.format(n=1, s="")]
+    warned = [(d["code"], d["message"]) for d in answer.json()["warnings"] if d["code"].startswith("schedule")]
+    assert warned == [("schedule.input_too_deep", schedule_checks.too_deep_schedules(1))]
 
 
 async def test_a_stored_input_that_doesnt_open_is_counted_unchecked(

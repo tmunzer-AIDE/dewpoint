@@ -16,7 +16,18 @@ import pytest
 from jsonschema.exceptions import ValidationError
 
 from dewpoint.apps import schedule_checks
-from dewpoint.apps.schedule_checks import CSV, Checked, Exhausted, Shape, checked_all, shape
+from dewpoint.apps.schedule_checks import (
+    CSV,
+    TOO_DEEP_STORED,
+    Breaks,
+    Checked,
+    Exhausted,
+    Shape,
+    checked_all,
+    shape,
+    too_deep_schedules,
+    warnings,
+)
 
 SECRET = "t0ken-value-1"
 STORED = {"token": SECRET, "site": "a", "floor": 2, "address": {"city": "Paris"}, "tags": ["a", "b"]}
@@ -242,12 +253,60 @@ def nested(depth: int) -> bytes:
     return ('{"n": ' * depth + "{}" + "}" * depth).encode()
 
 
-def test_a_stored_input_nested_deeper_than_the_check_follows_is_counted_unchecked() -> None:
-    """The final review: the steps bound the check's work, not its depth. Under a draft whose input recurses through
-    a reference, a stored input nested 300 deep raised `RecursionError` out of the check, and validate and publish
-    answered 500. It's counted unchecked, and the next input is still checked."""
-    with pytest.raises(RecursionError):  # the input goes deeper than the check can follow
-        shape(RECURSIVE, takes_csv=False).check(json.loads(nested(DEEP)))
+def test_a_stored_input_nested_past_the_input_limit_is_a_break_never_descended() -> None:
+    """Issue #88, ruling 5: admission refuses an input nested past 64 levels at every firing, so the check names it
+    a break, under any draft, without descending it. The final review's 300-level input under a recursive draft,
+    which raised `RecursionError` out of the check and was then counted unchecked, is such a break; the next input is
+    still checked."""
+    assert shape(RECURSIVE, takes_csv=False).check(json.loads(nested(DEEP))) == Checked([TOO_DEEP_STORED])
     deep, other = uuid.uuid4(), uuid.uuid4()
     partial, refused, unchecked = checked_all(RECURSIVE, False, [(deep, nested(DEEP)), (other, b'{"site": "a"}')])
-    assert (partial, [i for i, _ in refused], unchecked) == (frozenset(), [other], 1)
+    assert (partial, [i for i, _ in refused], unchecked) == (frozenset(), [deep, other], 0)
+    assert TOO_DEEP_STORED == "Its stored input nests deeper than 64 levels: every firing is refused."
+
+
+def test_the_limit_holds_under_a_draft_that_takes_any_object() -> None:
+    """A permissive draft accepted a 65-level input whose every firing admission refuses: now told."""
+    anything = shape({"type": "object"}, takes_csv=False)
+    assert anything.check(json.loads(nested(63))) == Checked([])  # 64 levels
+    assert anything.check(json.loads(nested(64))) == Checked([TOO_DEEP_STORED])  # 65
+    assert shape({"type": "object"}, takes_csv=True).check(json.loads(nested(64))) == Checked([CSV])  # the draft's own
+
+
+def test_a_draft_spending_many_frames_a_level_counts_an_input_within_the_limit_unchecked() -> None:
+    """The review's L3: under a draft wrapping each level's reference in 6 nested `allOf`, a stored input of 64
+    levels (within the limit) goes deeper than the check can follow: counted unchecked, never raised, in the check's
+    worker thread as in the main thread (admission tells it "nested too deeply to check")."""
+    import threading
+
+    inner: dict[str, Any] = {"type": "object", "properties": {"n": {"$ref": "#/$defs/n"}}}
+    for _ in range(6):
+        inner = {"allOf": [inner]}
+    wide = {"type": "object", "properties": {"n": {"$ref": "#/$defs/n"}}, "$defs": {"n": inner}}
+    stored = [(uuid.uuid4(), nested(63))]  # 64 levels
+    assert checked_all(wide, False, stored) == (frozenset(), [], 1)
+    found: list[Any] = []
+    worker = threading.Thread(target=lambda: found.append(checked_all(wide, False, stored)))
+    worker.start()
+    worker.join()
+    assert found == [(frozenset(), [], 1)]
+
+
+def test_a_depth_break_is_warned_of_as_its_own_never_as_the_drafts() -> None:
+    """The review's L4: a stored input past the limit fails at every firing already, whatever is published: its
+    warning says so and that the input must be replaced, apart from the schedules the draft itself would break."""
+    deep, drafts = Checked([TOO_DEEP_STORED]), Checked(["`floor` is required now."])
+    found = Breaks(refused=[(uuid.uuid4(), deep), (uuid.uuid4(), drafts), (uuid.uuid4(), deep)], unchecked=0)
+    said = [(d.code, d.message, d.field) for d in warnings(found, takes_csv=False)]
+    assert said == [
+        ("schedule.input_refused", schedule_checks.REFUSED.format(n=1, s=""), "/settings/input_schema"),
+        ("schedule.input_too_deep", too_deep_schedules(2), None),
+    ]
+    assert too_deep_schedules(1) == (
+        "1 live schedule fails at every firing already: its stored input nests deeper than 64 levels. Replace its "
+        "input; publishing changes nothing for it."
+    )
+    assert too_deep_schedules(2) == (
+        "2 live schedules fail at every firing already: their stored inputs nest deeper than 64 levels. Replace their "
+        "inputs; publishing changes nothing for them."
+    )

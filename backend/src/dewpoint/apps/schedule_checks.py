@@ -23,8 +23,9 @@ Its work is bounded in units, never time:
 - every keyword it evaluates, at any depth, spends one of the check's 50,000 steps, and its `anyOf` tries a branch only
   up to its first error, keeping none (JSON Schema's own builds every error of every failing branch first);
 - from one stored input it reads 100 errors, lazily, and keeps 5 distinct reasons, each of 300 characters at most;
-- the steps bound its work, not its depth: a stored input nested deeper than the check's descent can follow (about
-  250 objects, under a draft that recurses through a reference) isn't checked.
+- the steps bound its work, not its depth: a stored input nested past the input limit (64 levels) is a break, said
+  without descending it, as admission refuses it at every firing (issue #88); one the check's descent can't follow
+  within it (measured: 64 levels under a draft wrapping each level's reference in 6 nested `allOf`) isn't checked.
 What a bound leaves out is said: a schedule as unchecked, a reason list as having more. Decoding and checking run in a
 worker thread."""
 
@@ -42,11 +43,13 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from dewpoint.apps.inputs import nests_too_deep
 from dewpoint.apps.schedules import INPUT_PURPOSE
 from dewpoint.core.claims.cipher import ClaimCipher, ClaimUnreadableError
 from dewpoint.core.crypto.keys import KeySource, key_unreadable
 from dewpoint.core.models.schedules import Schedule
 from dewpoint.engine.graph.diagnostics import Diagnostic
+from dewpoint.engine.graph.model import MAX_DEPTH
 from dewpoint.engine.runtime.projection import location
 from dewpoint.engine.schema_refs import SCHEMA_LIST, SCHEMA_MAP, SCHEMA_ONE
 
@@ -58,6 +61,15 @@ MAX_ERRORS = 100  # errors read from one stored input, lazily
 MAX_REASONS = 5  # distinct reasons kept for one, in the order found
 MAX_REASON_CHARS = 300  # a reason's length at most: a name the draft gives may be long
 CSV = "This input takes a CSV file now: a schedule can't give its rows."
+TOO_DEEP_STORED = f"Its stored input nests deeper than {MAX_DEPTH} levels: every firing is refused."
+TOO_DEEP_SCHEDULE = (
+    f"1 live schedule fails at every firing already: its stored input nests deeper than {MAX_DEPTH} levels. Replace "
+    "its input; publishing changes nothing for it."
+)
+TOO_DEEP_SCHEDULES = (
+    f"{{n}} live schedules fail at every firing already: their stored inputs nest deeper than {MAX_DEPTH} levels. "
+    "Replace their inputs; publishing changes nothing for them."
+)
 REFUSED = (
     "Publishing this would make {n} live schedule{s} fail at every firing: their stored input doesn't fit this input. "
     "Once it's published, replace it, or keep the input as it was."
@@ -217,6 +229,8 @@ class Shape:
         when the check's steps run out."""
         if self.takes_csv:
             return Checked([CSV])
+        if nests_too_deep(value):  # admission refuses it at every firing, whatever the draft (issue #88)
+            return Checked([TOO_DEEP_STORED])
         if self.validator is None:  # another dialect's: not checked, and named in `partial`
             return Checked([])
         kept: list[str] = []
@@ -329,11 +343,14 @@ def warnings(found: Breaks, *, takes_csv: bool) -> list[Diagnostic]:
     """What validate and publish warn of: the schedules that would break, at the input (or the CSV declaration), and
     the ones not checked."""
     out: list[Diagnostic] = []
-    if found.refused:
-        n = len(found.refused)
+    deep = sum(1 for _, checked in found.refused if checked.reasons == [TOO_DEEP_STORED])  # whatever is published
+    if len(found.refused) > deep:
+        n = len(found.refused) - deep
         out.append(Diagnostic(code="schedule.input_refused", message=REFUSED.format(n=n, s="s" if n > 1 else ""),
                               field="/settings/csv" if takes_csv else "/settings/input_schema",
                               severity="warning"))  # fmt: skip
+    if deep:
+        out.append(Diagnostic(code="schedule.input_too_deep", message=too_deep_schedules(deep), severity="warning"))
     if found.unchecked:
         n = found.unchecked
         out.append(Diagnostic(code="schedule.unchecked", message=UNCHECKED.format(n=n, s="s" if n > 1 else ""),
@@ -343,6 +360,11 @@ def warnings(found: Breaks, *, takes_csv: bool) -> list[Diagnostic]:
         out.append(Diagnostic(code="schedule.partly_checked", message=PARTLY.format(keywords=named),
                               field="/settings/input_schema", severity="warning"))  # fmt: skip
     return out
+
+
+def too_deep_schedules(n: int) -> str:
+    """The depth breaks' warning (issue #88, the review's L4): they fail already, and only a new input mends them."""
+    return TOO_DEEP_SCHEDULE if n == 1 else TOO_DEEP_SCHEDULES.format(n=n)
 
 
 def checkable(diagnostics: Sequence[Diagnostic]) -> bool:

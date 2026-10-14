@@ -18,6 +18,7 @@ from dewpoint.apps.dispatcher import tick
 from dewpoint.core.db import tenant_scope
 from tests.apps.test_admission import KEYS, SCHEMA, TOKEN, count, current, published
 from tests.apps.test_admission_csv import full_input
+from tests.apps.test_inputs import RECURSIVE, objects
 from tests.apps.test_workflow_ops import publish, save, update
 from tests.support.graphs import G
 
@@ -366,3 +367,39 @@ async def test_a_recorded_tick_keeps_its_outcome_after_its_window(
         == [(r["id"], r["idempotency_key"], r["status"]) for r in before]
         == [(before[0]["id"], fresh, "queued"), (before[1]["id"], stale, "refused")]
     )
+
+
+async def stored(owner: Any, ctx: Any, schedule_id: uuid.UUID, value: Any) -> None:
+    """`value` as the schedule's sealed input, written as an input stored before issue #88's limit would be."""
+    sealed = await schedules._sealed(KEYS, ctx.tenant_id, schedule_id, value)
+    async with owner() as s, s.begin():
+        await s.execute(text("update schedules set input = :i where id = :id"), {"i": sealed, "id": schedule_id})
+
+
+async def test_a_stored_input_past_64_levels_fires_as_a_refused_request(
+    ready, owner_sessionmaker, api_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    """Issue #88: under a recursive input schema, 300 levels raised RecursionError at the firing; under a permissive
+    one, 65 levels were queued. Each is a refused request now, its input untouched: replacing it fixes the
+    schedule. The 65-level case is the one the depth check alone decides (the 300-level one `reasons()` would refuse
+    too, as too deeply nested to check)."""
+    ctx, wf, schedule_id = ready
+    recursive = {**RECURSIVE, "properties": {**SCHEMA["properties"], **RECURSIVE["properties"]}}
+    await save(api_sessionmaker, ctx, wf, G().node("a", "testkit.echo@1", {"value": 1}).data()
+               | {"settings": {"input_schema": recursive}})  # fmt: skip
+    assert (await publish(api_sessionmaker, ctx, wf, api_settings)).version is not None
+    await stored(owner_sessionmaker, ctx, schedule_id, {"token": TOKEN, "n": objects(299)})
+    assert (
+        await ticked(dispatch_sessionmaker, ctx, schedule_id, at(schedule_id, timedelta(seconds=3)))
+        == "refused:input_invalid"
+    )
+    await save(api_sessionmaker, ctx, wf, G().node("a", "testkit.echo@1", {"value": 1}).data()
+               | {"settings": {"input_schema": {"type": "object"}}})  # fmt: skip
+    assert (await publish(api_sessionmaker, ctx, wf, api_settings)).version is not None
+    await stored(owner_sessionmaker, ctx, schedule_id, {"token": TOKEN, "n": objects(64)})
+    assert (
+        await ticked(dispatch_sessionmaker, ctx, schedule_id, at(schedule_id, timedelta(seconds=2)))
+        == "refused:input_invalid"
+    )
+    await stored(owner_sessionmaker, ctx, schedule_id, {"token": TOKEN, "n": objects(63)})  # 64 levels: within it
+    assert await ticked(dispatch_sessionmaker, ctx, schedule_id, at(schedule_id, timedelta(seconds=1))) == "queued"

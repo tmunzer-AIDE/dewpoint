@@ -21,13 +21,39 @@ from dewpoint.core.claims import service as claims
 from dewpoint.core.claims.cipher import ClaimCipher
 from dewpoint.core.claims.secret_index import SECRET_INDEX_LIMIT
 from dewpoint.core.crypto.keys import KeySource
-from dewpoint.engine.handles import contains_marker
+from dewpoint.engine.graph.model import MAX_DEPTH
+from dewpoint.engine.handles import ClaimRef, contains_marker
 from dewpoint.engine.runtime.projection import location
 from dewpoint.engine.split import Split, split
 
 FORGED = "The run's input holds the reserved key `$claim`, which only Dewpoint writes."
 RESERVED_INPUT = "The run's input holds `rows` or `row_count`, which only a CSV upload supplies."
 _REASONS = 5  # an input that breaks more rules is told about the first ones
+TOO_DEEP = f"The run's input nests deeper than {MAX_DEPTH} levels."
+TOO_DEEP_TO_CHECK = "The run's input is nested too deeply to check against the workflow's input schema."
+
+
+def nests_too_deep(value: Any, *, handles: bool = False) -> bool:
+    """Whether `value` nests objects and arrays deeper than the engine's limit for a document (`MAX_DEPTH`), its own
+    value the first level, as a workflow document and a webhook body are counted (issue #88). Iterative: no recursion
+    limit decides, so it runs before anything that recurses through the input. `handles`: a run's value, whose handles
+    count as the leaves they stand for (what one expands to is bounded where it's resolved); an input from outside
+    holds none (the marker is refused), and a handle there counts as an object."""
+    stack: list[tuple[Any, int]] = [(value, 1)]
+    while stack:
+        current, depth = stack.pop()
+        if handles and ClaimRef.of(current) is not None:
+            continue
+        if isinstance(current, Mapping):
+            children: Any = current.values()
+        elif isinstance(current, list | tuple):
+            children = current
+        else:
+            continue
+        if depth > MAX_DEPTH:
+            return True
+        stack.extend((child, depth + 1) for child in children)
+    return False
 
 
 INPUT_INVALID = "input_invalid"
@@ -46,12 +72,15 @@ def reasons(schema: Mapping[str, Any], value: Any) -> list[str]:
     the data supplied shows as `*`), and the rule it breaks; never what's there. Ordered by that text, not by the
     data, and each told once: jsonschema reports `required` once per missing property (`dependentRequired` per
     missing dependency, `propertyNames` per refused name), and keys breaking one rule show as one `*`."""
-    found = sorted(
-        {
-            (location(list(e.absolute_path), schema), str(e.validator))
-            for e in Draft202012Validator(schema).iter_errors(value)
-        }
-    )
+    try:
+        found = sorted(
+            {
+                (location(list(e.absolute_path), schema), str(e.validator))
+                for e in Draft202012Validator(schema).iter_errors(value)
+            }
+        )
+    except RecursionError:  # jsonschema descends a call a level: told, never raised (issue #88)
+        return [TOO_DEEP_TO_CHECK]
     return [
         f"The run's input doesn't match the workflow's input schema at "
         f"{'its root' if where == '(root)' else where}: it breaks `{rule}`."
@@ -60,7 +89,10 @@ def reasons(schema: Mapping[str, Any], value: Any) -> list[str]:
 
 
 def checked(schema: Mapping[str, Any], value: dict[str, Any]) -> Split:
-    """`value` checked against `schema`, then split: CPU only. Raises InputRefusedError."""
+    """`value` checked against `schema`, then split: CPU only. Raises InputRefusedError. Its depth first: nothing
+    recursive reads an input deeper than the limit (issue #88)."""
+    if nests_too_deep(value):
+        raise InputRefusedError([TOO_DEEP])
     refused = reasons(schema, value)
     if refused:
         raise InputRefusedError(refused)
