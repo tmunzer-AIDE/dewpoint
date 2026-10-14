@@ -18,7 +18,7 @@ from dewpoint.apps import admission, cancels
 from dewpoint.apps.api.responses import StartFormOut
 from dewpoint.apps.csv_slots import CsvBusyError, Slot
 from dewpoint.apps.forms import csv_form, form_fields
-from dewpoint.apps.inputs import INPUT_INVALID
+from dewpoint.apps.inputs import INPUT_INVALID, TOO_DEEP
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.claims import service as claims
 from dewpoint.core.claims.cipher import ClaimCipher
@@ -29,7 +29,8 @@ from dewpoint.core.models.requests import RunRequest
 from dewpoint.core.models.runs import Run
 from dewpoint.core.models.workflows import Workflow, WorkflowVersion
 from dewpoint.core.retention import cutoff as retention
-from dewpoint.engine.handles import NestingError, StoredClaim, resolve_value
+from dewpoint.engine.graph.model import MAX_DEPTH
+from dewpoint.engine.handles import InputTooDeepError, NestingError, StoredClaim, resolve_value
 
 router = APIRouter(prefix="/api/v1", tags=["runs"])
 KEY_MAX = 255
@@ -265,6 +266,8 @@ async def rerun(
         )  # fmt: skip
     except admission.IdempotencyConflictError:
         raise HTTPException(409, detail={"error": "idempotency_conflict"}) from None
+    except admission.AdmissionRefusedError as e:  # a new input past the input limit (issue #88)
+        raise HTTPException(422, detail={"error": e.reason, "messages": e.messages}) from None
     except Exception as e:
         raise key_unusable(e) from None
     if existing is not None:
@@ -285,7 +288,8 @@ async def rerun(
 
 async def original_input(db: AsyncSession, keys: KeySource, tenant_id: uuid.UUID, old: RunRequest) -> dict[str, Any]:
     """A request's complete input, held in memory only: its envelope read through its own reader and every handle in
-    it resolved, as the request that owns the claims (§7.7)."""
+    it resolved, as the request that owns the claims (§7.7), bounded to the input limit whatever the store holds: past
+    it, 422 with the reason admission would give (issue #88)."""
     if old.envelope_id is None:  # refused: admission kept no envelope
         raise HTTPException(410, detail={"error": INPUT_NOT_RETAINED})
     cipher = ClaimCipher(keys)
@@ -296,7 +300,9 @@ async def original_input(db: AsyncSession, keys: KeySource, tenant_id: uuid.UUID
 
     try:
         envelope = await claims.read_envelope(db, cipher, tenant_id, request_id=old.id)
-        resolved = await resolve_value(envelope, fetch)
+        resolved = await resolve_value(envelope, fetch, max_depth=MAX_DEPTH)
+    except InputTooDeepError:
+        raise HTTPException(422, detail={"error": INPUT_INVALID, "messages": [TOO_DEEP]}) from None
     except (claims.EnvelopeUnavailableError, claims.ClaimUnavailableError, NestingError):
         raise HTTPException(410, detail={"error": INPUT_NOT_RETAINED}) from None
     except Exception as e:

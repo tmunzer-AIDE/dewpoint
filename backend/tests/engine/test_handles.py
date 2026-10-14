@@ -5,6 +5,7 @@ instead; and data from outside is refused when it holds the marker anywhere."""
 
 import json
 import uuid
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -16,9 +17,14 @@ from dewpoint.engine.handles import (
     MARKER,
     POINTER_MAX,
     ClaimRef,
+    InputTooDeepError,
+    NestingError,
+    StoredClaim,
     contains_marker,
+    escape,
     handles_in,
     pointer_bytes,
+    resolve_value,
     tokens,
 )
 
@@ -94,3 +100,98 @@ def test_the_marker_is_found_anywhere_and_handles_with_their_positions() -> None
     assert dict(handles_in(value)) == {"/x/1/y": a, "/z": b}
     assert contains_marker([{"deep": [{MARKER: "anything"}]}])  # a forged or malformed one too
     assert not contains_marker({"$claims": 1, "marker": MARKER})  # only the key is the marker
+
+
+def _recursive_handles_in(value: Any, pointer: str = "") -> Iterator[tuple[str, ClaimRef]]:
+    """`handles_in` as it was before issue #88: the reference its iterative walk must equal."""
+    ref = ClaimRef.of(value)
+    if ref is not None:
+        yield pointer, ref
+        return
+    children = value.items() if isinstance(value, dict) else enumerate(value) if isinstance(value, list) else ()
+    for key, child in children:
+        yield from _recursive_handles_in(child, pointer + "/" + escape(key))
+
+
+with_handles = st.recursive(
+    st.none() | st.integers() | st.text(max_size=4) | st.builds(lambda n: ClaimRef(str(uuid.UUID(int=n))).to_json(),
+                                                                st.integers(min_value=0, max_value=5)),
+    lambda inner: st.lists(inner, max_size=4) | st.dictionaries(st.text(max_size=4).filter(lambda k: k != MARKER),
+                                                                inner, max_size=4),
+    max_leaves=30,
+)  # fmt: skip
+
+
+@given(with_handles)
+def test_handles_are_found_as_before_in_the_same_order(value: Any) -> None:
+    assert list(handles_in(value)) == list(_recursive_handles_in(value))
+
+
+def nest(levels: int, leaf: Any = None) -> Any:
+    """`levels` objects deep, `leaf` inside the deepest."""
+    value: Any = {} if leaf is None else {"leaf": leaf}
+    for _ in range(levels - 1):
+        value = {"n": value}
+    return value
+
+
+def test_a_handle_is_found_however_deep_it_sits() -> None:
+    """Discovery reads stored claims before anything bounds them (issue #88): it never recurses."""
+    ref = ClaimRef(CLAIM)
+    assert [r for _, r in handles_in(nest(2_000, ref.to_json()))] == [ref]
+
+
+def _fetching(claims: dict[str, Any]) -> Any:
+    async def fetch(claim_id: str) -> StoredClaim:
+        return StoredClaim(claims[claim_id], ())
+
+    return fetch
+
+
+def _id(n: int) -> str:
+    return str(uuid.UUID(int=100 + n))
+
+
+async def test_a_bound_refuses_a_value_built_past_it_at_any_source() -> None:
+    """Issue #88: bounded, the resolution stops past `max_depth` levels of the value it builds, never descending
+    further, whether the depth is the value's own, a chain of shallow claims or one deep claim."""
+    fetch = _fetching({})
+    assert (await resolve_value(nest(64), fetch, max_depth=64)).value == nest(64)
+    with pytest.raises(InputTooDeepError):
+        await resolve_value(nest(65), fetch, max_depth=64)
+    with pytest.raises(InputTooDeepError):
+        await resolve_value(nest(300), fetch, max_depth=64)
+    # 24 claims of 41 levels, each holding the next at its deepest: about 984 levels once expanded
+    chain = {_id(i): nest(41, ClaimRef(_id(i + 1)).to_json() if i < 23 else None) for i in range(24)}
+    envelope = {"a": {"b": ClaimRef(_id(0)).to_json()}}
+    with pytest.raises(InputTooDeepError):
+        await resolve_value(envelope, _fetching(chain), max_depth=64)
+    with pytest.raises(InputTooDeepError):  # one claim of 2,000 levels
+        await resolve_value(envelope, _fetching({_id(0): nest(2_000)}), max_depth=64)
+
+
+async def test_a_bound_counts_across_claims_from_where_each_handle_sits() -> None:
+    claims = {_id(0): nest(31, ClaimRef(_id(1)).to_json()), _id(1): nest(32)}
+    within = {"x": ClaimRef(_id(0)).to_json()}  # 1 (the envelope) + 31 (the first claim) + 32 (the second) = 64
+    assert (await resolve_value(within, _fetching(claims), max_depth=64)).value["x"]["n"]
+    with pytest.raises(InputTooDeepError):
+        await resolve_value({"y": within}, _fetching(claims), max_depth=64)
+
+
+async def test_without_a_bound_resolution_is_as_before() -> None:
+    """The other callers (a step's config, a loop's items, a failure's strings) pass no bound: a claimed 65-level
+    body resolves as it did."""
+    claims = {_id(0): nest(65)}
+    assert (await resolve_value({"body": ClaimRef(_id(0)).to_json()}, _fetching(claims))).value == {"body": nest(65)}
+
+
+async def test_a_claim_chain_past_its_count_is_still_a_nesting_error() -> None:
+    chain = {_id(i): {"next": ClaimRef(_id(i + 1)).to_json()} for i in range(40)} | {_id(40): 1}
+    with pytest.raises(NestingError):
+        await resolve_value(ClaimRef(_id(0)).to_json(), _fetching(chain), max_depth=10_000)
+
+
+def test_too_deep_is_neither_a_nesting_error_nor_an_unavailable_claim() -> None:
+    from dewpoint.core.claims.service import ClaimUnavailableError
+
+    assert not issubclass(InputTooDeepError, NestingError | ClaimUnavailableError)

@@ -22,7 +22,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from dewpoint.apps.inputs import FORGED, RESERVED_INPUT, reasons
+from dewpoint.apps.inputs import FORGED, RESERVED_INPUT, TOO_DEEP, nests_too_deep, reasons
 from dewpoint.core.audit import service as audit
 from dewpoint.core.claims.cipher import ClaimCipher
 from dewpoint.core.crypto.keys import KeySource
@@ -154,7 +154,10 @@ async def _active_version(s: AsyncSession, workflow_id: uuid.UUID) -> WorkflowVe
 
 
 def _checked_input(version: WorkflowVersion, value: Mapping[str, Any]) -> None:
-    """The fixed input against the active version, as admission checks a trigger: a tick checks it again."""
+    """The fixed input against the active version, as admission checks a trigger: a tick checks it again. Its depth
+    first: nothing recursive reads an input deeper than the limit (issue #88)."""
+    if nests_too_deep(value):
+        raise ScheduleRefusedError(422, {"error": "input_invalid", "messages": [TOO_DEEP]})
     if any(name in value for name in RESERVED):
         raise ScheduleRefusedError(422, {"error": "input_invalid", "messages": [RESERVED_INPUT]})
     refused = reasons(trigger_schema(version.graph.get("settings") or {}), value)
