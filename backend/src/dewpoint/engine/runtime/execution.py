@@ -325,6 +325,7 @@ class Execution:
         self._shapes: dict[str, Shape] = {}  # a node type's output taint (`_output_shape`)
         self._spill_units: dict[tuple[Instance, str, int], Spill] = {}  # containers' claims queued or running (§5.3)
         self._merging: list[tuple[tuple[Any, ...], _Effect]] = []  # results claimed before they merge (§5.3)
+        self._merges: dict[Instance, _Effect] = {}  # control steps' among them, rowed if their run or scope ends first
         self._view_sizes: dict[uuid.UUID | None, int] = {}  # the steps a step's view reads, by region
 
     # --- the budget signals ----------------------------------------------------------------------------------------
@@ -602,10 +603,15 @@ class Execution:
             return
         if key[0] == "merge":
             key = ("step", key[1])
+            if self.sched.step(key[1]).control and self._merges.pop(key[1], None) is None:
+                return  # rowed as its run or its scope ended (`_queue_end`): what it merges counts no more
         elif key[0] == "step" and effect.output is not None and effect.loop is None and effect.end is None:
             n = live_state.size(effect.output)  # merges are authoritative (engine 2b spec §5.3): past the budget, the
-            if n > INLINE_FLOOR and self.sched.live + n > live_state.LIVE_BUDGET:  # result is claimed before it merges
+            over = n > INLINE_FLOOR and self.sched.live + n > live_state.LIVE_BUDGET  # result is claimed before it
+            if over and not self._late(key[1]):  # merges; one that counts no more is rowed at once, below (D-a3)
                 self._merging.append((key, effect))
+                if self.sched.step(key[1]).control:
+                    self._merges[key[1]] = effect  # its row, should the run or its scope end before it merges
                 return
         if key[0] == "collect":
             c: Collect = key[1]
@@ -630,8 +636,7 @@ class Execution:
             done = self._effect_of(effect)
             if done is not None:
                 self._effects[inst] = done
-            scope = self.sched.scopes.get(inst.scope)
-            if self.sched.ended is not None or scope is None or scope.failure is not None:
+            if self._late(inst):
                 self._queue_late(inst, effect)  # finished as the run or its scope ended: its real outcome (D-a3)
         if effect.loop is not None:
             self.sched.open_loop(
@@ -649,6 +654,11 @@ class Execution:
             if effect.variables:
                 self.sched.set_variables(effect.variables, inst)  # the next variable version (engine 2b spec §5.3)
             self.sched.succeed(inst, effect.output, effect.ports)
+
+    def _late(self, inst: Instance) -> bool:
+        """The run or the instance's scope has ended: what it finishes counts no more, but its row says what it did."""
+        scope = self.sched.scopes.get(inst.scope)
+        return self.sched.ended is not None or scope is None or scope.failure is not None
 
     # --- the budget ------------------------------------------------------------------------------------------------
 
@@ -795,9 +805,13 @@ class Execution:
         """An instance that ended without settling (B4b; the simulation design §3.3): `skipped` and `not_started`
         record attempt 1 and no start. A stopped one was handed out: `cancelled` once it began (a control step, or a
         plugin step still resolving its values), `not_started` if it never did. A plugin step that reached an attempt
-        rows its own end, and a unit that finished has its real outcome (D-a3). The row's key, if it made one."""
+        rows its own end, and a unit that finished has its real outcome (D-a3), one whose result was still to merge too.
+        The row's key, if it made one."""
         step = self.sched.step(inst)
         if kind == live_state.STOPPED:
+            merging = self._merges.pop(inst, None)
+            if merging is not None:
+                return self._queue_late(inst, merging)
             if inst in self._finished or (not step.control and inst in self._attempted):
                 return None
             if inst in self._started:
@@ -816,12 +830,13 @@ class Execution:
             return {"port": effect.ports[0]}
         return None
 
-    def _queue_late(self, inst: Instance, effect: "_Effect") -> None:
+    def _queue_late(self, inst: Instance, effect: "_Effect") -> tuple[str, str, int]:
         """A control step that finished as its run or scope ended (D-a3): its row records what it did, as it would
-        have otherwise (a simulated timer's `simulated` and resolved config too, §4.2)."""
+        have otherwise (a simulated timer's `simulated` and resolved config too, §4.2). The row's key."""
         failure = effect.failure or (effect.end.failure if effect.end is not None else None)
         waited = self._not_waited.pop(inst, None)
-        self._queue(
+        self._effects.pop(inst, None)
+        return self._queue(
             self._row(
                 inst,
                 "failed" if failure is not None else "succeeded",
@@ -833,7 +848,7 @@ class Execution:
                 error_code=failure.code if failure is not None else None,
                 error_message=failure.message if failure is not None else None,
                 cel_mode=effect.cel_mode or self._cel_modes.get(inst),
-                effect_preview=self._effects.pop(inst, None),
+                effect_preview=self._effect_of(effect),
             )
         )
 

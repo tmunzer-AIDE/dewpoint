@@ -13,6 +13,7 @@ import pytest
 from temporalio.client import WorkflowFailureError
 from temporalio.testing import WorkflowEnvironment
 
+from dewpoint.engine.runtime import scheduler
 from dewpoint.engine.runtime.activities import ProjectInput
 from tests.apps.worker.harness import RESULT_TIMEOUT_S, MemoryStore, run_id_of, start, workers
 from tests.support.graphs import G, cel
@@ -20,7 +21,7 @@ from tests.support.plugins.testkit import Slow
 
 ECHO, SLOW, FAIL_N = "testkit.echo@1", "testkit.slow@1", "testkit.fail_n@1"
 IF, LOOP, SET, DELAY, STOP = "flow.if@1", "flow.loop@1", "flow.set_variables@1", "flow.delay@1", "flow.stop@1"
-FAIL = "flow.fail@1"
+FAIL, FILTER = "flow.fail@1", "flow.filter@1"
 
 
 def graph() -> G:
@@ -171,6 +172,88 @@ async def test_a_simulated_timer_that_finished_as_the_run_stopped_says_it_wasnt_
         await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
     [row] = [r for r in store.steps(run_id_of(handle)) if r.node_key == "wait"]
     assert (row.status, row.outcome, row.input_preview) == ("succeeded", "simulated", {"duration_s": 3600})
+
+
+BIG = ["a" * 2_000, "b" * 2_000]  # a filter keeping both passes a 3,000-byte budget: claimed before it merges
+
+
+@pytest.mark.parametrize("name", ["f", "x"])
+async def test_a_control_step_past_the_budget_that_finished_as_the_run_ended_keeps_its_outcome(
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """D-a3 past the live-state budget (engine 2b spec §5.3): the filter and `stop` finish in the same activation. `f`
+    ranks before `stop`, so its result waits to be claimed when the run ends; `x` ranks after it, so the run has ended
+    when its result comes. Either way its row is what it did."""
+    monkeypatch.setattr(scheduler, "LIVE_BUDGET", 3_000)
+    store = MemoryStore()
+    g = graph().node("stop", STOP).node(name, FILTER, {"items": BIG, "predicate": cel("true")})
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, {})
+        await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
+    [row] = [r for r in store.steps(run_id_of(handle)) if r.node_key == name]
+    assert (row.status, row.outcome, row.output_preview is not None) == ("succeeded", None, True)
+
+
+@dataclasses.dataclass
+class HeldSpills(MemoryStore):
+    """A spill is written only once `release` is set: a result being claimed while the run ends."""
+
+    release: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
+    held: int = 0
+
+    async def write(
+        self, tenant_id: str, claims: Any, *, kind: str, step_id: str | None, iteration_key: str | None
+    ) -> None:
+        if kind == "spill":
+            self.held += 1
+            await self.release.wait()
+        await super().write(tenant_id, claims, kind=kind, step_id=step_id, iteration_key=iteration_key)
+
+
+async def test_a_control_step_whose_result_was_being_claimed_as_the_run_ended_keeps_its_outcome(
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D-a3 while a claim is written: `f`'s result passes the budget, so it's claimed before it merges; `stop` ends the
+    run a second later, with the claim still being written. `f`'s row is what it did."""
+    monkeypatch.setattr(scheduler, "LIVE_BUDGET", 3_000)
+    store = HeldSpills()
+    g = graph().node("f", FILTER, {"items": BIG, "predicate": cel("true")}).node("s", SLOW, {"seconds": 1})
+    g.node("stop", STOP).edge("s", "stop")
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, {})
+        result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
+        store.release.set()
+    assert result.status == "succeeded"
+    assert store.held == 1  # the claim was under way when the run ended
+    [row] = [r for r in store.steps(run_id_of(handle)) if r.node_key == "f"]
+    assert (row.status, row.outcome, row.output_preview is not None) == ("succeeded", None, True)
+
+
+async def test_a_control_step_whose_result_was_being_claimed_as_its_iteration_failed_is_rowed_once(
+    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D-a3 in a scope: `f`'s result is being claimed when `z` fails its iteration, so `f`'s row says what it did; the
+    claim lands later, while the run goes on, and merges nothing, nor rows `f` again."""
+    monkeypatch.setattr(scheduler, "LIVE_BUDGET", 3_000)
+    store = HeldSpills()
+    g = graph().node("l", LOOP, {"items": [0], "on_item_error": "continue"}, on_error="continue")
+    g.node("f", FILTER, {"items": BIG, "predicate": cel("true")}).node(
+        "z", "flow.transform@1", {"fields": {"r": cel("1 / item")}}
+    )
+    g.node("s", SLOW, {"seconds": 3}).edge("l", "f", "body").edge("l", "z", "body").edge("l", "s", "done")
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, {})
+        run_id = run_id_of(handle)
+        for _ in range(100):  # until `f`'s row is written: then the claim lands
+            if any(r.node_key == "f" and r.status != "running" for r in store.steps(run_id)):
+                break
+            await asyncio.sleep(0.05)
+        store.release.set()
+        await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
+    assert store.held == 1  # the claim was under way when the iteration failed
+    rows = {r.node_key: r for r in store.steps(run_id)}
+    assert (rows["z"].status, rows["f"].status, rows["f"].output_preview is not None) == ("failed", "succeeded", True)
+    assert store.conflicts == []
 
 
 async def test_a_cancel_ends_started_work_cancelled_and_queued_work_not_started(env: WorkflowEnvironment) -> None:
