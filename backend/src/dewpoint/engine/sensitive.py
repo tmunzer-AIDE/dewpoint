@@ -8,6 +8,7 @@ The projection redacts with it (`engine.runtime.projection`), and publish checks
 claiming (engine 2b spec §3.5, §4.1) go further: a position the schema doesn't declare is sensitive too, since unknown
 counts as sensitive (`engine.taint`)."""
 
+import enum
 from collections.abc import Collection, Mapping
 from typing import Any
 
@@ -17,6 +18,17 @@ SENSITIVE = "x-sensitive"
 SECRET_INDEX_LIMIT = "secret_index_limit"  # noqa: S105 - a code: as core.claims.secret_index's (a test keeps them equal)
 MIN_SECRET = 4  # a secret's characters, at least: shorter values would match ordinary text ("1", "yes") everywhere
 _MAX_DEPTH = 64  # a schema that refers to itself ends here
+
+
+class Some(enum.Enum):
+    """A path segment where publish can't tell which part: any element of a list, any value of a map."""
+
+    ITEM = "item"
+    VALUE = "value"
+
+
+ITEM, VALUE = Some.ITEM, Some.VALUE
+Part = str | int | Some
 
 
 def resolve(root: Mapping[str, Any], ref: str) -> Any:
@@ -106,9 +118,10 @@ def _marked(
     if pointer in holes:
         return
     branches = [b for s in schemas for b in expand(s, root)]
-    if any(b.get(SENSITIVE) is True for b in branches) or (isinstance(value, dict) and keys_sensitive(branches, root)):
-        if not _holes_only(value, pointer, holes):
-            out.append(pointer)
+    marked = any(b.get(SENSITIVE) is True for b in branches)
+    keyed = isinstance(value, dict) and keys_sensitive(branches, root)  # its keys are written, whatever its values
+    if (marked and not _holes_only(value, pointer, holes)) or keyed:
+        out.append(pointer)
     elif isinstance(value, dict):
         for key, child in value.items():
             _marked(child, children(branches, key), root, pointer + "/" + escape(key), out, holes)
@@ -130,8 +143,19 @@ def marked_positions(
     return out
 
 
-def is_marked(schema: Mapping[str, Any], path: tuple[str | int, ...], root: Mapping[str, Any] | None = None) -> bool:
-    """Whether the position at `path` lies at or under a part the schema marks sensitive."""
+def _step(branches: list[Mapping[str, Any]], part: Part) -> list[Any]:
+    """The schemas that may govern the part `part` of a value the branches govern: at `ITEM`, any element (`items`
+    and every tuple position); at `VALUE`, any key's value (every property, a pattern, `additionalProperties`)."""
+    if part is Some.ITEM:
+        return _elements(branches)
+    if part is Some.VALUE:
+        return _values(branches)
+    return elements(branches, part) if isinstance(part, int) else children(branches, part)
+
+
+def is_marked(schema: Mapping[str, Any], path: tuple[Part, ...], root: Mapping[str, Any] | None = None) -> bool:
+    """Whether the position at `path` lies at or under a part the schema marks sensitive (at `ITEM` or `VALUE`, under
+    any of the parts it may be)."""
     resolve_in = root if root is not None else schema
     schemas: list[Any] = [schema]
     for depth in range(len(path) + 1):
@@ -142,6 +166,78 @@ def is_marked(schema: Mapping[str, Any], path: tuple[str | int, ...], root: Mapp
             return True
         if depth == len(path):
             return False
-        part = path[depth]
-        schemas = elements(branches, part) if isinstance(part, int) else children(branches, part)
+        schemas = _step(branches, path[depth])
     return False
+
+
+def _schemas_at(schema: Mapping[str, Any], path: tuple[Part, ...], root: Mapping[str, Any]) -> list[Any]:
+    """The schemas that may govern the value at `path`, navigated as `is_marked` navigates."""
+    schemas: list[Any] = [schema]
+    for part in path:
+        schemas = _step([b for s in schemas for b in expand(s, root)], part)
+    return schemas
+
+
+def _elements(branches: list[Mapping[str, Any]]) -> list[Any]:
+    """The schemas of any element of a list: `items` and every tuple position."""
+    out: list[Any] = [b["items"] for b in branches if isinstance(b.get("items"), Mapping)]
+    for b in branches:
+        prefix = b.get("prefixItems")
+        out += prefix if isinstance(prefix, list) else []
+    return out
+
+
+def _values(branches: list[Mapping[str, Any]]) -> list[Any]:
+    """The schemas of any key's value of a map: every property, a pattern, `additionalProperties`."""
+    out: list[Any] = map_values(branches)
+    for b in branches:
+        props = b.get("properties")
+        out += list(props.values()) if isinstance(props, Mapping) else []
+    return out
+
+
+def _nested(branches: list[Mapping[str, Any]]) -> list[Any]:
+    """The schemas of a value's parts: an element's or a key's value's."""
+    return _values(branches) + _elements(branches)
+
+
+def may_hold_marked(schema: Mapping[str, Any], path: tuple[Part, ...], root: Mapping[str, Any] | None = None) -> bool:
+    """Whether a value written at `path` may put something at a part the schema marks: the position lies at or under a
+    marked part, or a part of it may be marked (a property, a pattern, `additionalProperties`, `items`, a tuple
+    position, a union's branch, a local `$ref`, sensitive keys)."""
+    resolve_in = root if root is not None else schema
+    if is_marked(schema, path, resolve_in):
+        return True
+    seen: set[int] = set()
+    stack: list[Any] = _schemas_at(schema, path, resolve_in)
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        branches = expand(node, resolve_in)
+        if any(b.get(SENSITIVE) is True for b in branches) or keys_sensitive(branches, resolve_in):
+            return True
+        stack += _nested(branches)
+    return False
+
+
+def keys_marked(schema: Mapping[str, Any], path: tuple[Part, ...], root: Mapping[str, Any] | None = None) -> bool:
+    """Whether the schema marks the keys of a map written at `path` (`propertyNames`). A map at a marked position, or
+    one whose key's value is marked, doesn't make its keys sensitive: an object of references there writes no
+    literal, its keys included (they're structure)."""
+    resolve_in = root if root is not None else schema
+    branches = [b for s in _schemas_at(schema, path, resolve_in) for b in expand(s, resolve_in)]
+    return keys_sensitive(branches, resolve_in)
+
+
+def marked_positions_at(
+    value: Any, schema: Mapping[str, Any], path: tuple[str | int, ...], root: Mapping[str, Any] | None = None
+) -> list[str]:
+    """`marked_positions` of a value written at `path` of the schema's instances, relative to it, navigated as
+    `is_marked` navigates: never through one resolved subschema, which a tuple position or a union's branches defeat.
+    Whether the position itself is marked is `is_marked`'s question."""
+    resolve_in = root if root is not None else schema
+    out: list[str] = []
+    _marked(value, _schemas_at(schema, path, resolve_in), resolve_in, "", out, ())
+    return out

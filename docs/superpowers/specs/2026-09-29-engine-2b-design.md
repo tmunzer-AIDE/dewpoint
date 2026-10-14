@@ -506,9 +506,30 @@ secret and a sub-flow's refusal is an activity result, in history.
   with (a property, a pattern, `additionalProperties`, `items` or a tuple position, a union's branch, a local `$ref`,
   sensitive keys), since publish can't tell which parts it writes: a fixed formula that leaves the sensitive part out
   is refused too, and the same value written as a literal is checked part by part.
-- Not covered: a CEL expression that reads run data and still puts a literal in its result
-  (`"Bearer " + trigger.tok`, `trigger.n > 0 ? "<secret>" : ""`) publishes, so a prefix a template can't write, CEL
-  still can. Telling a literal that reaches the result from one that's only compared needs a data-flow analysis.
+- A CEL expression that reads run data is refused where a constant it writes may land at a part the schema marks
+  (issue #79; the owner's rulings, 2026-10-14; `engine/cel/written.py`). A constant carries into the value through
+  the branches of `?:` (never its condition), `+` and the other arithmetic operators, list and map construction,
+  `dyn`, the conversions, a time getter's receiver (never its time zone), `asList`, `sortedKeys` (its map's keys),
+  `macNormalize` and `macOui`, a field read or an index, and a comprehension's variables; not through comparisons,
+  `in`, `has()`, `size()`, the logical operators, `contains`, `startsWith`, `endsWith`, `matches`, `type`,
+  `ipInCidr` or `cidrContains`, nor as a lookup's key or index. A function a later runtime adds carries every constant
+  anywhere until it's classified, and so does a message built in the expression (a `google.protobuf.Struct`'s
+  `fields` are its object's keys). Every constant counts, null, booleans and empty ones included, and so does an
+  empty list or map the author writes; empty text, bytes or a list joined by `+` writes nothing (as empty text beside
+  a template's reference), and a macro's own accumulator start isn't the author's. A constant counts where it lands,
+  by the rules a literal is checked with: a list's index and a map's constant key are followed; where publish loses
+  an element's index (a concatenation, a macro's result) or a value's key (one chosen at run time), the constant is
+  checked at every element or value the schema there could give it, the rest of its path kept; a map's key counts
+  where the schema marks that map's keys, never because the map lies at a marked position (an object of reads there
+  writes no literal, as an object of references doesn't); a key whose path publish loses stays a key, unless its own
+  map is iterated or `sortedKeys` reads it. So `"Bearer " + trigger.tok` is refused as the template is, and
+  `{"ssid": "corp", "passphrase": trigger.psk}` publishes at a body whose `passphrase` is marked. The rule guards
+  against writing a secret by mistake, not against encoding one on purpose through what carries nothing
+  (`string(size("…"))` publishes).
+- Each value envelope is checked from the config's root, as a literal written in place is: a formula, a reference's
+  default or a literal envelope nested under a tuple position or inside a union's branch is checked as the same value
+  written there (#79's plan review). A key written in a map whose keys are marked counts even when its value is a
+  reference: a reference stands for a value, never for the key beside it.
 - A start form still masks a sensitive field's default and enum (§7.7): versions published before this rule are
   immutable and may hold them.
 - A sensitive variable therefore has no default: it is null until a step sets it. Publish accepts it when its type
