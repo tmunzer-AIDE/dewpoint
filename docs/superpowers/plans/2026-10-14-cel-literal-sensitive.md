@@ -752,3 +752,4 @@ the merge is clean, and the merged tree, tried in a throwaway worktree without a
 The owner signed off rulings 1 to 7 (2026-10-14), with 1, 3 and 4 as the build's review amended them. The Low left
 unchanged (a fixed boolean or list: `trigger.b || true`, `[].all(x, trigger.b)`, `trigger.strs.filter(x, false)`)
 wasn't named in the sign-off: it stays open, for the owner.
+The owner then closed that Low (2026-10-14): such formulas keep publishing, with no change.
