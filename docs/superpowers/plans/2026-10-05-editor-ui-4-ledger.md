@@ -2818,3 +2818,21 @@ Deferred (minor):
 
 The deploy order, whole: migration 0071, then the ABI-9 workers, then republishing the versions published at ABI 8 (as
 for every ABI bump). Push and a pull request wait for the owner's word.
+
+### 4d-1a, CI on PR #101 (2026-10-14)
+
+The owner: "Push and open the PR; docs ride in it". CI's first run, on 61e4cc94: every job passed but the backend
+suite, with 3 failed, 6119 passed and 131 skipped.
+- Two timer tests timed out at 60 s, the same two as in the local whole run. Three 4d-1a tests ended a run
+  while an activity still ran on the shared time-skipping server, which then stops skipping time for the rest of its
+  worker: the held-claim test (4cc39751), the B4b deadline test and the many-open-instances test. Paired with a timer
+  test in one process, each of those three made it time out, and three other candidates didn't. They now run on
+  servers of their own (`own_env`, as the fixture says such a test must).
+- The deadline-order test's guard failed: CI's runner fired the deadline's timer in a workflow task of its own. The
+  test now forces what it needs: the run's build stops once both timers are started and serves again once both have
+  fired, and the guard checks that no workflow task started between them. Against the order before 68f0a1af it
+  fails; three copies run at once pass.
+
+cd1a44a1 holds both (test-only; the owner: "Commit and push it; keep asking for Auto-fix pushes"). CI's second run, on
+cd1a44a1: every job passed (the backend in 23 min), as did CodeQL. Main has since gained #102 (a CEL compile fix: no
+ABI, migration or runtime change), which merges cleanly.
