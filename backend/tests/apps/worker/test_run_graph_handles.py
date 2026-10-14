@@ -145,7 +145,7 @@ async def test_a_declassified_condition_over_a_sensitive_value_decides_plainly(e
     async with workers(env.client, store):
         result = await run(env.client, store, g, TRIGGER, claimed=True)
     assert result.status == "succeeded", result.error
-    ran = {r.node_key for r in store.steps(result_run(store))}
+    ran = {r.node_key for r in store.steps(result_run(store)) if r.status != "skipped"}  # B4b rows the other side
     assert "a" in ran and "b" not in ran  # the branch taken: what the listed site reveals (spec §4.3)
 
 
@@ -180,7 +180,7 @@ async def test_a_reference_to_a_sensitive_value_decides_a_listed_branch_and_case
     async with workers(env.client, store):
         result = await run(env.client, store, g, {"vip": True, "tier": 1}, claimed=True)
     assert result.status == "succeeded", result.error
-    ran = {r.node_key for r in store.steps(result_run(store))}
+    ran = {r.node_key for r in store.steps(result_run(store)) if r.status != "skipped"}  # B4b rows the other side
     assert {"y", "d"} <= ran and not {"n", "g"} & ran
 
 

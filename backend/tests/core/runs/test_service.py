@@ -57,6 +57,66 @@ async def test_upserts_are_idempotent_and_a_late_running_row_never_wins(
     assert (only.status, only.output_preview, only.outcome) == ("succeeded", {"v": 1}, "applied")
 
 
+async def upsert(worker: Any, tenant: uuid.UUID, rows: list[dict[str, Any]]) -> list[Any]:
+    async with worker() as s, s.begin():
+        await tenant_scope(s, tenant)
+        return await service.upsert_steps(s, tenant, rows)
+
+
+def provisional(run_id: uuid.UUID) -> dict[str, Any]:
+    return row(run_id, "failed", error_code=service.OUTCOME_UNCONFIRMED, error_message=service.UNCONFIRMED_MESSAGE)
+
+
+async def test_a_genuine_result_replaces_a_provisional_close_and_the_first_start_stands(
+    owner_sessionmaker, dispatch_sessionmaker, worker_sessionmaker
+) -> None:
+    """The simulation design §3.4: `running` takes anything, keeping its first `started_at`; a provisional close
+    (`outcome_unconfirmed`) gives way to the genuine result that arrives after it."""
+    tenant, run_id = await seeded_run(owner_sessionmaker, dispatch_sessionmaker)
+    first, later = datetime(2026, 10, 13, 9, 0, tzinfo=UTC), datetime(2026, 10, 13, 9, 5, tzinfo=UTC)
+    done = row(run_id, "succeeded", output_preview={"v": 1}, outcome="applied")
+    for rows in ([row(run_id, "running", started_at=first)], [row(run_id, "running", started_at=later)],
+                 [provisional(run_id)], [done]):  # fmt: skip
+        assert await upsert(worker_sessionmaker, tenant, rows) == []
+    [only] = await steps(owner_sessionmaker, tenant, run_id)
+    assert (only.status, only.output_preview, only.started_at) == ("succeeded", {"v": 1}, first)
+
+
+async def test_a_late_close_or_running_row_never_replaces_a_genuine_result(
+    owner_sessionmaker, dispatch_sessionmaker, worker_sessionmaker
+) -> None:
+    """Both arrival orders: the genuine result first, then a provisional close and a late `running` row (what
+    `_late()` makes of one) change nothing, and the same result again is no conflict."""
+    tenant, run_id = await seeded_run(owner_sessionmaker, dispatch_sessionmaker)
+    done = row(run_id, "succeeded", output_preview={"v": 1}, outcome="applied")
+    for rows in ([done], [provisional(run_id)], [row(run_id, "running")], [done]):
+        assert await upsert(worker_sessionmaker, tenant, rows) == []
+    [only] = await steps(owner_sessionmaker, tenant, run_id)
+    assert (only.status, only.output_preview, only.error_code) == ("succeeded", {"v": 1}, None)
+
+
+async def test_a_different_genuine_result_is_refused_and_returned(
+    owner_sessionmaker, dispatch_sessionmaker, worker_sessionmaker
+) -> None:
+    tenant, run_id = await seeded_run(owner_sessionmaker, dispatch_sessionmaker)
+    assert await upsert(worker_sessionmaker, tenant, [row(run_id, "succeeded", output_preview={"v": 1})]) == []
+    other = row(run_id, "failed", error_code="boom", error_message="x")
+    [conflict] = await upsert(worker_sessionmaker, tenant, [other])
+    assert (conflict.run_id, conflict.attempt, conflict.kept, conflict.refused) == (run_id, 1, "succeeded", "failed")
+    [only] = await steps(owner_sessionmaker, tenant, run_id)
+    assert (only.status, only.output_preview) == ("succeeded", {"v": 1})
+
+
+async def test_an_effect_is_stored_as_storage_writes_it(
+    owner_sessionmaker, dispatch_sessionmaker, worker_sessionmaker
+) -> None:
+    tenant, run_id = await seeded_run(owner_sessionmaker, dispatch_sessionmaker)
+    effect = {"assignments": {"note": "a\x00b", "n": float("nan")}}
+    await upsert(worker_sessionmaker, tenant, [row(run_id, "succeeded", effect_preview=effect)])
+    [only] = await steps(owner_sessionmaker, tenant, run_id)
+    assert only.effect_preview == {"assignments": {"note": "a\ufffdb", "n": "nan"}}
+
+
 async def test_messages_are_sanitized(owner_sessionmaker, dispatch_sessionmaker, worker_sessionmaker) -> None:
     tenant, run_id = await seeded_run(owner_sessionmaker, dispatch_sessionmaker)
     async with worker_sessionmaker() as s, s.begin():

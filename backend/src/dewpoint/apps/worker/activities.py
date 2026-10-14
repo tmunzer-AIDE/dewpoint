@@ -255,9 +255,10 @@ def _after_send(failure: _StepFailed, node: type[Node], network: AttemptNetwork 
     return failure
 
 
-def _transport_failed(e: TransportError, node: type[Node]) -> _StepFailed:
-    """The SDK class's own constants, never an instance's: a plugin's subclass can't change what's shown."""
-    ambiguous = node.side_effect == SideEffect.AMBIGUOUS
+def _transport_failed(e: TransportError, node: type[Node], *, simulated: bool = False) -> _StepFailed:
+    """The SDK class's own constants, never an instance's: a plugin's subclass can't change what's shown. A simulated
+    attempt sends nothing, so it's never ambiguous (the simulation design §4.1)."""
+    ambiguous = node.side_effect == SideEffect.AMBIGUOUS and not simulated
     kind = next((k for k in _TRANSPORT if isinstance(e, k)), None)
     if kind is None:  # as any unexpected exception: an ambiguous node's request may have been sent
         message = "The node raised a network failure Dewpoint doesn't know."
@@ -299,13 +300,15 @@ async def _call(
                 return found, APPLIED
         return await instance.run(ctx, config), APPLIED
     except OutcomeUnknownError as e:
+        if step.mode == SIMULATE:  # nothing was sent: the simulator's own failure, fatal (the simulation design §4.1)
+            raise _StepFailed(*_declared(e, node), retryable=False, outcome=SIMULATED) from None
         raise _StepFailed(*_declared(e, node), retryable=False, outcome=OUTCOME_UNKNOWN) from None
     except FatalError as e:
         raise _after_send(_StepFailed(*_declared(e, node), retryable=False), node, network) from None
     except RetryableError as e:
         raise _after_send(_StepFailed(*_declared(e, node), retryable=True), node, network) from None
     except TransportError as e:
-        raise _after_send(_transport_failed(e, node), node, network) from None
+        raise _after_send(_transport_failed(e, node, simulated=step.mode == SIMULATE), node, network) from None
     except SecretIndexLimitError as e:  # a connection's secret couldn't join the index: nothing was sent (D5)
         raise _after_send(_StepFailed(SECRET_INDEX_LIMIT, str(e), retryable=False), node, network) from None
     except StoreUnavailableError as e:
@@ -319,7 +322,7 @@ async def _call(
             raise _StepFailed(SIMULATION_UNAVAILABLE, f"`{step.ref}` can't be simulated.", retryable=False) from None
         _bug("step_unexpected_error", step, e, node)
         message = f"The node raised {logs.error_class(e)}."
-        if node.side_effect == SideEffect.AMBIGUOUS:
+        if node.side_effect == SideEffect.AMBIGUOUS and step.mode != SIMULATE:
             raise _StepFailed(OUTCOME_UNKNOWN, message, retryable=False, outcome=OUTCOME_UNKNOWN) from None
         raise _StepFailed(UNEXPECTED_ERROR, message, retryable=True) from None
 
@@ -335,7 +338,7 @@ def _same_tenant(tenant_id: str) -> None:
 
 
 def _masked(data: ProjectInput, secrets: Matcher) -> ProjectInput:
-    """A projection with every secret in its previews and messages replaced."""
+    """A projection with every secret in its previews (a control step's effect too) and messages replaced."""
 
     def text(message: str | None) -> str | None:
         return secrets.mask(message, REDACTED) if message is not None else None
@@ -345,6 +348,7 @@ def _masked(data: ProjectInput, secrets: Matcher) -> ProjectInput:
             r,
             input_preview=masked(r.input_preview, secrets, REDACTED),
             output_preview=masked(r.output_preview, secrets, REDACTED),
+            effect_preview=masked(r.effect_preview, secrets, REDACTED),
             error_message=text(r.error_message),
         )
         for r in data.steps

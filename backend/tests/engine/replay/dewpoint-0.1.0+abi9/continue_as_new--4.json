@@ -1,0 +1,1451 @@
+{
+ "events": [
+  {
+   "eventId": "1",
+   "eventTime": "2026-10-14T14:08:47.408Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_STARTED",
+   "workflowExecutionStartedEventAttributes": {
+    "attempt": 1,
+    "continuedExecutionRunId": "eb237b01-1f83-4e1c-9986-0075c375e950",
+    "firstExecutionRunId": "3c68389d-7da8-43c4-8541-aacafbd6cd2c",
+    "firstWorkflowTaskBackoff": "0s",
+    "identity": "replay-recorder",
+    "input": {
+     "payloads": [
+      {
+       "data": "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",
+       "metadata": {
+        "dewpoint-key-version": "MQ==",
+        "dewpoint-tenant": "MDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAx",
+        "encoding": "YmluYXJ5L2Rld3BvaW50LXRlbmFudC12MQ=="
+       }
+      }
+     ]
+    },
+    "lastCompletionResult": {},
+    "originalExecutionRunId": "ad65649e-e94d-4cda-a386-7bc745a16660",
+    "taskQueue": {
+     "name": "dewpoint-engine"
+    },
+    "workflowExecutionTimeout": "315360000s",
+    "workflowRunTimeout": "315360000s",
+    "workflowTaskTimeout": "10s",
+    "workflowType": {
+     "name": "RunGraph"
+    }
+   }
+  },
+  {
+   "eventId": "2",
+   "eventTime": "2026-10-14T14:08:47.408Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+   "workflowTaskScheduledEventAttributes": {
+    "attempt": 1,
+    "startToCloseTimeout": "10s",
+    "taskQueue": {
+     "name": "dewpoint-engine"
+    }
+   }
+  },
+  {
+   "eventId": "3",
+   "eventTime": "2026-10-14T14:08:47.408Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+   "workflowTaskStartedEventAttributes": {
+    "historySizeBytes": "2309",
+    "identity": "replay-recorder",
+    "scheduledEventId": "2"
+   }
+  },
+  {
+   "eventId": "4",
+   "eventTime": "2026-10-14T14:08:47.418Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+   "workflowTaskCompletedEventAttributes": {
+    "binaryChecksum": "255487c158298cf8055e7cd741e3c83f",
+    "identity": "replay-recorder",
+    "meteringMetadata": {},
+    "scheduledEventId": "2",
+    "sdkMetadata": {
+     "coreUsedFlags": [
+      1,
+      3,
+      2
+     ],
+     "sdkName": "temporal-python",
+     "sdkVersion": "1.33.0"
+    }
+   }
+  },
+  {
+   "eventId": "5",
+   "eventTime": "2026-10-14T14:08:47.418Z",
+   "eventType": "EVENT_TYPE_MARKER_RECORDED",
+   "markerRecordedEventAttributes": {
+    "details": {
+     "data": {
+      "payloads": [
+       {
+        "data": "eyJzZXEiOjEsImF0dGVtcHQiOjEsImFjdGl2aXR5X2lkIjoiMSIsImFjdGl2aXR5X3R5cGUiOiJkZXdwb2ludC5sb2FkX3ZlcnNpb24iLCJjb21wbGV0ZV90aW1lIjp7InNlY29uZHMiOjE3OTE5ODY5MjcsIm5hbm9zIjo0MDg2NDA4MzN9LCJiYWNrb2ZmIjpudWxsLCJvcmlnaW5hbF9zY2hlZHVsZV90aW1lIjp7InNlY29uZHMiOjE3OTE5ODY4NjcsIm5hbm9zIjo2MTM1MDYwMDB9fQ==",
+        "metadata": {
+         "encoding": "anNvbi9wbGFpbg=="
+        }
+       }
+      ]
+     },
+     "result": {
+      "payloads": [
+       {
+        "data": "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",
+        "metadata": {
+         "dewpoint-key-version": "MQ==",
+         "dewpoint-tenant": "MDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAx",
+         "encoding": "YmluYXJ5L2Rld3BvaW50LXRlbmFudC12MQ=="
+        }
+       }
+      ]
+     }
+    },
+    "markerName": "core_local_activity",
+    "workflowTaskCompletedEventId": "3"
+   }
+  },
+  {
+   "eventId": "6",
+   "eventTime": "2026-10-14T14:08:47.418Z",
+   "eventType": "EVENT_TYPE_TIMER_STARTED",
+   "timerStartedEventAttributes": {
+    "startToFireTimeout": "3599.888877s",
+    "timerId": "1",
+    "workflowTaskCompletedEventId": "3"
+   }
+  },
+  {
+   "eventId": "7",
+   "eventTime": "2026-10-14T14:08:47.418Z",
+   "eventType": "EVENT_TYPE_TIMER_STARTED",
+   "timerStartedEventAttributes": {
+    "startToFireTimeout": "2591999.888359s",
+    "timerId": "2",
+    "workflowTaskCompletedEventId": "3"
+   }
+  },
+  {
+   "activityTaskScheduledEventAttributes": {
+    "activityId": "2",
+    "activityType": {
+     "name": "testkit.echo.v1"
+    },
+    "header": {},
+    "heartbeatTimeout": "0s",
+    "input": {
+     "payloads": [
+      {
+       "data": "j1WBFs4R+a6Rh24xDrdIek7h/GveXPw81No/3u1lKXQWY140IvyWR2iuy8UXEsAV4+6VHW4ytgvNIrsq7loHKYk8XCdl12vsJCFxQBOM88CI3UzmlzabjIUWprShKqmEzIPTXOlL6XMri8JSE91+scenSq6y5LTh7OOQYXW0ZFYfbuGUqa5H3QLuGFE0pdgTijlOjaSSg2Ac3f4zOkj/iKs8V5cbluToCuVsW8sHMtvV3uePxHh8LkVeZQ/sY6U28Vhm2sZ9+TT5NVju1L0gGOe7Rmo+H3ZLbnGnz+RDxGi2dXl9f56PCIjojsMLYKODiqNb7gCbq++8O4ugCRkmgaqkrvrH7kZ3FvnTKFPVaSgyFMjKDQ9w9Be4JzgI7ZlDW74NsOgXaPEQxi9E/CFYMhdJhxdFla6/C4ZADz4xgzAZwPtqqzFJrCeX1lDs1a1kWWHnaz9g/CDzx6E/73fSS9/iSqeTxAeVQVNRcTgbCKJnGVTBwfMpf50xIWoXrQqeXFRx",
+       "metadata": {
+        "dewpoint-key-version": "MQ==",
+        "dewpoint-tenant": "MDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAx",
+        "encoding": "YmluYXJ5L2Rld3BvaW50LXRlbmFudC12MQ=="
+       }
+      }
+     ]
+    },
+    "priority": {},
+    "retryPolicy": {
+     "backoffCoefficient": 2.0,
+     "initialInterval": "1s",
+     "maximumAttempts": 1,
+     "maximumInterval": "100s"
+    },
+    "scheduleToCloseTimeout": "315360000s",
+    "scheduleToStartTimeout": "315360000s",
+    "startToCloseTimeout": "60s",
+    "taskQueue": {
+     "kind": "TASK_QUEUE_KIND_NORMAL",
+     "name": "dewpoint-engine"
+    },
+    "workflowTaskCompletedEventId": "3"
+   },
+   "eventId": "8",
+   "eventTime": "2026-10-14T14:08:47.418Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED"
+  },
+  {
+   "activityTaskStartedEventAttributes": {
+    "attempt": 1,
+    "identity": "replay-recorder",
+    "scheduledEventId": "8"
+   },
+   "eventId": "9",
+   "eventTime": "2026-10-14T14:08:47.418Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED"
+  },
+  {
+   "activityTaskCompletedEventAttributes": {
+    "identity": "replay-recorder",
+    "result": {
+     "payloads": [
+      {
+       "data": "jR1eeBm0m4kzdioSVQSpjGPyNBx7yBV+r8pqNzd6sLDD869P8XAQxjSD+pnZh87AOVFd1j0vCMxk2ACpcZ9yjoVRPjQr6+3GcPtSJr9Lw6EjNwlYv3NnnROiE7ohcdRNLA==",
+       "metadata": {
+        "dewpoint-key-version": "MQ==",
+        "dewpoint-tenant": "MDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAx",
+        "encoding": "YmluYXJ5L2Rld3BvaW50LXRlbmFudC12MQ=="
+       }
+      }
+     ]
+    },
+    "scheduledEventId": "8",
+    "startedEventId": "9"
+   },
+   "eventId": "10",
+   "eventTime": "2026-10-14T14:08:47.419Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED"
+  },
+  {
+   "eventId": "11",
+   "eventTime": "2026-10-14T14:08:47.419Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+   "workflowTaskScheduledEventAttributes": {
+    "attempt": 1,
+    "startToCloseTimeout": "10s",
+    "taskQueue": {
+     "name": "dewpoint-engine"
+    }
+   }
+  },
+  {
+   "eventId": "12",
+   "eventTime": "2026-10-14T14:08:47.419Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+   "workflowTaskStartedEventAttributes": {
+    "historySizeBytes": "8155",
+    "identity": "replay-recorder",
+    "scheduledEventId": "11"
+   }
+  },
+  {
+   "eventId": "13",
+   "eventTime": "2026-10-14T14:08:47.420Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+   "workflowTaskCompletedEventAttributes": {
+    "binaryChecksum": "255487c158298cf8055e7cd741e3c83f",
+    "identity": "replay-recorder",
+    "meteringMetadata": {},
+    "scheduledEventId": "11",
+    "sdkMetadata": {}
+   }
+  },
+  {
+   "activityTaskScheduledEventAttributes": {
+    "activityId": "3",
+    "activityType": {
+     "name": "dewpoint.project"
+    },
+    "header": {},
+    "heartbeatTimeout": "0s",
+    "input": {
+     "payloads": [
+      {
+       "data": "pVKZ7AI6CLmFnGZ4Xqa9EDfEMZGOWWxQnJGbDMuv68MR9DTfup3O4sh9SB1rxflFHWteK8VA3pWQkxmNsmn5wv/mS1NORFuPunxPoDkQbkkgX2zWPcxatltmr1Npt/tUgLUxIq4+SuP68amkj5M9FzGBdhXGGlOk0FWhBmSkhGeR8inQyLqlUnIo5y42GJtfWq9JVNCP9x9ZIq1rlrIIPCRc43dwN7cUyBWdumVZWuvzgERcGZxgmUnP438yeckSnebMTF1qT1yS706kpM1Y+H7BUvrkork767up7r2s4hWGoJtQV3PJAiiEfudHQHOO2x5rS3WoVIPpqNQwRDAmUnMfWKzxfkG4evq/edgjmd3i1Rs717L5NZfHc0OC4TwTESOCYD7kbG4JgCTsg7VtIbigmoKS+QyPal9GpLLfpsHiHZl335x7izKMDmLGs6qRpmlyUmSNHUpECB/Dsv+++vRDGdB9LMlPld4/IvO5jg2pkJM3RniTjg/XDxrrUfYltnb9H6ry7CNR0MeXadTc/INdYyPLMqf+m4I2Cqy4nsmsjXOi/3nd1c0ys/V8NlM+5snEq6SD5IokJ7FNLdSSo0zWF2oQpDZhnxbg6euj2yuItnIdGVLFL/LXQWKl5+I9r+ajv/h1BEHlSJC65IJUwxctE5KZS77416PrnWMaCAalhc3aBMT/k1GaUa7ntsOQivD0+xdhx/pNuS4YCUkl0oQ+OzXU1IOkliN5jPTN9/MBO1kg1kuDaPN1byGA98Yjo6LB/MP1YLVcxITwb1B79ngc9cicJ5aR4+6Kyo8SEc9hGY23mdI=",
+       "metadata": {
+        "dewpoint-key-version": "MQ==",
+        "dewpoint-tenant": "MDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAx",
+        "encoding": "YmluYXJ5L2Rld3BvaW50LXRlbmFudC12MQ=="
+       }
+      }
+     ]
+    },
+    "priority": {},
+    "retryPolicy": {
+     "backoffCoefficient": 2.0,
+     "initialInterval": "1s",
+     "maximumInterval": "30s"
+    },
+    "scheduleToCloseTimeout": "315360000s",
+    "scheduleToStartTimeout": "315360000s",
+    "startToCloseTimeout": "30s",
+    "taskQueue": {
+     "kind": "TASK_QUEUE_KIND_NORMAL",
+     "name": "dewpoint-engine"
+    },
+    "workflowTaskCompletedEventId": "12"
+   },
+   "eventId": "14",
+   "eventTime": "2026-10-14T14:08:47.420Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED"
+  },
+  {
+   "activityTaskScheduledEventAttributes": {
+    "activityId": "4",
+    "activityType": {
+     "name": "testkit.echo.v1"
+    },
+    "header": {},
+    "heartbeatTimeout": "0s",
+    "input": {
+     "payloads": [
+      {
+       "data": "8gqPqCIJOCDa/EX+nXq/UN1O/0aedh2U5b8oc69t75BbBQtQOMDcMdRzIELfJC3xpMvSSdOs4QBOHhiMxodh56Y48U/Oeyk89jVYK4d+jDhLUJg52masUfLbpFVdmizM1STKMmH9hvjo0kgjqisdHLRqgpQ2nAksvGTyirzDDSIMXIJhh4E8TNScZZgplL3P5tZZVCZPOd63KlF7WySGbs+Li7yo8hoM/2vmTn/KOG1NbHsRxTN6qh0zznNoxN5hCs8Oyp8Jveb8TB5t1n8Jk8wcmSeOs7AzyvLOPkaoA0HRiT9JGRmMzKhsM+xuCmW111dUQKt9b68RZSk4rRSuWE6j5sWU9rh4IdRnI7aPA5T8vGMjr9llXUWBw48P+IQqLTaPth7zoPPZMLemxWx6BWc/s6DLtu+fo7j6OYfnzsRmn+lAIhTGDCtBBhW6L9TdOkoHV6IVRsGHgnY+G4ySRTrCgk3LuSxblpOwjT5F09QG0De3UcwPoktZDWgTEbSRebjs",
+       "metadata": {
+        "dewpoint-key-version": "MQ==",
+        "dewpoint-tenant": "MDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAx",
+        "encoding": "YmluYXJ5L2Rld3BvaW50LXRlbmFudC12MQ=="
+       }
+      }
+     ]
+    },
+    "priority": {},
+    "retryPolicy": {
+     "backoffCoefficient": 2.0,
+     "initialInterval": "1s",
+     "maximumAttempts": 1,
+     "maximumInterval": "100s"
+    },
+    "scheduleToCloseTimeout": "315360000s",
+    "scheduleToStartTimeout": "315360000s",
+    "startToCloseTimeout": "60s",
+    "taskQueue": {
+     "kind": "TASK_QUEUE_KIND_NORMAL",
+     "name": "dewpoint-engine"
+    },
+    "workflowTaskCompletedEventId": "12"
+   },
+   "eventId": "15",
+   "eventTime": "2026-10-14T14:08:47.420Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED"
+  },
+  {
+   "activityTaskStartedEventAttributes": {
+    "attempt": 1,
+    "identity": "replay-recorder",
+    "scheduledEventId": "15"
+   },
+   "eventId": "16",
+   "eventTime": "2026-10-14T14:08:47.420Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED"
+  },
+  {
+   "activityTaskCompletedEventAttributes": {
+    "identity": "replay-recorder",
+    "result": {
+     "payloads": [
+      {
+       "data": "TAdOfuPsV2IDmKoxSg20Nirbg5duaWt2aaH5zSFgP0KfzAH/cuK5G1764v1AqnFrnsg2jrtOIEabzcHzJxICEyd1/4+g9kMZ9EfaQi4Abr4pv3aDUdMXTrNO+AjvmIWzCg==",
+       "metadata": {
+        "dewpoint-key-version": "MQ==",
+        "dewpoint-tenant": "MDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAx",
+        "encoding": "YmluYXJ5L2Rld3BvaW50LXRlbmFudC12MQ=="
+       }
+      }
+     ]
+    },
+    "scheduledEventId": "15",
+    "startedEventId": "16"
+   },
+   "eventId": "17",
+   "eventTime": "2026-10-14T14:08:47.421Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED"
+  },
+  {
+   "eventId": "18",
+   "eventTime": "2026-10-14T14:08:47.421Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+   "workflowTaskScheduledEventAttributes": {
+    "attempt": 1,
+    "startToCloseTimeout": "10s",
+    "taskQueue": {
+     "name": "dewpoint-engine"
+    }
+   }
+  },
+  {
+   "eventId": "19",
+   "eventTime": "2026-10-14T14:08:47.421Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+   "workflowTaskStartedEventAttributes": {
+    "historySizeBytes": "10146",
+    "identity": "replay-recorder",
+    "scheduledEventId": "18"
+   }
+  },
+  {
+   "eventId": "20",
+   "eventTime": "2026-10-14T14:08:47.423Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+   "workflowTaskCompletedEventAttributes": {
+    "binaryChecksum": "255487c158298cf8055e7cd741e3c83f",
+    "identity": "replay-recorder",
+    "meteringMetadata": {},
+    "scheduledEventId": "18",
+    "sdkMetadata": {}
+   }
+  },
+  {
+   "activityTaskScheduledEventAttributes": {
+    "activityId": "5",
+    "activityType": {
+     "name": "testkit.echo.v1"
+    },
+    "header": {},
+    "heartbeatTimeout": "0s",
+    "input": {
+     "payloads": [
+      {
+       "data": "vnDbTMJm8ymYy3ZZOGP7h0kApB4OqohmM3IGu2GDeLTBc+/Jy51FOxgeDCkKEaW5IMeY166VhcMrJq5LCnN6Vini0z5J1+Bg95xiaqu+U6xyaDU2Qw0NFAFyjwOGpgSty8TYxRmKf62rk9UvZD+uXxMZZ7bIWEMlruXTMtanPO+vtIhJUzhie/P9I+1nxi2jXYAfq5SaDO+vTWYg4UsosrgvlUyOrIcS37ulvmVbNdXQXfWnALFTW5yCTqJAEGqc3DCRGy7dSta39zx3jbaXyxKqAxm9tJO3BtY4Cl/kVbwxZupt0jYFoxhr9oL1PioHQBCvMhw2oEp8/KcP4Oa+C7dpFwdbc3Emc4csgiECkW/aTdD/PkqXCx94Gu/ERXw6P5ilagc3PvzzNMdgzyOqFI2ZBm93eDXva0/h2pYL+WN/R2Ll8l+mERU5oQWM10ySLYg5WG2FcHKXesYEkGOXxmAb7fUNWgiCqBbYict6xFSMdwQ71p/NQyBI3xC7VTzlAI5m",
+       "metadata": {
+        "dewpoint-key-version": "MQ==",
+        "dewpoint-tenant": "MDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAx",
+        "encoding": "YmluYXJ5L2Rld3BvaW50LXRlbmFudC12MQ=="
+       }
+      }
+     ]
+    },
+    "priority": {},
+    "retryPolicy": {
+     "backoffCoefficient": 2.0,
+     "initialInterval": "1s",
+     "maximumAttempts": 1,
+     "maximumInterval": "100s"
+    },
+    "scheduleToCloseTimeout": "315360000s",
+    "scheduleToStartTimeout": "315360000s",
+    "startToCloseTimeout": "60s",
+    "taskQueue": {
+     "kind": "TASK_QUEUE_KIND_NORMAL",
+     "name": "dewpoint-engine"
+    },
+    "workflowTaskCompletedEventId": "19"
+   },
+   "eventId": "21",
+   "eventTime": "2026-10-14T14:08:47.423Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED"
+  },
+  {
+   "activityTaskStartedEventAttributes": {
+    "attempt": 1,
+    "identity": "replay-recorder",
+    "scheduledEventId": "14"
+   },
+   "eventId": "22",
+   "eventTime": "2026-10-14T14:08:47.420Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED"
+  },
+  {
+   "activityTaskCompletedEventAttributes": {
+    "identity": "replay-recorder",
+    "result": {
+     "payloads": [
+      {
+       "data": "1oe9gpYILodHXze3AO+Hx5DWrhPkkV73MGlTtZ2D6zRRPbR3Cf9CVO59X1Un1IX2SzFm2jM=",
+       "metadata": {
+        "dewpoint-key-version": "MQ==",
+        "dewpoint-tenant": "MDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAx",
+        "encoding": "YmluYXJ5L2Rld3BvaW50LXRlbmFudC12MQ=="
+       }
+      }
+     ]
+    },
+    "scheduledEventId": "14",
+    "startedEventId": "20"
+   },
+   "eventId": "23",
+   "eventTime": "2026-10-14T14:08:47.423Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED"
+  },
+  {
+   "eventId": "24",
+   "eventTime": "2026-10-14T14:08:47.423Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+   "workflowTaskScheduledEventAttributes": {
+    "attempt": 2,
+    "startToCloseTimeout": "10s",
+    "taskQueue": {
+     "name": "dewpoint-engine"
+    }
+   }
+  },
+  {
+   "eventId": "25",
+   "eventTime": "2026-10-14T14:08:47.423Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+   "workflowTaskStartedEventAttributes": {
+    "historySizeBytes": "11235",
+    "identity": "replay-recorder",
+    "scheduledEventId": "24"
+   }
+  },
+  {
+   "eventId": "26",
+   "eventTime": "2026-10-14T14:08:47.425Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+   "workflowTaskCompletedEventAttributes": {
+    "binaryChecksum": "255487c158298cf8055e7cd741e3c83f",
+    "identity": "replay-recorder",
+    "meteringMetadata": {},
+    "scheduledEventId": "24",
+    "sdkMetadata": {}
+   }
+  },
+  {
+   "activityTaskScheduledEventAttributes": {
+    "activityId": "6",
+    "activityType": {
+     "name": "dewpoint.project"
+    },
+    "header": {},
+    "heartbeatTimeout": "0s",
+    "input": {
+     "payloads": [
+      {
+       "data": "XyZmtPLxifEuBZp0xHz4CoghvRnrLT3q84XGm/M82Wd5DncUfqN1kzy+7vTx1upYkdUcIKzvjBa4VGGjz8q1EFQeqgqa4eyHgd6HAGXxLFGVCYidnCpC5YoAd9C4+2yM2GUUaFN++X7O9/lu93xphjnl6p9QiJlb2/Bb3gnt3TSj/Edxn3B4MhaKReJ9lUbLzGqFDH2RgYLqDEXi123Y4du3Urj7u3eec2vM57xrbS6ujZNfRnBfB6/NaxbdnMWi7ViOJDcg5GXhH3Q31AMVcxwgUiBxhLvJnvdq/H92DQJh91yIe0aPTEXZ0lTpt7JW/t1eSpOmVIE4iflxpByzRjrlX4/l0PtTxAKGpLDQpkEm7IL9kx0tkMMqCAM5zRaD1YBMyXCSIwkRG45TOcXZ+MC38msZmIDv612N2I2j2p877yBVx3RGlRNlInsHwQ3kOOmZEjEkI7b94j79B7Uyw+cBKNRxG811sJIRS0c0/wwNBjCPAXezoKaRGOJFU6HJXUWpjLVoy1IdVBdtriawgN2UFvFLylIMVlO7wTLRGkCwm/weKZSPXYCTFu1GgNlBCzzuQmbmSA+ge9/Oe0IlmTXeIZJPRCanHa6LJArLfyIisAMqVADC+kj08n9QSZd5gGTcMER3qWU73oKtWt0BvrHnJqtW6xIN7nUlZNuycMXHrn+TwMMpsnHHipAvEqSMdbGlwrzyij3byXDq3gel3nrQwOrV/3aZJL54i+YoWvT26gFN/AsQ4oRAaHjbkFQ6GJgVWJQi3AucfYppp1gZ0CohExH8NhxSPjp8I93MUan3FIuqLqHH/vsPyDn52L4xGa/4SH1MbsG2aajwqZ5WoaFdLGDfieLtxyqg7yiPhxeX9ZD77q7Zm5ORHERJeoB3vzpufQDgofmBlEE8EhxIgFVJGlC5Uch/RxuELO5Skapn48IcfjHXvPzMV135hF19dns+xlK8VoKYVLWIgIyhMitSdiDeweXuI04vKzOUpHXkfTolArIm7oAZct4K++a8DbjN1qXxiTkbS+NpbUQjZYwNIFnxShkfnD6hmZ7Q5ArvSYiH40Pmc9qYqkCMZMg4YVdreLCLzj/9DUHF/ULSY5mJcg37Lg5yjdGUpP7KHKk20eqGIkzSdrRNKecGzdBczbmHZOr5PznzwIjzpqq1bWsnJ+8iO+9eHJxshSS82hFf7nCWWMn1bGBfuxrWuUsqjjGSk342kseqwEKhiyQ/2vVXEsqDhd0FwTHVgb+Lfic/EyCZizHpMixsIK0Kkex7if3mvjnitVdu9sv8AoByNbIRhfoALiHlr0ByL0w=",
+       "metadata": {
+        "dewpoint-key-version": "MQ==",
+        "dewpoint-tenant": "MDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAx",
+        "encoding": "YmluYXJ5L2Rld3BvaW50LXRlbmFudC12MQ=="
+       }
+      }
+     ]
+    },
+    "priority": {},
+    "retryPolicy": {
+     "backoffCoefficient": 2.0,
+     "initialInterval": "1s",
+     "maximumInterval": "30s"
+    },
+    "scheduleToCloseTimeout": "315360000s",
+    "scheduleToStartTimeout": "315360000s",
+    "startToCloseTimeout": "30s",
+    "taskQueue": {
+     "kind": "TASK_QUEUE_KIND_NORMAL",
+     "name": "dewpoint-engine"
+    },
+    "workflowTaskCompletedEventId": "25"
+   },
+   "eventId": "27",
+   "eventTime": "2026-10-14T14:08:47.425Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED"
+  },
+  {
+   "activityTaskStartedEventAttributes": {
+    "attempt": 1,
+    "identity": "replay-recorder",
+    "scheduledEventId": "21"
+   },
+   "eventId": "28",
+   "eventTime": "2026-10-14T14:08:47.423Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED"
+  },
+  {
+   "activityTaskCompletedEventAttributes": {
+    "identity": "replay-recorder",
+    "result": {
+     "payloads": [
+      {
+       "data": "SG4cZ6O7G7EHN/iRV7kTrT0KmvOZneilHAp1+53U3BiUoHtCWmmlGI88i5TUshDtYFON/9gCUL12b+CtNSmEITZRQ4EB+1rlWK0npUpifzQ9jM+ukgICMCZQCIfGyKrHew==",
+       "metadata": {
+        "dewpoint-key-version": "MQ==",
+        "dewpoint-tenant": "MDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAx",
+        "encoding": "YmluYXJ5L2Rld3BvaW50LXRlbmFudC12MQ=="
+       }
+      }
+     ]
+    },
+    "scheduledEventId": "21",
+    "startedEventId": "26"
+   },
+   "eventId": "29",
+   "eventTime": "2026-10-14T14:08:47.425Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED"
+  },
+  {
+   "eventId": "30",
+   "eventTime": "2026-10-14T14:08:47.425Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+   "workflowTaskScheduledEventAttributes": {
+    "attempt": 1,
+    "startToCloseTimeout": "10s",
+    "taskQueue": {
+     "name": "dewpoint-engine"
+    }
+   }
+  },
+  {
+   "eventId": "31",
+   "eventTime": "2026-10-14T14:08:47.425Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+   "workflowTaskStartedEventAttributes": {
+    "historySizeBytes": "12969",
+    "identity": "replay-recorder",
+    "scheduledEventId": "30"
+   }
+  },
+  {
+   "eventId": "32",
+   "eventTime": "2026-10-14T14:08:47.426Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+   "workflowTaskCompletedEventAttributes": {
+    "binaryChecksum": "255487c158298cf8055e7cd741e3c83f",
+    "identity": "replay-recorder",
+    "meteringMetadata": {},
+    "scheduledEventId": "30",
+    "sdkMetadata": {}
+   }
+  },
+  {
+   "activityTaskScheduledEventAttributes": {
+    "activityId": "7",
+    "activityType": {
+     "name": "testkit.echo.v1"
+    },
+    "header": {},
+    "heartbeatTimeout": "0s",
+    "input": {
+     "payloads": [
+      {
+       "data": "U8oApJLNzENFM299BkIA7o5SdFbC29VT9sfGsSvPk+o+p7EGWYv63wGa77KsV5YweB31wyUb8pCfEYYzvkw+R4LPQ2Y96IPlk28n4/OyUQnmVv1qlMF23kp5XTki0ebAMCpptGmpi1UvHwCg/40sLm+oP+fhq3CyXyV3vedqbWxsq08Wmq5JV/zWRYhETy1/TzBI+CNbUjwkU+BwJXrv2gspmy/HzdUtmQ3YOLu1mKAyF2BSLgvs2Vma9YwPMgQ2SIplCa9X6Dcu26coOVjX0gJ44SPlffcUyXp4+K5SBb3p6+AYO7gXmjqiYkC0CSpxXH8HwPFdkBCsG0K7lmrJ019XAHCujNK51YUIqsIkuCIal/3aLxZYlHUInp86orxmP9+amy4RWuKK8So5YQdUQKPU6PMZKJEzm7fKkbuqJLG/PI/m5vEplb42v04ImNhgHPefIxCjaR3YK/dvdR85nGW8sSlnpVveEKj5RQvTrmdVa+S6wgm/1PoYL+DcLAeJ4S23",
+       "metadata": {
+        "dewpoint-key-version": "MQ==",
+        "dewpoint-tenant": "MDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAx",
+        "encoding": "YmluYXJ5L2Rld3BvaW50LXRlbmFudC12MQ=="
+       }
+      }
+     ]
+    },
+    "priority": {},
+    "retryPolicy": {
+     "backoffCoefficient": 2.0,
+     "initialInterval": "1s",
+     "maximumAttempts": 1,
+     "maximumInterval": "100s"
+    },
+    "scheduleToCloseTimeout": "315360000s",
+    "scheduleToStartTimeout": "315360000s",
+    "startToCloseTimeout": "60s",
+    "taskQueue": {
+     "kind": "TASK_QUEUE_KIND_NORMAL",
+     "name": "dewpoint-engine"
+    },
+    "workflowTaskCompletedEventId": "31"
+   },
+   "eventId": "33",
+   "eventTime": "2026-10-14T14:08:47.426Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED"
+  },
+  {
+   "activityTaskStartedEventAttributes": {
+    "attempt": 1,
+    "identity": "replay-recorder",
+    "scheduledEventId": "27"
+   },
+   "eventId": "34",
+   "eventTime": "2026-10-14T14:08:47.425Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED"
+  },
+  {
+   "activityTaskCompletedEventAttributes": {
+    "identity": "replay-recorder",
+    "result": {
+     "payloads": [
+      {
+       "data": "eKPu8W8lAzGElgsM9IXvka0phK+R9jyDZgnKuLnRsm6bxq9r1NOmdlG5qMhyFOu4EKr8iLY=",
+       "metadata": {
+        "dewpoint-key-version": "MQ==",
+        "dewpoint-tenant": "MDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAx",
+        "encoding": "YmluYXJ5L2Rld3BvaW50LXRlbmFudC12MQ=="
+       }
+      }
+     ]
+    },
+    "scheduledEventId": "27",
+    "startedEventId": "32"
+   },
+   "eventId": "35",
+   "eventTime": "2026-10-14T14:08:47.426Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED"
+  },
+  {
+   "eventId": "36",
+   "eventTime": "2026-10-14T14:08:47.426Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+   "workflowTaskScheduledEventAttributes": {
+    "attempt": 1,
+    "startToCloseTimeout": "10s",
+    "taskQueue": {
+     "name": "dewpoint-engine"
+    }
+   }
+  },
+  {
+   "eventId": "37",
+   "eventTime": "2026-10-14T14:08:47.426Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+   "workflowTaskStartedEventAttributes": {
+    "historySizeBytes": "14058",
+    "identity": "replay-recorder",
+    "scheduledEventId": "36"
+   }
+  },
+  {
+   "eventId": "38",
+   "eventTime": "2026-10-14T14:08:47.428Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+   "workflowTaskCompletedEventAttributes": {
+    "binaryChecksum": "255487c158298cf8055e7cd741e3c83f",
+    "identity": "replay-recorder",
+    "meteringMetadata": {},
+    "scheduledEventId": "36",
+    "sdkMetadata": {}
+   }
+  },
+  {
+   "activityTaskScheduledEventAttributes": {
+    "activityId": "8",
+    "activityType": {
+     "name": "dewpoint.project"
+    },
+    "header": {},
+    "heartbeatTimeout": "0s",
+    "input": {
+     "payloads": [
+      {
+       "data": "uv/5sHuIPDFE3lZ29ecI74vpQBrHE414UfZn3tk9d03SGTKzwr1DeOjPxUTYAdSCav4SuOezZuhP7aChfTx5hLQ1/nOcVNuIbSY56Hw+3ZCaNxvLbp6Wf6WQC6brN8Ro+aXxyZotrhslGf/y3GdKbrGyFzyD98BpMbBvfsaeNuQSzykgMzoQuEu+dPikXUI3w4l+LzGRtycqx4idIBc0icrBPtlpms5yyjHsnw40iHOFI1gotEO2rgEvKEvrjABt53Gc4POhMghqPVRK8YGRuVfEQzIpnzwLbphk1E2gyRbd92gxa4piEtIcs+0UNH3rb2POb10zYrUDoXcINOkXGS2cpbLh6AlMR6uIlq5+rxuF/8mWe7VvXIcbi+5GUCDsJnmihq4agHCAfNNCD++KmDg8Ducb88/lFb9cKkYH4GNwNRhyhDPz/jCEu2oYLzxaIs52behSAg8X7rIxBP5CYipV5ouaDZDWDyoNeOZ0ZUrw3RIIOHxPu9b6QZSddZ1Ab/B1g1NybRLEV8ju7bmWO+cqfrLFek965nmhkJ1Ove7Q+e1fko3Ei4hOwRD6euNqjUUUwgDrAqsrriI50GhU7q2vB5fIksnbp1Lhq643w85HL9MWIGMUpPoxjfVPdLJTpEA82tN2SB7QivjDlFyV5XGnkkkVI9ZxDZnjvxuyhP8H+dTBV6QIJULKq5o+9/PXRRiO04M1SMN7OPcKaQh1Kt/aRuJxtGZNiZJ6rE9EEmJUISIs4ut03xgufn3ab1JQXwoopQPs+7hqMJTha6Cp7tdqS9Q1Cm6uUa0TE59AO+jmbWFqPKC+XLQAjedg4qaTArC/qntLo/ZoS3nlKeVG+iw1mmth57m5lWy9qlGyaXc92G6Z4pdxfw9QjFL9z6q+GM436074wyYwSpwATZtG4SM5M/bPbRcPC8/S7mhMecvpUSl00tvefrw3n3oLk6piuBuZrB5+ITkwJjhgVR4rldXQs5OfbwsO8RdUljCPeN2Gfk9QRsblr/2hCoOM+SWiAXHe3gJYmpd/xIKBzBj8lKsLcRNrwkDzV4S3JaLYV5QaTGfhHMnW/sgWuKvVnKqilo0zbpCgEXeWrFWdDF4xWZHzBbdmlkjtw7vsjie2n32q3gytZ7jSP7DN/c4CsAXnfHZ9MTKWd4m01kLvgRUY636cPhJqO5ZGvGIP7A/Jd7fCBIrXrMMHzgbylysphFgsfxSBO1eaMza6XNXAekyPO02SkYO8rju3YhZUgTvn0HnWoj/AzNOfIBvBeJsvaJs/f2WDoR4x/Zy9YXbweMaUarTOZrjHa7SA6zeZKYU=",
+       "metadata": {
+        "dewpoint-key-version": "MQ==",
+        "dewpoint-tenant": "MDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAx",
+        "encoding": "YmluYXJ5L2Rld3BvaW50LXRlbmFudC12MQ=="
+       }
+      }
+     ]
+    },
+    "priority": {},
+    "retryPolicy": {
+     "backoffCoefficient": 2.0,
+     "initialInterval": "1s",
+     "maximumInterval": "30s"
+    },
+    "scheduleToCloseTimeout": "315360000s",
+    "scheduleToStartTimeout": "315360000s",
+    "startToCloseTimeout": "30s",
+    "taskQueue": {
+     "kind": "TASK_QUEUE_KIND_NORMAL",
+     "name": "dewpoint-engine"
+    },
+    "workflowTaskCompletedEventId": "37"
+   },
+   "eventId": "39",
+   "eventTime": "2026-10-14T14:08:47.428Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED"
+  },
+  {
+   "activityTaskStartedEventAttributes": {
+    "attempt": 1,
+    "identity": "replay-recorder",
+    "scheduledEventId": "33"
+   },
+   "eventId": "40",
+   "eventTime": "2026-10-14T14:08:47.426Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED"
+  },
+  {
+   "activityTaskCompletedEventAttributes": {
+    "identity": "replay-recorder",
+    "result": {
+     "payloads": [
+      {
+       "data": "Z+m3139cZZTcMoDI4Z8Co5UaEibioe8DfW/S1788r0fKwf597O8ICHC0UAbx4Gh90DHGfoB2qwXlRDcULu5LvngHNtJraEfaoBJkTiegJUXk55KljoG6HWxiDLjnJEA2WQ==",
+       "metadata": {
+        "dewpoint-key-version": "MQ==",
+        "dewpoint-tenant": "MDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAx",
+        "encoding": "YmluYXJ5L2Rld3BvaW50LXRlbmFudC12MQ=="
+       }
+      }
+     ]
+    },
+    "scheduledEventId": "33",
+    "startedEventId": "38"
+   },
+   "eventId": "41",
+   "eventTime": "2026-10-14T14:08:47.428Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED"
+  },
+  {
+   "eventId": "42",
+   "eventTime": "2026-10-14T14:08:47.428Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+   "workflowTaskScheduledEventAttributes": {
+    "attempt": 1,
+    "startToCloseTimeout": "10s",
+    "taskQueue": {
+     "name": "dewpoint-engine"
+    }
+   }
+  },
+  {
+   "eventId": "43",
+   "eventTime": "2026-10-14T14:08:47.428Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+   "workflowTaskStartedEventAttributes": {
+    "historySizeBytes": "15792",
+    "identity": "replay-recorder",
+    "scheduledEventId": "42"
+   }
+  },
+  {
+   "eventId": "44",
+   "eventTime": "2026-10-14T14:08:47.430Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+   "workflowTaskCompletedEventAttributes": {
+    "binaryChecksum": "255487c158298cf8055e7cd741e3c83f",
+    "identity": "replay-recorder",
+    "meteringMetadata": {},
+    "scheduledEventId": "42",
+    "sdkMetadata": {}
+   }
+  },
+  {
+   "activityTaskScheduledEventAttributes": {
+    "activityId": "9",
+    "activityType": {
+     "name": "testkit.echo.v1"
+    },
+    "header": {},
+    "heartbeatTimeout": "0s",
+    "input": {
+     "payloads": [
+      {
+       "data": "CcwtPl9E7++8SGMq3DI92E85la7TZSxVCjndQGywTIbFntyfBC/8nNBy9WjxpAX0M2XysubjeJCDHoeVYIkNyMqHTHWStLT+Ak37YD5Ey53oZMX2eMMtPaCZg3WF8brnMqSBPHIjdrfsY4wxcWbIdTVBDwvKIYALoNyDGU2RZ4IrYHrWeUNZRT7iJzbRCELsy5/2cuckpZ58WofmOfIsqDHEEDYssrEAfrfG2F1eb0eTRkBL+qrsdnFFaXZi9vhHymfL7mkVkYhyU8NtmZOeIwjr/dgy97fgPujnrekZOXCdZJ5qOOF7sH/jcFtVIPLGTvK5DGOJVN/bYMgQVifsu+xUiIM+IYZndr4d4TpSwcn0yanLwjZliw7aA92FPgTGm/lj2SR6b9KJJOabyi7tmhJ/z95eT+YF9cC0PypXU04aSlRRpX0le6tzkec4JA43TZGF9MqcxU28l7Z01fNYwx0nHsd1M9DR46Z72lBMIYB6NpP3QlyOP6KVlaahRdI/0vR2",
+       "metadata": {
+        "dewpoint-key-version": "MQ==",
+        "dewpoint-tenant": "MDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAx",
+        "encoding": "YmluYXJ5L2Rld3BvaW50LXRlbmFudC12MQ=="
+       }
+      }
+     ]
+    },
+    "priority": {},
+    "retryPolicy": {
+     "backoffCoefficient": 2.0,
+     "initialInterval": "1s",
+     "maximumAttempts": 1,
+     "maximumInterval": "100s"
+    },
+    "scheduleToCloseTimeout": "315360000s",
+    "scheduleToStartTimeout": "315360000s",
+    "startToCloseTimeout": "60s",
+    "taskQueue": {
+     "kind": "TASK_QUEUE_KIND_NORMAL",
+     "name": "dewpoint-engine"
+    },
+    "workflowTaskCompletedEventId": "43"
+   },
+   "eventId": "45",
+   "eventTime": "2026-10-14T14:08:47.430Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED"
+  },
+  {
+   "activityTaskStartedEventAttributes": {
+    "attempt": 1,
+    "identity": "replay-recorder",
+    "scheduledEventId": "39"
+   },
+   "eventId": "46",
+   "eventTime": "2026-10-14T14:08:47.428Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED"
+  },
+  {
+   "activityTaskCompletedEventAttributes": {
+    "identity": "replay-recorder",
+    "result": {
+     "payloads": [
+      {
+       "data": "QCAPVe//PCj3itrrX1n712d+Jd08aiBGpHDw6wl56yhW7pM4shalAGurv1f6QMSH9sZX/uU=",
+       "metadata": {
+        "dewpoint-key-version": "MQ==",
+        "dewpoint-tenant": "MDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAx",
+        "encoding": "YmluYXJ5L2Rld3BvaW50LXRlbmFudC12MQ=="
+       }
+      }
+     ]
+    },
+    "scheduledEventId": "39",
+    "startedEventId": "44"
+   },
+   "eventId": "47",
+   "eventTime": "2026-10-14T14:08:47.430Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED"
+  },
+  {
+   "eventId": "48",
+   "eventTime": "2026-10-14T14:08:47.430Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+   "workflowTaskScheduledEventAttributes": {
+    "attempt": 1,
+    "startToCloseTimeout": "10s",
+    "taskQueue": {
+     "name": "dewpoint-engine"
+    }
+   }
+  },
+  {
+   "eventId": "49",
+   "eventTime": "2026-10-14T14:08:47.430Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+   "workflowTaskStartedEventAttributes": {
+    "historySizeBytes": "16881",
+    "identity": "replay-recorder",
+    "scheduledEventId": "48"
+   }
+  },
+  {
+   "eventId": "50",
+   "eventTime": "2026-10-14T14:08:47.431Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+   "workflowTaskCompletedEventAttributes": {
+    "binaryChecksum": "255487c158298cf8055e7cd741e3c83f",
+    "identity": "replay-recorder",
+    "meteringMetadata": {},
+    "scheduledEventId": "48",
+    "sdkMetadata": {}
+   }
+  },
+  {
+   "activityTaskScheduledEventAttributes": {
+    "activityId": "10",
+    "activityType": {
+     "name": "dewpoint.project"
+    },
+    "header": {},
+    "heartbeatTimeout": "0s",
+    "input": {
+     "payloads": [
+      {
+       "data": "SAagapEzr6qJJnh1mlYT13ZWPaHwuuM9R4ypq/LuCJM6dlKI9wUvm+nPJSL8+CTr5UW0RsyzNIkHdT8pSVvmPqPxDreqQ42bU/fC195++W5fKH8sL3x1ETxg3qht8B5q4sCmxHR0xWH2MvD+Fu4BgLrmCaCz90YpTqYuyuU0aBZ0WKBtiQc63p9OkivPIN0JEcchE3oWMY9aah8RqPbEz+hgadVBC4Cq/gbcBRhhuT+5XFfXS4gjfSk44FS2U6bFUFSo6FNkGt7Rzmobae0OEADra05OuSlvviXChT9PZcdcmpxWCSKHVmYCN4QTmKpFMowgqCUSpXS4CEgSZUJLHAfNUF34w+rskg+lGqINHIQt7ct1zgEGO0B+zt7qysH0rMfkKYW6JEpGusfnMtQ82sI+0roljBDZCNnQA1w4pVX6rU89JnM3NplaXFZptQD/kXtor6dw2iv8Nw0jQLqQIUvR59wqF00K06bCUEV8JF0h23du/Fa/Z/xIEvE7q+bYfDWYjxeJmprx9vR4R56v0HD8NdYMd9qok7dVmXu3cA+HCVmDMAPEyt+/geoQ9Gr2tjZeaJYOKtfZx4mb5dam+jugbkfsdDZqie0Nkq/4+qUZUbQrgp0PGSsZMSMBnM4K4em2QELxlwd/HNfY3kzQYsgxkwmfBKPAFgbLe1WCYKZICbJgWGx6E3KvKm+38SqnQ6b4dVJr2Fwz6+p3hBHbIyXQHco42zBGl7fID+3OaeAGGZqg4OpLyyliDV0lyhTJ9danyaKPD2MXzNouqlr4F+vNd0Au69OdPmrwL17hzaqFcpXDoKLZ0xqN6NdVOeDNz/h7wcANZ/hSoCIQivDaQJ5UOzNHERDRhNpIeZiXiLQdQiwliZndk+YECIxKCG+VtRrPgCQekA1PBR3yx1EF0tOCNj1SdnWeU+rZVGn7cJfNm1wHId+VzEPLSk+d2ocKoBADyUBzZCBoxX5umYsrvV9QVS3JcNJj9vRD0Nyjyy+pktx/GlUFxARAwfyqtGZzBn48dRuqdwvN71sQ1Q03cciWljVEuoYvYvpIKGiQtUPCPjniB3CDFnnD3pTdo5QAgCi2bpJ22FXpbZ/4gUpiAxlMZ8R8p7ytLKQHBOn4nLsvz/quykCDDphAwr/pjscXt/wtjRHReGqhTfo55LpH6dOfEEkyeyy+e3NjgrBcK2NU4KGd2q6nJIs1kCnaOjfPj7h+XqtczfdBmZ9PQot2BBmqf5RT/nFl13Pqfa4ScAtVroF+LFocBXN99+UWPjNnAQQLYTyelH/MJjMv+3W8kspgrHWQdjxHC74g8wM=",
+       "metadata": {
+        "dewpoint-key-version": "MQ==",
+        "dewpoint-tenant": "MDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAx",
+        "encoding": "YmluYXJ5L2Rld3BvaW50LXRlbmFudC12MQ=="
+       }
+      }
+     ]
+    },
+    "priority": {},
+    "retryPolicy": {
+     "backoffCoefficient": 2.0,
+     "initialInterval": "1s",
+     "maximumInterval": "30s"
+    },
+    "scheduleToCloseTimeout": "315360000s",
+    "scheduleToStartTimeout": "315360000s",
+    "startToCloseTimeout": "30s",
+    "taskQueue": {
+     "kind": "TASK_QUEUE_KIND_NORMAL",
+     "name": "dewpoint-engine"
+    },
+    "workflowTaskCompletedEventId": "49"
+   },
+   "eventId": "51",
+   "eventTime": "2026-10-14T14:08:47.431Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED"
+  },
+  {
+   "activityTaskStartedEventAttributes": {
+    "attempt": 1,
+    "identity": "replay-recorder",
+    "scheduledEventId": "45"
+   },
+   "eventId": "52",
+   "eventTime": "2026-10-14T14:08:47.430Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED"
+  },
+  {
+   "activityTaskCompletedEventAttributes": {
+    "identity": "replay-recorder",
+    "result": {
+     "payloads": [
+      {
+       "data": "IfFLRbRuU5Zv+oWAUCWmLRPK5HAkWHTo2cTqb+EYPdWWsVKknvIMMPbh+ub9/SecdveWCiDe3S5/CpP0tP0akWRW7Ldy8ge3oTZOEZVPNY9ATubIt7MYrUgonvio+XSbUw==",
+       "metadata": {
+        "dewpoint-key-version": "MQ==",
+        "dewpoint-tenant": "MDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAx",
+        "encoding": "YmluYXJ5L2Rld3BvaW50LXRlbmFudC12MQ=="
+       }
+      }
+     ]
+    },
+    "scheduledEventId": "45",
+    "startedEventId": "50"
+   },
+   "eventId": "53",
+   "eventTime": "2026-10-14T14:08:47.431Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED"
+  },
+  {
+   "eventId": "54",
+   "eventTime": "2026-10-14T14:08:47.431Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+   "workflowTaskScheduledEventAttributes": {
+    "attempt": 1,
+    "startToCloseTimeout": "10s",
+    "taskQueue": {
+     "name": "dewpoint-engine"
+    }
+   }
+  },
+  {
+   "eventId": "55",
+   "eventTime": "2026-10-14T14:08:47.431Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+   "workflowTaskStartedEventAttributes": {
+    "historySizeBytes": "18617",
+    "identity": "replay-recorder",
+    "scheduledEventId": "54"
+   }
+  },
+  {
+   "eventId": "56",
+   "eventTime": "2026-10-14T14:08:47.433Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+   "workflowTaskCompletedEventAttributes": {
+    "binaryChecksum": "255487c158298cf8055e7cd741e3c83f",
+    "identity": "replay-recorder",
+    "meteringMetadata": {},
+    "scheduledEventId": "54",
+    "sdkMetadata": {}
+   }
+  },
+  {
+   "activityTaskScheduledEventAttributes": {
+    "activityId": "11",
+    "activityType": {
+     "name": "testkit.echo.v1"
+    },
+    "header": {},
+    "heartbeatTimeout": "0s",
+    "input": {
+     "payloads": [
+      {
+       "data": "JpvAxuWdq/9gljjd8nnyRyMeGhOcDdFGW5RJiGdK6oOkvBqKooh4yOLrvbXFDGgEqSzvKoLsM96UcCDn6stKjmXfNYk+W0NaULV8D3vxRCi4fRG4EHhrH+CBvXAk+F2yMo+l5neJORaayOK2GT8+xkUqpQbHn2O5Crj0RWUo5aBXng+ioxp46E7MXhtokRk2g0MNaXjxzQPPEyZfunCSZZs7A4lY/t1B8LzeSiXqUuY8fopNTjR6rTuR18IEXUbwsFI+1Lv/jS5jkEMHncAjeSKyIZgVGg733fZWTay0g4optDK6srrtBmiwn98UUWc0x6htsWjLInTnsPGa7MwaSU7EtUejw8HfvidouWCqqVIP5RMj15eY8NV1dqAD1xCH0D14YX1Vifo0pIQ5zjLmneuLByeCk9/UeOo7VOLnc8w3Ld2tlSk2rSIKMUIdQI4AMU6obOuWiBai8h7bRm0HpvlqvOAPGsY1qCEBo4ImcplLbshZJ8x4oNt5FIj0svtHXUB8",
+       "metadata": {
+        "dewpoint-key-version": "MQ==",
+        "dewpoint-tenant": "MDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAx",
+        "encoding": "YmluYXJ5L2Rld3BvaW50LXRlbmFudC12MQ=="
+       }
+      }
+     ]
+    },
+    "priority": {},
+    "retryPolicy": {
+     "backoffCoefficient": 2.0,
+     "initialInterval": "1s",
+     "maximumAttempts": 1,
+     "maximumInterval": "100s"
+    },
+    "scheduleToCloseTimeout": "315360000s",
+    "scheduleToStartTimeout": "315360000s",
+    "startToCloseTimeout": "60s",
+    "taskQueue": {
+     "kind": "TASK_QUEUE_KIND_NORMAL",
+     "name": "dewpoint-engine"
+    },
+    "workflowTaskCompletedEventId": "55"
+   },
+   "eventId": "57",
+   "eventTime": "2026-10-14T14:08:47.433Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED"
+  },
+  {
+   "activityTaskStartedEventAttributes": {
+    "attempt": 1,
+    "identity": "replay-recorder",
+    "scheduledEventId": "51"
+   },
+   "eventId": "58",
+   "eventTime": "2026-10-14T14:08:47.431Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED"
+  },
+  {
+   "activityTaskCompletedEventAttributes": {
+    "identity": "replay-recorder",
+    "result": {
+     "payloads": [
+      {
+       "data": "/lnOGP5RzsXwd7B9sktXDeiRosT+iMGd0jBRbrfzC/y8GhT1XxvpdTeunnNhP8KamJLst5M=",
+       "metadata": {
+        "dewpoint-key-version": "MQ==",
+        "dewpoint-tenant": "MDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAx",
+        "encoding": "YmluYXJ5L2Rld3BvaW50LXRlbmFudC12MQ=="
+       }
+      }
+     ]
+    },
+    "scheduledEventId": "51",
+    "startedEventId": "56"
+   },
+   "eventId": "59",
+   "eventTime": "2026-10-14T14:08:47.433Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED"
+  },
+  {
+   "eventId": "60",
+   "eventTime": "2026-10-14T14:08:47.433Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+   "workflowTaskScheduledEventAttributes": {
+    "attempt": 1,
+    "startToCloseTimeout": "10s",
+    "taskQueue": {
+     "name": "dewpoint-engine"
+    }
+   }
+  },
+  {
+   "eventId": "61",
+   "eventTime": "2026-10-14T14:08:47.433Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+   "workflowTaskStartedEventAttributes": {
+    "historySizeBytes": "19708",
+    "identity": "replay-recorder",
+    "scheduledEventId": "60"
+   }
+  },
+  {
+   "eventId": "62",
+   "eventTime": "2026-10-14T14:08:47.434Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+   "workflowTaskCompletedEventAttributes": {
+    "binaryChecksum": "255487c158298cf8055e7cd741e3c83f",
+    "identity": "replay-recorder",
+    "meteringMetadata": {},
+    "scheduledEventId": "60",
+    "sdkMetadata": {}
+   }
+  },
+  {
+   "activityTaskScheduledEventAttributes": {
+    "activityId": "12",
+    "activityType": {
+     "name": "dewpoint.project"
+    },
+    "header": {},
+    "heartbeatTimeout": "0s",
+    "input": {
+     "payloads": [
+      {
+       "data": "cyzzTLw1l21YPRnRYzUN3E9UfOsB+/JdOoM+Xg6gvfScAjwg5qQDPDQqlyLWF0qeKvmj82OQxYPklk7zuvml3GoPSxhxpMaBlrJebKpS40ooGX5ZrNMoq137WyyD5zOorkfy0xBtPViWp8CjoWOfi6GiIAPBlewtC8EUI7Ak7iIUFXUGkJElftu9dss5Yjw63FgnEHS1YkghXoqeOD9RNmomFqaoPLrdy6BmuuFKajMqgCitByy7ZbG9opa4YOENB8wZfeeEaAEf7P/rflIrYcHbH6eEru7VEPuD+6GGOYtcyvo1hukgglqTaARv+I+/jJ9VnBMVe3gIaeGSk2/CPsLWqGAy6gJqBHjlB5S4Rd0I61yS188eK2RhYIRK7xNMYBd5kxTQNUtT7Px9Sp2zkLXaPVAO7WxryLvtFxp+7qeGqUMetfpsYOJKKnLy4FfaeyAKv6lE30sSTI7WTODWWhMfesDX/PQ6VxnCzRuAgSvQo/9vpLArFIHZwintyGG4f/Lzdz2Nw62D0yihWbDle18NP8cLEmjTZ3kQx31u0A8VKs3xhDic+0z6sd37iq1LBD8IMFSABq+zaAanEuSaT2UnQZEmLXxPxoB65AVE1vPnCHwnw+aslaWzxPAhYGg986nkmkNzRYpMfUvP3F12pJOz0tWKLWg1iBtYqw2QD2J16/Vj0NVIHN4bzYQdPYVHZqkfmFEmZOAL+qzypaOuB4h9CN5ZB1rFjMJQoZ61RfgyYDnwpzK/DiTuEJBuRYTo7IhOUIwGm6FW30rb/QmJNg7Hzwd3++7py/McqcnQYdf9nvCTTGZsw3Cuj7q8ckPjXNvt0MRgIW38Xpf/q8/ZCphEckteanBg6lo28y7amu0yjbRTYarnsSxmOjUiYxsokdRitrg0Jn8C7scatdlWJDTileWcw5NK2il5GNOCLlN8/GbI3RvrCUYAJtP/+oyJ/5fqDc2rjAkBb/0w2ioUNubc2tiisimzkIujWMHvDCzXoURnnoM1B15dX6RcAZmeHx9hBSPUlH1km8MQmRHg+BLSyxDUghJL/RWoFa6xo6755LFl9P7QIBnSKYt7DoNTZEhoGKXR+DYri8QWvewO+yeiW/E09/UONxpLlSoZId8OY8PjggaufKfG6TNLMCuVEYcD+x7KSWGIpRVBOdZz/smAooqA0im/x7w5dHr9vnw+gVQ5UuhZuR91tmpulpaMRCN2pWPcchWQ+U69AUHeyxEwvoIs40/FzcV6WaLetnIfP6E3wHafQOvPxZjLtJc9pIVp5c0YINdETPrMGNSgMmFtkjLqp6Pub4w6iOU=",
+       "metadata": {
+        "dewpoint-key-version": "MQ==",
+        "dewpoint-tenant": "MDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAx",
+        "encoding": "YmluYXJ5L2Rld3BvaW50LXRlbmFudC12MQ=="
+       }
+      }
+     ]
+    },
+    "priority": {},
+    "retryPolicy": {
+     "backoffCoefficient": 2.0,
+     "initialInterval": "1s",
+     "maximumInterval": "30s"
+    },
+    "scheduleToCloseTimeout": "315360000s",
+    "scheduleToStartTimeout": "315360000s",
+    "startToCloseTimeout": "30s",
+    "taskQueue": {
+     "kind": "TASK_QUEUE_KIND_NORMAL",
+     "name": "dewpoint-engine"
+    },
+    "workflowTaskCompletedEventId": "61"
+   },
+   "eventId": "63",
+   "eventTime": "2026-10-14T14:08:47.434Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED"
+  },
+  {
+   "activityTaskStartedEventAttributes": {
+    "attempt": 1,
+    "identity": "replay-recorder",
+    "scheduledEventId": "57"
+   },
+   "eventId": "64",
+   "eventTime": "2026-10-14T14:08:47.433Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED"
+  },
+  {
+   "activityTaskCompletedEventAttributes": {
+    "identity": "replay-recorder",
+    "result": {
+     "payloads": [
+      {
+       "data": "nwdMeE6r3v8eq0waMDiQJUTC3IccI4iGAYE8Tm5hLIweD/VfUAN0kpAf/VbhUHRWEkSvJzqrQ98fGuvEuBBiECZd4P83lPkNc2ujzBcU4XESt2FyZyNyTD6ksEMMSk1XSQ==",
+       "metadata": {
+        "dewpoint-key-version": "MQ==",
+        "dewpoint-tenant": "MDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAx",
+        "encoding": "YmluYXJ5L2Rld3BvaW50LXRlbmFudC12MQ=="
+       }
+      }
+     ]
+    },
+    "scheduledEventId": "57",
+    "startedEventId": "62"
+   },
+   "eventId": "65",
+   "eventTime": "2026-10-14T14:08:47.434Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED"
+  },
+  {
+   "eventId": "66",
+   "eventTime": "2026-10-14T14:08:47.434Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+   "workflowTaskScheduledEventAttributes": {
+    "attempt": 1,
+    "startToCloseTimeout": "10s",
+    "taskQueue": {
+     "name": "dewpoint-engine"
+    }
+   }
+  },
+  {
+   "eventId": "67",
+   "eventTime": "2026-10-14T14:08:47.434Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+   "workflowTaskStartedEventAttributes": {
+    "historySizeBytes": "21444",
+    "identity": "replay-recorder",
+    "scheduledEventId": "66"
+   }
+  },
+  {
+   "eventId": "68",
+   "eventTime": "2026-10-14T14:08:47.436Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+   "workflowTaskCompletedEventAttributes": {
+    "binaryChecksum": "255487c158298cf8055e7cd741e3c83f",
+    "identity": "replay-recorder",
+    "meteringMetadata": {},
+    "scheduledEventId": "66",
+    "sdkMetadata": {}
+   }
+  },
+  {
+   "eventId": "69",
+   "eventTime": "2026-10-14T14:08:47.436Z",
+   "eventType": "EVENT_TYPE_TIMER_CANCELED",
+   "timerCanceledEventAttributes": {
+    "startedEventId": "6",
+    "timerId": "1",
+    "workflowTaskCompletedEventId": "67"
+   }
+  },
+  {
+   "activityTaskStartedEventAttributes": {
+    "attempt": 1,
+    "identity": "replay-recorder",
+    "scheduledEventId": "63"
+   },
+   "eventId": "70",
+   "eventTime": "2026-10-14T14:08:47.434Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED"
+  },
+  {
+   "activityTaskCompletedEventAttributes": {
+    "identity": "replay-recorder",
+    "result": {
+     "payloads": [
+      {
+       "data": "HCBoUxIsHcIu58pMPs24C6Afiad/LbNW/l6kfvpfb6Z9tM/qM2Vtt9JqsQOqcfDaAvq9oj0=",
+       "metadata": {
+        "dewpoint-key-version": "MQ==",
+        "dewpoint-tenant": "MDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAx",
+        "encoding": "YmluYXJ5L2Rld3BvaW50LXRlbmFudC12MQ=="
+       }
+      }
+     ]
+    },
+    "scheduledEventId": "63",
+    "startedEventId": "68"
+   },
+   "eventId": "71",
+   "eventTime": "2026-10-14T14:08:47.436Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED"
+  },
+  {
+   "eventId": "72",
+   "eventTime": "2026-10-14T14:08:47.436Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+   "workflowTaskScheduledEventAttributes": {
+    "attempt": 1,
+    "startToCloseTimeout": "10s",
+    "taskQueue": {
+     "name": "dewpoint-engine"
+    }
+   }
+  },
+  {
+   "eventId": "73",
+   "eventTime": "2026-10-14T14:08:47.436Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+   "workflowTaskStartedEventAttributes": {
+    "historySizeBytes": "21930",
+    "identity": "replay-recorder",
+    "scheduledEventId": "72"
+   }
+  },
+  {
+   "eventId": "74",
+   "eventTime": "2026-10-14T14:08:47.437Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+   "workflowTaskCompletedEventAttributes": {
+    "binaryChecksum": "255487c158298cf8055e7cd741e3c83f",
+    "identity": "replay-recorder",
+    "meteringMetadata": {},
+    "scheduledEventId": "72",
+    "sdkMetadata": {}
+   }
+  },
+  {
+   "eventId": "75",
+   "eventTime": "2026-10-14T14:08:47.437Z",
+   "eventType": "EVENT_TYPE_TIMER_CANCELED",
+   "timerCanceledEventAttributes": {
+    "startedEventId": "7",
+    "timerId": "2",
+    "workflowTaskCompletedEventId": "73"
+   }
+  },
+  {
+   "activityTaskScheduledEventAttributes": {
+    "activityId": "13",
+    "activityType": {
+     "name": "dewpoint.project"
+    },
+    "header": {},
+    "heartbeatTimeout": "0s",
+    "input": {
+     "payloads": [
+      {
+       "data": "z2xGviejAoIvdpHkrsq7um2yR7MyoGQp+WYuKWmO6976zhpKph/KomO95GZRes871IEnEn5JYntP4zZzVI2MwnkzlXhw8Y+hk0fMvlLbD6UuLCNxA5XWv/9X2cXDpAbdNIu2MyS8t5H12+4qOQ6ea+8jR8IgICLAOnIkeEs2WdTAt3LfU7TgBcktu8G1R3dtLe/M0JmZhz8e3oMHCvTaV7pnm9L6gx87EmHImSJ1coUauk9CwZGjprPUJe4de982gSUdCdyPFLHvpdo5trsYNt6soyHe2fz+itr3gY2Ub2J8AQ0njhD50sKOYhxwetxVGsu2/7fDYLpMwz2XVk703pGrKgDrz67otTr/mtoLXKx2ayqy+PHVkhOR0w5dzAF50l8KfLDkLhpXA3so9SM6nEFtbdGOkh3Zzb5Nne3IWWsMiUtZ9UQIRDkGOHfKI33QRsf38Q9NWUJc5auyZlM9TKaN0HXSFDlu6zvKmZUseAQc6MjkAquEh50WbacUOAx6sEZhCDJIXNhuvuBoo9FP8XicKYI4pRtjxPTQyzdxhI9H0of6JVW5FOuyZnWLn7poipVJcCUdvIw8tNQCPR1RWaMtZGvyEr812cYRfaqUKEpZgcj9wOsGju+SZhiWaLs5V1/iw6iRUOYh6Wfb6EWNVau4I/gcVFuwDKL0fuKr2mpjPJZPKhYvHrO8U2/Jqt6pMheFf8WSsOQciFiZ/ktf7nMkpRvEOLsD9JvaShvl+WZHII6K5L/50jhZVcamw6W8zqTlOHACB95a6zDlvznRw0t4RYgbQ+Q8NkVe/3MnwnHvFAGEoi4=",
+       "metadata": {
+        "dewpoint-key-version": "MQ==",
+        "dewpoint-tenant": "MDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAx",
+        "encoding": "YmluYXJ5L2Rld3BvaW50LXRlbmFudC12MQ=="
+       }
+      }
+     ]
+    },
+    "priority": {},
+    "retryPolicy": {
+     "backoffCoefficient": 2.0,
+     "initialInterval": "1s",
+     "maximumInterval": "30s"
+    },
+    "scheduleToCloseTimeout": "315360000s",
+    "scheduleToStartTimeout": "315360000s",
+    "startToCloseTimeout": "30s",
+    "taskQueue": {
+     "kind": "TASK_QUEUE_KIND_NORMAL",
+     "name": "dewpoint-engine"
+    },
+    "workflowTaskCompletedEventId": "73"
+   },
+   "eventId": "76",
+   "eventTime": "2026-10-14T14:08:47.437Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED"
+  },
+  {
+   "activityTaskStartedEventAttributes": {
+    "attempt": 1,
+    "identity": "replay-recorder",
+    "scheduledEventId": "76"
+   },
+   "eventId": "77",
+   "eventTime": "2026-10-14T14:08:47.437Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED"
+  },
+  {
+   "activityTaskCompletedEventAttributes": {
+    "identity": "replay-recorder",
+    "result": {
+     "payloads": [
+      {
+       "data": "MD3XQ3p+vUQAX/ddUco6xKW2mZLy0EzKQGo9C60S2vPm/KQpDZR5W8vWz9RzsOYE1ZIUsNI=",
+       "metadata": {
+        "dewpoint-key-version": "MQ==",
+        "dewpoint-tenant": "MDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAx",
+        "encoding": "YmluYXJ5L2Rld3BvaW50LXRlbmFudC12MQ=="
+       }
+      }
+     ]
+    },
+    "scheduledEventId": "76",
+    "startedEventId": "77"
+   },
+   "eventId": "78",
+   "eventTime": "2026-10-14T14:08:47.438Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED"
+  },
+  {
+   "eventId": "79",
+   "eventTime": "2026-10-14T14:08:47.438Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+   "workflowTaskScheduledEventAttributes": {
+    "attempt": 1,
+    "startToCloseTimeout": "10s",
+    "taskQueue": {
+     "name": "dewpoint-engine"
+    }
+   }
+  },
+  {
+   "eventId": "80",
+   "eventTime": "2026-10-14T14:08:47.438Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+   "workflowTaskStartedEventAttributes": {
+    "historySizeBytes": "23275",
+    "identity": "replay-recorder",
+    "scheduledEventId": "79"
+   }
+  },
+  {
+   "eventId": "81",
+   "eventTime": "2026-10-14T14:08:47.440Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+   "workflowTaskCompletedEventAttributes": {
+    "binaryChecksum": "255487c158298cf8055e7cd741e3c83f",
+    "identity": "replay-recorder",
+    "meteringMetadata": {},
+    "scheduledEventId": "79",
+    "sdkMetadata": {}
+   }
+  },
+  {
+   "eventId": "82",
+   "eventTime": "2026-10-14T14:08:47.440Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_CONTINUED_AS_NEW",
+   "workflowExecutionContinuedAsNewEventAttributes": {
+    "backoffStartInterval": "0s",
+    "input": {
+     "payloads": [
+      {
+       "data": "ptqq2hQVwwVTJzrai/2htJcLZFX6Kg042CbSNeLfm61tyZaefNhfvrFR5xa1cuW9jEWipb7wf4UThVFJPzFKfk0hJofeMFNAnRn6q3hhpOUgg7lXMuD3ZM3KS/mGG9GVn0vo4OQCUv2N0gd0GEADpqhqi6+V6PiYyY80q+GY5pbI0xkDaH9ID4nFx+VdyJwJGZNTlYaXQjDfm8rSBZBDWjc+ND99c1/FcW7wcb2ANa9mw+AQJMuiPln5IxL6zpzrqrCGrUkKnVeMqI+WAVeCxX22z5TBH9fyniSFon3EeQ1JSwz5ECc37jds6Zm8kwXYWltnrJYKNL3MwEvv6cXSSp7vOmKVrYclqwk9dPLO879kDzxoBQuHMG4m1bjoQ1sIrxnCzqrClgswkrnHNOX+42rIOxFN50aS2YYWNoFWCqYdvD2XhI7GICpfyTra1a7RRrvW5Dz+4pYt4yXGZEUkoul+YaRKbylkgInF0mtB5oRBWtnUA7yzjM6v91Yy1ogHPBcqw2+/wCOL8vL4DwmaLD2E9zMw1CYVqncg4DTXgfeZVqtsvQQz0rMo7Csct54cZtbn1V/7OkTr8vEeZyQ23glbMKwDC++mh1+1oiMiJcsgFuYbwd5fbdD9XUZbQdCHn90I1DPRGvlrUqE9jldcfhT7zFc/wFVTFrf/NQ60pSm137Jt1YvKhB7ufJMqm6Wu7DuyS50lzc3T2cBUE+l4Z9RUi/uPpnSy1B8awJEjXix3TzLtMZP/KbJfXktdp6FvMPQ28EwGDZc3LQGXOXbpPc14n+yXTzNt9KeVoLLcIiEZv1o+kZ8EwfEE+78z/8lRVNbgogyHbHeS/3GAOZyF/ucytqcd2WdFfa4Q0D3fxtz2/ZYX+gWtl1LG87rzcvzr+oqWTAQD1ae2DIlrzqUgSI4S4gz4KWKqtdgNkjwkU4xug8+iAUa0107AroBb8IY0R5fLznUxJuvnuGwoxUJh3RftTLbntJmtnLodCFsA7N+FNF5/3OfeZ2GTut0G7LZn3Z45u2at2lUxvyiij5K3hr0yQTIT97kXFuQFhyzBcdg1oAq0V47iH2TJs51sGJkDAHUIz4Zu5PI4sy8HSHlj4VUf2Np7PkNOeZ/MbA4R+kzQ1jhWQTdcJA6NlAICXREIbWcvOVUqA/v3XQcvJv1OmmIdfA4Y1gAFZV/PaLCzUf4nczmvbtTIbtn3i+H+rKKlu0R/x2mroXPxG1TvOnvtIe1+zHKRbQ/8CX2pJfY8GT88RVrcRFlQ0lxoJoMlc+AJLobaRN/5Goi/CfDF+6xGY6matWx/JgFg5OKJDZP+vHFgqnnTosBlS0ujgrvOFGEjhWA9yuN8d/BinoFW1NkxyuJfWFm1TDWfj1vzBKmFxeqKZVMrkiWyeuuw1fEVu4c5rfQr8oNYB1B49pR3pLV945PZnTKaH0Chui23x0IsORgFHZPm7mji/RXjH8WCSiD61PURUWuMVHEe1DD4WxsLlqdy07YHkgcNwdmcNCZgyNyZHBPz8jhPUqIsdsdv3BajxRjImujuzFQIX4SqJ9m4s/t5lojXmGxX74b0V4SfBXfQKdCWHmJtpJpAf67Hyd8bmZ0xJfinjKfqMOG6asuF6pVn7kwip4xoA7g8uIjWhTB2kfri5LMnuoRpU8K9swymka9B0xfVf6lwbw9WGAkN7dMOml/fyK9LqynT3GpcYyBmlMELHAdnMlHHpWlEyYL0qfgmqLbpswK9tENs+l1hIm3YptOnGNpKG+X9e5/8vjrnam7wl88C3Lo3oI7r+1PpIZ2zVXzdkAqa1UOpjvDZZoCHVahzLPypIsmMlmcuAXoxYLNru11Dzx4QT1H2KAf01jqFcsq2h7z1//xEnI6IwvB0nIJnwIMIikLsA/1AFx81oWbVznH5jIphT5yMlOYhPZHAhmSfca+OF6p3jaBXY2WXBAfsR/YHjzmvtlPCv+2cl0syhZ5K0GYgZiw54Gg5jLaz3bo3IDeJ077PBouxZfAtMKUo4m1ZYw+/jJRDMSYdSJlGAYAitcSCIqnqagLDIyqSebnBbcmOb637r70qsqJfPOdysMytPV75334/0zMU5yqdCJL6w9PZZbQc+QIIZnGifrmDT2VX0eGXodwRF1ZAQJ3lS0JjMxyxOW827netCBwB86blzN2XZeGtuQOCWVcnevF3Tzz81SYlcpa+/JeagEIWxIrC5b6SCmBtbyePL8NT3d6TAga/7NKbGUy5Lk4zvIY+J302b7OLiwBjxjXPdJykPRg6MPvNi30ziyGhSMQRPIu3sR6tbHLgyEHmAgJTM2DNBDF7XGAxTr1jOYhN5l9OR3nRrGrgUzAJWxjsjfT3V/6jWT05j2ujpWbAGmrFILGKCG4q4Br37xDWXEr3y6UbZG9qb9GtVsUIO93gh+bK1bl3A9mzSz17oVRS2f02nKkLT9TGP/t0LWTrIZQuCv/xSqye5DUeGD5BR45P01BnVmVmhN/9Ic9U3iF0d/i/ZZAuGOiQdyCwuMoaV4mdfOD/T6VZ3tsi/eg0mziqz1k4EAkvSlWjdB74KB35pqC5eMzUrOmf0qoruHLAyMAGPWrlwECUb2WrT/Pj+kNaODJHa6d98Eua",
+       "metadata": {
+        "dewpoint-key-version": "MQ==",
+        "dewpoint-tenant": "MDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAx",
+        "encoding": "YmluYXJ5L2Rld3BvaW50LXRlbmFudC12MQ=="
+       }
+      }
+     ]
+    },
+    "newExecutionRunId": "195336a2-0866-4b7c-a5e8-2a669b425bf1",
+    "taskQueue": {
+     "name": "dewpoint-engine"
+    },
+    "workflowRunTimeout": "315360000s",
+    "workflowTaskCompletedEventId": "80",
+    "workflowTaskTimeout": "10s",
+    "workflowType": {
+     "name": "RunGraph"
+    }
+   }
+  }
+ ],
+ "workflowId": "t:00000000-0000-0000-0000-000000000001:run:ca7fb441-e279-4767-ac10-b4036f9d22f0"
+}

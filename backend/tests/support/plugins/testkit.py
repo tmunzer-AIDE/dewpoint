@@ -163,6 +163,24 @@ class SlowSend(Node):
         return Empty()
 
 
+class SlowSimulator(Node):
+    """Ambiguous, and its simulation takes `seconds`: a simulated attempt that times out or is stopped sent nothing,
+    so it's never an unknown outcome (the simulation design §4.1). It never runs live."""
+
+    type = "testkit.slow_simulator"
+    version = 1
+    title = "Slow simulator"
+    Config = SlowSendConfig
+    side_effect = SideEffect.AMBIGUOUS
+
+    async def run(self, ctx: StepContext, config: SlowSendConfig) -> Empty:
+        raise AssertionError("the slow simulator only simulates")
+
+    async def simulate(self, ctx: StepContext, config: SlowSendConfig) -> Empty:
+        await asyncio.sleep(config.seconds)
+        return Empty()
+
+
 class ReconcileOutput(BaseModel):
     found: bool
 
@@ -497,6 +515,7 @@ TESTKIT = Plugin(
         Sensitive,
         AmbiguousSend,
         SlowSend,
+        SlowSimulator,
         Reconcile,
         Blob,
         SecretBlob,

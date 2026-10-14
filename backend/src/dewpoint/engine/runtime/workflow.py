@@ -19,11 +19,13 @@ from temporalio.common import VersioningBehavior
 from temporalio.exceptions import ApplicationError, ChildWorkflowError
 
 with workflow.unsafe.imports_passed_through():
+    from dewpoint.engine.graph.seeds import is_target
     from dewpoint.engine.graph.values import iter_values, pointer_str
     from dewpoint.engine.handles import contains_marker
     from dewpoint.engine.runtime.activities import (
         FAILURE_HANDLER,
         LOAD_VERSION,
+        SIMULATE,
         SUBFLOW,
         BatchInput,
         BatchResult,
@@ -68,6 +70,7 @@ with workflow.unsafe.imports_passed_through():
         RunEnd,
         Scheduler,
     )
+    from dewpoint.engine.runtime.seeds import SEEDED_LIVE_REFUSED, TARGET_INVALID, Seeds, well_formed
     from dewpoint.engine.runtime.size import (
         BATCH_RESULTS_TOO_LARGE,
         BATCH_SNAPSHOT_TOO_LARGE,
@@ -189,12 +192,22 @@ class RunGraph(Execution):
             workflow.logger.error("run_version_unusable", extra=_bug(e))
             message = f"This build can't run the version ({type(e).__name__}); the worker's log has the details."
             return await self._end_early(RunEnd("failed", Failure(VERSION_UNUSABLE, message)), start.iterations)
+        target: uuid.UUID | None = None
+        if start.target_step_id is not None:  # a single step (S2): checked again here, before anything runs
+            refused = self._target_refused(start, program)
+            if refused is not None:
+                return await self._end_early(RunEnd("failed", refused), start.iterations)
+            target = uuid.UUID(start.target_step_id)
+            region = program.steps[target].region
+            innermost = program.steps[region].key if region is not None else None
+            self.seeds = Seeds.of(start.trigger, innermost)
+            self.trigger = self.seeds.trigger
         outputs: dict[str, Any] | None = None
         try:
             if snapshot is not None:
                 await self._restore(program, snapshot)
             else:
-                self._fresh(program)
+                self._fresh(program, target)
             if await self._drive() == CONTINUE:
                 await self._flush()
                 continued = replace(start, snapshot=await self._snapshot(), iterations=self.sched.iterations)
@@ -205,7 +218,7 @@ class RunGraph(Execution):
                 # engine 2b spec §5.3: too large to carry on, the run ends here, cleanly (2b-1b bounds the state)
                 self.sched.end(RunEnd("failed", Failure(SNAPSHOT_TOO_LARGE, RUN_SNAPSHOT_TOO_LARGE)))
             end = self.sched.ended or RunEnd("failed", Failure("error", "The run ended without a result."))
-            if end.status == "succeeded":
+            if end.status == "succeeded" and target is None:  # a single step has no declared outputs (S2)
                 end, outputs = await self._outputs_by(end)
             if outputs is not None and not self._returnable(outputs):  # checked here, where the result is made
                 end, outputs = RunEnd("failed", Failure(PAYLOAD_TOO_LARGE, OUTPUTS_TOO_LARGE)), None
@@ -230,21 +243,41 @@ class RunGraph(Execution):
             self._closing()
             raise ApplicationError(message, counted, type=INTERNAL_ERROR, non_retryable=True) from None
         ended = workflow.now()  # the end is decided: whatever follows, it stands
-        pin = self._handler_pin(data) if end.status in HANDLED else None
+        pin = self._handler_pin(data) if end.status in HANDLED and target is None else None  # none for one step
         if pin is not None and not await self._project_end(None):  # its rows land; its end waits for the handler
             await self._failure_handler(pin, data, self._end_error(end))  # (a cancel meanwhile: no handler)
         return await self._finish(end, outputs, ended)
 
-    def _fresh(self, program: Program) -> None:
+    def _target_refused(self, start: RunInput, program: Program) -> Failure | None:
+        """A single-step run's guards (S2; the simulation design §5.4), as admission checks them: it simulates, its
+        target is a step of the version that may run alone, and its seeds are values and absences by pointer (read
+        before the run's own failures are caught: a malformed one would fail its workflow task on every retry)."""
+        if start.mode != SIMULATE:
+            return Failure(SEEDED_LIVE_REFUSED, "A single step runs only as a simulation.")
+        if not well_formed(start.trigger):
+            return Failure(TARGET_INVALID, "The step's values aren't given as values and absences by pointer.")
+        try:
+            step = program.steps.get(uuid.UUID(str(start.target_step_id)))
+        except ValueError:
+            step = None
+        if step is None or not is_target(step.ref, step.control):
+            return Failure(TARGET_INVALID, "This step isn't one that can run alone.")
+        return None
+
+    def _fresh(self, program: Program, target: uuid.UUID | None = None) -> None:
         """A new run's state: its budget (the cap, or what its parent granted) and its variables. Its sensitive values
-        are handles already (engine 2b spec §3.5): nothing here holds one to learn."""
+        are handles already (engine 2b spec §3.5): nothing here holds one to learn. A single-step run starts its one
+        step alone (S2)."""
         self.program = program
         parent = self.parent
         budget = Budget(ITERATION_CAP, root=True) if parent is None else Budget(parent.grant, root=False)
         self.sched = Scheduler(program, budget=budget, prefix=workflow.info().workflow_id)
         schema = program.graph.settings.vars_schema
         self.sched.init_vars({k: p.get("default") for k, p in sorted(schema.get("properties", {}).items())})
-        self.sched.start()
+        if target is not None:
+            self.sched.start_target(target)
+        else:
+            self.sched.start()
 
     async def _outputs_by(self, end: RunEnd) -> tuple[RunEnd, dict[str, Any] | None]:
         """The workflow's outputs, within the run's deadline. Past it, their evaluation is cancelled and the run ends

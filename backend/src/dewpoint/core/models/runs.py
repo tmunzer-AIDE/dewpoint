@@ -95,6 +95,7 @@ class RunStep(Base):
     error_message: Mapped[str | None] = mapped_column(Text)
     outcome: Mapped[str | None] = mapped_column(String(16))
     cel_mode: Mapped[str | None] = mapped_column(String(16))
+    effect_preview: Mapped[Any] = mapped_column(JSONB)  # a control step's port or assignments (0071)
 
 
 class RunStepConnection(Base):

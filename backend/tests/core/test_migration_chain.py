@@ -24,7 +24,7 @@ def script() -> ScriptDirectory:
 
 
 def test_the_chain_has_one_head() -> None:
-    assert script().get_heads() == ["0065"]
+    assert script().get_heads() == ["0071"]
 
 
 def test_runs_workflow_last_comes_after_the_orphan_backoff() -> None:
@@ -45,3 +45,8 @@ def test_the_endpoint_sender_comes_after_the_samples_record() -> None:
 def test_2b_4bs_migrations_come_after_the_endpoint_sender() -> None:
     """2b-4b's first, 0048, was written on 0044 and chained, when it met main, after main's head then, 0070."""
     assert script().get_revision("0048").down_revision == "0070"
+
+
+def test_the_step_instance_ends_come_after_2b_4bs_last() -> None:
+    """Slot 0071 (4d-1a, B4b) is chained after main's head when it was written, 0065 (2b-4b's last)."""
+    assert script().get_revision("0071").down_revision == "0065"

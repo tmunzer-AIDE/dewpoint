@@ -71,6 +71,21 @@ def _row(row: StepRow) -> dict[str, Any]:
     }
 
 
+def _conflicted(conflicts: list[runs.StepConflict]) -> None:
+    """A genuine final row refused for another of its attempt's (the simulation design §3.4): the first stands. Ids
+    and statuses only."""
+    for c in conflicts:
+        _log.warning(
+            "step_result_conflict",
+            run_id=str(c.run_id),
+            step_id=str(c.step_id),
+            iteration_key=c.iteration_key,
+            attempt=c.attempt,
+            kept=c.kept,
+            refused=c.refused,
+        )
+
+
 class DbRunStore:
     def __init__(self, sessionmaker: async_sessionmaker[AsyncSession], keys: KeySource | None = None) -> None:
         """`keys`: the tenants' data keys, which claims and secret indexes are sealed with (engine 2b spec §3.1,
@@ -236,7 +251,7 @@ class DbRunStore:
                 async with s.begin_nested():
                     if data.start is not None:
                         await _start(s, tenant, data.start)
-                    await runs.upsert_steps(s, tenant, [_row(r) for r in data.steps])
+                    _conflicted(await runs.upsert_steps(s, tenant, [_row(r) for r in data.steps]))
                     if data.run is not None:
                         await _finish(s, data.run)
                         await _release(s, data.run)
@@ -270,7 +285,7 @@ class DbRunStore:
         for row in data.steps:
             try:
                 async with s.begin_nested():
-                    await runs.upsert_steps(s, tenant, [_row(row)])
+                    _conflicted(await runs.upsert_steps(s, tenant, [_row(row)]))
             except DBAPIError as e:
                 state = _refused(e)
                 if state is None:

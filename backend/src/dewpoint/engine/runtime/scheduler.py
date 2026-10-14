@@ -45,7 +45,12 @@ child writes its segments where its parent's loop names them, and returns its co
 
 A snapshot (`snapshot_format` 2, engine 2b spec §5.3) holds states, not queues: one code per node and per edge in
 region order, steps and loops by their topological index. Restoring rebuilds what's queued from those states, minus
-what was handed out before the snapshot and is still running."""
+what was handed out before the snapshot and is still running.
+
+Every instance of every opened scope ends exactly once (B4b, the simulation design §3): it settles (`take_settled`),
+or it ends otherwise (`take_ends`): `skipped`, on a branch not taken; `unstarted`, waiting or queued when its scope
+failed or the run ended; `stopped`, handed out then, so cancelled too (the workflow knows whether it began). An
+iteration never opened has no instances."""
 
 import bisect
 import heapq
@@ -63,6 +68,7 @@ from dewpoint.engine.runtime.program import BODY, DONE, ERROR_PORT, Program, Ste
 from dewpoint.engine.runtime.size import inline_limit
 
 ScopeKey = tuple[tuple[str, int], ...]
+SKIPPED, UNSTARTED, STOPPED = "skipped", "unstarted", "stopped"  # how an instance ended without settling (B4b)
 ITERATION_CAP = 100_000  # loop iterations and filter items across the whole logical run (spec §4.2)
 ITERATION_CAP_EXCEEDED = "iteration_cap_exceeded"
 CAP_MESSAGE = "This run reached its limit of 100,000 loop iterations."
@@ -524,6 +530,7 @@ class Scheduler:
         self.scopes: dict[ScopeKey, Scope] = {}
         self.loops: dict[Instance, LoopRun] = {}
         self.ended: RunEnd | None = None
+        self.target: uuid.UUID | None = None  # a single-step run's one step (S2)
         self.batch_loop: Instance | None = None  # a batch child: the loop whose slice it runs
         self.outcome: BatchOutcome | None = None  # a batch child: its slice's result, once it's done
         self._ready: list[Instance] = []
@@ -531,6 +538,7 @@ class Scheduler:
         self._batches: list[Batch] = []
         self._cancels: list[Instance] = []
         self._settled: list[tuple[Instance, dict[str, Any]]] = []
+        self._ends: list[tuple[Instance, str]] = []  # instances that ended without settling, and how (B4b)
         self._budget_waits: dict[str, Instance] = {}  # a need's key -> the loop waiting for it
         self._topo_of_key = {s.key: s.topo for s in program.steps.values()}
         self._members: dict[uuid.UUID | None, tuple[uuid.UUID, ...]] = {
@@ -588,6 +596,15 @@ class Scheduler:
     @_then_wake
     def start(self) -> None:
         self._open_scope((), None)
+
+    @_then_wake
+    def start_target(self, step: uuid.UUID) -> None:
+        """A single-step run (S2; the simulation design §5.3): `step` alone, in the root scope, with no edges, so
+        nothing else is ever instantiated. The run ends with it: its failure fails the run, whatever its `on_error`."""
+        self.target = step
+        scope = Scope((), self.program.steps[step].region, {step: NodeState.WAITING}, {}, {})
+        self.scopes[()] = scope
+        self._check_ready(scope, step)
 
     def start_batch(
         self,
@@ -666,6 +683,12 @@ class Scheduler:
         """Running steps whose scope ended (a failure, a stop, the deadline): their work must be cancelled, and
         nothing they report later counts."""
         out, self._cancels = sorted(self._cancels, key=self.order), []
+        return out
+
+    def take_ends(self) -> list[tuple[Instance, str]]:
+        """Instances that ended without settling since the last call (B4b): SKIPPED, UNSTARTED or STOPPED, in the
+        order they ended."""
+        out, self._ends = self._ends, []
         return out
 
     def take_spills(self) -> list[Spill]:
@@ -769,6 +792,9 @@ class Scheduler:
             return
         scope.nodes[step.id] = NodeState.FAILED
         self._settled.append((inst, {"error": failure.to_json()}))
+        if self.target is not None:  # a single step's failure is its run's (S2)
+            self._fail_scope(scope, failure)
+            return
         if step.on_error == "port":
             scope.results[step.key] = {"error": failure.to_json()}
             self._live += size(scope.results[step.key])
@@ -892,8 +918,12 @@ class Scheduler:
         queued = set(self._ready) | self._deferred
         for scope in self.scopes.values():
             for node_id, state in scope.nodes.items():
-                if state == NodeState.RUNNING and Instance(scope.key, node_id) not in queued:
-                    self._cancels.append(Instance(scope.key, node_id))
+                inst = Instance(scope.key, node_id)
+                if state == NodeState.RUNNING and inst not in queued:
+                    self._cancels.append(inst)
+                    self._ends.append((inst, STOPPED))
+                elif state in (NodeState.RUNNING, NodeState.WAITING):
+                    self._ends.append((inst, UNSTARTED))
         self._ready = []
         self._clear_deferred(())
         self._starting.clear()
@@ -1034,6 +1064,7 @@ class Scheduler:
                 self._vrefs[self.vars_version] = self._vrefs.get(self.vars_version, 0) + 1
             return None
         scope.nodes[node_id] = NodeState.DEAD
+        self._ends.append((Instance(scope.key, node_id), SKIPPED))
         return step
 
     def _fail_scope(self, scope: Scope, failure: Failure, *, report: bool = True) -> None:
@@ -1051,6 +1082,9 @@ class Scheduler:
                 if state == NodeState.RUNNING and inst not in queued and inst not in self._deferred:
                     self._cancels.append(inst)
                     self._handed.discard(inst)
+                    self._ends.append((inst, STOPPED))
+                elif state in (NodeState.RUNNING, NodeState.WAITING):
+                    self._ends.append((inst, UNSTARTED))
                 if state in (NodeState.RUNNING, NodeState.WAITING):
                     inner.nodes[node_id] = NodeState.DEAD
         self._ready = [r for r in self._ready if r.scope[: len(scope.key)] != scope.key]
@@ -1634,7 +1668,7 @@ class Scheduler:
         """`to_json` in parts: after each, it yields the structural units it took (codes and captures encoded), so
         the execution can spread a large snapshot over workflow tasks. Nothing changes the state between parts: a
         snapshot is taken only when nothing runs."""
-        if self._settled or self._cancels or self.ended is not None:
+        if self._settled or self._cancels or self._ends or self.ended is not None:
             raise ValueError("a snapshot is taken only between units, and never after the run ended")
         if self.budget.waiting or self.budget.reserved or self._budget_waits:  # the at-continue term (§5.3)
             raise ValueError("a snapshot is taken only when the iteration budget holds no waiting need or child grant")

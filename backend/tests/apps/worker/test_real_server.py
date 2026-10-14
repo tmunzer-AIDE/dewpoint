@@ -36,15 +36,19 @@ from tests.support.plugins.testkit import TESTKIT, EchoOutput, FailN, FailNConfi
 
 
 @asynccontextmanager
-async def serving(client: Client, store: MemoryStore, *, grace_s: float | None = None) -> AsyncIterator[None]:
+async def serving(
+    client: Client, store: MemoryStore, *, grace_s: float | None = None, again: str | None = None
+) -> AsyncIterator[str]:
     """A build of this test's own, current: the dev server keeps the deployment's routing between tests. `grace_s`: how
-    long its stopping worker lets running attempts finish."""
-    this = build("real")
+    long its stopping worker lets running attempts finish. `again`: a build this test served before, served again (its
+    runs are pinned to it, and it's still current). Yields the build."""
+    this = again or build("real")
     evaluator = Worker(client, task_queue=cel_queue(CURRENT_CEL_PROFILE), activities=[cel_activity(in_process, store)])
     grace = {} if grace_s is None else {"worker_shutdown_grace_s": grace_s}
     async with evaluator, engine_worker(client, store, [TESTKIT], settings(**grace), build=this, identity=this):
-        await set_current(client, this)
-        yield
+        if again is None:
+            await set_current(client, this)
+        yield this
 
 
 def graph(**outputs: Any) -> G:
@@ -434,10 +438,10 @@ async def test_a_run_ending_as_its_running_activity_completes_cancels_it_and_end
     only once that task is held, before its activation runs; the task is held until the server no longer has the
     body's activity pending. The run ends, so it cancels the body's activity, which the worker can't know has completed
     (the server holds the completion back for the next task). The server records the cancel and then the completion;
-    the body's step ends `cancelled`, the run `failed` with the root's error, and its history replays. Temporal's
-    time-skipping test server refuses that cancel (`ACTIVITY_UNKNOWN for scheduledEventId=…`) and the run stalls
-    there, its workflow task never completing: a test whose run may end as a quick activity completes needs this
-    server."""
+    the body's step ends `cancelled`, as does its loop (B4b: it began), the run `failed` with the root's error, and its
+    history replays. Temporal's time-skipping test server refuses that cancel (`ACTIVITY_UNKNOWN for
+    scheduledEventId=…`) and the run stalls there, its workflow task never completing: a test whose run may end as a
+    quick activity completes needs this server."""
     from temporalio.worker import _workflow as running
 
     BODY = "testkit.slow_echo.v1"  # the body's activity type
@@ -491,7 +495,11 @@ async def test_a_run_ending_as_its_running_activity_completes_cancels_it_and_end
     assert len(cancel) == len(done) == 1 and cancel[0] < done[0], (cancel, done)  # the race happened, as forced
     assert not any(e.HasField("workflow_task_failed_event_attributes") for e in events)
     rows = {(r.node_key, r.iteration_key, r.attempt): (r.status, r.error_code) for r in store.steps(run_id_of(handle))}
-    assert rows == {("f", "", 1): ("failed", "testkit.transient"), ("e", "l:0", 1): ("cancelled", None)}
+    assert rows == {
+        ("f", "", 1): ("failed", "testkit.transient"),
+        ("l", "", 1): ("cancelled", None),
+        ("e", "l:0", 1): ("cancelled", None),
+    }
     assert store.runs[run_id_of(handle)].status == "failed"
 
 

@@ -1194,9 +1194,15 @@ cancel while the version loads cancels the run.
 - **`runs`:** id, tenant_id, workflow_version_id, kind (`run`, `subflow`, `failure_handler`), the parent run, step
   and iteration of a sub-run, status (`running`, `succeeded`, `failed`, `cancelled`,
   `deadline_exceeded`), started_at, ended_at, error summary.
-- **`run_steps`:** run_id, step_id, `iteration_key`, `attempt`, status, timestamps, redacted input and output
-  previews (≤ 8 KiB each), error code and sanitized message, `outcome` (`applied`, `simulated`, `outcome_unknown`),
-  and the CEL mode used (`local`, `activity`).
+- **`run_steps`:** run_id, step_id, `iteration_key`, `attempt`, status (`running`, `succeeded`, `failed`,
+  `cancelled`, `skipped`, `not_started`), timestamps, redacted input and output previews (≤ 8 KiB each), error code
+  and sanitized message, `outcome` (`applied`, `simulated`, `outcome_unknown`), the CEL mode used (`local`,
+  `activity`), and a control step's effect (`effect_preview`: an `if`'s or a `switch`'s port, a `set_variables`'s
+  assignments). Since engine ABI 9 (B4b; `2026-10-13-editor-4d1-simulation-design.md` §3), every instance of every
+  opened scope ends with a row: `skipped` on a branch not taken, `not_started` when it never began (a retry stopped in
+  its backoff records its next attempt so), `cancelled` once it began; a control step that waits on something says
+  `running` first. A row's genuine end is never replaced: a provisional close (`outcome_unconfirmed`) gives way to it,
+  and a different genuine end is refused and logged (`step_result_conflict`).
 - **Writes:**
   - A batched `project` activity upserts rows keyed `(run_id, step_id, iteration_key, attempt)`. It is the only
     writer: a plugin step's activity runs one attempt and writes nothing, and the workflow queues each attempt's

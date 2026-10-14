@@ -33,9 +33,9 @@ cover local work only: anything outward-facing (push, PR, issues) is confirmed i
 | 0045 | B7: per-attempt connection provenance, with sub-project 3 |
 | 0046 | B9: preview consumption and durable live-test execution |
 | 0047 | 4b: `runs_workflow_last` (ruling 72; merged in #60, chained after 0044: M36) |
-| 0048–0065 | 2b-4b's work (#90, not merged). B4b and B8, reserved at 0048 and 0049 on 2026-10-08, moved to 0071 and 0072 (the owner, 2026-10-11) |
+| 0048–0065 | 2b-4b's work (#90, merged 2026-10-12, chained 0044 → 0047 → 0045 → 0070 → 0048 → … → 0065). B4b and B8, reserved at 0048 and 0049 on 2026-10-08, moved to 0071 and 0072 (the owner, 2026-10-11) |
 | 0070 | 4c-3a: `webhook_endpoints.trigger_key`, an endpoint's sender (the owner; it was 0054 until 2026-10-11, which 2b-4b's work also names) |
-| 0071 | B4b: `skipped` and `not_started` projection statuses (the owner, 2026-10-08; the slot, 2026-10-11) |
+| 0071 | B4b: `skipped` and `not_started` projection statuses and `run_steps.effect_preview` (the owner, 2026-10-08; the slot, 2026-10-11); 4d-1a, chained after 0065 |
 | 0072 | B8: draft and single-step simulation (the owner, 2026-10-08; the slot, 2026-10-11) |
 
 - One Alembic chain: before merging, the first unmerged migration's `down_revision` is reconciled with the actual head.
@@ -2645,3 +2645,194 @@ count and says so. The unit suite 995 passed (72 files); typecheck, lint, check:
 Migration slots (the owner, 2026-10-11): B4b moves to 0071 and B8 to 0072, as the table above records: 2b-4b's work
 (#90) uses 0048–0065. #90's own chain is reconciled with main by its session when it lands.
 
+### Owner, 4d-1 design, mockups and spec (2026-10-12 and 2026-10-13, in chat)
+
+4d-1 is Simulate workflow and Simulate step (outline §2 4d, D14). The owner chose, one decision at a time:
+- three plans: 4d-1a (the engine: B4b, simulated attempts and timers, S2's engine part; ABI 8; 0071), 4d-1b (B8:
+  draft snapshots, admission, readers; 0072), 4d-1c (the UI);
+- B4b's statuses `skipped` and `not_started`, and S2, a single step from supplied values (seeds), engine-run.
+
+Through the question prompt, the owner accepted:
+- section 1 (B4b), with D-a1–D-a7, the upsert precedence and 0071's refusing downgrade;
+- capacity (b): no draft cap; flow timers aren't waited in any simulate run of an ABI-8 version;
+- section 2a (B8), and section 2b (S2's engine contract), which closed D-a8;
+- section 3 (the UI) as the mockups' direction.
+
+D8: pasted reviews held the "4d-1 Simulation Mockups" canvas at versions 16 and 19. The owner signed off version 20
+(16 boards, light and dark, two true 320 px boards). The spec,
+`docs/superpowers/specs/2026-10-13-editor-4d1-simulation-design.md`, was approved by the owner and committed on
+`docs/editor-ui-4d1-spec` (99fda408, 2026-10-13).
+
+### 4d-1a plan accepted (2026-10-13, in chat)
+
+`docs/superpowers/plans/2026-10-13-editor-ui-4d1a-engine.md`, revision 7 (008c4be4). Pasted reviews held revisions 1
+to 6; a pasted review found revision 7 clean. The owner, in their own words: "I accept rulings 2, 3, 13 and 16; commit
+the plan, inline". The plan's rulings 1–16 join this ledger as 159–174; the plan says each one's why and its cost.
+Rulings 160, 161, 171 and 174 change the spec, amended in the same commit (§3.6, §5.2).
+
+159. **Accepted. Seed obligations, per use** (plan ruling 1): the validator's own guard facts decide what a read
+     tolerates; the strictest use wins.
+160. **Accepted. A seed's value** (plan ruling 2): its schema's types and value rules, as the schema stands; presence
+     and null inside it from its uses, held where their conditions are; a choice judged by its branches. Spec §5.2.
+161. **Accepted. Normalized reads** (plan ruling 3): a read through a list index is the whole list; a read of every
+     step's results refuses the target. Spec §5.2.
+162. **Accepted. Codes beside the spec's** (plan ruling 4): `seed_invalid`; `seed_alias` below an alias too;
+     `seeded_live_refused`, `target_invalid`.
+163. **Accepted. An absent seed keeps its containers** (plan ruling 5).
+164. **Accepted. A single-step run never continues as new**, evaluates no outputs and starts no failure handler (plan
+     ruling 6).
+165. **Accepted. End rows lazily, at most 500 waiting** (plan ruling 7).
+166. **Accepted. `testkit.slow_simulator`** for the simulated timeout path (plan ruling 8).
+167. **Accepted. The privilege reference stays as it is** (plan ruling 9).
+168. **Accepted. The headroom test counts work units, not projections** (plan ruling 10).
+169. **Accepted. The spread test's loop body is slow** (plan ruling 11).
+170. **Accepted. A cancel reaches a running activity in about 30 s**, unchanged by 4d-1a (plan ruling 12).
+171. **Accepted. A build ahead of 0071 drops nothing**: its projections retry until the migration lands (plan ruling
+     13). Spec §3.6.
+172. **Accepted. An item in scope without its index** (`ScopeView.framed`, plan ruling 14).
+173. **Accepted. A continued run knows which open loops began** (the snapshot's `loops`, plan ruling 15).
+174. **Accepted. A filter over a computed list** keeps its sources' `required` for a strict predicate read (plan
+     ruling 16). Spec §5.2.
+
+### 4d-1a, milestone 1 (2026-10-13)
+
+On `feat/editor-4d1a`, cut from origin/main ba31c3d3 with the docs branch merged (6e4ba376). Each task's tests ran red
+on its test diff alone, then green with its implementation, as the plan says; ruff (check and format), mypy (309
+files) and the import contracts (11 kept) were clean after each.
+- Task 1, e4304849: the ledger and the spec's four amendments.
+- Task 2, 5fb1bc31: migration 0071. 5 failed, then 11 passed; the privilege reference unchanged.
+- Task 3, 98d72846: the upsert precedence. 6 failed (the late close replacing a genuine result among them), then 35
+  passed.
+- Task 4, eb3e9012: the scheduler's ends. 5 failed, then 227 passed.
+- Task 5, 4741eae1: every instance's end projected, `ENGINE_ABI` 8. 13 failed, then 108 passed; 19 scenarios
+  recorded, 42 abi8 histories.
+
+M90. **The branch was cut from ba31c3d3, not d4ab0dbe**: #94 and #95 landed meanwhile, both test-only. The plan's 18
+     diffs were applied on ba31c3d3 first; each applies unchanged.
+M91. **Ruling 169's hang is the test server's**: #94 found the `ACTIVITY_UNKNOWN` stall is Temporal's time-skipping
+     test server, not the engine. The spread test's slow body still avoids it; nothing else changes.
+M92. **The worktree's environment is CPython 3.12** (`uv sync --frozen --python 3.12`, uv's installed 3.12), as CI's
+     backend job runs; uv's first pick was 3.14.
+M93. **Task 1 says "accepted"**: the owner accepted the plan and its rulings before Task 1 ran, so its ledger section
+     and commit say so, not "proposed".
+
+Open: `fix/pending-yield-timer` (51866a26, issue #16; local, not pushed) also makes `ENGINE_ABI` 8, with abi8 histories
+of its own. Whichever merges second moves to ABI 9 and records its histories again: the owner decides the order.
+
+### 4d-1a, milestone 3 and the final checkpoint (2026-10-14)
+
+The owner accepted milestone 1 in their own words: "Milestone 1 accepted, continue with Tasks 6–11". Milestone 2 has no
+pause or entry of its own (the plan's), so its tasks are here. Each task's tests ran red on its test diff alone, then
+green with its implementation, as the plan says.
+- Task 6, 11a87192: a simulated attempt is never of unknown outcome. 120 passed.
+- Task 7, 71d4d463: flow timers resolved but not waited in a simulation; `simulated_timer` recorded. 64 passed.
+- Task 8, 5e428936: a single step's seed contract. 74 passed.
+- Task 9, 2894e16d: a single step runs alone from its seeds; `single_step` recorded. 662 passed, 1 skipped.
+- Task 10, 0df5bbb2: a run's end rows spread over projections, 500 at most each. 67 passed.
+
+The final review (a fresh reviewer, on 6e4ba376..0df5bbb2): ready with fixes; no critical finding, one important, eight
+minor. Every fix below was reproduced by a test that failed first.
+- 68f0a1af: a control step that finished as the deadline passed kept its outcome (it was rowed `cancelled`), and a
+  simulated timer that finished as the run stopped kept `simulated` and its resolved duration (Minor 4, graded
+  important).
+- 4cc39751: a control step's result past the live-state budget kept its outcome when the run or its scope ended before
+  it merged (it closed `outcome_unconfirmed`). Found by a follow-up review the owner pasted; the owner, in their own
+  words: "Commit it; ledger entry waits for Task 11".
+
+The ABI: the owner, in their own words, "I confirm ABI 9; review the branch now, suite later": 4d-1a lands after the
+yield-timer fix (#16) and the patched CEL runtime, which took `ENGINE_ABI` 8. They merged as #99 (52314866). The owner:
+"Go once main's CI is green; uv sync OK". Main's CI and CodeQL passed on 52314866, then:
+- 426f5910 merges main (no rebase). Main's `ENGINE_ABI` 8, its tripwire and its 41 abi8 histories are taken
+  unchanged; 4d-1a's abi8 recordings are dropped. The yield-timer fix merged cleanly into `execution.py` and
+  `workflow.py`.
+- 4d5c7235 makes `ENGINE_ABI` 9: the tripwire, 44 abi9 histories (main's 19 scenarios and 4d-1a's two), and "ABI 9"
+  in the 4d-1 spec, the engine-core spec's `run_steps` entry and migration 0071's docstring.
+
+The final checkpoint. The owner's go: "Run the full suite, then the ledger entry". On 4d5c7235:
+- The CEL gates' tests, serial in a process of their own (as CI's cel-gates job): 504 passed, 10 skipped.
+- The backend suite without them (as CI's backend job), 8 workers, once: 6112 passed, 131 skipped, **4 failed**, in
+  23 min. It was not re-run whole.
+- Three of the four timed out: two run-graph policy tests waiting for their run's result, and the privilege reference
+  waiting 60 s on Docker's API for its database. Re-run alone afterwards, the three passed. That points to
+  interference within the parallel run; it doesn't prove it.
+- The fourth was real: the real-server test of a run ending as its running activity completes expected no row for its
+  loop, which B4b ends `cancelled` (it began). It failed the same way on 4cc39751, before the merge: since Task 5, in
+  no task's test set. 68893132 adds the loop's row to its expectation, test-only; the file, whole: 26 passed.
+
+On 68893132, the branch's last code commit: ruff (check and format), mypy (311 files) and the import contracts (11 kept)
+are clean. The replay gate's history check, as for a pull request against main and as for a branch push: clean. Local
+CodeQL (CLI 2.27.2, python-queries 1.8.12, as CI's): no finding.
+
+M94. **ABI 9, after main's 8** (the owner, above). The ledger and the accepted plan keep "ABI 8" where they record
+     what was decided then; this entry records the move.
+M95. **The deadline's test runs on the dev server**: the time-skipping test server stalls when two timers fire in one
+     workflow task. The test asserts that they did.
+M96. **The suite ran with 8 workers, not one per core**: at 14, the time-skipping test server missed its 5 s start on
+     several workers.
+M97. **The final review's set-aside lines**, each ruled: admission's order, the 422 mapping of `seed_*` and the §6.6
+     seeds read are 4d-1b's; `READS_EVERY` says "every step's results" for a bare `loops` read too (the amended
+     spec's wording); loops opening iterations after `end()` predates this branch; the cancel cap test's ~30 s wait
+     stands (ruling 170); the test-server stalls aren't this slice's code; `effect_preview` shows plain non-sensitive
+     assignments and sensitive ones as handles (§3.5); `/trigger/rows` needs no engine change.
+
+Deferred (minor, from the final review):
+- Loops keep advancing after the run's end, and a failed scope re-reports ends; iterations opened then run nothing
+  and have no rows.
+- `contract_of` gives no entry for a CEL value without a record (an invalid draft): 4d-1b's seeds read should
+  validate first, or refuse.
+- Ruling 164 (a single step never continues as new) holds by quiescence, not a guard.
+- `Seeds.of` can change a caller's dicts (unreachable for admitted seeds).
+- `upsert_steps` reads once per unwritten genuine row on a retried projection.
+- The seeded failure test goes through `simulation_unavailable`, not a simulator's own failure; no test of a
+  `READS_EVERY` refusal by itself.
+- A seeds trigger that isn't `{values, absent}` should be refused `target_invalid`, not fail in `Seeds.of`.
+
+Rulings 160, 161, 171 and 174 changed the spec (§3.6, §5.2), as accepted. The deploy order: migration 0071 before the
+ABI-9 workers. The final review of the integrated branch follows (the owner: "you run the review"); push and a pull
+request wait for the owner's word.
+
+### 4d-1a, the final review of the integrated branch (2026-10-14)
+
+A fresh reviewer, on 52314866..9086b467 (the owner: "you run the review"): ready with fixes; no critical finding, two
+important, three minor. It found no determinism, replay or migration problem, and every close path keeps main's
+`_closing()`. Each fix was reproduced by a test that failed first; the owner, in their own words: "Commit the three;
+then ask about push and PR".
+- 8b64a0c2: a control step's `effect_preview` is masked against the run's secret index, as its previews are (§3.5);
+  a `set_variables` literal repeating a secret the run knew was stored in clear.
+- 397e6b65: a single-step run refuses seeds that aren't values and absences by pointer, `target_invalid` before
+  anything runs; a malformed one failed the workflow task on every retry, and the run never ended. No caller sets
+  `target_step_id` outside the engine yet: 4d-1b's admission is the first.
+
+The suites the fixes touch (the worker's activities, store precedence, the seeded, policies, ends and boundary run
+tests, the secrets canary, `tests/engine`): 1526 passed, 1 skipped. On 397e6b65: ruff (check and format), mypy (311
+files) and the import contracts (11 kept) are clean; the replay gate's history check, as for a pull request against
+main and as for a branch push: clean; local CodeQL (CLI 2.27.2, python-queries 1.8.12): no finding. The whole suite
+wasn't run again.
+
+Deferred (minor):
+- A retried projection can log a spurious `step_result_conflict` when the secret index grew between its writes; the
+  stored row is kept, only the warning is wrong.
+- `docs/operations/runs.md`'s step error codes lack `seed_missing`, `seeded_live_refused` and `target_invalid`, which
+  the API can reach from 4d-1b.
+- `test_run_graph_ends.py`'s `Seen.said` is set and never awaited.
+
+The deploy order, whole: migration 0071, then the ABI-9 workers, then republishing the versions published at ABI 8 (as
+for every ABI bump). Push and a pull request wait for the owner's word.
+
+### 4d-1a, CI on PR #101 (2026-10-14)
+
+The owner: "Push and open the PR; docs ride in it". CI's first run, on 61e4cc94: every job passed but the backend
+suite, with 3 failed, 6119 passed and 131 skipped.
+- Two timer tests timed out at 60 s, the same two as in the local whole run. Three 4d-1a tests ended a run
+  while an activity still ran on the shared time-skipping server, which then stops skipping time for the rest of its
+  worker: the held-claim test (4cc39751), the B4b deadline test and the many-open-instances test. Paired with a timer
+  test in one process, each of those three made it time out, and three other candidates didn't. They now run on
+  servers of their own (`own_env`, as the fixture says such a test must).
+- The deadline-order test's guard failed: CI's runner fired the deadline's timer in a workflow task of its own. The
+  test now forces what it needs: the run's build stops once both timers are started and serves again once both have
+  fired, and the guard checks that no workflow task started between them. Against the order before 68f0a1af it
+  fails; three copies run at once pass.
+
+cd1a44a1 holds both (test-only; the owner: "Commit and push it; keep asking for Auto-fix pushes"). CI's second run, on
+cd1a44a1: every job passed (the backend in 23 min), as did CodeQL. Main has since gained #102 (a CEL compile fix: no
+ABI, migration or runtime change), which merges cleanly.

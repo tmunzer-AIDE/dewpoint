@@ -283,3 +283,47 @@ def test_a_stop_ends_the_run_and_cancels_running_work() -> None:
     s.succeed(a, {})
     s.end(RunEnd("succeeded", stopped=True))
     assert [name(s, i) for i in s.take_cancels()] == ["b"]
+
+
+# --- how instances end without settling (B4b, the simulation design §3) -------------------------------------------
+
+
+def ends(s: Scheduler) -> set[tuple[str, str]]:
+    return {(name(s, i), kind) for i, kind in s.take_ends()}
+
+
+def test_a_branch_not_taken_ends_skipped_with_what_only_it_leads_to() -> None:
+    g = G().node("c", IF, {"condition": True}).node("a", ECHO).node("b", ECHO).node("only_b", ECHO).node("j", ECHO)
+    g.edge("c", "a", "true").edge("c", "b", "false").edge("b", "only_b").edge("a", "j").edge("b", "j")
+    s = started(g)
+    [c] = s.take_ready()
+    s.succeed(c, {}, ("true",))
+    assert ends(s) == {("b", "skipped"), ("only_b", "skipped")}
+    assert run_all(s) == ["a", "j"]
+    assert ends(s) == set()  # each instance ends once
+
+
+def test_a_scope_failure_ends_handed_work_stopped_and_waiting_work_unstarted() -> None:
+    s = started(G().node("a", ECHO).node("b", ECHO).node("c", ECHO).edge("b", "c"))
+    a, _ = s.take_ready()
+    s.fail(a, BOOM)
+    assert ends(s) == {("b", "stopped"), ("c", "unstarted")}
+    assert [name(s, i) for i in s.take_cancels()] == ["b"]  # stopped work is cancelled too
+
+
+def test_the_runs_end_ends_queued_work_unstarted() -> None:
+    s = started(G().node("a", ECHO).node("b", ECHO).node("c", ECHO).edge("a", "c"))
+    [a] = s.take_ready(limit=1)  # `b` stays queued: never handed out
+    s.end(RunEnd("deadline_exceeded", Failure("deadline_exceeded", "The run passed its deadline.")))
+    assert ends(s) == {("a", "stopped"), ("b", "unstarted"), ("c", "unstarted")}
+    assert [name(s, i) for i in s.take_cancels()] == [name(s, a)]
+
+
+def test_a_stopped_loop_ends_its_open_iterations_and_an_item_never_opened_has_no_instances() -> None:
+    s = started(loop_graph())
+    [loop] = s.take_ready()
+    s.open_loop(loop, [1, 2, 3], concurrency=2, stop_on_error=True)
+    x0, _ = s.take_ready()
+    s.fail(x0, BOOM)
+    assert ends(s) == {("l:0/y", "unstarted"), ("l:1/x", "stopped"), ("l:1/y", "unstarted"), ("after", "unstarted")}
+    assert s.ended == RunEnd("failed", BOOM)

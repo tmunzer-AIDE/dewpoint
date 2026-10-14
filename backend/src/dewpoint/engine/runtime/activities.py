@@ -81,6 +81,9 @@ class RunInput:
     checkpoint_events: int = CHECKPOINT_EVENTS
     drain_events: int = DRAIN_EVENTS
     iterations: int = 0  # a continued run: what it had used, readable even when its snapshot isn't
+    # a single-step run (S2; the simulation design §5.4): its one step, simulated; its `trigger` is then its seeds,
+    # `{"values": {pointer: value}, "absent": [pointer]}`, and `version_id` may name a draft snapshot
+    target_step_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -291,7 +294,7 @@ class StepRow:
     node_key: str
     iteration_key: str
     attempt: int
-    status: str  # running | succeeded | failed | cancelled
+    status: str  # running | succeeded | failed | cancelled | skipped | not_started
     started_at: str | None = None
     ended_at: str | None = None
     input_preview: Any = None
@@ -300,6 +303,7 @@ class StepRow:
     error_message: str | None = None
     outcome: str | None = None
     cel_mode: str | None = None
+    effect_preview: Any = None  # a control step's effect besides its output: {"port"} or {"assignments"}
 
 
 @dataclass(frozen=True)
