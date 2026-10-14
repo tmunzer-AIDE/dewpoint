@@ -2718,3 +2718,75 @@ M93. **Task 1 says "accepted"**: the owner accepted the plan and its rulings bef
 
 Open: `fix/pending-yield-timer` (51866a26, issue #16; local, not pushed) also makes `ENGINE_ABI` 8, with abi8 histories
 of its own. Whichever merges second moves to ABI 9 and records its histories again: the owner decides the order.
+
+### 4d-1a, milestone 3 and the final checkpoint (2026-10-14)
+
+The owner accepted milestone 1 in their own words: "Milestone 1 accepted, continue with Tasks 6–11". Milestone 2 has no
+pause or entry of its own (the plan's), so its tasks are here. Each task's tests ran red on its test diff alone, then
+green with its implementation, as the plan says.
+- Task 6, 11a87192: a simulated attempt is never of unknown outcome. 120 passed.
+- Task 7, 71d4d463: flow timers resolved but not waited in a simulation; `simulated_timer` recorded. 64 passed.
+- Task 8, 5e428936: a single step's seed contract. 74 passed.
+- Task 9, 2894e16d: a single step runs alone from its seeds; `single_step` recorded. 662 passed, 1 skipped.
+- Task 10, 0df5bbb2: a run's end rows spread over projections, 500 at most each. 67 passed.
+
+The final review (a fresh reviewer, on 6e4ba376..0df5bbb2): ready with fixes; no critical finding, one important, eight
+minor. Every fix below was reproduced by a test that failed first.
+- 68f0a1af: a control step that finished as the deadline passed kept its outcome (it was rowed `cancelled`), and a
+  simulated timer that finished as the run stopped kept `simulated` and its resolved duration (Minor 4, graded
+  important).
+- 4cc39751: a control step's result past the live-state budget kept its outcome when the run or its scope ended before
+  it merged (it closed `outcome_unconfirmed`). Found by a follow-up review the owner pasted; the owner, in their own
+  words: "Commit it; ledger entry waits for Task 11".
+
+The ABI: the owner, in their own words, "I confirm ABI 9; review the branch now, suite later": 4d-1a lands after the
+yield-timer fix (#16) and the patched CEL runtime, which took `ENGINE_ABI` 8. They merged as #99 (52314866). The owner:
+"Go once main's CI is green; uv sync OK". Main's CI and CodeQL passed on 52314866, then:
+- 426f5910 merges main (no rebase). Main's `ENGINE_ABI` 8, its tripwire and its 41 abi8 histories are taken
+  unchanged; 4d-1a's abi8 recordings are dropped. The yield-timer fix merged cleanly into `execution.py` and
+  `workflow.py`.
+- 4d5c7235 makes `ENGINE_ABI` 9: the tripwire, 44 abi9 histories (main's 19 scenarios and 4d-1a's two), and "ABI 9"
+  in the 4d-1 spec, the engine-core spec's `run_steps` entry and migration 0071's docstring.
+
+The final checkpoint. The owner's go: "Run the full suite, then the ledger entry". On 4d5c7235:
+- The CEL gates' tests, serial in a process of their own (as CI's cel-gates job): 504 passed, 10 skipped.
+- The backend suite without them (as CI's backend job), 8 workers, once: 6112 passed, 131 skipped, **4 failed**, in
+  23 min. It was not re-run whole.
+- Three of the four timed out: two run-graph policy tests waiting for their run's result, and the privilege reference
+  waiting 60 s on Docker's API for its database. Re-run alone afterwards, the three passed. That points to
+  interference within the parallel run; it doesn't prove it.
+- The fourth was real: the real-server test of a run ending as its running activity completes expected no row for its
+  loop, which B4b ends `cancelled` (it began). It failed the same way on 4cc39751, before the merge: since Task 5, in
+  no task's test set. 68893132 adds the loop's row to its expectation, test-only; the file, whole: 26 passed.
+
+On 68893132, the branch's last code commit: ruff (check and format), mypy (311 files) and the import contracts (11 kept)
+are clean. The replay gate's history check, as for a pull request against main and as for a branch push: clean. Local
+CodeQL (CLI 2.27.2, python-queries 1.8.12, as CI's): no finding.
+
+M94. **ABI 9, after main's 8** (the owner, above). The ledger and the accepted plan keep "ABI 8" where they record
+     what was decided then; this entry records the move.
+M95. **The deadline's test runs on the dev server**: the time-skipping test server stalls when two timers fire in one
+     workflow task. The test asserts that they did.
+M96. **The suite ran with 8 workers, not one per core**: at 14, the time-skipping test server missed its 5 s start on
+     several workers.
+M97. **The final review's set-aside lines**, each ruled: admission's order, the 422 mapping of `seed_*` and the §6.6
+     seeds read are 4d-1b's; `READS_EVERY` says "every step's results" for a bare `loops` read too (the amended
+     spec's wording); loops opening iterations after `end()` predates this branch; the cancel cap test's ~30 s wait
+     stands (ruling 170); the test-server stalls aren't this slice's code; `effect_preview` shows plain non-sensitive
+     assignments and sensitive ones as handles (§3.5); `/trigger/rows` needs no engine change.
+
+Deferred (minor, from the final review):
+- Loops keep advancing after the run's end, and a failed scope re-reports ends; iterations opened then run nothing
+  and have no rows.
+- `contract_of` gives no entry for a CEL value without a record (an invalid draft): 4d-1b's seeds read should
+  validate first, or refuse.
+- Ruling 164 (a single step never continues as new) holds by quiescence, not a guard.
+- `Seeds.of` can change a caller's dicts (unreachable for admitted seeds).
+- `upsert_steps` reads once per unwritten genuine row on a retried projection.
+- The seeded failure test goes through `simulation_unavailable`, not a simulator's own failure; no test of a
+  `READS_EVERY` refusal by itself.
+- A seeds trigger that isn't `{values, absent}` should be refused `target_invalid`, not fail in `Seeds.of`.
+
+Rulings 160, 161, 171 and 174 changed the spec (§3.6, §5.2), as accepted. The deploy order: migration 0071 before the
+ABI-9 workers. The final review of the integrated branch follows (the owner: "you run the review"); push and a pull
+request wait for the owner's word.
