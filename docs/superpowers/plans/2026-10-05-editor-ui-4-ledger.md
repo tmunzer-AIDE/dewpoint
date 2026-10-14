@@ -2790,3 +2790,31 @@ Deferred (minor, from the final review):
 Rulings 160, 161, 171 and 174 changed the spec (§3.6, §5.2), as accepted. The deploy order: migration 0071 before the
 ABI-9 workers. The final review of the integrated branch follows (the owner: "you run the review"); push and a pull
 request wait for the owner's word.
+
+### 4d-1a, the final review of the integrated branch (2026-10-14)
+
+A fresh reviewer, on 52314866..9086b467 (the owner: "you run the review"): ready with fixes; no critical finding, two
+important, three minor. It found no determinism, replay or migration problem, and every close path keeps main's
+`_closing()`. Each fix was reproduced by a test that failed first; the owner, in their own words: "Commit the three;
+then ask about push and PR".
+- 8b64a0c2: a control step's `effect_preview` is masked against the run's secret index, as its previews are (§3.5);
+  a `set_variables` literal repeating a secret the run knew was stored in clear.
+- 397e6b65: a single-step run refuses seeds that aren't values and absences by pointer, `target_invalid` before
+  anything runs; a malformed one failed the workflow task on every retry, and the run never ended. No caller sets
+  `target_step_id` outside the engine yet: 4d-1b's admission is the first.
+
+The suites the fixes touch (the worker's activities, store precedence, the seeded, policies, ends and boundary run
+tests, the secrets canary, `tests/engine`): 1526 passed, 1 skipped. On 397e6b65: ruff (check and format), mypy (311
+files) and the import contracts (11 kept) are clean; the replay gate's history check, as for a pull request against
+main and as for a branch push: clean; local CodeQL (CLI 2.27.2, python-queries 1.8.12): no finding. The whole suite
+wasn't run again.
+
+Deferred (minor):
+- A retried projection can log a spurious `step_result_conflict` when the secret index grew between its writes; the
+  stored row is kept, only the warning is wrong.
+- `docs/operations/runs.md`'s step error codes lack `seed_missing`, `seeded_live_refused` and `target_invalid`, which
+  the API can reach from 4d-1b.
+- `test_run_graph_ends.py`'s `Seen.said` is set and never awaited.
+
+The deploy order, whole: migration 0071, then the ABI-9 workers, then republishing the versions published at ABI 8 (as
+for every ABI bump). Push and a pull request wait for the owner's word.
