@@ -172,7 +172,7 @@ class MistClient:
         if 200 <= status < 300:
             try:
                 value = json.loads(sent.content) if sent.content.strip() else None
-            except ValueError:
+            except (ValueError, RecursionError):  # the second: a body nested past the decoder's limit
                 raise InvalidAnswer() from None
             return Answer(status, value, {name.lower(): v for name, v in sent.headers})
         if status == 400:
