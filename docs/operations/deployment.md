@@ -251,10 +251,11 @@ build's runs keep `abi6`'s until they end. What a run does differently:
 
 ### ABI 8: what changes
 
-ABI 8 (#16's extra workflow-task failure) changes only how an execution closes, not what publishing accepts: a
-workflow published under ABI 7 publishes again unchanged, as every workflow must once the ABI 8 build is current
-(above). Its CEL queue is `dewpoint-cel.abi8.<profile>`: deploy the new build's evaluator workers with it, while the old
-build's runs keep `abi7`'s until they end. What a run does differently:
+ABI 8 (#16's extra workflow-task failure, and the CEL runtime's leak) changes how an execution closes and which
+runtime evaluates CEL, not what publishing accepts: a workflow published under ABI 7 publishes again unchanged, as
+every workflow must once the ABI 8 build is current (above). Its CEL queue is
+`dewpoint-cel.abi8.cel-cpp-0.1.3+dewpoint.1/fn-1/cls-1`: deploy the new build's evaluator workers with it, while the
+old build's runs keep `dewpoint-cel.abi7.cel-cpp-0.1.3/fn-1/cls-1` until they end. What a run does differently:
 
 - An execution that closes (its run or batch ends, fails, or continues as new) while the 1 ms timer that ends a
   workflow task is still pending cancels it with its close. Before, that timer could fire while the closing task was in
@@ -262,6 +263,12 @@ build's runs keep `abi7`'s until they end. What a run does differently:
   worker replayed its history. Such a close now shows a `TimerCanceled` event and the `cancel-pending-yield` patch
   marker in the history.
 - An execution continues as new once it has added 8 MiB of history, whatever Temporal suggests.
+- CEL runs on `cel-expr-python 0.1.3+dewpoint.1` (`deploy/cel-runtime/README.md`), so the CEL profile is
+  `cel-cpp-0.1.3+dewpoint.1/fn-1/cls-1`. 0.1.3 kept the arguments and the result of every call to one of Dewpoint's
+  CEL functions for the life of the process: a worker's memory, and the work of each full garbage collection, grew
+  with every such call. `dewpoint plugins sync` registers the new profile (step 1 of a rollout). Keep the old
+  profile's evaluators until no run of the old build is left, then retire it:
+  `dewpoint lifecycle retire --cel-profile cel-cpp-0.1.3/fn-1/cls-1`.
 
 ## Upgrading from a build without versioning
 
