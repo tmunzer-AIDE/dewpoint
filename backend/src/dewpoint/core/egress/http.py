@@ -124,7 +124,13 @@ class HttpResponse:
         return next((v for k, v in self.headers if k.lower() == wanted), None)
 
     def json(self) -> Any:
-        return json.loads(self.content)
+        """The body decoded. A body that isn't JSON raises ValueError, one nested past the decoder's limit too:
+        `json.loads` raises RecursionError on it, which a plugin decoding with `except ValueError` took for an
+        unexpected error (3d-2's review: a reconcilable create retried it into a second incident)."""
+        try:
+            return json.loads(self.content)
+        except RecursionError:
+            raise ValueError("the body nests deeper than decoding allows") from None
 
 
 class _GuardedBackend(httpcore.AsyncNetworkBackend):

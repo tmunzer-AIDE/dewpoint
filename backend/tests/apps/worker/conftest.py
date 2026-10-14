@@ -14,7 +14,11 @@ from tests.support.temporal import probe_temporal
 @pytest.fixture(scope="session")
 async def env() -> AsyncIterator[WorkflowEnvironment]:
     """Temporal's time-skipping test server (downloaded once by the SDK), shared by the session. Its client encrypts
-    as every Dewpoint process does, with fixture keys (engine 2b spec §6.2)."""
+    as every Dewpoint process does, with fixture keys (engine 2b spec §6.2). It refuses a run's cancel of an activity
+    that completed while the run's workflow task was in flight (`ACTIVITY_UNKNOWN for scheduledEventId=…`), and that
+    run stalls: a test whose run may end as a quick activity completes runs on `dev_env`, a real server, which records
+    the cancel and lets the run end (`test_real_server.py`'s
+    `test_a_run_ending_as_its_running_activity_completes_cancels_it_and_ends`)."""
     async with await WorkflowEnvironment.start_time_skipping(data_converter=FIXTURE_CONVERTER) as environment:
         yield environment
 
