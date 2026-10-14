@@ -1,8 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
+from collections.abc import Callable
+from typing import Any
+
 import pytest
+from google.protobuf import any_pb2
 
 from dewpoint.engine.cel import runtime
 from dewpoint.engine.cel import types as T
+from dewpoint.engine.cel.proto import syntax_pb2
+from tests.engine.cel.support import nested_maps
 
 
 def test_compile_gives_a_checked_ast_and_evaluates() -> None:
@@ -36,3 +42,32 @@ def test_error_values_and_aborts_are_distinguished_from_strings() -> None:
 def test_only_supported_signatures_are_declared() -> None:
     with pytest.raises(ValueError, match="unsupported CEL type"):
         runtime.compile_checked("x", {"x": "list(dyn)"})
+
+
+@pytest.mark.parametrize(
+    "step", [runtime.parse, lambda expr: runtime.compile_checked(expr, {})], ids=["parse", "compile_checked"]
+)
+def test_an_ast_deeper_than_protobuf_decodes_is_a_compile_error(step: Callable[[str], Any]) -> None:
+    """The parser accepts up to 30 nested maps, but the AST the runtime hands back for 17 or more is deeper than the
+    protobuf decoder's limit. Its message names the problem only: never the expression, nor the decoder's text."""
+    step(nested_maps(16))
+    for depth in (17, 30):
+        with pytest.raises(runtime.CompileError) as e:
+            step(nested_maps(depth))
+        assert e.value.problems == [runtime.TOO_DEEP] and str(e.value) == runtime.TOO_DEEP
+        assert e.value.__cause__ is None and e.value.__suppress_context__
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"\x0a\x05abc",  # the Any wrapper itself is cut short
+        any_pb2.Any(type_url="type.googleapis.com/cel.expr.ParsedExpr", value=b"\x0a\x05ab").SerializeToString(),
+    ],
+    ids=["wrapper", "payload"],
+)
+def test_an_ast_that_doesnt_decode_is_a_compile_error(payload: bytes) -> None:
+    with pytest.raises(runtime.CompileError) as e:
+        runtime._unpack(payload, syntax_pb2.ParsedExpr())
+    assert e.value.problems == [runtime.TOO_DEEP]
+    assert e.value.__cause__ is None and e.value.__suppress_context__

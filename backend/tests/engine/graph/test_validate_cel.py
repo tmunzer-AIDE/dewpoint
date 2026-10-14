@@ -8,9 +8,10 @@ from jsonschema import Draft202012Validator
 
 from dewpoint.engine.cel import types as T
 from dewpoint.engine.cel.record import ExpressionRecord, Projection
-from dewpoint.engine.cel.runtime import compile_checked, evaluate
+from dewpoint.engine.cel.runtime import TOO_DEEP, compile_checked, evaluate
 from dewpoint.engine.graph.validate import ValidationContext, ValidationResult, validate
 from dewpoint.plugins.flow import PLUGIN
+from tests.engine.cel.support import nested_maps
 from tests.support.catalog import catalog
 from tests.support.graphs import G, cel, nid, ref
 from tests.support.plugins.testkit import TESTKIT
@@ -212,6 +213,12 @@ def test_reference_diagnostics_match_refs() -> None:
     assert codes(one("nope + 1")) == ["cel.unknown_name"]
     assert codes(one("'a'.lowerAscii()")) == ["cel.unknown_function"]
     assert codes(one("1 +")) == ["cel.invalid"]
+
+
+def test_a_formula_deeper_than_its_ast_decodes_is_invalid_not_an_error() -> None:
+    """17 nested maps parse, but the runtime's AST of them is deeper than protobuf decodes."""
+    [d] = check(one(nested_maps(17))).diagnostics
+    assert (d.code, d.field, d.message) == ("cel.invalid", "/value", f"This expression isn't valid: {TOO_DEEP}")
 
 
 @pytest.mark.parametrize(

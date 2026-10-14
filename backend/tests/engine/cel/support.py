@@ -26,3 +26,9 @@ def make_record(expr: str, typed: Mapping[str, str] | None = None, *, item: bool
         bytes=c.bytes,
         work=c.work,
     )
+
+
+def nested_maps(depth: int) -> str:
+    """`[1].map(v0, [1].map(v1, ... "s"))`: each map is six message levels of the runtime's AST, so 17 of them pass the
+    protobuf decoder's limit (100) while the parser, whose limit is 32, still accepts them."""
+    return "".join(f"[1].map(v{i}, " for i in range(depth)) + '"s"' + ")" * depth

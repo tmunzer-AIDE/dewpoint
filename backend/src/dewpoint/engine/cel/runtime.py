@@ -12,11 +12,13 @@ from typing import Any
 
 from cel_expr_python import cel as _cel
 from google.protobuf import any_pb2
+from google.protobuf.message import DecodeError
 
 from dewpoint.engine.cel import functions, types
 from dewpoint.engine.cel.proto import checked_pb2, syntax_pb2
 
 _PROBLEM = re.compile(r"ERROR: <input>:(\d+):(\d+): ([^\n]*)")
+TOO_DEEP = "it nests macros (map, all, exists) too deeply inside one another"
 
 
 class CompileError(ValueError):
@@ -71,9 +73,16 @@ def _env(declarations: Mapping[str, str]) -> Any:
 
 
 def _unpack(serialized: bytes, message: Any) -> Any:
+    """protobuf refuses to decode a message nested more than 100 levels deep (upb and pure Python alike). Macros get
+    there before the parser's own limit of 32 does: a map is six levels, so 17 nested maps parse but don't decode.
+    Any failure to decode is reported as that one, without the decoder's text."""
     wrapper = any_pb2.Any()
-    wrapper.ParseFromString(serialized)
-    if not wrapper.Unpack(message):
+    try:
+        wrapper.ParseFromString(serialized)
+        unpacked = wrapper.Unpack(message)
+    except DecodeError:
+        raise CompileError([TOO_DEEP]) from None
+    if not unpacked:
         raise CompileError([f"unexpected AST payload {wrapper.type_url}"])
     return message
 
