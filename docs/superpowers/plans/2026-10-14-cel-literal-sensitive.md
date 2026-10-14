@@ -744,3 +744,11 @@ the touched files (`test_written`, `test_sensitive`, `test_validate_sensitive`, 
 `test_validate_declassify`, `test_api_nodes`: 311 passed) ran clean on the tree again. The commit is the owner's go to
 commit only: the amended rulings 1, 3 and 4, and the Low left unchanged for the owner (fixed booleans,
 `filter(x, false)`), still await the owner's sign-off. Not pushed.
+
+Pushed and opened as PR #103 on the owner's "push it and open a PR" (2026-10-14). `main` had moved to 2dbcc809 (#102):
+the merge is clean, and the merged tree, tried in a throwaway worktree without a commit, passed the touched files with
+`tests/apps/api/test_workflows.py` (337) and `test_validate_cel.py` (80). The branch wasn't merged or rebased.
+
+The owner signed off rulings 1 to 7 (2026-10-14), with 1, 3 and 4 as the build's review amended them. The Low left
+unchanged (a fixed boolean or list: `trigger.b || true`, `[].all(x, trigger.b)`, `trigger.strs.filter(x, false)`)
+wasn't named in the sign-off: it stays open, for the owner.
