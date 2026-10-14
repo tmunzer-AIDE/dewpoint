@@ -12,6 +12,7 @@ import pytest
 
 from dewpoint.engine.graph.validate import SubflowInfo, ValidationContext, validate
 from dewpoint.plugins.flow import PLUGIN
+from tests.engine.cel.support import nested_maps
 from tests.support.catalog import catalog
 from tests.support.graphs import G, cel, nid, ref, template
 from tests.support.plugins.testkit import TESTKIT
@@ -91,6 +92,11 @@ def test_a_template_writing_text_beside_a_reference_is_refused(token: Any) -> No
     g = G().node("s", SEND, {"token": token})
     g.settings = {"input_schema": {"type": "object", "properties": {"tok": SECRET}, "required": ["tok"]}}
     assert diagnostics(g) == [("sensitive.literal", "/token")]
+
+
+def test_a_formula_deeper_than_its_ast_decodes_is_invalid_at_a_sensitive_field() -> None:
+    g = G().node("s", SEND, {"token": cel(nested_maps(17))})
+    assert diagnostics(g) == [("cel.invalid", "/token")]
 
 
 def test_a_template_of_references_and_a_formula_that_reads_the_run_are_fine() -> None:

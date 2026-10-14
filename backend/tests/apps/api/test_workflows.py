@@ -8,6 +8,7 @@ from dewpoint.core.plugins import lifecycle
 from dewpoint.core.plugins.lifecycle import Entry
 from dewpoint.engine.graph.model import graph_hash, parse_graph
 from tests.apps.api.helpers import member_client, session_client
+from tests.engine.cel.support import nested_maps
 from tests.support.graphs import G, cel, nid, ref
 from tests.support.registry import sync_test_plugins
 
@@ -60,6 +61,20 @@ async def test_publish_and_draft_report_diagnostics(app, owner_sessionmaker, api
         assert r.json()["error"] == "invalid" and [d["code"] for d in r.json()["diagnostics"]] == ["ref.unknown_step"]
         malformed = await c.put(f"{base}/draft", json={"nodes": [{"key": "Bad Key"}]}, headers={"If-Match": "1"})
         assert malformed.status_code == 422 and malformed.json()["diagnostics"][0]["code"] == "graph.format"
+
+
+async def test_a_formula_deeper_than_its_ast_decodes_is_a_diagnostic(app, owner_sessionmaker, api_settings) -> None:
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    async with c:
+        deep = G().node("a", "testkit.echo@1", {"value": cel(nested_maps(17))}).data()
+        wf = (await c.post(f"/api/v1/t/{tid}/workflows", json={"name": "Deep", "draft": deep})).json()
+        base = f"/api/v1/t/{tid}/workflows/{wf['id']}"
+        checked = await c.post(f"{base}/validate")
+        assert checked.status_code == 200 and checked.json()["valid"] is False
+        assert [d["code"] for d in checked.json()["diagnostics"]] == ["cel.invalid"]
+        r = await c.post(f"{base}/publish", headers={"If-Match": "1"})
+        assert r.status_code == 422
+        assert r.json()["error"] == "invalid" and [d["code"] for d in r.json()["diagnostics"]] == ["cel.invalid"]
 
 
 async def test_activate_rolls_back(app, owner_sessionmaker, api_settings) -> None:
