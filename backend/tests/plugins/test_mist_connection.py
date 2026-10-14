@@ -15,6 +15,7 @@ import pytest
 from pydantic import ValidationError
 
 from dewpoint.apps.plugin_loader import installed_plugins
+from dewpoint.core.egress.http import HttpResponse
 from dewpoint.engine.registry.catalog import validate_plugin_manifest
 from dewpoint.plugins.mist import PLUGIN
 from dewpoint.plugins.mist.connection import MIST, MistConfig
@@ -195,3 +196,10 @@ async def test_msp_access_is_confirmed_through_the_org() -> None:
 async def test_verify_answers(answers: Mapping[str, _Answer | Exception], detail: str) -> None:
     result, _ = await _verify(answers)
     assert not result.ok and result.detail == detail
+
+
+async def test_an_answer_too_deep_to_decode_is_a_failed_verify_not_an_error() -> None:
+    """The runtime's answer raises ValueError for a body nested past the decoder's limit, as the hook expects."""
+    deep = HttpResponse(200, (), b"[" * 20_000 + b"]" * 20_000)
+    result, _ = await _verify({"/api/v1/self": deep})  # type: ignore[dict-item]
+    assert result == VerifyResult(False, "unreachable")

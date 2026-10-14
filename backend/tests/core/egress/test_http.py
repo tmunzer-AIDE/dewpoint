@@ -18,6 +18,7 @@ from dewpoint.core.egress.guard import (
 from dewpoint.core.egress.http import (
     GuardedHttp,
     HttpLimits,
+    HttpResponse,
     RedirectRefusedError,
     ResponseTooLargeError,
     ResponseUnreadableError,
@@ -25,6 +26,8 @@ from dewpoint.core.egress.http import (
 from tests.support.netfakes import TENANT, Request, guard, respond, serve, tls
 
 NAMES = ("dewpoint.test",)
+# Nested past the decoder's recursion limit: `json.loads` raises RecursionError on it, not ValueError (3d-2's review).
+DEEP = b"[" * 20_000 + b"]" * 20_000
 
 
 def client(answers, limits: HttpLimits | None = None) -> GuardedHttp:  # type: ignore[no-untyped-def]
@@ -319,3 +322,33 @@ async def test_data_after_a_deflate_stream_is_refused() -> None:
 
     with pytest.raises(ResponseUnreadableError):
         await _decoded(zlib.compress(b"x" * 100) + b"trailing", "deflate")
+
+
+@pytest.mark.parametrize("body", [DEEP, b'{"a":' * 20_000, b"not json", b""],
+                         ids=["deep_array", "deep_object", "not_json", "empty"])  # fmt: skip
+def test_a_body_that_isnt_json_raises_value_error_however_deep(body: bytes) -> None:
+    """Every plugin decodes with `except ValueError`: a body nested past the decoder's limit raised RecursionError, an
+    unexpected error (a reconcilable create retried it into a second ServiceNow incident, 3d-2's review)."""
+    answer = HttpResponse(200, (), body)
+    with pytest.raises(ValueError) as raised:
+        answer.json()
+    assert not isinstance(raised.value, RecursionError) and "[[[" not in str(raised.value)
+
+
+def test_json_still_decodes() -> None:
+    assert HttpResponse(200, (), b'{"result": [1, [2]]}').json() == {"result": [1, [2]]}
+    nested: list[object] = []
+    for _ in range(499):
+        nested = [nested]
+    assert HttpResponse(200, (), b"[" * 500 + b"]" * 500).json() == nested  # within the decoder's limit: decoded
+
+
+async def test_a_deep_answer_through_the_guarded_client_is_a_value_error() -> None:
+    async with serve(respond(200, DEEP), tls_names=NAMES) as server:
+        http = client({"dewpoint.test": ["127.0.0.1"]})
+        try:
+            answer = await http.request("GET", f"https://dewpoint.test:{server.port}/")
+        finally:
+            await http.aclose()
+    with pytest.raises(ValueError):
+        answer.json()
