@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from dewpoint.engine.graph.validate import SubflowInfo, ValidationContext, validate
+from dewpoint.engine.graph.validate import _SENSITIVE_LITERAL, SubflowInfo, ValidationContext, validate
 from dewpoint.plugins.flow import PLUGIN
 from tests.engine.cel.support import nested_maps
 from tests.support.catalog import catalog
@@ -317,3 +317,217 @@ def test_a_sensitive_object_built_from_references_writes_no_literal() -> None:
 
     assert assigns({"user": ref("trigger.user"), "pw": ref("trigger.pw")}) == []
     assert ("sensitive.literal", "/assignments/login") in assigns({"user": "ops", "pw": ref("trigger.pw")})
+
+
+# ---- a constant a formula carries into a sensitive position (issue #79) ---------------------------------------------
+
+STRINGS = {"type": "array", "items": {"type": "string"}}
+RUN_DATA = {
+    "type": "object",
+    "properties": {
+        "tok": SECRET, "pw": SECRET, "n": {"type": "integer"}, "x": {"type": "string"}, "s": {"type": "string"},
+        "y": {"type": "string"}, "user": {"type": "string"}, "v": {"type": "string"}, "flag": {"type": "boolean"},
+        "lst": {"type": "array", "items": {"type": "object"}}, "strs": STRINGS, "obj": {"type": "object"},
+        "l": {"type": "array", "items": {"type": "integer"}}, "toks": {"type": "array", "items": SECRET},
+        "headers": {"type": "object", "additionalProperties": {"type": "string"}},
+    },
+    "required": ["tok", "pw", "n", "s", "y", "user", "v", "flag", "lst", "strs", "obj", "l", "toks", "headers"],
+}  # fmt: skip
+
+
+def refusals(g: G, **ctx: Any) -> list[str | None]:
+    """The fields refused as written secrets: other diagnostics (a type, a variable's default) aren't this rule's."""
+    return [field for code, field in diagnostics(g, **ctx) if code == "sensitive.literal"]
+
+
+def token(expr: str) -> list[str | None]:
+    g = G().node("s", SEND, {"token": cel(expr)})
+    g.settings = {"input_schema": RUN_DATA}
+    return refusals(g)
+
+
+def assigned(schema: dict[str, Any], value: Any) -> list[str | None]:
+    g = G().node("v", SET, {"assignments": {"x": value}})
+    g.settings = {"input_schema": RUN_DATA, "vars_schema": {"type": "object", "properties": {"x": schema}}}
+    return refusals(g)
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        '"Bearer " + trigger.tok',  # the issue's four
+        'trigger.n > 0 ? "s3cr3t-value" : ""',
+        'has(trigger.x) ? "s3cr3t-value" : "s3cr3t-value"',
+        'run.id != "" ? "s3cr3t-value" : ""',
+        'trigger.n > 0 ? trigger.tok : ""',  # a fallback, as a reference's default
+        "trigger.n > 0 ? trigger.tok : null",
+        '["s3cr3t-value"].map(x, x)[0] + trigger.y',
+        "string(4242) + trigger.tok",
+        'sortedKeys(google.protobuf.Struct{fields: {"s3cr3t-value": trigger.tok}})[0]',  # the fresh review's High
+    ],
+)
+def test_a_formula_carrying_a_written_constant_into_a_sensitive_position_is_refused(expr: str) -> None:
+    assert token(expr) == ["/token"]
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        'trigger.headers["Authorization"]',  # a constant key or index looks a value up
+        "trigger.toks[0]",
+        'trigger.toks.filter(x, x.startsWith("api"))[0]',  # a constant in a predicate or a condition is compared
+        'trigger.s == "api" ? trigger.tok : trigger.y',
+        '"" + trigger.tok',  # empty text writes nothing
+    ],
+)
+def test_a_formula_carrying_no_constant_into_it_publishes(expr: str) -> None:
+    assert token(expr) == []
+
+
+def test_the_refusal_quotes_nothing_the_formula_writes() -> None:
+    g = G().node("s", SEND, {"token": cel('"s3cr3t-value" + trigger.tok')})
+    g.settings = {"input_schema": RUN_DATA}
+    found = [d for d in validate(g.build(), ValidationContext(catalog=CAT)).diagnostics
+             if d.code == "sensitive.literal"]  # fmt: skip
+    assert [d.message for d in found] == [_SENSITIVE_LITERAL] and "s3cr3t" not in repr(found)
+
+
+NULLABLE_LOGIN = {**LOGIN, "default": None}
+KEYS = {"type": ["object", "null"], "propertyNames": {"x-sensitive": True}, "default": None}
+WHOLE_LOGIN = {**NULLABLE_LOGIN, "x-sensitive": True}
+
+
+@pytest.mark.parametrize(
+    ("schema", "expr", "refused"),
+    [
+        (NULLABLE_LOGIN, '{"user": "ops", "pw": trigger.pw}', False),  # a constant at a plain part
+        (NULLABLE_LOGIN, '{"user": trigger.user, "pw": "pa55-" + trigger.pw}', True),
+        ({"type": ["array", "null"], "items": SECRET, "default": None}, '[trigger.tok, "k3y-value"]', True),
+        ({"type": ["array", "null"], "items": SECRET, "default": None}, 'trigger.toks + ["k3y-value"]', True),  # lost
+        (KEYS, '{"k3y-value": trigger.v}', True),  # a written key where keys are marked
+        (KEYS, "{trigger.v: trigger.s}", False),
+        (KEYS, 'google.protobuf.Struct{fields: {"k3y-value": trigger.v}}', True),  # a Struct's fields are its keys
+        (KEYS, '{"k3y-" + trigger.v: trigger.s}', True),  # a key computed from a constant
+        (KEYS, '["k3y-value"].map(k, {k: trigger.v})[0]', True),
+        (NULLABLE_LOGIN, '{"pw": trigger.pw}', False),  # a key whose value is marked isn't sensitive for that
+        (WHOLE_LOGIN, '{"user": trigger.user, "pw": trigger.pw}', False),  # an object of reads: its keys are structure
+    ],
+)  # fmt: skip
+def test_a_carried_constant_is_refused_where_it_lands_at_a_marked_part(
+    schema: dict[str, Any], expr: str, refused: bool
+) -> None:
+    assert assigned(schema, cel(expr)) == (["/assignments/x"] if refused else [])
+
+
+WHOLE_STRINGS = {**STRINGS, "type": ["array", "null"], "x-sensitive": True, "default": None}
+WHOLE_OBJECT = {"type": ["object", "null"], "x-sensitive": True, "default": None}
+
+
+@pytest.mark.parametrize(
+    ("schema", "value", "refused"),
+    [
+        (WHOLE_STRINGS, cel("trigger.flag ? [] : trigger.strs"), True),  # written empties, as the literals are
+        (WHOLE_OBJECT, cel("trigger.flag ? {} : trigger.obj"), True),
+        (WHOLE_STRINGS, [], True),
+        (WHOLE_STRINGS, cel("trigger.strs.map(x, x)"), False),
+        (WHOLE_STRINGS, cel("[] + trigger.strs"), False),  # joined by `+`, an empty list writes nothing
+    ],
+)
+def test_a_written_empty_list_or_map_is_written(schema: dict[str, Any], value: Any, refused: bool) -> None:
+    """The owner's first plan review: `[]` and `{}` are container nodes, not constants, but written all the same."""
+    assert assigned(schema, value) == (["/assignments/x"] if refused else [])
+
+
+PW_OBJECT = {"type": ["object", "null"], "properties": {"pw": SECRET}}
+TUPLE = {"type": ["array", "null"], "prefixItems": [PW_OBJECT], "default": None}
+UNION = {
+    "anyOf": [{"type": "object", "properties": {"y": PW_OBJECT}}, {"type": "object", "properties": {"z": {}}}],
+    "default": None,
+}
+
+
+@pytest.mark.parametrize(
+    ("schema", "at"), [(TUPLE, lambda v: [v]), (UNION, lambda v: {"y": v})], ids=["tuple", "union"]
+)
+@pytest.mark.parametrize(
+    ("value", "refused"),
+    [
+        (cel('{"pw": "lit-" + trigger.s}'), True),  # a formula reading the run
+        (cel('{"pw": "lit-value"}'), True),  # one reading nothing (#76's rule)
+        (ref("trigger.obj", default={"pw": "lit-value"}), True),  # a reference's default
+        ({"$value": {"kind": "literal", "value": {"pw": "lit-value"}}}, True),  # a literal envelope
+        (cel('{"pw": trigger.pw}'), False),
+        (ref("trigger.obj"), False),
+    ],
+    ids=["read-formula", "fixed-formula", "ref-default", "literal-envelope", "read-pw", "ref"],
+)
+def test_an_envelope_nested_at_a_tuple_position_or_in_a_union_is_checked_as_written_in_place(
+    schema: dict[str, Any], at: Any, value: Any, refused: bool
+) -> None:
+    """The owner's first plan review and its siblings (ruling 6): `target_schema()` follows neither, so all four
+    published clean while the same literal written in place was refused."""
+    field = "/assignments/x/0" if schema is TUPLE else "/assignments/x/y"
+    assert assigned(schema, at(value)) == ([field] if refused else [])
+
+
+def test_a_map_of_reads_read_back_from_a_list_keeps_its_keys_structure() -> None:
+    """Its keys may be at or under the value read (`ANY, KEY`): checked against keys a schema marks, never as values."""
+    assert assigned(WHOLE_OBJECT, cel('trigger.lst.map(x, {"pw": trigger.pw})[0]')) == []
+
+
+WHOLE_OBJECTS = {"type": ["array", "null"], "items": {"type": "object"}, "x-sensitive": True, "default": None}
+PW_ITEMS = {"type": ["array", "null"], "items": PW_OBJECT, "default": None}
+KEY_ITEMS = {"type": ["array", "null"], "items": {"type": "object", "propertyNames": {"x-sensitive": True}},
+             "default": None}  # fmt: skip
+
+
+@pytest.mark.parametrize("schema", [WHOLE_OBJECTS, PW_ITEMS], ids=["whole", "pw-items"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        cel('[{"pw": trigger.pw}] + [{"pw": trigger.pw}]'),
+        cel('trigger.lst.map(x, {"pw": trigger.pw})'),
+        cel('[{"pw": trigger.pw}].filter(x, true)'),
+        cel('trigger.lst.map(x, {"pw": trigger.pw}).map(y, y)'),
+        [{"pw": ref("trigger.pw")}],  # the written list of references
+    ],
+)
+def test_maps_of_reads_stay_structure_where_their_path_is_lost(schema: dict[str, Any], value: Any) -> None:
+    """The owner's second plan review: a key keeps being a key through concatenation and the macros."""
+    assert assigned(schema, value) == []
+
+
+@pytest.mark.parametrize(
+    ("schema", "expr"),
+    [
+        (KEY_ITEMS, 'trigger.lst.map(x, {"k3y-value": trigger.v})'),  # a written key where the items mark keys
+        (KEY_ITEMS, '[google.protobuf.Struct{fields: {"k3y-value": trigger.v}}]'),
+        (WHOLE_OBJECTS, '["x"].map(i, {"s3cr3t-value": trigger.v})[0].map(k, k)'),  # a written key, iterated: a value
+        (WHOLE_OBJECTS, 'sortedKeys({"s3cr3t-value": trigger.v})'),
+    ],
+)
+def test_a_written_key_is_refused_where_keys_are_marked_or_once_it_becomes_a_value(
+    schema: dict[str, Any], expr: str
+) -> None:
+    assert assigned(schema, cel(expr)) == ["/assignments/x"]
+
+
+def test_a_written_key_beside_a_reference_is_refused_where_keys_are_marked() -> None:
+    """Ruling 7: a reference stands for a value, never for the key written beside it."""
+    assert assigned(KEYS, {"k3y-value": ref("trigger.v")}) == ["/assignments/x"]  # the map whose keys are written
+
+
+BOOLEAN = {"type": ["boolean", "null"], "x-sensitive": True, "default": None}
+
+
+def test_a_macros_own_start_isnt_written_but_a_boolean_the_author_writes_is() -> None:
+    assert assigned(BOOLEAN, cel("trigger.l.all(x, x > 0)")) == []
+    assert assigned(BOOLEAN, cel("trigger.n > 0 ? true : false")) == ["/assignments/x"]
+
+
+def test_a_carried_constant_into_a_sub_flows_sensitive_input_is_refused() -> None:
+    child = uuid.UUID(int=9)
+    info = SubflowInfo(child, uuid.UUID(int=10), {"type": "object", "properties": {"key": SECRET}}, {"type": "object"})
+    g = G().node("r", RUN, {"workflow_id": str(child), "input": {"key": cel('"Bearer " + trigger.tok')}})
+    g.settings = {"input_schema": RUN_DATA}
+    assert refusals(g, subflows={child: info}) == ["/input/key"]

@@ -201,9 +201,12 @@ change, with its fix:
 - **A computed key or index into trigger or step data** (`trigger.rows[i]`, `m[k]` with `k` computed) runs in the
   evaluator. Fix: read static paths where the expression should stay in the workflow.
 - **A literal or a default at a sensitive position** is refused, null and `""` included: a node's config, a reference's
-  or a template's default, an assignment to a sensitive variable, a sub-flow's sensitive input field
-  (`sensitive.literal`), and a `default` at a sensitive position of the input or variables schema
-  (`sensitive.default`). Fix: pass the secret in the run's input, in a field marked `x-sensitive`.
+  or a template's default, a template's text (a `Bearer ` prefix too), a formula that reads nothing or carries a
+  constant it writes into the sensitive part (`"Bearer " + trigger.tok`, `trigger.n > 0 ? trigger.tok : ""`), an
+  assignment to a sensitive variable, a sub-flow's sensitive input field (`sensitive.literal`), and a `default` at a
+  sensitive position of the input or variables schema (`sensitive.default`). A constant a formula only compares or
+  looks up with (`trigger.kind == "api"`, `trigger.headers["Authorization"]`) isn't written. Fix: pass the secret in
+  the run's input, in a field marked `x-sensitive`.
 - **Sensitive data that would leave a run in plain text** is refused: a timer computed from it (`taint.timer`), a
   `fail` node's message built from it (`taint.fail_message`), or a sub-flow input field the child doesn't mark
   sensitive (`taint.subflow_input`). Fix: compute timers and messages from plain data; mark the child's field

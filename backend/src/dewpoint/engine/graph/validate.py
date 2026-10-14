@@ -15,6 +15,7 @@ from jsonschema.exceptions import SchemaError
 
 from dewpoint.engine.cel import ast as cel_ast
 from dewpoint.engine.cel import runtime as cel_runtime
+from dewpoint.engine.cel import written
 from dewpoint.engine.cel.record import ExpressionRecord
 from dewpoint.engine.graph import cel_check
 from dewpoint.engine.graph import liveness as lv
@@ -68,12 +69,16 @@ from dewpoint.engine.registry.catalog import Catalog, NodeTypeSpec, marked_below
 from dewpoint.engine.schema_refs import PREFIX as REF_PREFIX
 from dewpoint.engine.schema_refs import ref_problems, subschemas
 from dewpoint.engine.sensitive import (
+    ITEM,
     SENSITIVE,
+    VALUE,
+    Part,
     expand,
     is_marked,
-    keys_sensitive,
-    map_values,
+    keys_marked,
     marked_positions,
+    marked_positions_at,
+    may_hold_marked,
     resolve,
 )
 from dewpoint.engine.taint import CLEAN, TAINTED, Shape, from_schema, make
@@ -360,56 +365,51 @@ def _declassify(
 _RUN_ROOTS = frozenset((*cel_check.ROOTS, *cel_check.ITEM_ROOTS))
 
 
-def _reads_nothing(expr: str) -> bool:
-    """Whether a CEL expression reads no run data: none of its free identifiers is a root (a comprehension's own
-    variable isn't free, and `string` or `int` is a built-in type). fn-1 is pure, so it gives the same value every
-    run, written into the workflow as a literal would be. One that doesn't parse is reported where it's checked."""
+def _cel_writes(expr: str, root: Mapping[str, Any], pointer: Pointer) -> bool:
+    """Whether a CEL expression writes a fixed value at a part the schema marks (§3.8). One that reads no run data
+    (none of its free identifiers is a root: a comprehension's own variable isn't free, and `string` or `int` is a
+    built-in type) gives the same value every run, fn-1 being pure: written into the workflow as a literal would be,
+    refused wherever the caller found a part could be marked. One that reads the run is refused where a constant it
+    writes may land at a marked part (`written.reaching`, issue #79). One that doesn't parse is reported where it's
+    checked."""
     try:
         parsed = cel_runtime.parse(expr)
     except cel_runtime.CompileError:
         return False
     names = cel_ast.global_idents(parsed.expr)
-    return not any(n.lstrip(".").split(".")[0] in _RUN_ROOTS for n in names)  # `.trigger`: the root, named from the top
+    if not any(n.lstrip(".").split(".")[0] in _RUN_ROOTS for n in names):  # `.trigger`: the root, named from the top
+        return True
+    return any(_lands_marked(root, pointer, p) for p in written.reaching(parsed.expr))
 
 
-def _holds_marked(schema: Mapping[str, Any]) -> bool:
-    """Whether a standalone schema can mark a part of its instances sensitive, by the rules a literal is checked with
-    (`marked_positions`): behind a local `$ref`, in a union's branch, under a property, a pattern,
-    `additionalProperties`, `items` or a tuple position, or a map whose keys are. Other keywords (`not`, `if`, a
-    definition nothing reaches) mark nothing."""
-    seen: set[int] = set()
-    stack: list[Any] = [schema]
-    while stack:
-        node = stack.pop()
-        if id(node) in seen:
-            continue
-        seen.add(id(node))
-        branches = expand(node, schema)
-        if any(b.get(SENSITIVE) is True for b in branches) or keys_sensitive(branches, schema):
-            return True
-        stack += map_values(branches)
-        for b in branches:
-            props, prefix = b.get("properties"), b.get("prefixItems")
-            stack += list(props.values()) if isinstance(props, Mapping) else []
-            stack += prefix if isinstance(prefix, list) else []
-            stack += [b["items"]] if isinstance(b.get("items"), Mapping) else []
-    return False
+def _lands_marked(root: Mapping[str, Any], pointer: Pointer, position: written.Position) -> bool:
+    """Whether a constant at `position` of the value written at `pointer` may land at a part the schema marks: a value
+    at or under a marked part (at `ITEM` or `VALUE`, under any part it may be), a key where its map's keys are marked,
+    anything where a part may be marked (`written.Position` names the forms)."""
+    at: tuple[Part, ...] = tuple(pointer)
+    for part in position:
+        if part is written.Wild.KEY:
+            return keys_marked(root, at)
+        if part is written.Wild.ANY:
+            return may_hold_marked(root, at)
+        at = (*at, ITEM if part is written.Wild.ITEM else VALUE if part is written.Wild.VALUE else part)
+    return is_marked(root, at)
 
 
-def _writes_sensitive(
-    value: Value, root: Mapping[str, Any], pointer: Pointer, target: Mapping[str, Any] | None
-) -> bool:
-    """Whether a value envelope writes a literal at a sensitive position (§3.8): the literal itself or a reference's
-    default, at it or holding a part the target schema marks; a template's default or text (all of it, without a
-    reference); a CEL expression that reads nothing, wherever the target marks a part, since publish can't tell which
-    parts it writes. Null and the empty string are written too; empty text beside a reference writes nothing."""
+def _writes_sensitive(value: Value, root: Mapping[str, Any], pointer: Pointer) -> bool:
+    """Whether a value envelope writes a literal at a sensitive position (§3.8), read from the config's root as a
+    literal written in place is (a tuple position, a union's branches, a pattern, a local `$ref`; never one resolved
+    subschema, which those defeat): the literal itself or a reference's default, at it or holding a part the schema
+    marks; a template's default or text (all of it, without a reference); a CEL expression that writes a fixed value
+    where it may land at a marked part (`_cel_writes`). Null and the empty string are written too; empty text beside a
+    reference writes nothing."""
     marked = is_marked(root, pointer)
     if isinstance(value, LiteralValue):
-        return marked or bool(target is not None and marked_positions(value.value, target))
+        return marked or bool(marked_positions_at(value.value, root, pointer))
     if isinstance(value, RefValue):
-        return value.has_default and (marked or bool(target is not None and marked_positions(value.default, target)))
+        return value.has_default and (marked or bool(marked_positions_at(value.default, root, pointer)))
     if isinstance(value, CelValue):
-        return (marked or (target is not None and _holds_marked(target))) and _reads_nothing(value.expr)
+        return may_hold_marked(root, pointer) and _cel_writes(value.expr, root, pointer)
     refs = [p for p in value.parts if isinstance(p, TemplateRef)]
     text = "".join(p for p in value.parts if isinstance(p, str))
     return marked and (not refs or bool(text) or any(p.default is not None for p in refs))
@@ -901,7 +901,7 @@ class _Validator:
                 fld=site.field,
             )
             return None
-        if root is not None and _writes_sensitive(value, root, pointer, target):
+        if root is not None and _writes_sensitive(value, root, pointer):
             self.err("sensitive.literal", _SENSITIVE_LITERAL, node=site.node, fld=site.field)
         out: Resolved | None
         if isinstance(value, LiteralValue):

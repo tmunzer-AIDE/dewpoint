@@ -20,7 +20,7 @@ from dewpoint.plugins.mist.schemas import secret_name
 from dewpoint.sdk import FatalError, Node, SideEffect, node_manifest
 from tests.plugins.mist.fakes import ORG, OTHER_ORG, SITE, FakeConnection, FakeHttp, FakeStep, Reply
 from tests.support.catalog import catalog
-from tests.support.graphs import G
+from tests.support.graphs import G, cel
 
 WLAN = "7b2c4d6e-8f10-4a2b-9c3d-4e5f6a7b8c9d"
 
@@ -210,6 +210,44 @@ def test_a_generic_writes_secret_named_fields_are_sensitive_at_any_depth(
     assert [d.field for d in found] == marked
     assert config_secrets(raw, schema) == sorted({v for v in ("LiteralSecret123", "x1234", "t0k3n-value")
                                                   if v in repr(body)})  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("body", "refused"),
+    [
+        ('{"ssid": "corp", "passphrase": trigger.psk}', False),  # a constant at a plain field writes nothing secret
+        ('{"ssid": trigger.s, "passphrase": "psk-" + trigger.psk}', True),  # a prefix written at the secret one
+        ('{"ssid": "corp", "auth": {"type": "psk", "psk": trigger.psk}}', False),
+        ('{"ssid": "corp", "auth": {"type": "psk", "psk": trigger.psk + "-v2"}}', True),
+        # the fresh review's Medium: an element's place is kept where its index is lost, so a list built by a macro
+        # or a concatenation is checked part by part, as the written list is
+        ('{"ssid": "corp", "wlans": trigger.lst.map(x, {"name": "corp-" + x.name, "psk": x.psk})}', False),
+        ('{"ssid": "corp", "vlan_ids": [1, 2] + [trigger.n]}', False),
+        ('{"ssid": "corp", "wlans": trigger.lst.map(x, {"name": x.name, "psk": "psk-" + x.psk})}', True),
+        (
+            '{"ssid": "corp", "passphrase": sortedKeys(google.protobuf.Struct{fields: {"s3cr3t-value": trigger.s}})'
+            "[0]}",
+            True,
+        ),  # fmt: skip
+    ],
+)
+def test_a_formula_body_is_refused_only_where_its_constant_lands_at_a_secret_field(body: str, refused: bool) -> None:
+    """Issue #79: a body built by a formula is checked part by part, as a written body is: a constant at `ssid` is
+    fine, one carried into `passphrase` or `auth.psk` isn't."""
+    raw = {"connection": str(uuid.uuid4()), "method": "POST", "path": f"/api/v1/orgs/{ORG}/psks", "body": cel(body)}
+    g = G().node("a", "mist.api.write@1", raw)
+    secret = {"type": "string", "x-sensitive": True}
+    wlan = {"type": "object", "properties": {"name": {"type": "string"}, "psk": secret}, "required": ["name", "psk"]}
+    run_data = {
+        "psk": secret,
+        "s": {"type": "string"},
+        "n": {"type": "integer"},
+        "lst": {"type": "array", "items": wlan},
+    }
+    g.settings = {"input_schema": {"type": "object", "properties": run_data, "required": ["psk", "s", "n", "lst"]}}
+    found = [d.field for d in validate(g.build(), ValidationContext(catalog=catalog(PLUGIN))).diagnostics
+             if d.code == "sensitive.literal"]  # fmt: skip
+    assert found == (["/body"] if refused else [])
 
 
 def test_the_body_marks_every_secret_named_field_mist_uses() -> None:
