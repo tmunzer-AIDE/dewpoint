@@ -7,7 +7,9 @@ from typing import Any
 
 from sqlalchemy import text
 
-PROFILE = "cel-cpp-0.1.3/fn-1/cls-1"
+from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
+
+PROFILE = CURRENT_CEL_PROFILE  # routed like a published version (route.py compares it with LOCAL_CEL_PROFILE)
 
 
 async def seed_workflow(

@@ -3,7 +3,7 @@ name = "dewpoint"
 version = "0.1.0"
 description = "Multi-tenant no-code automation for Juniper Mist"
 license = "Apache-2.0"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"
 dependencies = [
   "fastapi>=0.115",
   "uvicorn[standard]>=0.32",
@@ -20,7 +20,7 @@ dependencies = [
   "typer>=0.13",
   "structlog>=24.4",
   "jsonschema>=4.23",
-  "cel-expr-python==0.1.3",
+  "cel-expr-python==0.1.3+dewpoint.1",
   "protobuf>=7.35.1,<8",
   "temporalio==1.33.0",
   "ahocorasick-rs>=0.22",
@@ -63,6 +63,23 @@ dev = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# CPython 3.12 on three platforms only: the patched CEL runtime (deploy/cel-runtime) ships cp312 wheels for these, and
+# nothing else. uv 0.13 locks per-platform URL sources this way, and writes the lock's format.
+[tool.uv]
+required-version = ">=0.13"
+environments = [
+  "sys_platform == 'linux' and platform_machine == 'x86_64'",
+  "sys_platform == 'linux' and platform_machine == 'aarch64'",
+  "sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+
+[tool.uv.sources]
+cel-expr-python = [
+  { url = "https://github.com/tmunzer-AIDE/dewpoint/releases/download/cel-expr-python-0.1.3-dewpoint.1/cel_expr_python-0.1.3%2Bdewpoint.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+  { url = "https://github.com/tmunzer-AIDE/dewpoint/releases/download/cel-expr-python-0.1.3-dewpoint.1/cel_expr_python-0.1.3%2Bdewpoint.1-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+  { url = "https://github.com/tmunzer-AIDE/dewpoint/releases/download/cel-expr-python-0.1.3-dewpoint.1/cel_expr_python-0.1.3%2Bdewpoint.1-cp312-cp312-macosx_11_0_arm64.whl", marker = "sys_platform == 'darwin' and platform_machine == 'arm64'" },
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/dewpoint"]

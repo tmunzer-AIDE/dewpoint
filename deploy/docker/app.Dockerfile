@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Base image note: no distroless image ships Python >= 3.12 on a supported Debian yet; this is slim, non-root,
 # without build tools, and meant to run with a read-only root filesystem. Revisit for distroless.
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS build
+FROM python:3.12-slim-bookworm AS build
+# uv 0.13 reads the lock's format (backend/pyproject.toml's required-version); astral's bookworm images stopped
+# at 0.9, so the binary is copied in, pinned, onto the runtime stage's own base.
+COPY --from=ghcr.io/astral-sh/uv:0.13.0@sha256:cdc6093146eb3ff6a40107b38f008b789e050e77ad87865e381d9917da55a168 /uv /uvx /bin/
 WORKDIR /app
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
 COPY backend/pyproject.toml backend/uv.lock ./

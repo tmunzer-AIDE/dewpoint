@@ -56,6 +56,9 @@ One evaluator serves one CEL profile. Keep an evaluator for a profile running wh
 workflow version uses it (`docs/operations/plugin-lifecycle.md`). A request for another profile fails closed
 (`profile_mismatch`, then the step's error is `cel_profile_unavailable`); no other profile ever evaluates it.
 
+A profile names its runtime build. The current one, `cel-cpp-0.1.3+dewpoint.1/fn-1/cls-1`, runs a patched
+`cel-expr-python` 0.1.3, built from `deploy/cel-runtime/`.
+
 ## Outcomes
 
 Every evaluation ends in a value or a recorded outcome, never a retry: `timeout`, `cpu_limit`, `memory_limit`,

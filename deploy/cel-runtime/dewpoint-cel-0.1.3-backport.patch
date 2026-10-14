@@ -1,0 +1,74 @@
+diff --git a/cel_expr_python/py_cel_function.cc b/cel_expr_python/py_cel_function.cc
+index c4e7a63..5f246c4 100644
+--- a/cel_expr_python/py_cel_function.cc
++++ b/cel_expr_python/py_cel_function.cc
+@@ -95,12 +95,16 @@ absl::StatusOr<cel::Value> PyCelFunctionAdapter::Invoke(
+                                        /*plain_value=*/true));
+   }
+   PyObject* result = PyObject_CallObject(py_function_.ptr(), py_args);
++  // Dewpoint backport of upstream 4e644476: release the argument tuple and the
++  // result, which 0.1.3 kept alive for the life of the process.
++  Py_DECREF(py_args);
+   absl::Status status = PyErr_toStatus();
+   if (!status.ok()) {
++    Py_XDECREF(result);
+     return cel::ErrorValue(status);
+   }
+ 
+-  return PyObjectToCelValue(
++  absl::StatusOr<cel::Value> cel_result = PyObjectToCelValue(
+       result, return_type_,
+       [this]() {
+         return absl::StrFormat(
+@@ -108,6 +112,8 @@ absl::StatusOr<cel::Value> PyCelFunctionAdapter::Invoke(
+             PyUnicode_AsUTF8(PyObject_Repr(py_function_.ptr())));
+       },
+       env, context.arena());
+-};
++  Py_XDECREF(result);
++  return cel_result;
++}
+ 
+ }  // namespace cel_python
+diff --git a/cel_expr_python/py_cel_value.cc b/cel_expr_python/py_cel_value.cc
+index 131de8d..d6cc1d1 100644
+--- a/cel_expr_python/py_cel_value.cc
++++ b/cel_expr_python/py_cel_value.cc
+@@ -267,6 +267,9 @@ PyObject* CelValueToPyObject(const cel::Value& cel_value,
+                              bool plain_value) {
+   switch (cel_value.kind()) {
+     case cel::ValueKind::kNull: {
++      // Dewpoint backport of upstream 4e644476: callers own the returned
++      // reference (PyTuple_SetItem and PyList_SetItem steal it).
++      Py_INCREF(Py_None);
+       return Py_None;
+     }
+     case cel::ValueKind::kBool: {
+diff --git a/cel_expr_python/py_error_status.cc b/cel_expr_python/py_error_status.cc
+index 83e03b9..6a2ae44 100644
+--- a/cel_expr_python/py_error_status.cc
++++ b/cel_expr_python/py_error_status.cc
+@@ -18,6 +18,7 @@
+ #include <Python.h>  // IWYU pragma: keep - Needed for PyObject
+ 
+ #include <stdexcept>
++#include <string>
+ 
+ #include "absl/base/no_destructor.h"
+ #include "absl/container/flat_hash_map.h"
+@@ -44,8 +45,14 @@ static absl::Status PyErrorToStatus(PyObject* py_type, PyObject* py_error) {
+            {PyExc_ValueError, absl::StatusCode::kOutOfRange},
+            {PyExc_LookupError, absl::StatusCode::kNotFound},
+            {PyExc_OverflowError, absl::StatusCode::kOutOfRange}});
++  // Dewpoint change (not upstream): copy the message before releasing pystr,
++  // which owns the UTF-8 buffer; 0.1.3 read it after the release.
+   PyObject* pystr = PyObject_Str(py_error);
+-  const char* message = pystr ? PyUnicode_AsUTF8(pystr) : "Unknown error";
++  const char* utf8 = pystr ? PyUnicode_AsUTF8(pystr) : nullptr;
++  if (utf8 == nullptr) {
++    PyErr_Clear();  // str() or its UTF-8 encoding failed; keep no new error
++  }
++  const std::string message = utf8 ? utf8 : "Unknown error";
+   Py_XDECREF(pystr);
+ 
+   auto it = kPyExceptionToStatusMap->find(py_type);

@@ -3,6 +3,8 @@
 - Sign off every commit (Developer Certificate of Origin): `git commit -s`.
 - Every source file starts with an SPDX header: `# SPDX-License-Identifier: Apache-2.0`
   (or `// SPDX-License-Identifier: Apache-2.0` in TypeScript).
+- The backend runs on CPython 3.12 only, with uv 0.13 or newer: its CEL runtime is a patched build with wheels for
+  Linux x86_64 and aarch64 and macOS arm64 (`deploy/cel-runtime/README.md`).
 - Backend: `cd backend && uv run ruff check . && uv run mypy src && uv run lint-imports && uv run pytest`
   (tests need a running Docker daemon for the PostgreSQL test container). Locally, one test worker per core is
   faster: `uv run pytest -n auto --ignore=tests/apps/cel_evaluator && uv run pytest tests/apps/cel_evaluator`.
