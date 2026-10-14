@@ -157,6 +157,8 @@ NODE_TYPE_UNAVAILABLE = "node_type_unavailable"  # the registry has it, but this
 CANCELLED = Failure("cancelled", "The run was cancelled.")
 AMBIGUOUS = "ambiguous"  # a manifest's side_effect: the request may have been sent
 CONTINUE = "continue"  # `_drive`'s answer when the execution continues-as-new
+YIELD_TIMER_S = 0.001  # the durable timer that ends a workflow task once its budget is spent (spec §5.6)
+CANCEL_PENDING_YIELD = "cancel-pending-yield"  # the patch that cancels it as an execution closes (#16, ENGINE_ABI 8)
 CLAIM_REFUSED = "A claim this run may not read, or that doesn't exist."
 INPUT_INVALID = "input_invalid"  # a sub-flow's input that doesn't match its schema, found where it's resolved
 SPILLS = uuid.UUID("2b1b5e11-0000-4000-8000-000000000522")  # spilled values' claim ids: from where they were spilled
@@ -454,7 +456,7 @@ class Execution:
                 cut: list[asyncio.Task[None]] = []
                 if self.sched.queued_left():  # the take was cut short: the rest in the next workflow task
                     if self._yield_timer is None or self._yield_timer.done():
-                        self._yield_timer = asyncio.create_task(asyncio.sleep(0.001))
+                        self._yield_timer = asyncio.create_task(asyncio.sleep(YIELD_TIMER_S))
                     cut.append(self._yield_timer)
                 done, _ = await workflow.wait([*tasks.values(), clock, wake, *cut], return_when=asyncio.FIRST_COMPLETED)
                 wake.cancel()
@@ -1346,7 +1348,7 @@ class Execution:
             if not self._task_budget().must_yield(record, send=send, structure=structure, whole=whole):
                 return
             if self._yield_timer is None or self._yield_timer.done():
-                self._yield_timer = asyncio.create_task(asyncio.sleep(0.001))
+                self._yield_timer = asyncio.create_task(asyncio.sleep(YIELD_TIMER_S))
             await asyncio.shield(self._yield_timer)
 
     async def _send(self, value: Any) -> None:
@@ -1361,7 +1363,19 @@ class Execution:
     async def _returned[R](self, result: R) -> R:
         """The execution's result, paced as a command is: it goes out with its workflow task's completion."""
         await self._send(result)
+        self._closing()
         return result
+
+    def _closing(self) -> None:
+        """The execution closes in this workflow task (its result, its continue-as-new or its failure goes out), and
+        yields no more: a yield timer still pending is cancelled with it. Units share that timer and race it, so one's
+        result can win and the execution carry on to its close, the timer never awaited; were it to fire while the
+        closing task is in flight, Temporal would refuse the close (UNHANDLED_COMMAND, #16's extra failure), and a
+        cancel in the same completion drops the fire. Versioned (`workflow.patched`): a history recorded without the
+        cancel replays as it ran (ENGINE_ABI 8)."""
+        timer = self._yield_timer
+        if timer is not None and not timer.done() and workflow.patched(CANCEL_PENDING_YIELD):
+            timer.cancel()
 
     def _charge_sent(self, value: Any) -> None:
         """A payload this workflow task records without sending it as a command: a local activity's result."""

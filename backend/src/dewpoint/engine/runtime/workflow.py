@@ -213,6 +213,7 @@ class RunGraph(Execution):
                 continued = replace(start, snapshot=await self._snapshot(), iterations=self.sched.iterations)
                 if snapshot_fits(continued, workflow.payload_converter()):
                     await self._send(continued)
+                    self._closing()
                     workflow.continue_as_new(continued)
                 # engine 2b spec §5.3: too large to carry on, the run ends here, cleanly (2b-1b bounds the state)
                 self.sched.end(RunEnd("failed", Failure(SNAPSHOT_TOO_LARGE, RUN_SNAPSHOT_TOO_LARGE)))
@@ -239,6 +240,7 @@ class RunGraph(Execution):
             # failure stands, or the task's completion is refused and a replay that doesn't raise takes the run's own
             # path. Whoever sees the execution close records its end: the reconciler, a sub-run's parent.
             counted = {"iterations": _counted(self, start.iterations)}  # its end shows no zero for work it used
+            self._closing()
             raise ApplicationError(message, counted, type=INTERNAL_ERROR, non_retryable=True) from None
         ended = workflow.now()  # the end is decided: whatever follows, it stands
         pin = self._handler_pin(data) if end.status in HANDLED and target is None else None  # none for one step
@@ -545,6 +547,7 @@ class LoopBatch(Execution):
                 )
                 if snapshot_fits(continued, workflow.payload_converter()):
                     await self._send(continued)
+                    self._closing()
                     workflow.continue_as_new(continued)
                 # engine 2b spec §5.3: too large to carry on, the batch ends here and its loop fails
                 stopped = Failure(SNAPSHOT_TOO_LARGE, BATCH_SNAPSHOT_TOO_LARGE).to_json()
@@ -558,6 +561,7 @@ class LoopBatch(Execution):
         except Exception as e:
             workflow.logger.error("batch_internal_error", extra=_bug(e))
             message = f"The batch failed ({type(e).__name__}); the worker's log has the details."
+            self._closing()
             raise ApplicationError(message, type=INTERNAL_ERROR, non_retryable=True) from None  # in this task, as a run
         await self._project_end(None)
         return await self._returned(self._result(self.sched.ended))

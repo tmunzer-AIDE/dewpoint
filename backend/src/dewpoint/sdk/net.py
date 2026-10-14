@@ -126,7 +126,7 @@ class HttpResponse(Protocol):
 
     def header(self, name: str) -> str | None: ...
 
-    def json(self) -> Any: ...
+    def json(self) -> Any: ...  # ValueError when the body isn't JSON, however deeply it nests
 
 
 class HttpClient(Protocol):

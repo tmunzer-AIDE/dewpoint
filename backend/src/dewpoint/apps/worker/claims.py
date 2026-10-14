@@ -20,7 +20,7 @@ from typing import Any, Protocol, cast
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from dewpoint.apps.inputs import FORGED, reasons
+from dewpoint.apps.inputs import FORGED, TOO_DEEP, nests_too_deep, reasons
 from dewpoint.core.claims.secret_index import SECRET_INDEX_LIMIT, Index, SecretIndexLimitError
 from dewpoint.core.claims.service import CLAIM_UNAVAILABLE, ClaimUnavailableError, NewClaim
 from dewpoint.engine.canonical import canonical_json
@@ -29,12 +29,14 @@ from dewpoint.engine.cel import ipc
 from dewpoint.engine.cel import types as T
 from dewpoint.engine.cel.bind import BindingError, bind_item, check_json
 from dewpoint.engine.cel.record import ExpressionRecord
+from dewpoint.engine.graph.model import MAX_DEPTH
 from dewpoint.engine.handles import (
     MISSING,
     NESTING_MAX,
     RESERVED,
     ClaimRef,
     Fetch,
+    InputTooDeepError,
     NestingError,
     StoredClaim,
     contains_marker,
@@ -750,10 +752,16 @@ async def child_input(data: ChildInput, store: ClaimStore) -> ChildInputResult:
         raise ApplicationError(NO_CHILD_VERSION, type=VERSION_UNUSABLE, non_retryable=True)
     seed = uuid.uuid5(_INPUTS, data.child_run_id)
     made = _Reclassified(seed, uuid.UUID(data.child_run_id), uuid.UUID(data.root_run_id))
+    if nests_too_deep(data.value, handles=True):  # the envelope's own depth first, before any read (issue #88)
+        return ChildInputResult(reasons=[TOO_DEEP])
     try:
         held, closure = await _walked(store, tenant, run, data.value)  # read once: checked, granted below
         fetch = _from(held, _fetcher(store, tenant, run))
-        refused = reasons(schema, (await resolve_value(data.value, fetch)).value)
+        try:  # bounded through every claim it reads: a chain of shallow ones, or one deep (issue #88)
+            resolved = await resolve_value(data.value, fetch, max_depth=MAX_DEPTH)
+        except InputTooDeepError:
+            return ChildInputResult(reasons=[TOO_DEEP])
+        refused = reasons(schema, resolved.value)
         if refused:
             return ChildInputResult(reasons=refused)
         value = await _reclassify(data.value, from_schema(schema), fetch, made)

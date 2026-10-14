@@ -11,13 +11,15 @@ from typing import Any
 import pytest
 from sqlalchemy import text
 
+from dewpoint.apps.inputs import TOO_DEEP
 from dewpoint.core.claims import service as claims
 from dewpoint.core.claims.cipher import ClaimCipher
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.runs import service as runs
-from dewpoint.engine.handles import StoredClaim, resolve_value
+from dewpoint.engine.handles import ClaimRef, StoredClaim, resolve_value
 from tests.apps.api.helpers import member_client
-from tests.apps.test_admission import KEYS, TOKEN, admit, count, current, published
+from tests.apps.test_admission import KEYS, OPEN_GRAPH, TOKEN, admit, count, current, published
+from tests.apps.test_inputs import objects
 from tests.apps.test_workflow_ops import update
 from tests.support.graphs import G
 
@@ -460,3 +462,88 @@ async def test_a_reruns_new_input_is_validated_as_any_start(keyed_app, ready, ow
         headers={"Idempotency-Key": "r1"},
     )  # fmt: skip
     assert (answer.status_code, answer.json()["error"]) == (422, "input_invalid")
+
+
+async def test_an_input_nested_past_64_levels_is_422_with_the_fixed_reason(
+    keyed_app, ready, owner_sessionmaker, api_settings
+) -> None:
+    """Issue #88: the depth is checked first, so the refusal says so whatever the schema would have said."""
+    ctx, wf = ready
+    client = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx)
+    deep = {"token": TOKEN, "n": objects(64)}  # 65 levels
+    answer = await client.post(
+        runs_url(ctx, wf), json={"input": deep, "mode": "live"}, headers={"Idempotency-Key": "d"}
+    )
+    assert (answer.status_code, answer.json()) == (422, {"error": "input_invalid", "messages": [TOO_DEEP]})
+    old = await started_request(client, ctx, wf)
+    answer = await client.post(f"/api/v1/t/{ctx.tenant_id}/runs/{old['id']}/rerun", json={"input": deep},
+                               headers={"Idempotency-Key": "r1"})  # fmt: skip
+    assert (answer.status_code, answer.json()) == (422, {"error": "input_invalid", "messages": [TOO_DEEP]})
+
+
+@pytest.fixture
+async def permissive(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings
+) -> Any:
+    ctx, wf = await published(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, OPEN_GRAPH)
+    await current(dispatch_sessionmaker)
+    return ctx, wf
+
+
+def rerun_url(ctx: Any, request_id: str) -> str:
+    return f"/api/v1/t/{ctx.tenant_id}/runs/{request_id}/rerun"
+
+
+async def kept(owner: Any, request_id: str) -> list[Any]:
+    """What a request keeps of its input: its row's envelope id and its `run_inputs` rows, as stored."""
+    async with owner() as s:
+        row = (await s.execute(text("select envelope_id, status from run_requests where id = :r"),
+                               {"r": request_id})).one()  # fmt: skip
+        inputs = (await s.execute(text("select id, ciphertext from run_inputs where owner_run_id = :r order by id"),
+                                  {"r": request_id})).all()  # fmt: skip
+    return [tuple(row), [tuple(i) for i in inputs]]
+
+
+@pytest.mark.parametrize("levels", [65, 300])
+async def test_a_rerun_of_an_input_kept_past_the_limit_is_refused_and_a_new_input_recovers_it(
+    keyed_app, permissive, owner_sessionmaker, api_settings, monkeypatch, levels: int
+) -> None:
+    """Issue #88, ruling 4: an input admission kept before the limit (admitted here with the depth check off, as it
+    was) is rebuilt for a re-run and refused with the reason; a re-run given a new input proceeds; the original
+    request and what it keeps are untouched."""
+    ctx, wf = permissive
+    client = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx)
+    with monkeypatch.context() as before:
+        for module in ("dewpoint.apps.inputs", "dewpoint.apps.admission"):  # every place admission reads it
+            before.setattr(f"{module}.nests_too_deep", lambda value, **_: False)
+        old = await client.post(runs_url(ctx, wf), json={"input": objects(levels), "mode": "live"},
+                                headers={"Idempotency-Key": "old"})  # fmt: skip
+    assert old.status_code == 202, old.text
+    original = await kept(owner_sessionmaker, old.json()["id"])
+    answer = await client.post(rerun_url(ctx, old.json()["id"]), json={}, headers={"Idempotency-Key": "r1"})
+    assert (answer.status_code, answer.json()) == (422, {"error": "input_invalid", "messages": [TOO_DEEP]})
+    answer = await client.post(rerun_url(ctx, old.json()["id"]), json={"input": {"site": "b"}},
+                               headers={"Idempotency-Key": "r2"})  # fmt: skip
+    assert answer.status_code == 202, answer.text
+    assert await kept(owner_sessionmaker, old.json()["id"]) == original
+
+
+async def test_a_rerun_rebuilding_a_kept_claim_too_deep_to_resolve_is_refused_with_the_reason(
+    keyed_app, permissive, owner_sessionmaker, api_sessionmaker, api_settings
+) -> None:
+    """The rebuild is bounded whatever the store holds (ruling 2a): the kept root claim resealed with 2,000 levels (no
+    admission could have kept it: its split failed past 497) raised RecursionError there, which escaped the route as a
+    500 (`key_unusable` re-raises what isn't a key's failure)."""
+    ctx, wf = permissive
+    client = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx)
+    old = (await client.post(runs_url(ctx, wf), json={"input": {"site": "a"}, "mode": "live"},
+                             headers={"Idempotency-Key": "old"})).json()  # fmt: skip
+    ref = ClaimRef.of(await envelope_of(api_sessionmaker, ctx, old["id"]))  # undeclared: the root kept as a claim
+    assert ref is not None
+    sealed = await ClaimCipher(KEYS).seal(str(ctx.tenant_id), ref.id, claims._plain(objects(2_000)))
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(
+            text("update run_inputs set ciphertext = :c where id = :i"), {"c": sealed, "i": uuid.UUID(ref.id)}
+        )
+    answer = await client.post(rerun_url(ctx, old["id"]), json={}, headers={"Idempotency-Key": "r1"})
+    assert (answer.status_code, answer.json()) == (422, {"error": "input_invalid", "messages": [TOO_DEEP]})

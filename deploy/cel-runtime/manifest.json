@@ -1,0 +1,119 @@
+{
+ "package": "cel-expr-python",
+ "version": "0.1.3+dewpoint.1",
+ "source": {
+  "repository": "https://github.com/cel-expr/cel-python",
+  "commit": "3e369fe3dfd29ef2fcb3d8a63997e58f50e592ae",
+  "tag": "v0.1.3"
+ },
+ "patch": {
+  "file": "dewpoint-cel-0.1.3-backport.patch",
+  "sha256": "38c995fb5ae21354dfa6cb482fb4857e1872e7d7b9e7d67b44ec02748d1caf16"
+ },
+ "assembly": {
+  "script": "deploy/cel-runtime/assemble.sh",
+  "sha256": "75b342bb1aa097f8b0e7229cca246f9ae1a40875ee7ebb34fd1f85eb81aa3535",
+  "note": "the build ran this script without its SPDX comment line, added when it was committed"
+ },
+ "MODULE.bazel.lock": {
+  "sha256": "6a10850eb49d1517da8e1bc1d58dd38bbfe2213c08d23a49911b237d1fe46d8f",
+  "note": "generated on macOS; unchanged by the Linux aarch64 and x86_64 builds in update mode; macOS rebuild with --lockfile_mode=error passed"
+ },
+ "bazel": {
+  "version": "8.5.1",
+  "sha256": {
+   "darwin-arm64": "cb6d2f19ad92157e7186f64151e665c1b0c3bacaa690784e66f446f1b7660140",
+   "linux-arm64": "b7f2a85595e8a87d54843bc656c1e379fd9b8c1b5f783dc41717c1d7eb7cc49f",
+   "linux-x86_64": "61d89402f0368e64b6c827be5de79d8e65382e8124c3cbb97325611a1851392e"
+  }
+ },
+ "bazelisk": {
+  "version": "v1.29.0",
+  "sha256": {
+   "darwin-arm64": "cee851f726789227d5561004e9904a52be45c3efb56f8b38b6993d6adbaa0409",
+   "linux-arm64": "e20e8b0f4f240091b7a55bf17b9398bd4f40ee70ae0208dff95dd4c445fb4010",
+   "linux-amd64": "5a408715e932c0250d28bd84555f12edbf70117de42f9181691c736eacc4a992"
+  }
+ },
+ "platforms": {
+  "macos-arm64": {
+   "toolchain": "Command Line Tools 27.0 (Apple clang 21.0.0, clang-2100.3.34.2), SDK MacOSX27.0.sdk, via DEVELOPER_DIR + --action_env/--host_action_env=DEVELOPER_DIR",
+   "deployment_target": "11.0",
+   "python": "CPython 3.12.3 (uv-managed)",
+   "build_env": [
+    "altgraph==0.17.5",
+    "build==1.6.1",
+    "delocate==0.13.0",
+    "macholib==1.16.4",
+    "packaging==26.3",
+    "pyproject-hooks==1.3.3",
+    "setuptools==82.0.1",
+    "typing-extensions==4.16.0",
+    "wheel==0.48.0"
+   ],
+   "cold_build_s": 263
+  },
+  "linux-aarch64": {
+   "image": "quay.io/pypa/manylinux_2_28_aarch64@sha256:3ab937ec86ca568d546a98e2d2616be3282e3e42b8e18ca0c233dcf9fb6293e6",
+   "toolchain": "gcc (GCC) 14.2.1 20250110 (Red Hat 14.2.1-11)",
+   "python": "/opt/python/cp312-cp312",
+   "build_env": [
+    "build==1.5.0",
+    "packaging==26.2",
+    "pyproject_hooks==1.2.0",
+    "setuptools==82.0.1",
+    "wheel==0.48.0"
+   ],
+   "cold_build_s": 1005,
+   "docker": "8 GB memory, --local_resources=memory=6000 --jobs=8"
+  },
+  "linux-x86_64": {
+   "image": "quay.io/pypa/manylinux_2_28_x86_64@sha256:d3f051574f040b4c1d23b18fd06741cd7288c6f537faa0a76b1c7edf048bfa62",
+   "toolchain": "gcc (GCC) 14.2.1 20250110 (Red Hat 14.2.1-11)",
+   "python": "/opt/python/cp312-cp312",
+   "build_env": [
+    "build==1.5.0",
+    "packaging==26.2",
+    "pyproject_hooks==1.2.0",
+    "setuptools==82.0.1",
+    "wheel==0.48.0"
+   ],
+   "host": "Docker on Apple Silicon, linux/amd64 through Rosetta; 8 GB VM",
+   "build_s": "826 (jobs 8, Bazel's JVM OOM-killed at 1,560/1,571 actions) + 203 (resumed, jobs 4)"
+  }
+ },
+ "third_party_licenses": {
+  "abseil-cpp.LICENSE": "c79a7fea0e3cac04cd43f20e7b648e5a0ff8fa5344e644b0ee09ca1162b62747",
+  "antlr4.LICENSE": "3db1fb3ee79a4b4f9918fc4d0f6133bf18a3cf787f126cd22f8aa9b862281c0c",
+  "cel-cpp.LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+  "cel-spec.LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+  "protobuf.LICENSE": "6e5e117324afd944dcf67f36cf329843bc1a92229a8cd9bb573d7a83130fea7d",
+  "pybind11.LICENSE": "83965b843b98f670d3a85bd041ed4b372c8ec50d7b4a5995a83ac697ba675dcb",
+  "pybind11_abseil.LICENSE": "30470db027ad848158ad97147d9320d428ca3a40143eef37e4296b46e9432cae",
+  "re2.LICENSE": "6040cda75d90b1738292a631d89934c411ef7ffd543c4d6a1b7edfc8edf29449",
+  "utf8_range.LICENSE": "02de69b64fc36d9e938f418e52723e42f0b2b226d58a9cb3c8dcbdf7059f5074",
+  "yaml-cpp.LICENSE": "aa6fcc27be034e41e21dd832f9175bfe694a48491d9e14ff0fa278e19ad14f1b"
+ },
+ "wheels": {
+  "cel_expr_python-0.1.3+dewpoint.1-cp312-cp312-macosx_11_0_arm64.whl": {
+   "sha256": "3ef6e7f046129948a1f429eb8d78fcf6842e91071ab0ba2f635babdca9ae6733",
+   "bytes": 11957395
+  },
+  "cel_expr_python-0.1.3+dewpoint.1-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl": {
+   "sha256": "cd32ceb4aea7c3257d1ae1640d5d104a518b2b41094763fc2a8734c85f905bc3",
+   "bytes": 15184894
+  },
+  "cel_expr_python-0.1.3+dewpoint.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl": {
+   "sha256": "deb256960ff194e023dff8559f15e5a82aeb6f6b609e69d024509491ef921318",
+   "bytes": 16048489
+  }
+ },
+ "build_linux_script": {
+  "file": "deploy/cel-runtime/build-linux.sh",
+  "sha256": "d19a4251ff7750a6caf1d74494404e0230e778bfa2900b3685f7f40741cc573f",
+  "note": "the build ran this script without its SPDX comment line, added when it was committed"
+ },
+ "reproducible": {
+  "macos-arm64": "rebuilt 2026-10-14 from this directory (cold, 308 s): the wheel's bytes differ only in its zip entries' timestamps; every file inside is identical (cmp), the extension modules byte for byte (same LC_UUID). The ANTLR jar came from Maven Central (same sha256), www.antlr.org being blocked by the network's proxy."
+ }
+}

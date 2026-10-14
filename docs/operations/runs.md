@@ -28,9 +28,9 @@ talks to Temporal.
 - Admission takes the workflow's active version, if the workflow is enabled, and freezes it in the request. It checks
   the deployment's environment is recorded and, in `production`, that production runs are on; that the dispatcher
   recorded a current build within the last 2 minutes, of the version's engine ABI; that nothing the version uses is
-  retired; and the input, against the version's input schema. Then it claims the input, as any run's
-  ([below](#sensitive-and-large-values-claims)), and keeps the request's input, with handles in place of its claimed
-  values, encrypted beside them (its trigger envelope).
+  retired; and the input: at most 64 levels deep, then against the version's input schema. Then it claims the
+  input, as any run's ([below](#sensitive-and-large-values-claims)), and keeps the request's input, with handles in
+  place of its claimed values, encrypted beside them (its trigger envelope).
 - A refusal answers with its code and fixed messages that never quote a value: 503 `production_runs_disabled`,
   `environment_not_recorded`, `no_current_build` or `key_unusable` (the tenant's data key can't be read); 422
   `input_invalid` or `secret_index_limit`, with each place and rule the input breaks; 409 `workflow_disabled`,
@@ -453,6 +453,13 @@ The input is checked against the version's input schema when the request is admi
 value over 64 KiB are stored encrypted in `run_inputs`, and the run starts with handles in their place. A refused
 input leaves no request.
 
+An input nests at most 64 levels of objects and arrays, its own value the first, as a workflow and a webhook event do
+(issue #88). Deeper, it's refused `input_invalid` with "The run's input nests deeper than 64 levels.", before its schema
+is read and whatever its idempotency key already holds: at a start; at a re-run, given a new input or rebuilding the
+original (one kept before the limit is refused so, and a re-run given a new input proceeds); at a schedule's create or
+replace (422); and at a firing, a `refused` request (a schedule stored before the limit fires refused until its input is
+replaced; validate and publish warn that it fails at every firing already). Nothing already kept is changed.
+
 ## Reading runs
 
 `GET /api/v1/t/{tenant}/runs` lists requests and top-level runs together, newest first by `(queued_at, id)`
@@ -527,9 +534,11 @@ claims are.
   already public. A loop over any other sensitive list needs its entry. A loop over a list held as a handle (a
   reference's, or CEL's that comes back claimed) gets each item as a handle into it. A filter over sensitive data runs
   whole in one activity: the run sees the kept items' handle and the two counts, never a decision per item.
-- **Sub-flows and failure handlers.** A sub-flow's input is checked against the child's input schema
-  (`input_invalid` when it doesn't match) and claimed as a trigger is, and the child is granted the parent's claims it
-  holds; a sub-flow grants its parent the claims in its outputs. A failure handler is granted what its trigger holds.
+- **Sub-flows and failure handlers.** A sub-flow's input is checked against the child's input schema (`input_invalid`
+  when it doesn't match, or when it nests deeper than 64 levels once its claims are resolved: they're read bounded, so
+  neither a chain of claims nor one deep claim is read past it) and claimed as a trigger is, and the child is granted
+  the parent's claims it holds; a sub-flow grants its parent the claims in its outputs. A failure handler is granted
+  what its trigger holds.
 - **How many claims one crossing carries (a present limit).** A sub-flow's input, a sub-flow's outputs and a loop
   batch's items cross to another run with the claims they hold, granted in one activity with a one-minute timeout. Since
   2b-4b M3 that activity checks a thousand claims a statement, from their owners and sizes, and reads them in groups of
@@ -660,7 +669,8 @@ step's output couldn't be stored as claims after the node ran: its effect happen
 was sent, and the attempt is retried under the step's retry policy), `internal_error` (a bug in the worker, such as
 one while preparing a step before its node ran: nothing was sent, it isn't retried, and the worker's log names where
 it was raised), `input_invalid` (a
-sub-flow's input that doesn't match the child's input schema: each place and rule, a map's key shown as `*`) and `node_failed` (a plugin's failure whose own code
+sub-flow's input that doesn't match the child's input schema: each place and rule, a map's key shown as `*`; or that
+nests deeper than 64 levels) and `node_failed` (a plugin's failure whose own code
 wasn't a constant identifier of its code, [above](#what-the-workers-log-shows)). A sub-flow step fails with its sub-flow's code, and with `terminated`
 when an operator terminated the sub-flow; a loop fails with `terminated` when one of its batches was.
 

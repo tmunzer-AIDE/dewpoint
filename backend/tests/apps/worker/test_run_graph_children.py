@@ -693,3 +693,29 @@ async def test_a_cancelled_run_runs_no_failure_handler(env: WorkflowEnvironment)
         with pytest.raises(WorkflowFailureError):
             await asyncio.wait_for(handle.result(), 60)
     assert (store.runs[run_id_of(handle)].status, store.starts) == ("cancelled", {})
+
+
+def _nested(levels: int, leaf: Any) -> Any:
+    value = leaf
+    for _ in range(levels):
+        value = {"n": value}
+    return value
+
+
+async def test_a_sub_flows_input_nested_past_64_levels_fails_its_step_with_the_reason(env: WorkflowEnvironment) -> None:
+    """Issue #88: no literal can be that deep (a workflow's document nests at most 64 levels), but step outputs can:
+    two echoes nest 40 levels each around one another's value, and the child's input refused at the crossing fails
+    the step `input_invalid`, the fixed reason its message."""
+    from dewpoint.apps.inputs import TOO_DEEP
+
+    store = MemoryStore()
+    sub = store.publish(graph({"type": "object", "properties": {"deep": {"x-sensitive": True}}}))  # takes echoes' data
+    g = graph(code=ref("steps.r.error.code", default="none"), message=ref("steps.r.error.message", default="none"))
+    g.node("a", ECHO, {"value": _nested(40, 1)})
+    g.node("b", ECHO, {"value": _nested(40, ref("steps.a.output.value"))})
+    g.node("r", RUN, {"workflow_id": str(sub), "input": {"deep": ref("steps.b.output.value")}}, on_error="continue")
+    g.edge("a", "b")
+    g.edge("b", "r")
+    _, result = await finished(env, store, g, {})
+    assert (result.status, result.outputs) == ("succeeded", {"code": "input_invalid", "message": TOO_DEEP})
+    assert store.starts == {}  # the child never started

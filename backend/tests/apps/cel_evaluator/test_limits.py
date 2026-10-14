@@ -16,10 +16,10 @@ import pytest
 
 from dewpoint.apps import cel_client
 from dewpoint.engine.cel import evaluate as E
-from dewpoint.engine.cel import ipc
+from dewpoint.engine.cel import ipc, profile
 from dewpoint.engine.cel import types as T
 
-P = "cel-cpp-0.1.3/fn-1/cls-1"
+P = profile.CURRENT_CEL_PROFILE  # the profile the evaluator names from the installed runtime
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="rlimits and the evaluator are Linux only")
 S = "a" * 100_000 + "!"
 PROBES: dict[str, tuple[str, dict[str, str], dict[str, Any], set[str]]] = {

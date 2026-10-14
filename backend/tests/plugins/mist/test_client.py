@@ -69,8 +69,11 @@ async def test_statuses_map_to_fixed_errors(status: int, error: type[Exception],
     assert e.value.code == code and "secret" not in e.value.message  # type: ignore[attr-defined]
 
 
-async def test_an_answer_that_isnt_json_is_refused() -> None:
-    client, _ = make({("GET", "/api/v1/x"): Reply(200, raw=b"<html>")})
+@pytest.mark.parametrize("raw", [b"<html>", b"[" * 20_000 + b"]" * 20_000], ids=["html", "too_deep"])
+async def test_an_answer_that_isnt_json_is_refused(raw: bytes) -> None:
+    """A body nested past the decoder's limit raises RecursionError, not ValueError: it's refused as any other body
+    that isn't JSON, never an unexpected error (the runtime JSON decoding follow-up, 2026-10-14)."""
+    client, _ = make({("GET", "/api/v1/x"): Reply(200, raw=raw)})
     with pytest.raises(FatalError) as e:
         await client.call("GET", "/api/v1/x")
     assert e.value.code == "mist.invalid_answer"

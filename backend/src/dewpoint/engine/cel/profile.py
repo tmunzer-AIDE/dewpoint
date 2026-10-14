@@ -3,7 +3,7 @@
 profile, shipped only after the §5.9 gates pass for it."""
 
 RUNTIME_DISTRIBUTION = "cel-expr-python"
-RUNTIME_VERSION = "0.1.3"
+RUNTIME_VERSION = "0.1.3+dewpoint.1"
 FUNCTION_LIBRARY = "fn-1"
 # cls-1 is the classifier as plan 2a-2 first ships it. Its rules changed while 2a-2 was built (caps, retained
 # accumulators, work charges, regex eligibility) without a new version: no published version had classified an

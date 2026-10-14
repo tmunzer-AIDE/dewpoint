@@ -185,17 +185,17 @@ def alembic_config(migrations: Path = BACKEND / "migrations") -> Config:
 
 FROM_URL = "<the url's database>"  # the default expected name (0053's guard): the database `url` names
 
-_COLLECTION = {"migrations": 0, "was_on": True}  # migrations running in this process; collection's state before them
+_COLLECTION = {"migrations": 0, "was_on": True}  # migrations (and steps) running here; collection's state before them
 _COLLECTION_LOCK = threading.Lock()
 
 
 @contextmanager
 def _collection_paused() -> Iterator[None]:
-    """No automatic garbage collection while a migration runs in this process (the disconnect, 2026-10-12): under the
-    parallel suite a long-lived worker's full collection took up to 2 s (a fresh process's, like production's migrate,
-    0.07 s), freezing every thread, the migrating one mid-step included, past D15's idle bound, and the server ended the
-    step's session. Process-wide, so counted across threads: paused at the first, the state before it back after the
-    last."""
+    """No automatic garbage collection while a migration, or a step through `autocommitted`, runs in this process (the
+    disconnect, 2026-10-12): under the parallel suite a long-lived worker's full collection took up to 2 s (a fresh
+    process's, like production's migrate, 0.07 s), freezing every thread, the migrating one mid-step included, past
+    D15's idle bound, and the server ended the step's session. Process-wide, so counted across threads: paused at the
+    first, the state before it back after the last."""
     with _COLLECTION_LOCK:
         if _COLLECTION["migrations"] == 0:
             _COLLECTION["was_on"] = gc.isenabled()
@@ -241,7 +241,8 @@ def downgrade(url: str, target: str, config: Config | None = None, expected: str
 
 
 def autocommitted[T](url: str, fn: Callable[[Connection], T]) -> T:
-    """`fn` on a connection of its own in autocommit, as a migration's online statements run, in this thread."""
+    """`fn` on a connection of its own in autocommit, as a migration's online statements run, in this thread; no
+    automatic garbage collection meanwhile (`_collection_paused`): online.py's own tests run D15's steps here."""
 
     async def run() -> T:
         engine = create_async_engine(url.replace("postgresql://", "postgresql+asyncpg://"), poolclass=NullPool)
@@ -252,7 +253,8 @@ def autocommitted[T](url: str, fn: Callable[[Connection], T]) -> T:
         finally:
             await engine.dispose()
 
-    return asyncio.run(run())
+    with _collection_paused():
+        return asyncio.run(run())
 
 
 @contextmanager

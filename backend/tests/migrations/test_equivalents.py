@@ -39,6 +39,50 @@ LATERAL (SELECT gen_random_uuid() AS id FROM generate_series(1, $1)) g"""
 INDEXES = {"runs_workflow_last": ("0044", "0047"), "runs_workflow_ended": ("0047", "0045")}  # built by, from, to
 STALL_S = 1.5  # how long a writer's open transaction holds `runs` while the upgrade runs
 BOUND_S = 1.0  # the server's deadlock_timeout: no write waits that long behind a step (D15)
+GAP_S = 0.1  # the watcher samples every 5-10 ms (74 ms apart at most under a probe's load ~42): longer is unobserved
+Seen = tuple[float, dict[int, list[int]]]  # a sample: when, and each backend's blockers then
+
+
+def migration_wait(writer: int, ours: set[int], start: float, end: float, seen: list[Seen]) -> tuple[float, float]:
+    """An upper bound on how long a write running from `start` to `end` waited on the migration, and how much of it
+    went unobserved (the owner's ruling, 2026-10-12); not an exact attribution. At a sample the writer counts as
+    waiting on the migration when its blockers lead, directly or through a chain, to any backend that isn't the test's
+    own (`ours`): an unknown blocker counts as the migration's. Between two samples it counts as waiting unless both
+    saw it not waiting; and wholly, as unobserved, when they're more than GAP_S apart or one end is the write's own
+    start or end, before its first sample or after its last. A missed interval never reads as no wait."""
+
+    def waiting(blockers: dict[int, list[int]]) -> bool:
+        stack, visited = list(blockers.get(writer, [])), set()
+        while stack:
+            pid = stack.pop()
+            if pid not in ours:
+                return True
+            if pid not in visited:
+                visited.add(pid)
+                stack.extend(blockers.get(pid, []))
+        return False
+
+    points = [(start, None), *[(at, waiting(b)) for at, b in seen if start < at < end], (end, None)]
+    waited = unobserved = 0.0
+    for (a, was), (b, now) in zip(points, points[1:], strict=False):
+        if b - a > GAP_S or was is None or now is None:
+            waited, unobserved = waited + b - a, unobserved + b - a
+        elif was or now:
+            waited += b - a
+    return waited, unobserved
+
+
+def bounded(writes: list[tuple[float, float]], writer: int, ours: set[int], seen: list[Seen]) -> dict[str, float]:
+    """D15's bound on the writes: for none does the upper bound on its wait on the migration (`migration_wait`) reach
+    BOUND_S. Their whole time, commit included, is reported, never bounded: a slow WAL flush isn't the migration's (the
+    probe of 2026-10-12)."""
+    measured = [(end - start, *migration_wait(writer, ours, start, end, seen)) for start, end in writes]
+    total, waited, unobserved = max(measured, key=lambda m: m[1])
+    assert waited < BOUND_S, (
+        f"a write's wait on the migration, at most {waited:.3f} s (upper bound; {unobserved:.3f} s of it unobserved; "
+        f"{total:.3f} s in all), reaches the bound"
+    )
+    return {"writes": len(measured), "worst_total_s": max(m[0] for m in measured), "worst_wait_bound_s": waited}
 
 
 @pytest.fixture(scope="module")
@@ -269,14 +313,15 @@ async def test_an_index_an_interrupted_build_left_invalid_is_built_again(cluster
 
 async def test_writes_to_runs_go_on_through_both_index_builds(cluster, templates) -> None:
     """While each index is built on a `runs` of `CLONES` root runs, a writer keeps inserting runs: it commits during
-    each build, never waits on the migration while a build runs, and no write waits a deadlock_timeout. Another
-    writer's open transaction holds `runs` as each migration starts, which a non-concurrent build would queue behind
-    (and every write behind it). Then every row is in both indexes (amcheck, heapallindexed)."""
+    each build, never waits on the migration while a build runs, and no write's wait on the migration, bounded from
+    above (every backend's blockers sampled throughout, `bounded`), reaches a deadlock_timeout. Another writer's open
+    transaction holds `runs` as each migration starts, which a non-concurrent build would queue behind (and every write
+    behind it). Then every row is in both indexes (amcheck, heapallindexed)."""
     url = await copy(cluster, templates["large"])
     writer = await asyncpg.connect(url)
     watcher = await asyncpg.connect(url)
     writes: list[tuple[float, float]] = []
-    samples: list[tuple[float, list[int], list[str]]] = []
+    samples: list[tuple[float, dict[int, list[int]], list[str]]] = []
     stop = asyncio.Event()
     wpid = writer.get_server_pid()
 
@@ -288,12 +333,14 @@ async def test_writes_to_runs_go_on_through_both_index_builds(cluster, templates
 
     async def watch() -> None:
         while not stop.is_set():
-            row = await watcher.fetchrow(
-                "SELECT pg_blocking_pids($1) AS blocked_by, ARRAY(SELECT coalesce(index_relid::regclass::text, '') "
-                "FROM pg_stat_progress_create_index WHERE relid = 'runs'::regclass) AS building",
-                wpid,
+            rows = await watcher.fetch(
+                "SELECT a.pid, pg_blocking_pids(a.pid) AS blocked_by, ARRAY(SELECT coalesce(index_relid::regclass::"
+                "text, '') FROM pg_stat_progress_create_index WHERE relid = 'runs'::regclass) AS building "
+                "FROM pg_stat_activity a WHERE a.datname = current_database() AND a.backend_type = 'client backend' "
+                "AND a.pid <> pg_backend_pid()"
             )  # fmt: skip
-            samples.append((time.monotonic(), list(row["blocked_by"]), list(row["building"])))
+            blockers = {r["pid"]: list(r["blocked_by"]) for r in rows}
+            samples.append((time.monotonic(), blockers, list(rows[0]["building"]) if rows else []))
             await asyncio.sleep(0.005)
 
     writing, watching = asyncio.create_task(write()), asyncio.create_task(watch())
@@ -311,13 +358,59 @@ async def test_writes_to_runs_go_on_through_both_index_builds(cluster, templates
         await asyncio.gather(writing, watching)
         await writer.close()
         await watcher.close()
-    assert writes and max(end - t0 for t0, end in writes) < BOUND_S
+    assert writes
+    print("writes:", bounded(writes, wpid, {wpid, *holders}, [(at, blockers) for at, blockers, _ in samples]))
     for name in INDEXES:
         during = [at for at, _, building in samples if name in building]
         assert during, f"{name}'s build never observed"
         assert any(min(during) <= end <= max(during) for _, end in writes), f"no write committed during {name}'s build"
-    held_up = [(at, by) for at, by, building in samples if building and set(by) - set(holders)]
+    held_up = [(at, b.get(wpid)) for at, b, building in samples if building and set(b.get(wpid, [])) - set(holders)]
     assert held_up == [], "a write waited on the migration while it built an index"
     await _sql(url, "CREATE EXTENSION IF NOT EXISTS amcheck")
     for name in INDEXES:
         await _sql(url, f"SELECT bt_index_check('{name}'::regclass, true)")
+
+
+# The concurrent-write bound's own measure (the owner's ruling, 2026-10-12): an upper bound on the time a write waits on
+# the migration, never its whole commit, and never an unobserved interval read as no wait. Recorded-style traces, no
+# database.
+
+WRITER, HOLDER, STEP = 101, 102, 103
+
+
+def _seen(blocked: Callable[[float], dict[int, list[int]]], end: float, every: float = 0.005) -> list[Seen]:
+    return [(i * every, blocked(i * every)) for i in range(1, round(end / every))]
+
+
+@pytest.mark.parametrize("chain", [{WRITER: [STEP], STEP: [HOLDER]}, {WRITER: [HOLDER], HOLDER: [STEP]}],
+                         ids=["behind the step", "behind a backend behind the step"])  # fmt: skip
+def test_a_write_the_migration_holds_past_the_bound_fails_it(chain: dict[int, list[int]]) -> None:
+    seen = _seen(lambda t: chain if t < 1.2 else {}, 1.25)
+    with pytest.raises(AssertionError, match=r"at most 1\.2\d* s \(upper bound"):
+        bounded([(0.0, 1.25)], WRITER, {WRITER, HOLDER}, seen)
+
+
+def test_a_slow_flush_after_an_in_bound_wait_passes_and_is_reported() -> None:
+    seen = _seen(lambda t: {WRITER: [STEP], STEP: [HOLDER]} if t < 0.6 else {}, 1.4)  # then its commit's WAL flush
+    report = bounded([(0.0, 1.4)], WRITER, {WRITER, HOLDER}, seen)
+    assert report["worst_total_s"] == 1.4
+    assert 0.6 <= report["worst_wait_bound_s"] < 0.62
+
+
+def test_a_wait_on_the_tests_own_backend_alone_is_not_the_migrations() -> None:
+    seen = _seen(lambda t: {WRITER: [HOLDER]} if t < 1.2 else {}, 1.25)
+    assert bounded([(0.0, 1.25)], WRITER, {WRITER, HOLDER}, seen)["worst_wait_bound_s"] < 0.02
+
+
+def test_an_interval_the_watcher_missed_counts_as_a_wait() -> None:
+    """Seen waiting 0.5 s, then running, then unobserved 0.6 s between two samples that both saw it running: read as
+    no wait, the gap would pass the write."""
+    trace = _seen(lambda t: {WRITER: [STEP], STEP: [HOLDER]} if t < 0.5 else {}, 1.3)
+    seen = [(at, b) for at, b in trace if not 0.6 <= at < 1.2]
+    with pytest.raises(AssertionError, match=r"at most 1\.1\d* s \(upper bound; 0\.6\d* s of it unobserved"):
+        bounded([(0.0, 1.3)], WRITER, {WRITER, HOLDER}, seen)
+
+
+def test_a_write_no_sample_saw_counts_whole() -> None:
+    with pytest.raises(AssertionError, match=r"at most 1\.050 s"):
+        bounded([(0.0, 1.05)], WRITER, {WRITER, HOLDER}, [])

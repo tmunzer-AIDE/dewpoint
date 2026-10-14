@@ -13,10 +13,11 @@ from typing import Any
 import pytest
 from sqlalchemy import text
 
-from dewpoint.apps.inputs import RESERVED_INPUT
+from dewpoint.apps.inputs import RESERVED_INPUT, TOO_DEEP
 from tests.apps.api.test_run_requests_api import as_role
 from tests.apps.test_admission import KEYS, TOKEN, published
 from tests.apps.test_admission_csv import GRAPH as CSV_GRAPH
+from tests.apps.test_inputs import objects
 
 pytestmark = pytest.mark.usefixtures("development_deployment")
 BODY = {"cron": "0 9 * * 1-5", "time_zone": "Europe/Paris", "input": {"token": TOKEN, "site": "a"}}
@@ -305,3 +306,17 @@ async def test_a_schedule_that_may_have_been_unpaused_never_says_otherwise(
     await incarnation(owner_sessionmaker, ctx, made["id"], 0, **evidence)
     await incarnation(owner_sessionmaker, ctx, made["id"], 1)
     assert (await editor.get(schedule_url(ctx, made["id"]))).json()["never_unpaused"] is False
+
+
+async def test_an_input_nested_past_64_levels_is_refused_on_create_and_replace(
+    keyed_app, workflow, owner_sessionmaker, api_settings
+) -> None:
+    """Issue #88: the depth first, with its fixed reason, whatever the schema would have said."""
+    ctx, wf = workflow
+    editor = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "editor")
+    deep = {"token": TOKEN, "n": objects(64)}  # 65 levels
+    answer = await editor.post(schedules_url(ctx, wf), json=BODY | {"input": deep})
+    assert (answer.status_code, answer.json()) == (422, {"error": "input_invalid", "messages": [TOO_DEEP]})
+    created = (await editor.post(schedules_url(ctx, wf), json=BODY)).json()
+    answer = await editor.patch(schedule_url(ctx, created["id"]), json={"input": deep})
+    assert (answer.status_code, answer.json()) == (422, {"error": "input_invalid", "messages": [TOO_DEEP]})

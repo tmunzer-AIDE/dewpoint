@@ -99,13 +99,25 @@ def contains_marker(value: Any) -> bool:
 
 
 def handles_in(value: Any, pointer: str = "") -> Iterator[tuple[str, ClaimRef]]:
-    """Every handle in `value`, with the pointer where it sits, outermost first; nothing inside a handle."""
-    ref = ClaimRef.of(value)
-    if ref is not None:
-        yield pointer, ref
-        return
-    for key, child in _children(value):
-        yield from handles_in(child, pointer + "/" + escape(key))
+    """Every handle in `value`, with the pointer where it sits, outermost first; nothing inside a handle. Iterative,
+    depth first in the value's own order: a stored claim's depth never reaches the recursion limit (issue #88)."""
+    frames: list[tuple[str, Iterator[tuple[str | int, Any]]]] = []
+    item: tuple[str, Any] | None = (pointer, value)
+    while item is not None:
+        at, current = item
+        ref = ClaimRef.of(current)
+        if ref is not None:
+            yield at, ref
+        else:
+            frames.append((at, _children(current)))
+        item = None
+        while frames and item is None:
+            base, children = frames[-1]
+            following = next(children, None)
+            if following is None:
+                frames.pop()
+            else:
+                item = (base + "/" + escape(following[0]), following[1])
 
 
 NESTING_MAX = 32  # claims nested deeper than this are refused: a claim holds handles only to claims made before it
@@ -113,6 +125,11 @@ NESTING_MAX = 32  # claims nested deeper than this are refused: a claim holds ha
 
 class NestingError(Exception):
     """Claims nested deeper than NESTING_MAX: a bug, never a value's fault."""
+
+
+class InputTooDeepError(Exception):
+    """A value whose resolution was bounded (`resolve_value(max_depth=)`) built past the bound: the value's fault,
+    never a bug, and never `claim_unavailable` (issue #88)."""
 
 
 @dataclass(frozen=True)
@@ -150,7 +167,7 @@ def _overlaps(sensitive: tuple[str, ...], path: list[str]) -> bool:
     return False
 
 
-async def resolve(ref: ClaimRef, fetch: Fetch, depth: int = 0) -> Resolved:
+async def resolve(ref: ClaimRef, fetch: Fetch, depth: int = 0, level: int = 1, bound: int | None = None) -> Resolved:
     """What `ref` addresses, read through nested claims, with every handle inside it resolved (§3.3). Tainted when
     any part it read was: the part lies in or holds one of its claim's sensitive pointers, or a nested claim it read
     is tainted (§3.6). `fetch` reads a whole claim, and does the checks: the tenant, and the owner or a grant."""
@@ -161,31 +178,35 @@ async def resolve(ref: ClaimRef, fetch: Fetch, depth: int = 0) -> Resolved:
     for i, part in enumerate(path):
         nested = ClaimRef.of(value)
         if nested is not None:  # the pointer goes on inside a claim nested here
-            inner = await resolve(nested.extend(*path[i:]), fetch, depth + 1)
+            inner = await resolve(nested.extend(*path[i:]), fetch, depth + 1, level, bound)
             return Resolved(inner.value, inner.tainted or _overlaps(stored.sensitive_pointers, path[:i]))
         value, found = _step(value, part)
         if not found:
             return Resolved(MISSING, _overlaps(stored.sensitive_pointers, path[: i + 1]))
-    plain, inner_tainted = await _plain(value, fetch, depth)
+    plain, inner_tainted = await _plain(value, fetch, depth, level, bound)
     return Resolved(plain, inner_tainted or _overlaps(stored.sensitive_pointers, path))
 
 
-async def _plain(value: Any, fetch: Fetch, depth: int) -> tuple[Any, bool]:
-    """`value` with every handle in it resolved, and whether any of them was tainted."""
+async def _plain(value: Any, fetch: Fetch, depth: int, level: int = 1, bound: int | None = None) -> tuple[Any, bool]:
+    """`value` with every handle in it resolved, and whether any of them was tainted. `level`: where `value` sits in
+    the value being built, the root the first; given a `bound`, an object or array past it is refused before it's
+    read (a handle's value sits where the handle does)."""
     nested = ClaimRef.of(value)
     if nested is not None:
-        inner = await resolve(nested, fetch, depth + 1)
+        inner = await resolve(nested, fetch, depth + 1, level, bound)
         return inner.value, inner.tainted
+    if bound is not None and isinstance(value, dict | list) and level > bound:
+        raise InputTooDeepError(f"The value nests deeper than {bound} levels.")
     if isinstance(value, dict):
         out, tainted = {}, False
         for key, child in value.items():
-            out[key], t = await _plain(child, fetch, depth)
+            out[key], t = await _plain(child, fetch, depth, level + 1, bound)
             tainted = tainted or t
         return out, tainted
     if isinstance(value, list):
         items, tainted = [], False
         for child in value:
-            item, t = await _plain(child, fetch, depth)
+            item, t = await _plain(child, fetch, depth, level + 1, bound)
             items.append(item)
             tainted = tainted or t
         return items, tainted
@@ -225,10 +246,12 @@ async def part(ref: ClaimRef, fetch: Fetch, depth: int = 0) -> StoredClaim | Non
     return StoredClaim(value, _rebased(stored.sensitive_pointers, path))
 
 
-async def resolve_value(value: Any, fetch: Fetch) -> Resolved:
+async def resolve_value(value: Any, fetch: Fetch, *, max_depth: int | None = None) -> Resolved:
     """`value` with every handle in it resolved, and whether any of them was tainted. A handle that addresses nothing
-    drops its key from the map holding it, and is MISSING as a whole value."""
-    plain, tainted = await _plain(value, fetch, 0)
+    drops its key from the map holding it, and is MISSING as a whole value. Given `max_depth`, the value built is
+    bounded to that many levels of objects and arrays across every claim, `InputTooDeepError` past it; none, and it
+    resolves whatever the depth (a step's config, a loop's items, a failure's strings: issue #88)."""
+    plain, tainted = await _plain(value, fetch, 0, 1, max_depth)
     return Resolved(_present(plain), tainted)
 
 
