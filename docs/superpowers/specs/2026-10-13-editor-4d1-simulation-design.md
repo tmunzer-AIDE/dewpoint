@@ -32,7 +32,7 @@ the runs list and run pages (4e); simulating a published version from the editor
 | 4d-1b, backend | B8: draft snapshots, admission, execution path, readers, the reads the UI needs (§6) | none | 0072 |
 | 4d-1c, UI | the screens of §7, built against the signed-off boards | none | none |
 
-Each plan has its own branch and PR, stacked as before (D26). 4d-1b needs 4d-1a merged (S2's seeds and the ABI-8
+Each plan has its own branch and PR, stacked as before (D26). 4d-1b needs 4d-1a merged (S2's seeds and the ABI-9
 statuses); 4d-1c needs both.
 
 The migration slots are the ledger's: 0071 (B4b) and 0072 (B8). #90 (2b-4b) merged with its own 0048-0065, chained 0044
@@ -79,11 +79,11 @@ cancelled for a continue-as-new are never recorded as `cancelled`: they resume.
 - **D-a3:** a control step that finished in the same activation as the run's end keeps its real outcome. Tests cover
   completion against cancellation in both orders, and the same rows projected twice.
 - **D-a4:** no per-iteration status. Nothing infers that an iteration opened or finished from missing rows.
-- **D-a5:** in an ABI-8 run that ended outside the workflow (a bug, `history_lost`, a termination), a missing row reads
+- **D-a5:** in an ABI-9 run that ended outside the workflow (a bug, `history_lost`, a termination), a missing row reads
   "not recorded". #90's reconciler still closes `running` rows as `failed` with error code `outcome_unconfirmed`.
 - **D-a6:** the extra rows follow the run's retention; the existing graph and iteration budgets and byte-bounded
   projection batches still apply.
-- Runs of versions whose `engine_abi` is below 8 show a missing row as "not recorded": a version only ever runs on a
+- Runs of versions whose `engine_abi` is below 9 show a missing row as "not recorded": a version only ever runs on a
   build of its own ABI.
 
 ### 3.4 Upsert precedence
@@ -104,7 +104,7 @@ which today's upsert writes over a genuine result. Tests cover both arrival orde
 
 ### 3.5 `effect_preview`
 
-0071 adds a nullable `run_steps.effect_preview` (JSONB), written in ABI-8 runs and protected like `output_preview` (the
+0071 adds a nullable `run_steps.effect_preview` (JSONB), written in ABI-9 runs and protected like `output_preview` (the
 same `storable()` and redaction): `{"port": "<name>"}` for `flow.if` and `flow.switch`, `{"assignments": {…}}` for
 `flow.set_variables`, sensitive values redacted. The steps' declared outputs are unchanged. It reveals nothing new (a
 `skipped` row already shows the branch) and gives run pages their taken edges.
@@ -115,12 +115,12 @@ same `storable()` and redaction): `{"port": "<name>"}` for `flow.if` and `flow.s
 - `run_steps.effect_preview jsonb NULL`.
 - The grants the projection needs, last; the privilege reference regenerated.
 - Its downgrade refuses while any `skipped` or `not_started` row, or any non-null `effect_preview`, exists (after the
-  ABI-8 workers are stopped), in #90's `REFUSE_DOWNGRADE` style. Clearing such rows is a recovery procedure the owner
+  ABI-9 workers are stopped), in #90's `REFUSE_DOWNGRADE` style. Clearing such rows is a recovery procedure the owner
   approves, never automatic.
 - If 0071 lags a new build, its projections fail on the missing column and are retried until the migration lands:
   nothing is dropped, and runs' ends wait for it. The deploy order is migration first, as for every ABI bump.
 
-## 4. Simulated attempts and flow timers (4d-1a, ABI 8)
+## 4. Simulated attempts and flow timers (4d-1a, ABI 9)
 
 ### 4.1 Simulated attempts (D-a7)
 
@@ -135,7 +135,7 @@ same `storable()` and redaction): `{"port": "<name>"}` for `flow.if` and `flow.s
 
 ### 4.2 Flow timers aren't waited (capacity ruling (b))
 
-In every simulate run of a version at ABI 8 or later (draft simulations, scheduled simulate runs, simulate starts of
+In every simulate run of a version at ABI 9 or later (draft simulations, scheduled simulate runs, simulate starts of
 published versions, and their sub-flow and failure-handler children, which inherit the mode):
 
 - `flow.delay` and `flow.wait_until` resolve and validate their config as live: an invalid duration or timestamp fails
@@ -223,7 +223,7 @@ tree's display shapes.
 
 ### 5.4 Guards and the input
 
-- `RunInput` gains `target_step_id: str | None` (ABI 8). `RunInput.version_id` carries the draft snapshot's id; the
+- `RunInput` gains `target_step_id: str | None` (ABI 9). `RunInput.version_id` carries the draft snapshot's id; the
   existing `RunInput.snapshot` (a continue-as-new snapshot) is unrelated.
 - At admission (§6.3) and again in the workflow before any step: the target exists in the draft snapshot, its type is
   on the allowlist, and the mode is `simulate`. The workflow fails a targeted run that isn't simulate,
@@ -425,7 +425,7 @@ A third drawer tab beside Setup and Options, for allowlisted targets:
   every opened scope ends exactly once; the upsert precedence in both arrival orders; the simulated-attempt
   classification on both sides; timers in simulate; the seed contract (obligations, overlaps, aliases, filter contexts,
   the three states, `/run…` and unknown pointers refused); a seeded run's target-only completion and guards; a
-  targeted run whose step reads `run.id`, `run.started_at` and `run.now` with no seed for them; recorded ABI-8
+  targeted run whose step reads `run.id`, `run.started_at` and `run.now` with no seed for them; recorded ABI-9
   histories; 0071 up, down
   (refused), the CHECK and the privilege reference.
 - **4d-1b:** admission order (an exact retry after the draft changed), blocking against reported checks, the snapshot
@@ -443,7 +443,7 @@ A third drawer tab beside Setup and Options, for allowlisted targets:
   also count every attempt (§3.1). All of it stays within the existing graph and iteration budgets and byte-bounded
   projection batches. The simulation's reads are paged and summarized on the server; the general run
   detail stays unpaged until 4e.
-- The ABI-8 deploy order: migration first.
+- The ABI-9 deploy order: migration first.
 - B8's dual paths ("version or draft snapshot"): most fail closed; the two that would fail open (retirement, connection
   "in use") have explicit tests.
 - The seed contract depends on the validator's guard analysis; the plan verifies what it records before relying on it.

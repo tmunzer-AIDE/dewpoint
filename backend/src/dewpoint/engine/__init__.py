@@ -12,5 +12,7 @@
 # binding charged the bytes measuring its views serialized (#18); a value several CEL binding sets share claimed once
 # and sent as its handle (#26); a step's CEL requests stopped before the run's history passes 32 MiB. 8: a yield timer
 # still pending as an execution closes, cancelled with its close (#16's extra failure; the `cancel-pending-yield`
-# patch).
-ENGINE_ABI = 8
+# patch). 9: editor 4d-1a (the simulation design): every step instance's end projected (`skipped`, `not_started`,
+# `cancelled`) with control steps' `running` rows and effects; simulated attempts never of unknown outcome; flow timers
+# not waited in a simulation; single-step runs (`RunInput.target_step_id`).
+ENGINE_ABI = 9

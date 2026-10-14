@@ -9,7 +9,7 @@
 Online (2b-4b, D15): the column is added in a step of its own (no rewrite); the wider check is added `NOT VALID` in
 another, validated outside any transaction (it reads every row without blocking writes), then put in the old one's
 place. The roles' table grants on `run_steps` cover the new column. Its downgrade refuses while a row records either
-new status or an effect: dropping them would lose what ABI-8 runs recorded (stop the ABI-8 workers first)."""
+new status or an effect: dropping them would lose what ABI-9 runs recorded (stop the ABI-9 workers first)."""
 
 import sqlalchemy as sa
 from alembic import op
