@@ -4,8 +4,11 @@ Nothing here builds: deploy/cel-runtime/README.md says how."""
 
 import hashlib
 import json
+import tomllib
 from pathlib import Path
 from typing import Any
+
+from dewpoint.engine.cel import profile
 
 RECIPE = Path(__file__).parents[4] / "deploy" / "cel-runtime"
 
@@ -25,3 +28,12 @@ def test_the_build_record_names_the_committed_inputs() -> None:
     assert record["assembly"]["sha256"] == sha256(RECIPE / "assemble.sh")
     assert record["build_linux_script"]["sha256"] == sha256(RECIPE / "build-linux.sh")
     assert {p.name: sha256(p) for p in (RECIPE / "third_party_licenses").iterdir()} == record["third_party_licenses"]
+
+
+def test_the_lock_installs_the_recorded_wheels() -> None:
+    lock = tomllib.loads((RECIPE.parents[1] / "backend" / "uv.lock").read_text())
+    entries = [p for p in lock["package"] if p["name"] == "cel-expr-python"]
+    locked = {w["url"].rsplit("/", 1)[1].replace("%2B", "+"): w["hash"] for e in entries for w in e.get("wheels", [])}
+    record = manifest()
+    assert locked == {name: f"sha256:{w['sha256']}" for name, w in record["wheels"].items()}
+    assert {e["version"] for e in entries} == {record["version"]} == {profile.RUNTIME_VERSION}

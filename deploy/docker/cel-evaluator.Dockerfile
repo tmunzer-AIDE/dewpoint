@@ -3,14 +3,19 @@
 # with the pure modules it imports (engine.canonical, and engine.handles for bindings that hold handles; both standard
 # library only). A test checks every Dewpoint module the evaluator loads is copied here.
 # No database driver, no web framework, no Temporal SDK: the evaluator imports none of them (import-linter contract).
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS build
+FROM python:3.12-slim-bookworm AS build
+# uv 0.13 reads the lock's format (backend/pyproject.toml's required-version); astral's bookworm images stopped
+# at 0.9, so the binary is copied in, pinned, onto the runtime stage's own base.
+COPY --from=ghcr.io/astral-sh/uv:0.13.0@sha256:cdc6093146eb3ff6a40107b38f008b789e050e77ad87865e381d9917da55a168 /uv /uvx /bin/
 WORKDIR /app
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
 COPY backend/pyproject.toml backend/uv.lock ./
-# The two locked requirements, with their hashes: each entry is its `name==version \` line plus hash lines.
+# The locked requirements, with their hashes: protobuf's `name==version \` line plus hash lines, and the patched CEL
+# runtime's `name @ url ; marker \` line per platform (deploy/cel-runtime), of which pip installs the one that matches.
 RUN uv export --locked --no-dev --no-emit-project --no-header --no-annotate > all.txt \
- && awk '/^(cel-expr-python|protobuf)==/{keep=1} keep{print} keep && !/\\$/{keep=0}' all.txt > requirements.txt \
- && test "$(grep -cE '^(cel-expr-python|protobuf)==' requirements.txt)" = 2 \
+ && awk '/^(cel-expr-python @ |protobuf==)/{keep=1} keep{print} keep && !/\\$/{keep=0}' all.txt > requirements.txt \
+ && test "$(grep -c '^cel-expr-python @ ' requirements.txt)" = 3 \
+ && test "$(grep -c '^protobuf==' requirements.txt)" = 1 \
  && uv venv /app/.venv \
  && uv pip install --python /app/.venv/bin/python --require-hashes --no-deps -r requirements.txt
 COPY backend/src/dewpoint/__init__.py src/dewpoint/__init__.py
