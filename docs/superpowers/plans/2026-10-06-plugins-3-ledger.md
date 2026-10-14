@@ -1932,3 +1932,37 @@ shaped it: technical recommendations only.
   authorization.
 
 The owner signed off this ruling, its two corrections included (2026-10-09: "signed off"), and authorized push and PR.
+
+## Runtime JSON decoding (2026-10-14)
+
+Branch `fix/http-json-depth` from `origin/main` dd59578, on the owner's choice (2026-10-14) of the item 3d-2 left
+open: the runtime's answer decodes a body too deep for the decoder into the error every plugin expects.
+
+Fact checked (CPython 3.12.x, this repo's interpreter, measured, not from memory): `json.loads` raises
+`RecursionError`, not `ValueError`, on a body nested past its recursion limit (20,000 `[`, closed or not; 5,000 unclosed
+raised `JSONDecodeError`). 3d-2's review found it turned a ServiceNow 201 into a retried unexpected error; the plugin
+handles it at its own boundaries (`UNDECODABLE`). Of the other decoding sites, Mist's stream reader already takes it
+(`UNREADABLE`, 3b-2's review); Mist's verify decodes through the runtime's `json()`; Mist's REST client decodes the
+raw content itself with `except ValueError` only, so a deep body was an unexpected error (logged as a bug) rather than
+`mist.invalid_answer`. No other plugin decodes a provider's JSON.
+
+- Ruling: the runtime's `HttpResponse.json()` raises `ValueError` ("the body nests deeper than decoding allows", the
+  body never quoted) for such a body, so a plugin's `except ValueError` takes it as any body that isn't JSON; the SDK's
+  `HttpResponse` protocol says so. Mist's client takes `RecursionError` beside `ValueError` (it reads `content`, not
+  `json()`): `mist.invalid_answer`, fatal, as any body that isn't JSON. ServiceNow's own handling stays (its tests use
+  their own fakes) - cost if wrong: none (a decodable body decodes as before).
+- Tests, each watched failing first: a deep array and a deep object raise `ValueError` (not `RecursionError`, the body
+  unquoted), a body that isn't JSON still does, nesting within the limit still decodes; through the guarded client
+  against a local TLS server; Mist's verify answers `unreachable` for such a body instead of raising; Mist's client
+  refuses it as `mist.invalid_answer`. Four mutants (no conversion, another error type, the body in the message, the
+  client's `ValueError` alone) are each killed.
+- Committed on the owner's go (2026-10-14): the fix and its tests (f7635d8), then this section.
+- Verified at f7635d8: 2,120 tests across egress, every plugin, the SDK and the worker; ruff, format, mypy, import
+  contracts; gitleaks over the branch's commits finds nothing; CodeQL's python analysis finds nothing locally (CLI
+  2.27.2, python-queries 1.8.12).
+- Full suite at f7635d8: a first run hung, every worker idle for 1 h 45 min, and was stopped before a stack dump (cause
+  unknown). The rerun (`-o faulthandler_timeout=300`, no test stalled): 5,989 passed, 131 skipped, 1 failed, the CEL
+  gates 488 passed and 10 skipped. The failure,
+  `test_issue_16s_run_ends_the_same_through_the_servers_force_close_of_a_slow_task`, is the race its docstring names: under load (the machine's load average near 7 to 14, other sessions' suites
+  running) the worker's own 2 s deadlock bound failed the workflow task (cause 14) before the server's force close
+  (cause 17); it passed alone 3 of 3 at load 10 to 14. This change decodes HTTP answers, which no workflow task does.
