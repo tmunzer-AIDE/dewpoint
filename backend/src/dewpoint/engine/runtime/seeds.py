@@ -27,6 +27,17 @@ def segments(pointer: str) -> tuple[str, ...]:
     return tuple(s.replace("~1", "/").replace("~0", "~") for s in pointer[1:].split("/"))
 
 
+def well_formed(trigger: Any) -> bool:
+    """Seeds as `Seeds.of` reads them: `{"values": {pointer: value}, "absent": [pointer]}`, each pointer below the root.
+    A root pointer (`""`) would cover every read."""
+    if not isinstance(trigger, Mapping) or not set(trigger) <= {"values", "absent"}:
+        return False
+    values, absent = trigger.get("values", {}), trigger.get("absent", [])
+    if not isinstance(values, Mapping) or not isinstance(absent, list | tuple):
+        return False
+    return all(isinstance(p, str) and p.startswith("/") for p in (*values, *absent))
+
+
 def _put(tree: dict[str, Any], path: Sequence[str], value: Any) -> None:
     for seg in path[:-1]:
         nxt = tree.get(seg)

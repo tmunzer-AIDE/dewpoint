@@ -70,7 +70,7 @@ with workflow.unsafe.imports_passed_through():
         RunEnd,
         Scheduler,
     )
-    from dewpoint.engine.runtime.seeds import SEEDED_LIVE_REFUSED, TARGET_INVALID, Seeds
+    from dewpoint.engine.runtime.seeds import SEEDED_LIVE_REFUSED, TARGET_INVALID, Seeds, well_formed
     from dewpoint.engine.runtime.size import (
         BATCH_RESULTS_TOO_LARGE,
         BATCH_SNAPSHOT_TOO_LARGE,
@@ -249,10 +249,13 @@ class RunGraph(Execution):
         return await self._finish(end, outputs, ended)
 
     def _target_refused(self, start: RunInput, program: Program) -> Failure | None:
-        """A single-step run's guards (S2; the simulation design §5.4), as admission checks them: it simulates, and its
-        target is a step of the version that may run alone."""
+        """A single-step run's guards (S2; the simulation design §5.4), as admission checks them: it simulates, its
+        target is a step of the version that may run alone, and its seeds are values and absences by pointer (read
+        before the run's own failures are caught: a malformed one would fail its workflow task on every retry)."""
         if start.mode != SIMULATE:
             return Failure(SEEDED_LIVE_REFUSED, "A single step runs only as a simulation.")
+        if not well_formed(start.trigger):
+            return Failure(TARGET_INVALID, "The step's values aren't given as values and absences by pointer.")
         try:
             step = program.steps.get(uuid.UUID(str(start.target_step_id)))
         except ValueError:

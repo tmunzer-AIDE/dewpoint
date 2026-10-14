@@ -8,6 +8,7 @@ import asyncio
 import uuid
 from typing import Any
 
+import pytest
 from temporalio.testing import WorkflowEnvironment
 
 from tests.apps.worker.harness import RESULT_TIMEOUT_S, MemoryStore, run_id_of, start, start_version, workers
@@ -97,6 +98,28 @@ async def test_a_target_that_cant_run_alone_is_refused(env: WorkflowEnvironment)
     store = MemoryStore()
     g = graph().node("l", LOOP, {"items": [1]}).node("x", ECHO, {"value": 1}).edge("l", "x", "body")
     result, run_id = await alone(env, store, g, "l", {"values": {}, "absent": []})
+    assert (result.status, result.error["code"]) == ("failed", "target_invalid")
+    assert store.steps(run_id) == []
+
+
+@pytest.mark.parametrize(
+    "seeds",
+    [
+        {"values": {"trigger/x": 1}, "absent": []},  # a pointer without its leading `/`
+        {"values": {"/trigger/x": 1}, "absent": [7]},  # a pointer that isn't text
+        {"values": {}, "absent": "/trigger/x"},  # `absent` that isn't a list
+        {"values": {"": 1}, "absent": []},  # the whole trigger: it would cover every read
+        {"value": {"/trigger/x": 1}},  # not `{values, absent}`
+    ],
+)
+async def test_seeds_that_arent_values_and_absent_by_pointer_are_refused(
+    env: WorkflowEnvironment, seeds: dict[str, Any]
+) -> None:
+    """Admission checks the seeds' shape (4d-1b); the run checks it again, before anything runs, so a malformed one
+    ends the run `target_invalid` rather than failing its workflow task on every retry."""
+    store = MemoryStore()
+    g = graph().node("b", ECHO, {"value": 1})
+    result, run_id = await alone(env, store, g, "b", seeds)
     assert (result.status, result.error["code"]) == ("failed", "target_invalid")
     assert store.steps(run_id) == []
 
