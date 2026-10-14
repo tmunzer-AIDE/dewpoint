@@ -338,7 +338,7 @@ def _same_tenant(tenant_id: str) -> None:
 
 
 def _masked(data: ProjectInput, secrets: Matcher) -> ProjectInput:
-    """A projection with every secret in its previews and messages replaced."""
+    """A projection with every secret in its previews (a control step's effect too) and messages replaced."""
 
     def text(message: str | None) -> str | None:
         return secrets.mask(message, REDACTED) if message is not None else None
@@ -348,6 +348,7 @@ def _masked(data: ProjectInput, secrets: Matcher) -> ProjectInput:
             r,
             input_preview=masked(r.input_preview, secrets, REDACTED),
             output_preview=masked(r.output_preview, secrets, REDACTED),
+            effect_preview=masked(r.effect_preview, secrets, REDACTED),
             error_message=text(r.error_message),
         )
         for r in data.steps

@@ -614,6 +614,25 @@ async def test_a_sensitive_trigger_field_is_masked_where_it_is_copied(env: Workf
     assert key is not None and store.claims[key.id].value == "k3y-k3y-k3y"
 
 
+async def test_an_assignment_that_repeats_a_secret_is_masked_in_its_effect(env: WorkflowEnvironment) -> None:
+    """The simulation design §3.5: a control step's `effect_preview` is protected like its output preview. A
+    `set_variables` assigns a plain literal that repeats a secret the run indexed at admission: its row masks it."""
+    store = MemoryStore()
+    g = graph().node("v", "flow.set_variables@1", {"assignments": {"note": "k3y-k3y-k3y"}})
+    g.settings["input_schema"] = {
+        "type": "object",
+        "properties": {"api_key": {"type": "string", "x-sensitive": True}},
+        "required": ["api_key"],
+    }
+    g.settings["vars_schema"] = {"type": "object", "properties": {"note": {"type": "string", "default": ""}}}
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, {"api_key": "k3y-k3y-k3y"}, claimed=True)
+        await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
+    [row] = store.steps(run_id_of(handle))
+    assert row.effect_preview == {"assignments": {"note": "[redacted]"}}
+    assert "k3y-k3y-k3y" not in repr(store.rows) + repr(store.runs)
+
+
 async def test_a_sensitive_config_value_is_masked_where_it_is_copied_or_echoed(env: WorkflowEnvironment) -> None:
     """Review finding: a node's `x-sensitive` config field is redacted in its own input preview, but a control step
     can copy the same value, and the node can echo it in its error. A sensitive value comes in through the run's input
