@@ -36,3 +36,15 @@ it("draws nothing without a result", () => {
   const { container } = render(<SimTags label="notify" tags={[]} />);
   expect(container.textContent).toBe("");
 });
+
+it("goes under its card on one line, cut short, where another card is beside it; one line under it at narrow widths", () => {
+  render(<SimTags label="long" place="under" tags={[{ text: "12 instances: 1 succeeded · 2 failed · 9 skipped", kind: "status" }, { text: "fixture · not sent", kind: "fixture" }]} />);
+  const list = screen.getByRole("list", { name: "long: simulated result" });
+  expect(list.className).toMatch(/\btop-full\b/);
+  expect(list.className).not.toMatch(/\bleft-full\b/);
+  expect(list.className).toMatch(/\btruncate\b/);
+  expect(within(list).getByText("fixture · not sent")).toBeTruthy(); // every word still read out
+  render(<SimTags label="notify" tags={[{ text: "succeeded", kind: "ok" }]} />);
+  expect(screen.getByRole("list", { name: "notify: simulated result" }).className).toMatch(/@max-3xl:truncate/);
+});
+

@@ -3082,3 +3082,35 @@ The owner, in chat: "Milestone 3 accepted, continue; leave the e2e to CI".
   filter): no finding.
 
 Mid-slice rulings over the slice: M102 only. The final review follows. Nothing pushed.
+
+### 4d-1c, the final review (2026-10-15)
+
+A fresh reviewer (Fable) on 6bd2ed51..85437b72: no critical finding, 4 important, 11 minor; "ready with fixes". Every
+Review Focus item implemented and pinned by its test. Re-graded by effect: minor 11 (an "Open" past the picker's first
+50 iterations showed nothing) is important, loops over 50 iterations being ordinary. Fixed test-first, each red then
+green:
+- 1, the canvas's tags painted over a sibling card in branching layouts (auto layout leaves 40 px between siblings),
+  and at narrow widths over the card below when they wrapped. The owner's choice ("Beside, else under"): beside the card
+  wherever no other card is in that box, else under it on one line, cut short, every word still read out; one line
+  under it at narrow widths too (`tagsFitBeside`, `SimTags`'s `place`). The e2e spec checks that `long`'s tags don't
+  cover `short`.
+- 2, paging a loop's iterations dropped the focus and flashed "Reading…": the page shown stays while the next is read
+  (one query per page, each step read through the client: `useQueries` makes a new observer per key, so
+  `keepPreviousData` had nothing to keep), and the focus goes to the other button when the one used is gone.
+- 3, a failed Cancel was silent and rejected: the session says `cancelFailed`; the panel and the bar say "Couldn't
+  cancel it. Try again."
+- 4, a request that couldn't start got "Simulated." on the bar: "Couldn't start · nothing ran · revision N", with
+  "Simulation".
+- 11, "Open" past the first 50: the iteration asked for is read on its own and shown, the picker naming it.
+
+After the fixes: the whole frontend suite, 1184 passed (90 files); ESLint and the type check silent; the build done
+(the editor's chunk 504.04 kB, 158.70 kB gzipped); local CodeQL, no finding.
+
+Ruling 199's text says only a 5xx without the API's code is "outcome unknown"; the code also takes an API-coded 500,
+502 or 504 for unknown, the safer reading (a 500 may follow a commit, and the retry is idempotent). Only a coded 503 is
+a refusal. Deferred minors (a follow-up issue, as for earlier slices): an optional nullable seed's missing words ("or
+choose Null or Absent", the board); the dialog's type tags; "attempt N of M" read from today's draft on a stale result;
+the previous result hidden after a refusal until a reload; an ended simulation read again on each window focus; live
+regions for the bar and the panel's line; "Edit as JSON" toggled off drops JSON edits; refusal words for `key_unusable`
+and `forbidden`; `onSave`'s promise left pending after "Go back to them"; the Test tab's result blinking out between
+admission and the first read.

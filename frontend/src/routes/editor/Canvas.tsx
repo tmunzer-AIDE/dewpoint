@@ -21,7 +21,7 @@ import { StartNode, type StartData } from "./StartCard";
 import { StepNode, type Problems, type StepData } from "./StepCard";
 import { PLUS, Pluses, placePluses, type Box, type Point } from "./pluses";
 import { mustReveal } from "./reveal";
-import type { SimTag } from "./simulation/results";
+import { tagsFitBeside, type SimTag } from "./simulation/results";
 
 const nodeTypes = { step: StepNode, start: StartNode } satisfies NodeTypes;
 const edgeTypes = { flow: FlowEdge } satisfies EdgeTypes;
@@ -61,9 +61,12 @@ function build(p: CanvasProps): { nodes: Node[]; edges: Edge[] } {
   for (const e of drawableEdges(p.doc)) used.set(idKey(e.from.node), [...(used.get(idKey(e.from.node)) ?? []), portOf(e)]);
   const keyOf = new Map(nodesOf(p.doc).map((n) => [idKey(n.id), n.key]));
   const start: StartData = { empty: nodesOf(p.doc).length === 0, focusId: p.focusId, editable: p.editable, onItem: p.onItem, ...p.start };
+  // A result's tags go beside a card, else under it where another card is beside it (the review's 1).
+  const corners = nodesOf(p.doc).map(pos);
+  const placeOf = (i: number) => (tagsFitBeside(corners[i]!, [startPosition(p.doc), ...corners.filter((_, j) => j !== i)]) ? "beside" : "under");
   const nodes: Node[] = [
     { id: START, type: "start", position: startPosition(p.doc), draggable: false, selectable: false, data: start, ...SIZE },
-    ...nodesOf(p.doc).map((n): Node => {
+    ...nodesOf(p.doc).map((n, i): Node => {
       const type = p.types.get(n.type);
       const data: StepData = {
         node: n, type, ports: portsOf(n, type), connected: used.get(idKey(n.id)) ?? [], problems: p.problems.get(idKey(n.id)) ?? NONE,
@@ -71,6 +74,7 @@ function build(p: CanvasProps): { nodes: Node[]; edges: Edge[] } {
         editable: p.editable,
         onItem: p.onItem,
         simulated: p.simulated?.get(idKey(n.id)),
+        simulatedPlace: p.simulated?.has(idKey(n.id)) ? placeOf(i) : undefined,
       };  // prettier-ignore
       return { id: idKey(n.id), type: "step", position: pos(n), draggable: p.editable, selectable: false, data, ...SIZE };
     }),

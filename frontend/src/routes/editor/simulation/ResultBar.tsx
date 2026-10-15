@@ -13,9 +13,10 @@ import { STALE, staleWords, type Stale } from "./stale";
 
 const BAR = "flex flex-wrap items-center gap-3 border-b border-line bg-surface-2 px-5 py-2.5 text-small";
 
-export function ResultBar({ phase, revision, endedAt, notWaited, stale, target, hidden, onHide, onShow, onPanel, onCancel }: {
+export function ResultBar({ phase, revision, endedAt, notWaited, stale, target, cancelFailed, hidden, onHide, onShow, onPanel, onCancel }: {
   phase: Phase; revision: number; endedAt: string | null; notWaited: boolean; stale: Stale | null;
   target: string | null; // a step test's step, by its key: it ran alone
+  cancelFailed: boolean; // the last cancel didn't go through
   hidden: boolean;
   onHide: () => void; onShow: () => void; onPanel: () => void; onCancel: () => void;
 }) {  // prettier-ignore
@@ -24,7 +25,17 @@ export function ResultBar({ phase, revision, endedAt, notWaited, stale, target, 
     return (
       <div className={BAR}>
         <span className="grow text-sim">{`◌ Simulating · ${going} · nothing is sent`}</span>
+        {cancelFailed && <span className="text-danger">Couldn&apos;t cancel it. Try again.</span>}
         {phase !== "cancel_requested" && <Button size="sm" onClick={onCancel}>Cancel</Button>}
+      </div>
+    );
+  }
+  // Nothing ran (the dispatcher gave it up, or it was refused): no result to show or hide, never "Simulated."
+  if (phase === "dead" || phase === "refused") {
+    return (
+      <div className={BAR}>
+        <span className="grow">{`${STATUS[phase]} · nothing ran · revision ${revision}`}</span>
+        <Button size="sm" onClick={onPanel}>Simulation</Button>
       </div>
     );
   }

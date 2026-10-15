@@ -3,6 +3,7 @@
 // Running boards), from the server's per-step summary, never a partial page. A step that ran once shows its final
 // attempt; a loop's step totals its instances, one per opened iteration, skipped ones included, its ports apart; a
 // step with none says why, in the server's tag. Always words: the colour and the hatch only repeat them.
+import { CARD } from "../../../lib/layout";
 import type { Origin, StepSummary } from "../../../lib/simulations";
 
 /** What a tag is: a status (ok, failed or other), values a person gave, a plugin's fixture, an evaluation, an absence,
@@ -48,6 +49,17 @@ const statusKind = (status: string): SimTagKind => (status === "succeeded" ? "ok
 export const field = (v: unknown, key: string): unknown => (typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>)[key] : undefined);
 
 export const words = (tags: SimTag[]) => tags.map((t) => t.text);
+
+/** The box a step's tags take beside its card (SimTags): 8 px off its right edge, 240 px wide, the card's height. */
+const BESIDE = { gap: 8, width: 240 };
+type At = { x: number; y: number };
+
+/** Whether a card's tags fit beside it (§7.3): no other card (`others`, by their top-left corners) in that box. Else
+ * they go under it, on one line (the review's 1; the owner's choice, "beside, else under"). */
+export function tagsFitBeside(at: At, others: At[]): boolean {
+  const box = { x: at.x + CARD.width + BESIDE.gap, y: at.y, width: BESIDE.width, height: CARD.height };
+  return !others.some((o) => o.x < box.x + box.width && box.x < o.x + CARD.width && o.y < box.y + box.height && box.y < o.y + CARD.height);
+}
 
 /** A step's tags. `maxAttempts`: its own, or its type's (an attempt is said "of" it); `ended`: whether the
  * simulation has (while it runs, a loop's step says what it has so far). */

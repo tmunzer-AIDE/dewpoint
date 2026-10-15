@@ -35,7 +35,7 @@ function session(over: { phase?: SimulationSession["phase"]; state?: Partial<Sim
   const state: SimulationState = { request: request(over.request), run: null, cancel_requested: false, read_back: "kept", input: { site: "HQ Paris", floor: 3, api_token: "[redacted]" }, seeds: null, ...over.state };
   return {
     local: { kind: "admitted", frozen: null, request: state.request, latest: false }, state, steps: { given: "input", steps: over.steps ?? STEPS },
-    phase: over.phase ?? "succeeded", busy: false, readFailed: false, asOf: null, start: vi.fn(), checkAgain: vi.fn(), cancel: vi.fn(), readAgain: vi.fn(),
+    phase: over.phase ?? "succeeded", busy: false, readFailed: false, asOf: null, cancelFailed: false, start: vi.fn(), checkAgain: vi.fn(), cancel: vi.fn(), readAgain: vi.fn(),
   };  // prettier-ignore
 }
 

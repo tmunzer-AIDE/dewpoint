@@ -1335,6 +1335,7 @@ function Editor({
           endedAt={simulation.state.run?.ended_at ?? simulation.state.request.ended_at}
           notWaited={(simulation.steps?.steps ?? []).some((s) => s.origin === "evaluated_not_waited")}
           stale={stale}
+          cancelFailed={simulation.cancelFailed}
           target={simulation.state.request.target_step_id ? (findNode(doc, simulation.state.request.target_step_id)?.key ?? simulation.steps?.steps[0]?.key ?? "the step") : null}
           hidden={!resultShown}
           onHide={() => setHiddenFor(simulationId)}

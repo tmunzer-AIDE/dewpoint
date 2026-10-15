@@ -16,17 +16,20 @@ const instance = (step: string, n: number) =>
 
 let asked: string[];
 let failing: boolean;
+let held: Promise<void> | null; // the next page's answer waits for it
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 beforeEach(() => {
   asked = [];
   failing = false;
-  vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+  held = null;
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const url = new URL((input as Request).url);
     asked.push(url.pathname + url.search);
     const m = url.pathname.match(/\/steps\/([^/]+)\/instances$/);
     if (failing || !m) return Promise.resolve(json({ error: "http_error" }, 500));
     const offset = Number(url.searchParams.get("offset"));
     const limit = Number(url.searchParams.get("limit"));
+    if (offset > 0 && held) await held;
     const items = Array.from({ length: Math.max(0, Math.min(limit, TOTAL - offset)) }, (_, i) => instance(m[1]!, offset + i));
     return Promise.resolve(json({ total: TOTAL, items }));
   });
@@ -75,6 +78,32 @@ describe("a loop's iterations, paged (§7.5; the ResultPanel board)", () => {
     expect(screen.queryByRole("button", { name: /^Next/ })).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "Previous 4" }));
     expect(await screen.findByText("Iterations 5–8 of 12")).toBeTruthy();
+  });
+
+  it("keeps the page shown and the focus where it was while the next one is read (the review's 2)", async () => {
+    let answer!: () => void;
+    held = new Promise((resolve) => (answer = resolve));
+    show();
+    const next = await screen.findByRole("button", { name: "Next 4" });
+    await userEvent.click(next);
+    expect(screen.getByRole("list", { name: "each_ap's iterations, 1 to 4 of 12" })).toBeTruthy(); // not "Reading…"
+    expect(document.activeElement).toBe(next);
+    answer();
+    expect(await screen.findByRole("list", { name: "each_ap's iterations, 5 to 8 of 12" })).toBeTruthy();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Next 4" }));
+  });
+
+  it("gives the focus to Previous when the last page has no Next, and to Next when the first has no Previous", async () => {
+    show();
+    await userEvent.click(await screen.findByRole("button", { name: "Next 4" }));
+    await screen.findByText("Iterations 5–8 of 12");
+    await userEvent.click(screen.getByRole("button", { name: "Next 4" }));
+    await screen.findByText("Iterations 9–12 of 12");
+    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Previous 4" })));
+    await userEvent.click(screen.getByRole("button", { name: "Previous 4" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Previous 4" }));
+    await screen.findByText("Iterations 1–4 of 12");
+    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Next 4" })));
   });
 
   it("says when they couldn't be read, and reads them again", async () => {

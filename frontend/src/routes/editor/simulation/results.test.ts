@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from "vitest";
 import type { StepSummary } from "../../../lib/simulations";
-import { tagsOf, words } from "./results";
+import { tagsFitBeside, tagsOf, words } from "./results";
 
 type Final = NonNullable<StepSummary["final"]>;
 const summary = (over: Partial<StepSummary>): StepSummary => ({
@@ -53,3 +53,13 @@ describe("a step's result on the canvas (§7.3, §7.4; the ResultCanvas and Runn
     expect(tagsOf(summary({ instances: 0, statuses: {}, origin: "not_recorded" }), { maxAttempts: 1, ended: true })[0]!.kind).toBe("absent");
   });
 });
+
+describe("where a step's tags go (the review's 1, the owner's choice: beside, else under)", () => {
+  it("go beside a card wherever no other card is there, and under it where one is", () => {
+    expect(tagsFitBeside({ x: 0, y: 0 }, [{ x: 0, y: 140 }, { x: 600, y: 0 }])).toBe(true); // the next rank, a far card
+    expect(tagsFitBeside({ x: 0, y: 0 }, [{ x: 300, y: 0 }])).toBe(false); // a sibling 40 px to the right
+    expect(tagsFitBeside({ x: -160, y: 420 }, [{ x: 160, y: 420 }])).toBe(false); // the e2e fixture's branches
+    expect(tagsFitBeside({ x: 0, y: 0 }, [{ x: 400, y: 40 }])).toBe(false); // half a card lower, still in the way
+  });
+});
+

@@ -22,7 +22,7 @@ function session(phase: SimulationSession["phase"], s: StepSummary | null, state
   };  // prettier-ignore
   return {
     local: { kind: "admitted", frozen: null, request: full.request, latest: false }, state: full, steps: s ? { given: "seeded", steps: [s] } : null,
-    phase, busy: false, readFailed: false, asOf: null, start: vi.fn(), checkAgain: vi.fn(), cancel: vi.fn(), readAgain: vi.fn(),
+    phase, busy: false, readFailed: false, asOf: null, cancelFailed: false, start: vi.fn(), checkAgain: vi.fn(), cancel: vi.fn(), readAgain: vi.fn(),
   };  // prettier-ignore
 }
 const show = (s: SimulationSession) => render(<StepResult session={s} stepKey="notify" attemptsOf={() => 3} />);

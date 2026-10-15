@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ResultBar } from "./ResultBar";
 
 const props = (over: Partial<Parameters<typeof ResultBar>[0]> = {}) => ({
-  phase: "succeeded" as const, revision: 14, endedAt: "2026-10-15T10:42:19Z", notWaited: false, hidden: false, stale: null, target: null,
+  phase: "succeeded" as const, revision: 14, endedAt: "2026-10-15T10:42:19Z", notWaited: false, hidden: false, stale: null, target: null, cancelFailed: false,
   onHide: vi.fn(), onShow: vi.fn(), onPanel: vi.fn(), onCancel: vi.fn(), ...over,
 });  // prettier-ignore
 
@@ -41,6 +41,22 @@ describe("the canvas's bar for a simulation (§7.3; the ResultCanvas and Running
     render(<ResultBar {...props({ target: "notify" })} />);
     expect(screen.getByText("Step test: notify.").parentElement?.textContent).toBe("Step test: notify. Only this step ran. Nothing was sent.");
     expect(screen.queryByText("Simulated.")).toBeNull();
+  });
+
+  it("says when a cancel didn't go through (the review's 3)", () => {
+    render(<ResultBar {...props({ phase: "running", endedAt: null, cancelFailed: true })} />);
+    expect(screen.getByText("Couldn't cancel it. Try again.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy();
+  });
+
+  it("says a simulation that couldn't start ran nothing, never that it was simulated (the review's 4)", async () => {
+    const p = props({ phase: "dead" });
+    render(<ResultBar {...p} />);
+    expect(screen.getByText("Couldn't start · nothing ran · revision 14")).toBeTruthy();
+    expect(screen.queryByText("Simulated.")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Hide the result" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Simulation" }));
+    expect(p.onPanel).toHaveBeenCalled();
   });
 
   it("once hidden, is one bar that brings the result back", async () => {

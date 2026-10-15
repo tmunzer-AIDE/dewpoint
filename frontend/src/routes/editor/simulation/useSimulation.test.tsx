@@ -107,6 +107,22 @@ describe("a simulation the editor sends (§7.1, §7.2)", () => {
     await waitFor(() => expect(result.current.phase).toBe("cancel_requested"));
   });
 
+  it("whose cancel fails says so, and a cancel tried again clears it (the review's 3)", async () => {
+    answers.set(`POST ${BASE}`, () => json(request("started"), 202));
+    answers.set(`GET ${BASE}/r1`, () => json(state("started", { status: "running", queued_at: null, started_at: null, ended_at: null, error: null, iterations: 0 })));
+    answers.set("POST /api/v1/t/t1/runs/r1/cancel", () => json({ error: "http_error" }, 500));
+    const { result } = session();
+    await act(() => result.current.start(freeze(14, { input: {} })));
+    await waitFor(() => expect(result.current.phase).toBe("running"));
+    let done: Awaited<ReturnType<typeof result.current.cancel>> | undefined;
+    await act(async () => void (done = await result.current.cancel())); // never rejects
+    expect(done).toBeNull();
+    expect(result.current.cancelFailed).toBe(true);
+    answers.set("POST /api/v1/t/t1/runs/r1/cancel", () => json({ cancel: "requested", request: request("started") }, 202));
+    await act(async () => void (await result.current.cancel()));
+    expect(result.current.cancelFailed).toBe(false);
+  });
+
   it("whose read fails keeps the last state it knew, and says so", async () => {
     answers.set(`POST ${BASE}`, () => json(request("queued"), 202));
     answers.set(`GET ${BASE}/r1`, () => json(state("queued")));

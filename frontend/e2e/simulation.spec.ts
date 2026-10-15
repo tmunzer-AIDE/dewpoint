@@ -35,6 +35,8 @@ async function accessibleBothWays(page: Page, screen: string): Promise<void> {
 }
 
 const tags = (page: Page, key: string) => page.getByRole("list", { name: `${key}: simulated result` });
+const overlaps = (a: { x: number; y: number; width: number; height: number }, b: typeof a) =>
+  a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
 
 test("a workflow is simulated from its toolbar: the result beside each step, and in the panel", async ({ page }) => {
   await importSimulate(page, "Simulate A");
@@ -50,6 +52,10 @@ test("a workflow is simulated from its toolbar: the result beside each step, and
   await expect(tags(page, "check")).toContainText("evaluated · → true");
   await expect(tags(page, "long")).toContainText("succeeded");
   await expect(tags(page, "short")).toContainText("skipped");
+  // `long` and `short` are 60 px apart: `long`'s tags go under it, never over `short` (the review's 1).
+  const besideShort = (await tags(page, "long").boundingBox())!;
+  const shortCard = (await page.getByRole("button", { name: /^short, Transform/ }).boundingBox())!;
+  expect(overlaps(besideShort, shortCard)).toBe(false);
   await expect(panel.getByRole("region", { name: "Steps, in run order" })).toBeVisible();
   await expect(panel.getByRole("region", { name: "Input used" })).toContainText("HQ Paris");
   await accessibleBothWays(page, "simulate: the result");

@@ -24,7 +24,7 @@ const at = (iso: string) => new Date(iso).toLocaleTimeString("en-GB");
 function session(over: Partial<SimulationSession> = {}): SimulationSession {
   return {
     local: { kind: "admitted", frozen: null, request: request("queued"), latest: false },
-    state: null, steps: null, phase: null, busy: true, readFailed: false, asOf: null,
+    state: null, steps: null, phase: null, busy: true, readFailed: false, asOf: null, cancelFailed: false,
     start: vi.fn(), checkAgain: vi.fn(), cancel: vi.fn(() => Promise.resolve("requested" as const)), readAgain: vi.fn(),
     ...over,
   };  // prettier-ignore
@@ -107,6 +107,12 @@ describe("the Simulation panel's lifecycle (§7.2; the Lifecycle and Running boa
     s.local = { kind: "admitted", frozen: null, request: request("started"), latest: true };
     show(s);
     expect(screen.getByText(`Your latest simulation of this workflow, started ${at(QUEUED_AT)} on revision 14.`)).toBeTruthy();
+  });
+
+  it("says when a cancel didn't go through (the review's 3)", () => {
+    show(admitted("started", run("running"), { phase: "running", cancelFailed: true }));
+    expect(screen.getByText("Couldn't cancel it. Try again.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Cancel the simulation" })).toBeTruthy();
   });
 
   it("closes on Close and on Escape", async () => {

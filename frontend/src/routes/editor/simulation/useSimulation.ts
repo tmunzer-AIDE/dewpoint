@@ -29,6 +29,8 @@ export interface SimulationSession {
   busy: boolean;
   /** The last read failed: what's shown is as of `asOf` (§7.2). */
   readFailed: boolean;
+  /** The last cancel didn't go through (no answer, or refused): the person is told, and may try again. */
+  cancelFailed: boolean;
   asOf: number | null;
   start: (frozen: Frozen) => Promise<void>;
   checkAgain: () => Promise<void>;
@@ -71,6 +73,7 @@ export function useSimulation(tenantId: string, workflowId: string): SimulationS
   const send = useCallback(
     async (frozen: Frozen) => {
       setLocal({ kind: "submitting", frozen });
+      setCancelFailed(false);
       try {
         const request = await sendSimulation(tenantId, workflowId, frozen);
         setLocal({ kind: "admitted", frozen, request, latest: false });
@@ -84,9 +87,17 @@ export function useSimulation(tenantId: string, workflowId: string): SimulationS
   const checkAgain = useCallback(async () => {
     if (local.kind === "unknown" || local.kind === "refused") await send(local.frozen);
   }, [local, send]);
+  const [cancelFailed, setCancelFailed] = useState(false);
   const cancel = useCallback(async () => {
     if (requestId === null) return null;
-    const done = await cancelSimulation(tenantId, requestId);
+    let done: "cancelled" | "requested";
+    try {
+      done = await cancelSimulation(tenantId, requestId);
+    } catch {
+      setCancelFailed(true);
+      return null;
+    }
+    setCancelFailed(false);
     await qc.invalidateQueries({ queryKey: ["simulation", tenantId, workflowId, requestId] });
     return done;
   }, [qc, requestId, tenantId, workflowId]);
@@ -96,8 +107,8 @@ export function useSimulation(tenantId: string, workflowId: string): SimulationS
   return useMemo(
     () => ({
       local, state, steps: requestId !== null ? (stepsRead.data ?? null) : null, phase, busy,
-      readFailed: read.isRefetchError, asOf: read.dataUpdatedAt || null, start: send, checkAgain, cancel, readAgain,
+      readFailed: read.isRefetchError, asOf: read.dataUpdatedAt || null, cancelFailed, start: send, checkAgain, cancel, readAgain,
     }),
-    [local, state, requestId, stepsRead.data, phase, busy, read.isRefetchError, read.dataUpdatedAt, send, checkAgain, cancel, readAgain],
+    [local, state, requestId, stepsRead.data, phase, busy, read.isRefetchError, read.dataUpdatedAt, cancelFailed, send, checkAgain, cancel, readAgain],
   );  // prettier-ignore
 }

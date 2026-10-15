@@ -50,8 +50,15 @@ export function LatestResult({ tenantId, workflowId, session, node, attemptsOf, 
       setShown(iteration.key);
     }
   }, [iteration?.n]);
+  // The iteration "Open" asked for, read on its own when it's past the picker's first page (§7.5: a loop's iterations).
+  const first = page.data?.items ?? [];
+  const askedPast = iteration !== null && page.data !== undefined && !first.some((i) => keyOf(i) === iteration.key);
+  const asked = useQuery({
+    ...stepInstancesQuery(tenantId, workflowId, state?.request.id ?? "", node.id, { offset: 0, limit: 1, within: iteration?.key }),
+    enabled: several && ended && askedPast,
+  });
   if (!s || !state) return null;
-  const items = page.data?.items ?? [];
+  const items = askedPast && asked.data ? [...first, ...asked.data.items.filter((i) => keyOf(i) === iteration?.key)] : first;
   const choice = picked ?? (items[0] ? keyOf(items[0]) : "");
   const item = shown === null ? undefined : items.find((i) => keyOf(i) === shown);
   const words = tagsOf(s, { maxAttempts: attemptsOf(s), ended }).map((t) => t.text).join(" · ");
@@ -74,7 +81,7 @@ export function LatestResult({ tenantId, workflowId, session, node, attemptsOf, 
               </div>
               <Button size="md" onClick={() => setShown(choice || null)}>Show</Button>
             </div>
-            {page.data.total > items.length && <p className="text-small text-muted">{`The first ${items.length} of ${page.data.total} iterations.`}</p>}
+            {page.data.total > first.length && <p className="text-small text-muted">{`The first ${first.length} of ${page.data.total} iterations.`}</p>}
             {item !== undefined && <InstanceDetail final={item} max={attemptsOf(s)} />}
           </>
         )

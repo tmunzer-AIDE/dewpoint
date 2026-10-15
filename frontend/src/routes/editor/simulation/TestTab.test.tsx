@@ -15,7 +15,7 @@ const DOC = { graph_format: 1, nodes: [NOTIFY], edges: [] } as unknown as GraphD
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
 let contract: (revision: number) => Response;
-let instances: () => Response;
+let instances: (url: URL) => Response;
 let asked: string[];
 beforeEach(() => {
   asked = [];
@@ -24,7 +24,7 @@ beforeEach(() => {
     const url = new URL((input as Request).url);
     asked.push(url.pathname + url.search);
     if (url.pathname === SEEDS) return Promise.resolve(contract(Number(url.searchParams.get("revision"))));
-    if (url.pathname.endsWith("/steps/id-notify/instances")) return Promise.resolve(instances());
+    if (url.pathname.endsWith("/steps/id-notify/instances")) return Promise.resolve(instances(url));
     return Promise.resolve(json({ error: "not_found" }, 404));
   });
 });
@@ -35,7 +35,7 @@ const said = (text: string) => (_: string, el: Element | null) => el?.tagName ==
 
 function idle(): SimulationSession {
   return {
-    local: { kind: "idle" }, state: null, steps: null, phase: null, busy: false, readFailed: false, asOf: null,
+    local: { kind: "idle" }, state: null, steps: null, phase: null, busy: false, readFailed: false, asOf: null, cancelFailed: false,
     start: vi.fn(), checkAgain: vi.fn(), cancel: vi.fn(), readAgain: vi.fn(),
   };  // prettier-ignore
 }
@@ -262,6 +262,19 @@ describe("the step in your latest simulation (§7.6; the TestTab and TestOther b
     const found = await screen.findByRole("region", { name: "In your latest simulation" });
     expect(await within(found).findByText("invalid_blocks")).toBeTruthy();
     expect(within(found).getByRole("combobox", { name: "Iteration" })).toHaveProperty("value", "each_ap:3");
+  });
+
+  it("opens an iteration past the picker's first 50 (the review's 11)", async () => {
+    instances = (url) =>
+      url.searchParams.get("within") === "each_ap:54"
+        ? json({ total: 1, items: [instance(54, "failed")] })
+        : json({ total: 60, items: Array.from({ length: 50 }, (_, n) => instance(n, "succeeded")) });
+    show({ session: latest(notify({ instances: 60, statuses: { succeeded: 59, failed: 1 }, final: null })), iteration: { key: "each_ap:54", n: 1 } });
+    const found = await screen.findByRole("region", { name: "In your latest simulation" });
+    expect(await within(found).findByText("invalid_blocks")).toBeTruthy();
+    expect(within(found).getByRole("combobox", { name: "Iteration" })).toHaveProperty("value", "each_ap:54");
+    expect(asked.some((a) => a.includes("within=each_ap%3A54"))).toBe(true);
+    expect(within(found).getByText("The first 50 of 60 iterations.")).toBeTruthy(); // the page's, not the one opened
   });
 
   it("shows it beside a step that can't run alone", async () => {

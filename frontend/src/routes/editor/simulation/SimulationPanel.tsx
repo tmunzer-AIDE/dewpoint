@@ -74,6 +74,7 @@ export function SimulationPanel({ session, onSimulateAgain, onClose, children }:
         )}
         {phase === "cancel_requested" && <Button size="sm" disabled>Cancel requested</Button>}
       </div>
+      {session.cancelFailed && !ended && <p className="text-small text-danger">Couldn&apos;t cancel it. Try again.</p>}
       {children}
       {phase !== null && !ended && <p className="text-small text-muted">Read again every few seconds while this tab is open.</p>}
       {ended && onSimulateAgain && (
