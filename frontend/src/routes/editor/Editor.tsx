@@ -3,7 +3,7 @@
 // adds problems, Task 15 publishing and versions.
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useBlocker, useMatch, useRouter } from "@tanstack/react-router";
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { Button } from "../../components/Button";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { LoadError } from "../../components/LoadError";
@@ -21,6 +21,7 @@ import { begin, record, redo, undo, type History } from "../../lib/history";
 import { CARD, layout } from "../../lib/layout";
 import { guardLeaving } from "../../lib/leaving";
 import type { Path } from "../../lib/schemaForm";
+import { ENDED, draftSnapshotQuery, freeze, type StepSummary } from "../../lib/simulations";
 import { useDocumentTitle } from "../../lib/title";
 import { schedulesQuery, startSummary, workflowBindingsQuery } from "../../lib/triggers";
 import {
@@ -42,6 +43,14 @@ import { addsOf, item, type ItemAction } from "./items";
 import { DeclassifyPanel } from "./DeclassifyPanel";
 import { ProblemsPanel, type PublishProblems } from "./ProblemsPanel";
 import { SaveState } from "./SaveState";
+import { SimulateDialog } from "./simulation/SimulateDialog";
+import { ResultBar } from "./simulation/ResultBar";
+import { tagsOf, type SimTag } from "./simulation/results";
+import { SimulationPanel } from "./simulation/SimulationPanel";
+import { SimulationResult } from "./simulation/SimulationResult";
+import { changesOf, staleOf } from "./simulation/stale";
+import { TestTab } from "./simulation/TestTab";
+import { useSimulation } from "./simulation/useSimulation";
 import { type Problems } from "./StepCard";
 import { StepPicker, type PickMode } from "./StepPicker";
 import { READ_ONLY, type PanelActions } from "./triggers/context";
@@ -55,8 +64,9 @@ type Opened = { workflow: WorkflowDetail; types: NodeType[]; role: string | null
 /** The editor's right column: a step's panel, the problems, the versions, the edits not applied, Declassify, or the
  * Triggers panel (4c-3b), at a place in it when "Go to it" sent it there. */
 type Side =
-  | { kind: "step"; node: string; field?: { pointer: string; kind?: UnappliedKind; n: number } } | { kind: "problems" } | { kind: "versions" }
-  | { kind: "unapplied" } | { kind: "declassify" } | { kind: "triggers"; at?: { pointer: string; n: number } } | null;  // prettier-ignore
+  | { kind: "step"; node: string; field?: { pointer: string; kind?: UnappliedKind; n: number }; test?: { key: string; n: number } }
+  | { kind: "problems" } | { kind: "versions" }
+  | { kind: "unapplied" } | { kind: "declassify" } | { kind: "triggers"; at?: { pointer: string; n: number } } | { kind: "simulation" } | null;  // prettier-ignore
 const NO_DIAGNOSTICS: Diagnostic[] = []; // one empty list, so a memo over it holds
 const NO_STEPS: ReadonlySet<string> = new Set();
 
@@ -365,9 +375,10 @@ function Editor({
   const publishButton = useRef<HTMLButtonElement>(null);
   const unappliedButton = useRef<HTMLButtonElement>(null);
   const declassifyButton = useRef<HTMLButtonElement>(null);
+  const simulateButton = useRef<HTMLButtonElement>(null);
   const jumps = useRef(0); // each "Go to" a field, so the same one twice still focuses it
   const [landing, setLanding] = useState<{
-    on: "problems" | "versions" | "publish" | "problems-panel" | "versions-panel" | "unapplied" | "unapplied-panel" | "declassify" | "declassify-panel" | "triggers-panel";
+    on: "problems" | "versions" | "publish" | "problems-panel" | "versions-panel" | "unapplied" | "unapplied-panel" | "declassify" | "declassify-panel" | "triggers-panel" | "simulate" | "simulation-panel";
     n: number;
   } | null>(null);
   const land = (on: NonNullable<typeof landing>["on"]) => setLanding((l) => ({ on, n: (l?.n ?? 0) + 1 }));
@@ -387,6 +398,8 @@ function Editor({
         declassify: () => usable(declassifyButton.current) ?? usable(versionsButton.current),
         "declassify-panel": () => document.getElementById("declassify-title") ?? usable(declassifyButton.current),
         "triggers-panel": () => document.getElementById("triggers-title"),
+        simulate: () => usable(simulateButton.current) ?? usable(versionsButton.current),
+        "simulation-panel": () => document.getElementById("simulation-title") ?? usable(simulateButton.current),
       }[landing.on]();
       target?.focus();
     });
@@ -465,6 +478,46 @@ function Editor({
   const [notice, setNotice] = useState<Notice | null>(null);
   const viewAsked = useRef(0); // the newest version view asked for
   const publisher = canPublish(role) && sync.status !== "conflict";
+  // Simulating the draft (4d-1c, §7.1): editors and up, who hold workflow.edit and run.start; never on a version's view.
+  const simulation = useSimulation(tenantId, workflow.id);
+  const simulator = canEdit(role) && viewing === null;
+  const [simulateAt, setSimulateAt] = useState<{ revision: number; doc: GraphDoc } | null>(null); // the input, asked
+  const [saving, setSaving] = useState(false); // the save Simulate waits for
+  // Its result on the canvas (§7.3): tags beside each step, under the banner, until "Hide the result", which hides this
+  // simulation's only (the next one shows again).
+  const simulationId = simulation.state?.request.id ?? null;
+  const [hiddenFor, setHiddenFor] = useState<string | null>(null);
+  const resultShown = simulator && simulationId !== null && simulation.phase !== null && hiddenFor !== simulationId;
+  // An attempt is said "of" the step's own limit, else its type's.
+  const attemptsOf = useCallback(
+    (s: StepSummary) => findNode(doc, s.step_id)?.options?.max_attempts ?? typeMap.get(s.type)?.retry.max_attempts ?? null,
+    [doc, typeMap],
+  );
+  // Before the person's edits (§7.7): once it ended, when the server's draft moved on or an edit here isn't saved; then
+  // the draft it ran (its snapshot, read once) says which steps changed since, are new since, or are gone.
+  const simulationEnded = simulation.phase !== null && ENDED.has(simulation.phase);
+  const stale = simulationEnded && simulation.state ? staleOf(simulation.state.request.draft_revision, sync) : null;
+  const snapshotId = simulation.state?.request.draft_snapshot_id ?? null;
+  const snapshot = useQuery({ ...draftSnapshotQuery(tenantId, workflow.id, snapshotId ?? ""), enabled: snapshotId !== null && stale !== null });
+  const ran = snapshotId !== null && snapshot.data?.id === snapshotId ? snapshot.data.graph : null;
+  const changes = useMemo(() => (stale && ran ? changesOf(ran, doc) : null), [stale, ran, doc]);
+  const simulated = useMemo(() => {
+    const tags = new Map<string, SimTag[]>();
+    if (!resultShown) return tags;
+    for (const s of simulation.steps?.steps ?? []) {
+      if (!findNode(doc, s.step_id)) continue; // no longer in the draft: the panel says so
+      const since: SimTag[] = changes?.changed.has(idKey(s.step_id)) ? [{ text: "changed since", kind: "note" }] : [];
+      tags.set(idKey(s.step_id), [...tagsOf(s, { maxAttempts: attemptsOf(s), ended: simulationEnded }), ...since]);
+    }
+    const from = simulation.state?.request.draft_revision;
+    for (const id of changes?.added ?? []) tags.set(id, [{ text: `new since revision ${from}: no result`, kind: "note" }]);
+    return tags;
+  }, [resultShown, simulation.steps, simulation.state, simulationEnded, doc, changes, attemptsOf]);
+  // A draft changed elsewhere refuses the simulation as it refuses a save: the editor stops, as on a save's 409.
+  const conflicted = simulation.local.kind === "refused" && simulation.local.error.code === "draft_conflict" ? simulation.local : null;
+  useEffect(() => {
+    if (conflicted) saver.current?.conflict();
+  }, [conflicted]);
   // When editing stops (a conflict, an exit, a publication), what only editing offers stops with it: an open dialog
   // closes, placing ends (a click on a read-only canvas places nothing) and says so. Focus held by what's gone (the
   // dialog, a "+", Auto layout, Add step, a panel's buttons) goes to what's drawn: a panel's heading when it was in
@@ -884,6 +937,33 @@ function Editor({
     return left;
   }
 
+  /** A simulation's save, Publish's own (§7.1): the draft as it is, saved; the revision saved, else null, said why. A
+   * failed save sends nothing. Called with the edits not applied settled (`whenSettled`). */
+  async function saveFirst(): Promise<number | null> {
+    setSaving(true);
+    setNotice({ tone: "info", text: "Saving before the simulation…" });
+    try {
+      const revision = await saver.current!.flush();
+      setNotice(null);
+      return revision;
+    } catch (e) {
+      // A conflict has its own banner.
+      setNotice(e instanceof ConflictError ? null : {
+        tone: "danger", text: "Not simulated: your latest edits aren't saved. Retry the save, then simulate.",
+        action: { label: "Retry", run: () => saver.current?.retry() },
+      });  // prettier-ignore
+      return null;
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  /** Simulate workflow: the input is asked for at the revision the save made, never an older one. */
+  async function simulate() {
+    const revision = await saveFirst();
+    if (revision !== null) setSimulateAt({ revision, doc: draftNow() });
+  }
+
   /** `then`, once every unapplied edit is in the draft; when one can't be, the person decides first (ruling 18). */
   function whenSettled(action: string, then: () => void) {
     const left = settleAll();
@@ -1162,6 +1242,19 @@ function Editor({
           Versions
         </Button>
         <Button size="md" onClick={() => void exportFile()}>Export</Button>
+        {simulator && (
+          <Button
+            ref={simulateButton}
+            variant="simulate"
+            size="md"
+            aria-haspopup="dialog"
+            aria-describedby={simulation.busy ? "simulate-busy" : undefined}
+            disabled={sync.status === "conflict" || simulation.busy || saving || busy !== null}
+            onClick={() => whenSettled("simulate", () => void simulate())}
+          >
+            ◌ Simulate workflow
+          </Button>
+        )}
         {publisher && viewing === null && (
           <Button
             ref={publishButton}
@@ -1176,6 +1269,14 @@ function Editor({
           </Button>
         )}
       </Toolbar>
+      {simulator && simulation.busy && (
+        <p id="simulate-busy" className="flex flex-wrap items-center gap-3 border-b border-line bg-surface-2 px-5 py-2.5 text-small">
+          <span className="grow">Your simulation hasn&apos;t ended. Simulate again once it has.</span>
+          <Button size="sm" aria-expanded={side?.kind === "simulation"} onClick={() => setSide(side?.kind === "simulation" ? null : { kind: "simulation" })}>
+            Simulation
+          </Button>
+        </p>
+      )}
       {viewing && (
         <div className="flex flex-wrap items-center gap-3 border-b border-line bg-surface-2 px-5 py-2.5 text-small">
           <span className="grow">Viewing version {viewing.number}, read only. The draft is unchanged.</span>
@@ -1227,6 +1328,22 @@ function Editor({
           <Button size="sm" variant="primary" onClick={() => setReloading(true)}>Reload</Button>
         </div>
       )}
+      {simulator && simulationId !== null && simulation.phase !== null && simulation.state && (
+        <ResultBar
+          phase={simulation.phase}
+          revision={simulation.state.request.draft_revision}
+          endedAt={simulation.state.run?.ended_at ?? simulation.state.request.ended_at}
+          notWaited={(simulation.steps?.steps ?? []).some((s) => s.origin === "evaluated_not_waited")}
+          stale={stale}
+          cancelFailed={simulation.cancelFailed}
+          target={simulation.state.request.target_step_id ? (findNode(doc, simulation.state.request.target_step_id)?.key ?? simulation.steps?.steps[0]?.key ?? "the step") : null}
+          hidden={!resultShown}
+          onHide={() => setHiddenFor(simulationId)}
+          onShow={() => setHiddenFor(null)}
+          onPanel={() => setSide({ kind: "simulation" })}
+          onCancel={() => void simulation.cancel()}
+        />
+      )}
       <div className="flex min-h-0 flex-1 @max-3xl:flex-col">
         <div className="relative flex min-h-0 min-w-0 flex-1">
           {placing && editable && (
@@ -1263,7 +1380,9 @@ function Editor({
             summary,
             open: side?.kind === "triggers",
             onOpen: () => setSide(side?.kind === "triggers" ? null : { kind: "triggers" }),
+            tags: resultShown && simulation.steps?.given === "input" ? [{ text: "input", kind: "given" }] : undefined,
           }}
+          simulated={simulated}
           />
         </div>
         {open && (
@@ -1286,6 +1405,20 @@ function Editor({
             actions={viewing ? VERSION_ACTIONS : actionsFor(open.id)}
             note={noteFor(open.id)}
             focusField={side?.kind === "step" ? (side.field ?? null) : null}
+            testAt={side?.kind === "step" ? (side.test?.n ?? null) : null}
+            test={
+              simulator ? (
+                <TestTab
+                  tenantId={tenantId} workflowId={workflow.id} node={open} doc={doc} types={typeMap} revision={sync.revision}
+                  session={simulation} blocked={sync.status === "conflict" || simulation.busy || saving || busy !== null}
+                  onSave={() => new Promise((resolve) => whenSettled("simulate", () => void saveFirst().then(resolve)))}
+                  onStart={(frozen) => void simulation.start(frozen)}
+                  onSimulateWorkflow={() => whenSettled("simulate", () => void simulate())}
+                  onGoTo={(id) => focus(item.node(id))} onShowProblems={() => setSide({ kind: "problems" })} attemptsOf={attemptsOf}
+                  iteration={side?.kind === "step" ? (side.test ?? null) : null}
+                />
+              ) : undefined
+            }
             onAdd={onItem}
             onDelete={() => setAsking({ kind: "node", id: open.id })}
             onConnectPort={(port) => setConnecting({ node: open.id, port })}
@@ -1378,6 +1511,22 @@ function Editor({
             }}
           />
         )}
+        {side?.kind === "simulation" && (
+          <SimulationPanel
+            session={simulation}
+            onSimulateAgain={simulator && sync.status !== "conflict" && !simulation.busy ? () => whenSettled("simulate", () => void simulate()) : undefined}
+            onClose={() => {
+              setSide(null);
+              land("simulate");
+            }}
+          >
+            <SimulationResult
+              tenantId={tenantId} workflowId={workflow.id} session={simulation} doc={doc} ran={ran} stale={stale} changes={changes}
+              attemptsOf={attemptsOf} onGoTo={(id) => focus(item.node(id))} onShowProblems={() => setSide({ kind: "problems" })}
+              onOpen={(id, iteration) => setSide({ kind: "step", node: id, test: { key: iteration, n: ++jumps.current } })}
+            />
+          </SimulationPanel>
+        )}
         {side?.kind === "problems" && (
           <ProblemsPanel
             state={checked}
@@ -1405,6 +1554,24 @@ function Editor({
           onPick={onPick}
           onConnect={picker.kind === "after" && picker.from ? () => setConnecting(picker.from) : undefined}
           onClose={() => setPicker(null)}
+        />
+      )}
+      {simulateAt && (
+        <SimulateDialog
+          tenantId={tenantId}
+          workflowId={workflow.id}
+          name={workflow.name}
+          revision={simulateAt.revision}
+          doc={simulateAt.doc}
+          onSimulate={(input) => {
+            setSimulateAt(null);
+            void simulation.start(freeze(simulateAt.revision, { input }));
+            setSide({ kind: "simulation" }); // its heading takes focus
+          }}
+          onClose={() => {
+            setSimulateAt(null);
+            land("simulate");
+          }}
         />
       )}
       {connecting && (

@@ -7,6 +7,8 @@ import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
 import { START } from "../../lib/graph";
 import { startLabel } from "../../lib/triggers";
 import { item, type ItemAction } from "./items";
+import type { SimTag } from "./simulation/results";
+import { SimTags } from "./simulation/SimTags";
 
 export type StartData = {
   empty: boolean;
@@ -15,6 +17,7 @@ export type StartData = {
   onItem: (action: ItemAction) => void;
   summary: string; // what starts a run, in words
   open: boolean; // the Triggers panel is open
+  tags?: SimTag[]; // in a simulation of the whole workflow: the input a person gave (§7.4)
   onOpen: () => void;
 };
 
@@ -35,6 +38,7 @@ export function StartNode({ data }: NodeProps<Node<StartData, "start">>) {
         <span className="truncate text-small text-muted">{data.summary}</span>
       </button>
       <Handle type="source" id="out" position={Position.Bottom} isConnectable={false} />
+      {data.tags && <SimTags label="Start" tags={data.tags} />}
       {data.empty && data.editable && (
         <button
           type="button"

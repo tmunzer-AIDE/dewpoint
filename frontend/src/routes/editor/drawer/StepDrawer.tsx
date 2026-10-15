@@ -4,7 +4,7 @@
 // schema, the required ones on Setup and the rest on Options (ruling 3). Then how its formulas run, and, for an
 // editor, 4b's actions: its "+" twins (WCAG 2.5.8), where it sits (2.5.7), its edges. Escape closes it as Close does
 // and gives focus back to the step. What its fields do to the draft goes through `actions`, the editor's (ruling 18).
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Button } from "../../../components/Button";
 import { Tabs } from "../../../components/Tabs";
 import { fieldsOf, tabsOf, type FieldSpec } from "../../../lib/schemaForm";
@@ -33,7 +33,7 @@ const NUDGES: { key: Nudge; glyph: string; word: string }[] = [
   { key: "ArrowRight", glyph: "→", word: "right" },
 ];
 
-type Tab = "setup" | "options";
+type Tab = "setup" | "options" | "test";
 
 /** The drawer's disabled controls, its own and 4a's alike, look disabled: the disabled fill and line, their values in
  * muted ink, which stays legible where the disabled ink wouldn't (the owner's ruling O2). 4a's forms elsewhere keep
@@ -80,12 +80,15 @@ function locate(root: HTMLElement, { pointer, kind }: FocusRequest): HTMLElement
 
 export function StepDrawer({
   node, type, tenantId, workflowId, revision, steps, openDeclassify, ports, problems, expressions, editable, adds, actions, note, focusField,
-  onAdd, onDelete, onConnectPort, onPlace, onNudge, onClose,
+  test, testAt, onAdd, onDelete, onConnectPort, onPlace, onNudge, onClose,
 }: {
   node: GraphNode; type: NodeType | undefined; tenantId: string; workflowId: string; revision: number | null;
   steps: { id: string; key: string; title: string | null }[]; openDeclassify?: () => void; ports: string[];
   problems: Diagnostic[] | null; expressions: Expression[]; editable: boolean; adds: { label: string; action: ItemAction }[];
-  actions: DrawerActions; note: string | null; focusField: { pointer: string; kind?: UnappliedKind; n: number } | null; onAdd: (action: ItemAction) => void; onDelete: () => void; onConnectPort: (port: string) => void;
+  actions: DrawerActions; note: string | null; focusField: { pointer: string; kind?: UnappliedKind; n: number } | null;
+  test?: ReactNode; // the Test tab, for editors (4d-1c, §7.6), even on a step with nothing to set up
+  testAt?: number | null; // asked to show the Test tab (the Simulation panel's "Open"), counted
+  onAdd: (action: ItemAction) => void; onDelete: () => void; onConnectPort: (port: string) => void;
   onPlace: () => void; onNudge: (key: Nudge) => void; onClose: () => void;
 }) {  // prettier-ignore
   const heading = useRef<HTMLHeadingElement>(null);
@@ -97,7 +100,10 @@ export function StepDrawer({
   }, [node.id]);
   const fields = useMemo(() => (type ? fieldsOf(type) : []), [type]);
   const { setup, options } = tabsOf(fields);
-  const [tab, setTab] = useState<Tab>(setup.length > 0 ? "setup" : "options");
+  const [tab, setTab] = useState<Tab>(test && testAt ? "test" : setup.length > 0 ? "setup" : "options");
+  useEffect(() => {
+    if (test && testAt) setTab("test");
+  }, [testAt]);
   const [handling, setHandling] = useState(false);
   // "Go to" (ruling 16; the review of 66fc658): a config field on its tab; a held key at the key field; a held limit in
   // the error handling, opened; a held entry name at its name. Its control takes focus once it has rendered, and one
@@ -229,7 +235,7 @@ export function StepDrawer({
           <p className="text-small">
             This server doesn&apos;t know this step&apos;s type, so its settings can&apos;t be shown. They&apos;re kept as they are.
           </p>
-        ) : fields.length === 0 ? (
+        ) : fields.length === 0 && !test ? (
           <p className="text-small text-muted">This step has nothing to set up.</p>
         ) : (
           <Tabs
@@ -256,6 +262,7 @@ export function StepDrawer({
                   ? options.map((f) => <FieldView key={f.pointer} spec={f} />)
                   : <p className="text-small text-muted">Nothing else to set.</p>,
               },
+              ...(test ? [{ value: "test" as const, label: "Test", content: test }] : []),
             ]}
           />
         )}

@@ -21,6 +21,7 @@ import { StartNode, type StartData } from "./StartCard";
 import { StepNode, type Problems, type StepData } from "./StepCard";
 import { PLUS, Pluses, placePluses, type Box, type Point } from "./pluses";
 import { mustReveal } from "./reveal";
+import { tagsFitBeside, type SimTag } from "./simulation/results";
 
 const nodeTypes = { step: StepNode, start: StartNode } satisfies NodeTypes;
 const edgeTypes = { flow: FlowEdge } satisfies EdgeTypes;
@@ -48,7 +49,8 @@ export interface CanvasProps {
   placing: boolean; // the next click on an empty place puts a step there (WCAG 2.5.7)
   overview: boolean; // the minimap: off while a side panel narrows the canvas (the owner's ruling on milestone 3)
   onPlace: (at: { x: number; y: number }) => void; // the click, in the canvas's own coordinates
-  start: { summary: string; open: boolean; onOpen: () => void }; // the start card: what starts a run, and its panel
+  start: { summary: string; open: boolean; onOpen: () => void; tags?: SimTag[] }; // the start card: what starts a run, and its panel
+  simulated?: Map<string, SimTag[]>; // each step's result in the editor's simulation, by identity (4d-1c)
 }
 
 /** What React Flow draws: the start card, each step, an edge from the start card to each entry step, and each edge
@@ -59,15 +61,20 @@ function build(p: CanvasProps): { nodes: Node[]; edges: Edge[] } {
   for (const e of drawableEdges(p.doc)) used.set(idKey(e.from.node), [...(used.get(idKey(e.from.node)) ?? []), portOf(e)]);
   const keyOf = new Map(nodesOf(p.doc).map((n) => [idKey(n.id), n.key]));
   const start: StartData = { empty: nodesOf(p.doc).length === 0, focusId: p.focusId, editable: p.editable, onItem: p.onItem, ...p.start };
+  // A result's tags go beside a card, else under it where another card is beside it (the review's 1).
+  const corners = nodesOf(p.doc).map(pos);
+  const placeOf = (i: number) => (tagsFitBeside(corners[i]!, [startPosition(p.doc), ...corners.filter((_, j) => j !== i)]) ? "beside" : "under");
   const nodes: Node[] = [
     { id: START, type: "start", position: startPosition(p.doc), draggable: false, selectable: false, data: start, ...SIZE },
-    ...nodesOf(p.doc).map((n): Node => {
+    ...nodesOf(p.doc).map((n, i): Node => {
       const type = p.types.get(n.type);
       const data: StepData = {
         node: n, type, ports: portsOf(n, type), connected: used.get(idKey(n.id)) ?? [], problems: p.problems.get(idKey(n.id)) ?? NONE,
         separate: p.separate.get(idKey(n.id)) ?? 0, conditional: p.conditional.has(idKey(n.id)), current: p.current !== null && sameId(p.current, n.id), focusId: p.focusId,
         editable: p.editable,
         onItem: p.onItem,
+        simulated: p.simulated?.get(idKey(n.id)),
+        simulatedPlace: p.simulated?.has(idKey(n.id)) ? placeOf(i) : undefined,
       };  // prettier-ignore
       return { id: idKey(n.id), type: "step", position: pos(n), draggable: p.editable, selectable: false, data, ...SIZE };
     }),

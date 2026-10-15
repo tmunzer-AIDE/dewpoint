@@ -9,7 +9,7 @@ const CONTROL = "min-h-11 w-full min-w-0 rounded-lg border bg-surface px-3 text-
 export const controlClass = (invalid: boolean): string => `${CONTROL} ${invalid ? "border-danger" : "border-line-control"}`;
 
 interface Labelled {
-  label: string;
+  label: ReactNode; // its text, with what a form adds beside it (a "required" tag)
   hint?: ReactNode;
   error?: string;
 }
