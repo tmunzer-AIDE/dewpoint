@@ -248,7 +248,9 @@ synced yet, or its Temporal id's first update not landed) and `count_pending` (l
 
 `dewpoint dispatcher` starts admitted requests. Run one or more. It needs `DEWPOINT_DATABASE_URL` with a login in the
 `dewpoint_dispatch` role, `DEWPOINT_TEMPORAL_ADDRESS` and `DEWPOINT_TEMPORAL_NAMESPACE` (checked against the recorded
-namespace before it connects: exit 2 otherwise, [`deployment.md`](deployment.md)), and the KEK. Every second it:
+namespace before it connects: exit 2 otherwise, [`deployment.md`](deployment.md)), and the KEK. SIGTERM or SIGINT
+stops it once the cycle in hand ends, a start in flight getting its answer, then gives a tick being admitted 5 seconds
+and hands its lead over: it exits 0, and a second signal ends it at once. Every second it:
 
 1. reads the current build from Temporal and records it, for admission's engine ABI check;
 2. picks each tenant's oldest due request (through `dispatch_candidates()`, which returns ids and when they were
@@ -449,9 +451,12 @@ loader, the projection, and one activity per installed plugin node type. It need
   (`dewpoint-cel.abi<engine ABI>.<profile>`) with
   `DEWPOINT_CEL_MAX_CONCURRENT` activities at a time (default 2; match the evaluator's slots,
   [`cel-evaluator.md`](cel-evaluator.md)).
-- `DEWPOINT_WORKER_SHUTDOWN_GRACE_S` (default 30): a stopping worker lets running attempts finish this long, then
-  cancels them. A cancelled attempt ends as on a lost worker: `outcome_unknown` for an `ambiguous` node (a simulated
-  attempt sends nothing: `simulated`). Give the process manager a stop timeout longer than this.
+- `DEWPOINT_WORKER_SHUTDOWN_GRACE_S` (default 30): a stopping worker lets running attempts and CEL evaluations
+  finish this long, then cancels them. A cancelled attempt ends as on a lost worker: `outcome_unknown` for an
+  `ambiguous` node (a simulated attempt sends nothing: `simulated`). SIGTERM or SIGINT stops the worker this way: it
+  stops polling, gives running attempts this grace and plugin calls in flight their answer (10 seconds at most), and
+  exits 0; a second signal ends it at once. Give the process manager a stop timeout longer than this (Compose's is
+  45 seconds).
 - `DEWPOINT_WORKER_SET_CURRENT` (default off): the worker makes its own build the one new runs start on. Only where
   one build runs at a time, as in Docker Compose; elsewhere, promote builds with `dewpoint deployment set-current`
   ([`deployment.md`](deployment.md)).

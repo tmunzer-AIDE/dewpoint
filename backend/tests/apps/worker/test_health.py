@@ -29,9 +29,6 @@ class Log:
             raise ConnectionError("the database is down")
         self.events.append(f"report {healthy}")
 
-    async def stop(self) -> None:
-        self.events.append("stop")
-
 
 @pytest.mark.parametrize("answer", [False, None])
 async def test_an_instance_that_cant_prove_itself_at_startup_records_it_and_never_polls(answer: bool | None) -> None:
@@ -47,34 +44,28 @@ async def test_a_healthy_start_is_recorded() -> None:
     assert log.events == ["check True", "report True"]
 
 
-async def test_a_failed_check_stops_the_workers_then_ends_the_process() -> None:
+async def test_a_failed_check_is_recorded_then_ends_the_process() -> None:
+    """Its caller stops the workers once it raises (`stopping.serve`, tests/apps/worker/test_main.py): the SDK's
+    shutdown returns only once the workers have ended, and a watch that waited for it would be cancelled first."""
     log = Log([True, False])
     with pytest.raises(WorkerUnhealthyError):
-        await watch(log.check, log.report, log.stop, interval_s=0)
-    assert log.events == ["check True", "report True", "check False", "report False", "stop"]
+        await watch(log.check, log.report, interval_s=0)
+    assert log.events == ["check True", "report True", "check False", "report False"]
 
 
 async def test_an_outage_proves_nothing_and_keeps_the_instance_polling() -> None:
     """Nothing is recorded while the database doesn't answer: the row goes stale, and a stale row isn't live."""
     log = Log([True, None, None, False])
     with pytest.raises(WorkerUnhealthyError):
-        await watch(log.check, log.report, log.stop, interval_s=0)
-    assert log.events == [
-        "check True",
-        "report True",
-        "check None",
-        "check None",
-        "check False",
-        "report False",
-        "stop",
-    ]
+        await watch(log.check, log.report, interval_s=0)
+    assert log.events == ["check True", "report True", "check None", "check None", "check False", "report False"]
 
 
 async def test_a_record_it_cant_write_keeps_a_healthy_instance_polling() -> None:
     log = Log([True, True, False], fail_reports=2)
     with pytest.raises(WorkerUnhealthyError):
-        await watch(log.check, log.report, log.stop, interval_s=0)
-    events = ["check True", "report failed", "check True", "report failed", "check False", "report False", "stop"]
+        await watch(log.check, log.report, interval_s=0)
+    events = ["check True", "report failed", "check True", "report failed", "check False", "report False"]
     assert log.events == events
 
 

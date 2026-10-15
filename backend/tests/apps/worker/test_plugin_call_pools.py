@@ -119,6 +119,7 @@ async def test_a_worker_process_opens_at_most_its_budgeted_connections(monkeypat
     where each is made (the one factory every engine goes through), with the most connections each may open: the
     budget, CONNECTIONS. Its plugin calls' LISTEN takes a connection of the shared pool's."""
 
+    from dewpoint.apps import stopping
     from dewpoint.apps.worker import main
     from dewpoint.core import db
     from tests.apps.worker.test_main import proven, settings, unrecorded
@@ -133,8 +134,8 @@ async def test_a_worker_process_opens_at_most_its_budgeted_connections(monkeypat
     class Polling(Exception):
         """Where the test stops the worker: every part of it made, none of it run."""
 
-    def gather(*started: Any, **_: Any) -> None:
-        for coroutine in started:
+    async def serve(serving: list[Any], helpers: list[Any], **_: Any) -> None:
+        for coroutine in (*serving, *helpers):
             coroutine.close()
         raise Polling
 
@@ -150,7 +151,7 @@ async def test_a_worker_process_opens_at_most_its_budgeted_connections(monkeypat
     monkeypatch.setattr(main, "reporter", lambda *args: unrecorded)
     monkeypatch.setattr(main, "self_check", proven)
     monkeypatch.setattr(main, "engine_worker", lambda *args, **kwargs: SimpleNamespace(run=lambda: asyncio.sleep(0)))
-    monkeypatch.setattr(main, "asyncio", SimpleNamespace(gather=gather))
+    monkeypatch.setattr(stopping, "serve", serve)
     with pytest.raises(Polling):
         await main.run(settings())
     pools = [(e.pool.size(), e.pool._max_overflow) for e in made]  # type: ignore[attr-defined]

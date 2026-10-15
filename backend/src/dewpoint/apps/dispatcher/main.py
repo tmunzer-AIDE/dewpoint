@@ -9,14 +9,15 @@ import os
 import socket
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import timedelta
 
 import structlog
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from temporalio.client import Client
 from temporalio.service import RetryConfig, RPCError, RPCStatusCode
 from temporalio.worker import Worker
 
-from dewpoint.apps import tick_contract
+from dewpoint.apps import stopping, tick_contract
 from dewpoint.apps.codec import KeyringKeys, data_converter
 from dewpoint.apps.dispatcher import budget, evidence, matching, recovery, start_call
 from dewpoint.apps.dispatcher.cancels import send_cancels
@@ -44,6 +45,10 @@ from dewpoint.core.temporal_connect import keep_token_fresh
 
 log = structlog.get_logger("dewpoint.dispatcher")
 CYCLE_S = 1.0  # between cycles
+# A stopping dispatcher's admission worker lets a tick in hand be admitted this long, once the cycle in hand ends,
+# inside Compose's 15-second stop grace (the owner's ruling D2): rather than cancelled, and retried by the next
+# dispatcher.
+ADMISSION_GRACE = timedelta(seconds=5)
 # The SDK's retries of its own calls (`start_workflow`, a handle's): its defaults, made explicit, since a call's worst
 # rests on them (the owner's D16 review of checkpoint 3): retried until 10 s after its first attempt, each attempt with
 # the call's deadline, so at most 20 s with the 10-second ones (`test_sdk_retry_bounds.py`)
@@ -105,17 +110,22 @@ async def cycle(
         await report(sessionmaker, reconciler, build_id, {**settled}, kind="reconciler")
 
 
-async def serve(one: Callable[[], Awaitable[None]], *, cycles: int | None = None) -> None:
-    """Cycles, `CYCLE_S` apart, forever (or `cycles` of them). A cycle that fails is logged by type, never by message,
-    and the next one runs: the process outlives what it can't control (the whole-branch review)."""
+async def serve(
+    one: Callable[[], Awaitable[None]], *, cycles: int | None = None, stop: asyncio.Event | None = None
+) -> None:
+    """Cycles, `CYCLE_S` apart, forever (or `cycles` of them), until a stop is requested: the cycle in hand ends, its
+    starts in flight getting their answers, and no other begins (the owner's ruling D1). A cycle that fails is logged
+    by type, never by message, and the next one runs: the process outlives what it can't control (the whole-branch
+    review)."""
+    requested = stop if stop is not None else asyncio.Event()
     done = 0
-    while cycles is None or done < cycles:
+    while (cycles is None or done < cycles) and not requested.is_set():
         try:
             await one()
         except Exception as e:
             log.error("dispatcher_cycle_failed", error=type(e).__name__)
         done += 1
-        await asyncio.sleep(CYCLE_S)
+        await stopping.pause(requested, CYCLE_S)
 
 
 def admission_worker(client: Client, sessionmaker: async_sessionmaker[AsyncSession], keys: KeySource) -> Worker:
@@ -124,8 +134,9 @@ def admission_worker(client: Client, sessionmaker: async_sessionmaker[AsyncSessi
     keep no error text, as the engine worker's don't (engine 2b spec §12)."""
     logs.withhold_activity_errors()
     return Worker(
-        client, task_queue=ADMISSION_QUEUE, workflows=[ScheduleTick], activities=[Ticker(sessionmaker, keys).tick]
-    )
+        client, task_queue=ADMISSION_QUEUE, workflows=[ScheduleTick], activities=[Ticker(sessionmaker, keys).tick],
+        graceful_shutdown_timeout=ADMISSION_GRACE,
+    )  # fmt: skip
 
 
 async def startup(sessionmaker: async_sessionmaker[AsyncSession], settings: Settings) -> PlatformSettings:
@@ -138,38 +149,56 @@ async def startup(sessionmaker: async_sessionmaker[AsyncSession], settings: Sett
     return recorded
 
 
-async def run(settings: Settings) -> None:
-    """Raises EnvironmentNotRecordedError or EnvironmentMismatchError before connecting to Temporal."""
+async def run(settings: Settings, stop_requested: asyncio.Event | None = None) -> None:
+    """Raises EnvironmentNotRecordedError or EnvironmentMismatchError before connecting to Temporal. A stop request
+    (`stop_requested`, set by SIGTERM or SIGINT: apps/stopping.py) abandons its start, nothing taken yet, or ends its
+    cycles once the one in hand has; then its admission worker stops, a tick in hand given `ADMISSION_GRACE`, and its
+    lead goes, for another dispatcher to take (the owner's rulings D1, D2)."""
+    requested = stop_requested if stop_requested is not None else asyncio.Event()
     engine = make_engine(settings.database_url)
     try:
         sessionmaker = make_sessionmaker(engine)
-        recorded = await startup(sessionmaker, settings)
-        keys = KeyringKeys(sessionmaker, Keyring(KekSet.from_settings(settings)))
-        client = await temporal_connect(
-            settings, recorded.environment, data_converter=data_converter(keys),
-            identity=f"{os.getpid()}@{socket.gethostname()} {tick_contract.IDENTITY}", retry_config=RETRY,
-        )  # fmt: skip
-        refreshing = asyncio.create_task(keep_token_fresh(client, settings))  # bearer mode: a rotated token
-        budget.instrument(client)  # its passes' soft budget: every call timed (D16 prototype)
-        start_call.install(client)  # its starts carry their recorded request id, one RPC attempt each
-        instance = uuid.uuid4()
-        reconciler, leader = uuid.uuid5(instance, "reconciler"), Leader(engine)
-        log.info("dispatcher_started", instance=str(instance), build=this_build())
-        rotation, verified, retention, pages = Rotation(), Verified(), evidence.Retention(), matching.Busy()
-        drift = Drift()
-
-        async def one() -> None:
-            await cycle(sessionmaker, client, keys, settings, instance=instance, reconciler=reconciler, leader=leader,
-                        rotation=rotation, verified=verified, retention=retention, pages=pages,
-                        drift=drift)  # fmt: skip
-
-        try:
-            async with admission_worker(
-                client, sessionmaker, keys
-            ):  # ends the process if it fails: Compose restarts it
-                await serve(one)
-        finally:
-            refreshing.cancel()
-            await leader.close()
+        started = await stopping.unless_stopped(requested, _connected(sessionmaker, settings))
+        if started is not None:
+            await _dispatch(engine, sessionmaker, *started, settings, requested)
     finally:
         await engine.dispose()
+    log.info("dispatcher_stopped")
+
+
+async def _connected(sessionmaker: async_sessionmaker[AsyncSession], settings: Settings) -> tuple[Client, KeySource]:
+    """Its start: the deployment checked and its maximum run duration recorded, then Temporal, with tenants' keys."""
+    recorded = await startup(sessionmaker, settings)
+    keys = KeyringKeys(sessionmaker, Keyring(KekSet.from_settings(settings)))
+    client = await temporal_connect(
+        settings, recorded.environment, data_converter=data_converter(keys),
+        identity=f"{os.getpid()}@{socket.gethostname()} {tick_contract.IDENTITY}", retry_config=RETRY,
+    )  # fmt: skip
+    return client, keys
+
+
+async def _dispatch(
+    engine: AsyncEngine, sessionmaker: async_sessionmaker[AsyncSession], client: Client, keys: KeySource,
+    settings: Settings, requested: asyncio.Event,
+) -> None:  # fmt: skip
+    """Its cycles, beside its admission worker, until a stop is requested."""
+    refreshing = asyncio.create_task(keep_token_fresh(client, settings))  # bearer mode: a rotated token
+    budget.instrument(client)  # its passes' soft budget: every call timed (D16 prototype)
+    start_call.install(client)  # its starts carry their recorded request id, one RPC attempt each
+    instance = uuid.uuid4()
+    reconciler, leader = uuid.uuid5(instance, "reconciler"), Leader(engine)
+    log.info("dispatcher_started", instance=str(instance), build=this_build())
+    rotation, verified, retention, pages = Rotation(), Verified(), evidence.Retention(), matching.Busy()
+    drift = Drift()
+
+    async def one() -> None:
+        await cycle(sessionmaker, client, keys, settings, instance=instance, reconciler=reconciler, leader=leader,
+                    rotation=rotation, verified=verified, retention=retention, pages=pages,
+                    drift=drift)  # fmt: skip
+
+    try:
+        async with admission_worker(client, sessionmaker, keys):  # ends the process if it fails: Compose restarts it
+            await serve(one, stop=requested)
+    finally:
+        refreshing.cancel()
+        await leader.close()

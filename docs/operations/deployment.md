@@ -435,9 +435,10 @@ Each engine worker instance records itself in `worker_instances`: its build, its
 polls, and every 30 seconds. The check proves what `payload_codec` needs of the instance, that its KEK wraps and
 unwraps a key and its database role may read data keys, and what `claim_check` needs, that its role may read and write
 claims, grants and the secret index. An instance that fails it stops polling (running attempts get the shutdown grace)
-and exits with code 3; its process manager should restart it. A database that doesn't answer proves nothing either
-way: during an outage the worker keeps running, records nothing, and its row goes stale. Sub-project 2b-2's dispatcher
-starts runs only while every live instance of the current build is healthy and holds every capability.
+and exits with code 3; its process manager should restart it, as Compose does. A database that doesn't answer proves
+nothing either way: during an outage the worker keeps running, records nothing, and its row goes stale. Sub-project
+2b-2's dispatcher starts runs only while every live instance of the current build is healthy and holds every
+capability.
 
 The check is deliberately light: it proves a grant and a fresh key's round trip, not that stored keys unwrap. A wrong
 KEK configured under the right id passes it, and passes `dewpoint keys status`, which compares KEK ids
@@ -469,6 +470,22 @@ Schedules in step with the `schedules` table. A schedule's time zone is checked 
 data, which the shipped image holds (CI schedules a run in `Europe/Paris` through Compose to prove it). Don't edit a
 Dewpoint schedule in Temporal's UI: the dispatcher only tells its own updates apart, by the `dewpoint generation <n>`
 note it writes.
+
+**Stopping.** `docker compose stop`, `restart` and a recreate by `up` send SIGTERM, and the worker, the dispatcher and
+retention each stop at their own safe point, then exit 0:
+
+- the worker stops polling, lets running attempts and evaluations finish within `DEWPOINT_WORKER_SHUTDOWN_GRACE_S`
+  and plugin calls in flight within their 10 seconds; Compose waits 45 seconds;
+- the dispatcher ends the cycle in hand, a start in flight getting its answer, gives a tick being admitted 5 seconds,
+  and hands its lead over; Compose waits 15 seconds, which a healthy cycle never comes near, and cuts a cycle that
+  Temporal's slowness stretched past them: its items are resumed or settled by the next dispatcher, as after a crash;
+- retention ends the step in hand; Compose waits 10 seconds, and a sweep or an erasure pass still running then is
+  cut, and resumes when it starts again.
+
+Each leaves without the interpreter's own shutdown, where temporalio's bridge can crash. A second SIGTERM or SIGINT
+ends a process at once (exit 143 or 130). In `docker compose ps -a`, exit 0 is a process that stopped itself; 137 is
+Compose's SIGKILL at the end of its wait. A native crash prints each thread's stack (`PYTHONFAULTHANDLER`, set in the
+image) to the service's log.
 
 Compose's services set `DEWPOINT_TEMPORAL_INSECURE_DEV=true` to reach the dev server in plaintext, which only a
 recorded `development` environment accepts: a Compose deployment recorded as `production` needs an external Temporal
@@ -526,7 +543,8 @@ docker compose run --rm -e DEWPOINT_DATABASE_URL="postgresql+asyncpg://dewpoint_
 ```
 
 **Upgrading Compose in place,** `migrate` runs while the old build's services are still connected. Either stop them
-first (`docker compose stop api worker dispatcher retention`), or, once their connections were recycled after any
+first (`docker compose stop api worker dispatcher retention`, which lets the worker's running attempts finish: up to
+45 seconds), or, once their connections were recycled after any
 `deadlock_timeout` change (above), set `DEWPOINT_UPGRADE_SETTINGS_ATTESTED=1` in `.env` for the upgrade, and remove it
 after.
 

@@ -158,7 +158,10 @@ services:
       # Compose runs one build at a time: the worker makes its build current (docs/operations/deployment.md).
       DEWPOINT_WORKER_SET_CURRENT: "true"
     volumes: [cel-socket:/run/dewpoint-cel]
-    stop_grace_period: 45s  # longer than DEWPOINT_WORKER_SHUTDOWN_GRACE_S (30 s): running attempts finish
+    # SIGTERM: it stops polling, lets running attempts and evaluations finish within DEWPOINT_WORKER_SHUTDOWN_GRACE_S
+    # (30 s) and plugin calls in flight within their 10 s, then exits 0; this outlasts both (docs/operations/runs.md)
+    stop_grace_period: 45s
+    restart: unless-stopped  # a worker that ends comes back: exit 3 after a failed self-check, or a crash
     depends_on:
       migrate: { condition: service_completed_successfully }
       temporal: { condition: service_healthy }
@@ -173,7 +176,10 @@ services:
       <<: *appenv
       DEWPOINT_DATABASE_URL: postgresql+asyncpg://dewpoint_dispatch_login:${DEWPOINT_DISPATCH_DB_PASSWORD}@postgres/dewpoint
       DEWPOINT_TEMPORAL_ADDRESS: temporal:7233
-    stop_grace_period: 15s  # longer than a start's own deadline (10 s): a start in flight gets its answer
+    # SIGTERM: the cycle in hand ends, a start in flight getting its answer within its own deadline (10 s), then a tick
+    # being admitted gets 5 s, and it exits 0. A cycle slowed by Temporal can outlast this: it's cut, and what it held
+    # is resumed or settled by the next dispatcher, as after any crash
+    stop_grace_period: 15s
     restart: unless-stopped  # a dispatcher that ends comes back: queued runs keep starting
     depends_on:
       migrate: { condition: service_completed_successfully }
@@ -189,6 +195,8 @@ services:
       # It carries tenant erasures on too (docs/operations/erasure.md), through Temporal, decoding no payload.
       DEWPOINT_TEMPORAL_ADDRESS: temporal:7233
       DEWPOINT_TEMPORAL_NAMESPACE: ${DEWPOINT_TEMPORAL_NAMESPACE:-default}
+    # SIGTERM: the step in hand ends, and it exits 0; a sweep still running after this is cut, and resumes
+    stop_grace_period: 10s
     restart: unless-stopped  # the SLO needs a successful sweep a day: one that ends comes back
     depends_on:
       migrate: { condition: service_completed_successfully }

@@ -15,7 +15,7 @@ from tests.support.logs import rendered
 TOKEN = "tok-live-3a9e7d1c"
 
 
-async def _crashes(settings: Any) -> None:
+async def _crashes(settings: Any, stop_requested: Any = None) -> None:
     token = TOKEN
     try:
         if token:

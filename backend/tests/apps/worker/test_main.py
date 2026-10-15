@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """`dewpoint worker`'s workers."""
 
+import asyncio
 from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -12,7 +13,7 @@ from temporalio.testing import WorkflowEnvironment
 import dewpoint
 from dewpoint.apps import cel_client
 from dewpoint.apps.codec import FailureConverter, TenantCodec
-from dewpoint.apps.worker import main
+from dewpoint.apps.worker import health, main
 from dewpoint.apps.worker.health import WorkerUnhealthyError
 from dewpoint.apps.worker.main import engine_worker
 from dewpoint.core import logs
@@ -149,3 +150,161 @@ async def test_an_unavailable_evaluator_is_logged_by_its_type_only(monkeypatch: 
     assert secret not in "\n".join(lines())
     [record] = records(lines())
     assert (record["event"], record["error"]) == ("cel_evaluator_unavailable", "EvaluatorUnavailable")
+
+
+async def test_the_cel_worker_lets_running_evaluations_finish(own_env: WorkflowEnvironment) -> None:
+    """The owner's ruling W3 (graceful stop): a stopping worker's evaluations get the same grace as its attempts; one
+    cancelled at once would spend one of `cel.evaluate`'s three attempts, and wait for the next worker."""
+    worker = main.cel_worker(own_env.client, "/run/cel.sock", "cel-1", MemoryStore(), max_concurrent=2,
+                             grace=timedelta(seconds=45))  # fmt: skip
+    assert worker.config()["graceful_shutdown_timeout"] == timedelta(seconds=45)
+
+
+class Serving:
+    """The worker process's parts, standing in for its workers, its plugin-call server and its health watch: what each
+    did, in order."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.events: list[str] = []
+        self.polling = asyncio.Event()
+        self.refused: Exception | None = None  # what a worker's run() raises before it polls, if anything
+        test = self
+
+        class Engine:
+            async def dispose(self) -> None:
+                test.events.append("disposed")
+
+        class Worker:
+            """temporalio 1.33.0's shape: `shutdown()` returns only once `run()` has ended, and never when `run()`
+            failed before it polled (its namespace not validated, say)."""
+
+            def __init__(self, *args: object, **kwargs: Any) -> None:
+                self.stopping, self.ended = asyncio.Event(), asyncio.Event()
+
+            async def run(self) -> None:
+                if test.refused is not None:
+                    raise test.refused
+                test.events.append("polling")
+                test.polling.set()
+                await self.stopping.wait()
+                test.events.append("worker ended")
+                self.ended.set()
+
+            async def shutdown(self) -> None:
+                test.events.append("shutdown")
+                self.stopping.set()
+                await self.ended.wait()
+
+        class PluginCalls:
+            def __init__(self, *args: object, **kwargs: Any) -> None:
+                self.stopped = asyncio.Event()
+
+            def stop(self) -> None:
+                self.stopped.set()
+
+            async def run(self) -> None:
+                await self.stopped.wait()
+                test.events.append("plugin calls ended")
+
+        async def watch(*args: object) -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                test.events.append("watch cancelled")
+                raise
+
+        async def recorded(*args: object) -> object:
+            return SimpleNamespace(environment="development")
+
+        async def connect(*args: object, **kwargs: Any) -> object:
+            test.events.append("connected")
+            return SimpleNamespace()
+
+        monkeypatch.setattr(main, "make_engine", lambda url, **pool: Engine())
+        monkeypatch.setattr(main, "make_sessionmaker", lambda engine: None)
+        monkeypatch.setattr(main, "verify_environment", recorded)
+        monkeypatch.setattr(main, "reporter", lambda *args: unrecorded)
+        monkeypatch.setattr(main, "self_check", proven)
+        monkeypatch.setattr(main, "temporal_connect", connect)
+        monkeypatch.setattr(main, "engine_worker", Worker)
+        monkeypatch.setattr(main, "PluginCallServer", PluginCalls)
+        monkeypatch.setattr(main, "watch", watch)
+
+
+async def test_a_stop_request_stops_the_workers_then_their_helpers_then_the_engines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The owner's ruling W1 (graceful stop): SIGTERM (Compose's stop) does what a failed check does: the workers stop
+    polling, running attempts get the shutdown grace and plugin calls their answer; then what only helped them goes,
+    and then the engines, which the attempts used to the end."""
+    s, requested = Serving(monkeypatch), asyncio.Event()
+    running = asyncio.ensure_future(main.run(settings(), stop_requested=requested))
+    await asyncio.wait_for(s.polling.wait(), 10)
+    requested.set()
+    await asyncio.wait_for(running, 10)
+    assert s.events[:2] == ["connected", "polling"]
+    assert sorted(s.events[2:5]) == ["plugin calls ended", "shutdown", "worker ended"]
+    assert s.events[5:] == ["watch cancelled", "disposed", "disposed"]
+
+
+async def test_a_stop_while_starting_abandons_the_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The owner's ruling W2: a worker still starting (here, its database not answering) has taken nothing; it stops at
+    once instead of waiting for Compose's SIGKILL."""
+    s, requested = Serving(monkeypatch), asyncio.Event()
+
+    async def unanswered(*args: object) -> object:
+        requested.set()
+        await asyncio.Event().wait()
+        raise AssertionError("never answered")
+
+    monkeypatch.setattr(main, "verify_environment", unanswered)
+    await asyncio.wait_for(main.run(settings(), stop_requested=requested), 10)
+    assert s.events == ["disposed", "disposed"]
+
+
+async def test_a_failed_promotion_stops_the_workers_before_the_process_ends(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The owner's ruling W1: a helper that fails (`promote` out of time) stops the workers first; it no longer leaves
+    them polling while the engines are disposed under them."""
+    s = Serving(monkeypatch)
+
+    class OutOfTime(Exception):
+        """`promote`'s, told apart from a hang's TimeoutError."""
+
+    async def promote(client: object) -> None:
+        await s.polling.wait()
+        raise OutOfTime
+
+    monkeypatch.setattr(main, "promote", promote)
+    with pytest.raises(OutOfTime):
+        await asyncio.wait_for(main.run(settings(worker_set_current=True), stop_requested=asyncio.Event()), 10)
+    assert s.events[:2] == ["connected", "polling"]
+    assert sorted(s.events[2:5]) == ["plugin calls ended", "shutdown", "worker ended"]
+    assert s.events[5:] == ["watch cancelled", "disposed", "disposed"]
+
+
+async def test_a_failed_self_check_still_ends_the_worker_unhealthy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Engine 2b spec §2.7, through the stop's wiring (the fresh review's finding 1): the SDK's `shutdown()` returns
+    only once `run()` has ended, so the workers end before the failed check is raised; it's raised all the same, and the
+    process exits 3, not as a stop."""
+    s = Serving(monkeypatch)
+    answers = [True, False]  # at startup, then at its first watch
+
+    async def check(*args: object) -> bool:
+        return answers.pop(0)
+
+    monkeypatch.setattr(main, "self_check", check)
+    monkeypatch.setattr(main, "watch", lambda check, report: health.watch(check, report, interval_s=0))
+    with pytest.raises(WorkerUnhealthyError):
+        await asyncio.wait_for(main.run(settings(), stop_requested=asyncio.Event()), 10)
+    assert s.events[0] == "connected" and "worker ended" in s.events and s.events[-2:] == ["disposed", "disposed"]
+
+
+async def test_a_worker_that_fails_before_it_polls_ends_the_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fresh review's finding 2: the SDK's `run()` can fail before it polls, and its `shutdown()` then never
+    returns; the process still ends, with that failure, once its other parts have stopped."""
+    s = Serving(monkeypatch)
+    s.refused = LookupError("namespace not found")
+    with pytest.raises(LookupError, match="namespace"):
+        await asyncio.wait_for(main.run(settings(), stop_requested=asyncio.Event()), 10)
+    assert s.events[0] == "connected" and sorted(s.events[1:3]) == ["plugin calls ended", "shutdown"]  # at once
+    assert s.events[3:] == ["watch cancelled", "disposed", "disposed"]
