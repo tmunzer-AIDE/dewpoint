@@ -8,7 +8,9 @@ from dewpoint.core.temporal_settings import TemporalConnection
 
 
 class Settings(TemporalConnection):  # Temporal's §10.4 security settings with the others
-    model_config = SettingsConfigDict(env_prefix="DEWPOINT_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="DEWPOINT_", env_file=".env", extra="ignore", hide_input_in_errors=True
+    )
 
     database_url: str
     kek_b64: str = Field(description="Base64 32-byte key-encryption key")

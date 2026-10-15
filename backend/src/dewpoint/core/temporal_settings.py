@@ -13,7 +13,9 @@ TLS_SETTINGS = ("temporal_tls_ca", "temporal_tls_server_name", "temporal_tls_cer
 class TemporalConnection(BaseSettings):
     """The settings every Temporal-connected process's own settings include."""
 
-    model_config = SettingsConfigDict(env_prefix="DEWPOINT_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="DEWPOINT_", env_file=".env", extra="ignore", hide_input_in_errors=True
+    )
 
     temporal_tls_ca: str | None = None  # a CA file; the system roots verify the server when unset
     temporal_tls_server_name: str | None = None  # the name verified, when it isn't the address's host
