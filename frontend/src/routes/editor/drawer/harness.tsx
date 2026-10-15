@@ -129,7 +129,7 @@ function Harness({ type, options, edits, state, children }: {
 }
 
 /** The type's fields, or `children`, in a drawer of one step. `config()`, `node()` and `held()` read what the edits
- * made of it. `replace` changes the draft from outside, as an undo does; `remount` reopens the fields; `refuse`
+ * made of it. `replace` changes the draft from outside (its config, and its options when given), as an undo does; `remount` reopens the fields; `refuse`
  * makes every write answer `why`, or none with null. */
 export function showFields(type: NodeType, options: Options = {}, children?: ReactNode) {
   const edits: Edit[] = [];
@@ -162,8 +162,13 @@ export function showFields(type: NodeType, options: Options = {}, children?: Rea
     config: () => state.doc.nodes![0]!.config ?? {},
     node: () => state.doc.nodes![0]!,
     held: () => [...state.held.values()],
-    replace: (config: Record<string, unknown>) => {
-      state.doc = { ...state.doc, nodes: [{ ...state.doc.nodes![0]!, config }] };
+    replace: (config: Record<string, unknown>, options?: StepOptions) => {
+      state.doc = { ...state.doc, nodes: [{ ...state.doc.nodes![0]!, config, ...(options ? { options } : {}) }] };
+      redraw();
+    },
+    /** Every held edit dropped, as the list of edits not applied does: never through a field's own Discard. */
+    dropHeld: () => {
+      state.held = new Map();
       redraw();
     },
     remount: () => {

@@ -1055,7 +1055,15 @@ function Editor({
     // What had focus: a canvas item; the open panel (left there while its step survives); or something else in the
     // editor (left where it is).
     const inPanel = panel !== null && !t.dataset.item && t.closest("aside") !== null;
-    if (inPanel && !panelGone) return;
+    if (inPanel && !panelGone) {
+      // Its control may not survive: an undo can rebuild a list or name an entry back, which draws that part afresh
+      // (#73). A frame later, a control gone gives focus to its panel's heading, never the page (the review).
+      const aside = t.closest("aside");
+      requestAnimationFrame(() => {
+        if (!t.isConnected && aside?.isConnected) aside.querySelector<HTMLElement>("h2[tabindex]")?.focus();
+      });
+      return;
+    }
     const held = inPanel ? item.node(panel) : (t.dataset.item ?? null);
     if (held === null) return;
     // A surviving item keeps its element and its focus: asking again would steal it back a frame later from

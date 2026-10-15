@@ -5,7 +5,7 @@ import { useRef } from "react";
 import { Button } from "../../../components/Button";
 import { Field, Select } from "../../../components/Field";
 import type { StepOptions } from "../../../lib/config";
-import { STALE, limitProblem, type Limit } from "../../../lib/unapplied";
+import { STALE, limitPointer, limitProblem, parseNumber, type Limit } from "../../../lib/unapplied";
 import type { GraphNode, NodeType } from "../../../lib/workflows";
 import { useDrawer, useSession } from "./context";
 import { useText } from "./scalars";
@@ -27,13 +27,16 @@ export function chipText(node: GraphNode, type: NodeType | undefined): string {
 function LimitField({ name, label, fallback }: { name: Limit; label: string; fallback: string }) {
   const drawer = useDrawer();
   const own = drawer.node.options ?? {};
-  const pointer = `/options/${name}`;
+  const pointer = limitPointer(name);
   const held = drawer.held("limit", pointer);
   const { mark, onFocus } = useSession(`${drawer.node.id}${pointer}`);
   const [text, setText] = useText(
     own[name] ?? undefined,
     (v) => (typeof v === "number" ? String(v) : ""),
-    (t, v) => (t.trim() === "" ? v === undefined : Number(t) === v),
+    (t, v) => {
+      const read = parseNumber(t, false); // what the text means, decimal only (#73): "0x10" never means 16
+      return "value" in read && read.value === v;
+    },
     held?.text,
   );
   const stale = held !== undefined && drawer.stale("limit", pointer);

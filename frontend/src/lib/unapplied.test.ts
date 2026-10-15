@@ -5,8 +5,8 @@ import { formula, literal, setConfig } from "./config";
 import type { CsvSettings } from "./csv";
 import type { Path } from "./schemaForm";
 import {
-  STALE, TRIGGERS, applyAll, applyUnapplied, baseOf, isStale, lineageOf, parseNumber, unappliedFile, unappliedId, within,
-  type Unapplied, type UnappliedKind,
+  STALE, TRIGGERS, applyAll, applyUnapplied, baseOf, isStale, limitPointer, lineageOf, parseNumber, unappliedFile, unappliedId,
+  within, type Unapplied, type UnappliedKind,
 } from "./unapplied";  // prettier-ignore
 import type { GraphDoc, GraphNode, NodeType } from "./workflows";
 
@@ -47,6 +47,26 @@ it("keeps a number exactly as typed, or says why not", () => {
   }
 });
 
+it("reads a number only in decimal notation (#73)", () => {
+  for (const t of ["0x10", "0X10", "0b11", "0o7", "Infinity", "-Infinity", "1_000", "1e", "e5", ".", "+", "-", "1.2.3", "--1"]) {
+    expect([t, parseNumber(t, false)]).toEqual([t, { problem: "A number, like 42 or 2.5." }]);
+    expect([t, parseNumber(t, true)]).toEqual([t, { problem: "A whole number, like 42." }]);
+  }
+  const read: [string, number][] = [
+    ["12", 12], [" 12 ", 12], ["-3", -3], ["+5", 5], ["2.5", 2.5], [".5", 0.5], ["5.", 5], ["1e3", 1000], ["1E-2", 0.01], ["007", 7],
+  ];  // prettier-ignore
+  for (const [t, value] of read) expect([t, parseNumber(t, false)]).toEqual([t, { value }]);
+});
+
+it("reads a long run of digits in linear time, whatever follows it (the review)", () => {
+  const digits = "1".repeat(30_000);
+  const started = performance.now();
+  for (const t of [`${digits}x`, `${digits}e`, `${digits}.${digits}x`]) {
+    expect(parseNumber(t, false)).toEqual({ problem: "A number, like 42 or 2.5." });
+  }
+  expect(performance.now() - started).toBeLessThan(250); // backtracking over every split of the digits took seconds
+});
+
 it("applies JSON, and keeps a literal envelope a literal", () => {
   const doc = fetch({});
   const text = '{"x": {"$value": {"kind": "ref", "path": "trigger.x"}}}';
@@ -64,7 +84,7 @@ it("refuses what the graph's format would, with its reason", () => {
   expect(applyUnapplied(crowded, held(crowded, "formula", "/fields/more", ["fields", "more"], "2"), TRANSFORM)).toEqual({
     problem: "A workflow can hold at most 2,000 references, templates and formulas.",
   });
-  expect(applyUnapplied(empty, held(empty, "limit", "/options/max_attempts", ["max_attempts"], "25"), TRANSFORM)).toEqual({
+  expect(applyUnapplied(empty, held(empty, "limit", limitPointer("max_attempts"), ["max_attempts"], "25"), TRANSFORM)).toEqual({
     problem: "A whole number from 1 to 20.",
   });
 });
@@ -105,11 +125,11 @@ it("applies each held edit in turn, as one document, the deepest first, and keep
   const edits = [
     held(doc, "number", "/n", ["n"], "12", { whole: true }),
     held(doc, "number", "/m", ["m"], "1x"),
-    held(doc, "limit", "/options/max_attempts", ["max_attempts"], "5"),
+    held(doc, "limit", limitPointer("max_attempts"), ["max_attempts"], "5"),
   ];
   const { doc: next, applied: done, left } = applyAll(doc, edits, typeOf, () => true);
   expect(next.nodes![0]).toMatchObject({ config: { n: 12 }, options: { max_attempts: 5 } });
-  expect(done.map((u) => u.pointer)).toEqual(["/options/max_attempts", "/n"]); // rank order, not insertion order
+  expect(done.map((u) => u.pointer)).toEqual([limitPointer("max_attempts"), "/n"]); // rank order, not insertion order
   expect(left.map((u) => [u.pointer, u.why])).toEqual([["/m", "A number, like 42 or 2.5."]]);
 });
 
@@ -168,6 +188,12 @@ it("tells two equal numbers apart after a removal and its undo", () => {
   expect(isStale(beside, typed)).toBe(false);
 });
 
+it("tells a limit from a config field named options in the recovery file (#73)", () => {
+  const doc = fetch({});
+  const file = unappliedFile([held(doc, "limit", limitPointer("timeout_s"), ["timeout_s"], "0", { label: "Timeout (seconds)" })], () => "fetch");
+  expect(file.edits.map((e) => e.at)).toEqual(["#/options/timeout_s"]);
+});
+
 it("writes edits not applied as a file of their own, never into the graph", () => {
   const doc = fetch({});
   const file = unappliedFile([held(doc, "number", "/n", ["n"], "5x", { label: "Count", why: "A number, like 42 or 2.5." })], () => "fetch");
@@ -184,6 +210,15 @@ describe("which edits a change covers", () => {
     expect([at("/fields"), at("/fields/x"), at("/fieldsx")].map(within(A, "/fields"))).toEqual([true, true, false]);
     expect(within(B, "/fields")(at("/fields"))).toBe(false);
     expect(within(A, "")(held(doc, "key", "", [], "load"))).toBe(true); // the whole step: a deletion's
+  });
+
+  it("never covers a limit from the step's config, whose field may be named options: only the whole step does (#73)", () => {
+    const doc = fetch({ options: { max_attempts: 1 } });
+    const limit = held(doc, "limit", limitPointer("max_attempts"), ["max_attempts"], "25");
+    expect(limitPointer("max_attempts")).toBe("#/options/max_attempts");
+    expect([within(A, "/options"), within(A, "/options/max_attempts"), within(A, "")].map((covers) => covers(limit))).toEqual([
+      false, false, true,
+    ]);  // prettier-ignore
   });
 
   it("says when an edit's step is gone", () => {

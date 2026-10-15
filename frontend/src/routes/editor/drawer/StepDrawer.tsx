@@ -2,8 +2,8 @@
 // A step's drawer (4c-1, §10.3; it replaces 4b's panel, ruling 2). At the top: its key, its type, how it runs and what
 // a failure does. Then the problems that belong to no field. Then its settings on two tabs, generated from its type's
 // schema, the required ones on Setup and the rest on Options (ruling 3). Then how its formulas run, and, for an
-// editor, 4b's actions: its "+" twins (WCAG 2.5.8), where it sits (2.5.7), its edges. Escape closes it and gives focus
-// back to the step. What its fields do to the draft goes through `actions`, the editor's (ruling 18).
+// editor, 4b's actions: its "+" twins (WCAG 2.5.8), where it sits (2.5.7), its edges. Escape closes it as Close does
+// and gives focus back to the step. What its fields do to the draft goes through `actions`, the editor's (ruling 18).
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "../../../components/Button";
 import { Tabs } from "../../../components/Tabs";
@@ -90,7 +90,11 @@ export function StepDrawer({
 }) {  // prettier-ignore
   const heading = useRef<HTMLHeadingElement>(null);
   const aside = useRef<HTMLElement>(null);
-  useEffect(() => heading.current?.focus(), [node.id]);
+  // The heading takes focus as the drawer opens, unless a Go to opened it: its field does, a frame later, and the heading
+  // first would be said before it (#73). A field still loading has the heading hold focus meanwhile (below).
+  useEffect(() => {
+    if (!focusField) heading.current?.focus();
+  }, [node.id]);
   const fields = useMemo(() => (type ? fieldsOf(type) : []), [type]);
   const { setup, options } = tabsOf(fields);
   const [tab, setTab] = useState<Tab>(setup.length > 0 ? "setup" : "options");
@@ -135,6 +139,7 @@ export function StepDrawer({
     }
     const frame = requestAnimationFrame(() => {
       if (land()) return;
+      if (!root.contains(document.activeElement)) heading.current?.focus(); // never the page while it loads (#73)
       observer.observe(root, { childList: true, subtree: true });
       document.addEventListener("pointerdown", moved, true);
       document.addEventListener("keydown", moved, true);
@@ -170,6 +175,10 @@ export function StepDrawer({
         onKeyDown={(e) => {
           if (e.key === "Escape") {
             e.stopPropagation();
+            // Out of the field first, as a click on Close: what applies when focus leaves applies, or stays with why, or
+            // asks (#73). Unmounted with focus inside, the field would never hear it leave.
+            const active = document.activeElement;
+            if (active instanceof HTMLElement && aside.current?.contains(active)) active.blur();
             onClose();
           }
         }}

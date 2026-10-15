@@ -6,7 +6,7 @@
 // Columns are written through `setAt`, so a list edited in place keeps its lineage and a removal starts a new one: a
 // held edit inside a column is applied only to the column it was typed in (ruling 113).
 import type { Schemas } from "./client";
-import { setAt } from "./config";
+import { DECIMAL, setAt } from "./config";
 import { isObject } from "./schemaForm";
 import type { GraphDoc } from "./workflows";
 
@@ -133,9 +133,10 @@ export function rulesOf(c: CsvColumn): string {
     .join(", ");
 }
 
-/** The largest file as typed, in MB, as bytes: up to the platform's 5 MB. Null when it isn't a size. */
+/** The largest file as typed, in MB, as bytes: up to the platform's 5 MB. Null when it isn't a size, or isn't decimal
+ * (#73). */
 export function bytesOf(mb: string): number | null {
-  const n = Number(mb.trim());
+  const n = DECIMAL.test(mb.trim()) ? Number(mb.trim()) : NaN;
   if (mb.trim() === "" || !Number.isFinite(n) || n <= 0) return null;
   const bytes = Math.round(n * 1024 * 1024);
   return bytes >= 1 && bytes <= MAX_BYTES ? bytes : null;

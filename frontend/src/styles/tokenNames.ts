@@ -81,5 +81,7 @@ export const PAIRS: [string, string, number][] = ([
   // Text the specimen renders elsewhere: the error callout's body, a hovered rail item, a simulated node's text.
   ["ink", "danger-bg", 4.5], ["rail-ink", "rail-line", 4.5], ["muted", "accent-soft", 4.5], // a highlighted menu item's detail
   ["ink", "sim-bg", 4.5], ["muted", "sim-bg", 4.5], ["accent-ink", "sim-bg", 4.5],
+  // The step drawer's disabled controls and mode toggles: a viewer reads a step's values there (#73).
+  ["muted", "disabled-bg", 4.5],
   ...BUTTON_PAIRS,
 ] as [string, string, number][]).filter(([fg, bg], i, all) => all.findIndex(([f, b]) => f === fg && b === bg) === i);

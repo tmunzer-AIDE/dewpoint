@@ -1266,6 +1266,53 @@ it("applies a JSON edit still being typed when the person leaves", async () => {
   act(() => cancelLeaving());
 });
 
+// #73: Escape closes the drawer as Close does: what applies when focus leaves a field applies first, or stays with why.
+
+const routeTyped = async (text: string, draft: object = oneStep("acme.router@1", { routes: [{ port: "a" }] }, "route")) => {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, ROUTER]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "route" }));
+  await userEvent.clear(screen.getByLabelText("Routes"));
+  await userEvent.paste(text); // focus stays: nothing has applied it yet
+};
+
+it("applies a JSON edit still being typed when Escape closes the drawer, as Close does", async () => {
+  await routeTyped('[{"port": "a"}, {"port": "c"}]');
+  await userEvent.keyboard("{Escape}");
+  expect(screen.queryByRole("complementary", { name: "route" })).toBeNull();
+  expect(stepConfig("route")).toEqual({ routes: [{ port: "a" }, { port: "c" }] });
+  expect(screen.queryByRole("button", { name: /edits? not applied/ })).toBeNull();
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "route" })));
+});
+
+it("keeps JSON that doesn't parse when Escape closes the drawer, with why, as Close does", async () => {
+  await routeTyped('[{"port": ');
+  await userEvent.keyboard("{Escape}");
+  expect(stepConfig("route")).toEqual({ routes: [{ port: "a" }] });
+  await userEvent.click(screen.getByRole("button", { name: "1 edit not applied" }));
+  const list = screen.getByRole("complementary", { name: "Edits not applied" });
+  expect(list.textContent).toContain("route · Routes");
+  expect(list.textContent).not.toContain("Still being typed."); // tried as focus left, as Close's click does
+});
+
+it("asks before the edit Escape applies takes a port with edges away", async () => {
+  await routeTyped('[{"port": "a"}]', routed());
+  await userEvent.keyboard("{Escape}");
+  expect(screen.getByRole("dialog", { name: "Remove a port" }).textContent).toContain("The port b goes with this change");
+});
+
+it("renames a map entry whose new name is typed when Escape closes the drawer", async () => {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES.filter((t) => t.ref !== "flow.transform@1"), TRANSFORM]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: oneStep("flow.transform@1", { fields: { old: 1 } }, "map") }));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "map" }));
+  await userEvent.clear(screen.getByLabelText("Name: old"));
+  await userEvent.type(screen.getByLabelText("Name: old"), "new");
+  await userEvent.keyboard("{Escape}");
+  expect(stepConfig("map")).toEqual({ fields: { new: 1 } });
+});
+
 it("asks before leaving with an edit it can't apply", async () => {
   await unappliedDuration();
   const decision = mayLeave();
@@ -1412,6 +1459,18 @@ it("removes a declassify entry that named no case when a case is added where it 
   expect(drawerNote()).toContain("Removed 1 declassify entry");
 });
 
+it("gives focus to the drawer's heading when an undo draws afresh the part it was in (the review)", async () => {
+  await openSwitch();
+  await userEvent.click(screen.getByRole("button", { name: "Remove: Cases, item 1" })); // a, which has no edge
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Add to Cases" }))); // its frame
+  const json = within(screen.getByRole("group", { name: "Cases, item 1" })).getAllByRole("button", { name: "Edit as JSON" })[0]!;
+  json.focus();
+  await userEvent.keyboard("{Control>}z{/Control}"); // the list before: its items drawn afresh
+  expect(stepConfig("pick")).toEqual({ cases: [{ port: "a", when: formula("true") }, { port: "b", when: formula("false") }] });
+  expect(json.isConnected).toBe(false);
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("heading", { name: "pick" })));
+});
+
 it("says a declassify entry's removal, beyond the drawer", async () => {
   const said: string[] = [];
   const stop = onAnnounce((m) => said.push(m));
@@ -1424,35 +1483,37 @@ it("says a declassify entry's removal, beyond the drawer", async () => {
   );
 });
 
-/** a's decision declassified, and a JSON edit changing it typed into the cases, not applied: the drawer closed on it. */
-async function holdChangedCase() {
+/** a's decision declassified, and a JSON edit changing it typed into the cases: Escape applies it as it closes the
+ * drawer, as Close does (#73), so its entry goes with the drawer closed. */
+async function closeOnChangedCase() {
   await openSwitch([{ node: "id-pick", field: "/cases/0/when" }]);
   await userEvent.click(within(screen.getByRole("group", { name: "Cases" })).getAllByRole("button", { name: "Edit as JSON" })[0]!);
   await userEvent.clear(screen.getByLabelText("Cases"));
   await userEvent.paste(JSON.stringify([{ port: "a", when: formula("trigger.n > 1") }, { port: "b", when: formula("false") }]));
   await userEvent.keyboard("{Escape}");
   expect(screen.queryByRole("complementary", { name: "pick" })).toBeNull();
-  expect(declassifyOf()).toEqual([{ node: "id-pick", field: "/cases/0/when" }]);
+  expect(declassifyOf()).toEqual([]);
 }
 const removedOnScreen =
   "pick: Removed 1 declassify entry: the list item it named is gone, or was changed in an edit of the whole list. That " +
   "decision is no longer declassified; Undo puts the entry back.";
 
-it("shows a declassify entry's removal with its drawer closed: an edit applied on the way out", async () => {
+it("shows a declassify entry's removal with its drawer closed: an edit applied as Escape closed it", async () => {
   answers.set(`GET ${BASE}/export`, () => json({ format: "dewpoint.workflow", format_version: 1, name: "Nightly", graph: {}, bindings: [] }));
-  await holdChangedCase();
-  await userEvent.click(screen.getByRole("button", { name: "Export" })); // applies it first, then exports
+  await closeOnChangedCase();
+  expect(screen.getByText(removedOnScreen).closest(".sr-only")).toBeNull(); // on the screen, not only said
+  await userEvent.click(screen.getByRole("button", { name: "Export" }));
   await vi.waitFor(() => expect(downloads).toHaveLength(1));
   expect(declassifyOf()).toEqual([]);
-  expect(screen.getByText(removedOnScreen).closest(".sr-only")).toBeNull(); // on the screen, not only said
+  expect(screen.getByText(removedOnScreen).closest(".sr-only")).toBeNull(); // still there after the export
   await userEvent.keyboard("{Control>}z{/Control}");
   expect(declassifyOf()).toEqual([{ node: "id-pick", field: "/cases/0/when" }]);
   expect(screen.queryByText(removedOnScreen)).toBeNull();
 });
 
-it("keeps showing a declassify entry's removal through the publication that applied it", async () => {
-  await holdChangedCase();
-  await confirmPublish(1); // applies it before asking, and clears the notices when it starts
+it("keeps showing a declassify entry's removal through a publication after it", async () => {
+  await closeOnChangedCase();
+  await confirmPublish(1); // it clears the notices when it starts
   await screen.findByText("Saved · published as v1", {}, { timeout: 3000 });
   expect(declassifyOf()).toEqual([]);
   expect(screen.getByText(removedOnScreen).closest(".sr-only")).toBeNull();
@@ -1751,6 +1812,19 @@ it("goes to a problem's field: the drawer opens on its tab, the field focused (r
   expect(screen.getByRole("tab", { name: "Options · 1 problem" }).getAttribute("aria-selected")).toBe("true");
 });
 
+it("goes to a problem's field without focusing the drawer's heading first (#73)", async () => {
+  const focused: string[] = [];
+  const record = (e: FocusEvent) => focused.push((e.target as HTMLElement).id);
+  document.addEventListener("focusin", record);
+  try {
+    await goTo("/concurrency");
+    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Items at a time, at most")));
+  } finally {
+    document.removeEventListener("focusin", record);
+  }
+  expect(focused).not.toContain("step-drawer-title"); // announced once: the field, never the heading a frame before
+});
+
 it("goes to the step's own problems when no field shows the one named", async () => {
   await goTo("/nope");
   await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Problems with this step" })));
@@ -1873,6 +1947,13 @@ it("goes to a field whose control is still loading, once it's there", async () =
   const arrive = await goToLoadingConnection();
   await arrive();
   await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Connection")));
+});
+
+it("holds focus on the drawer's heading while a Go to's field loads, then lands on it (#73)", async () => {
+  const arrive = await goToLoadingConnection();
+  expect(document.activeElement).toBe(screen.getByRole("heading", { name: "sites" }));
+  await arrive();
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("combobox", { name: "Connection" })));
 });
 
 it("drops a pending Go to when the person moves on before the field's control loads", async () => {

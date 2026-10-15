@@ -4,7 +4,7 @@
 // never the control, so a tab, a toggle or a closed drawer can't lose them. Each is applied when it can be, and said,
 // with its reason, while it can't.
 import {
-  admission, formula, formulaProblem, keyProblem, literal, parseJson, renameEntry, renameKey, renamePort, rootOf,
+  DECIMAL, admission, formula, formulaProblem, keyProblem, literal, parseJson, renameEntry, renameKey, renamePort, rootOf,
   setAt, setConfig, setOptions, valueAt, type Changed,
 } from "./config";  // prettier-ignore
 import { csvOf, csvProblem, rowsLimit, sizeLimit, textProblem } from "./csv";
@@ -27,7 +27,7 @@ export interface Unapplied {
   id: string; // unappliedId(node, kind, pointer)
   node: string; // the step's id, as the draft writes it; TRIGGERS for the Triggers panel's
   kind: UnappliedKind;
-  pointer: string; // where it goes: in the step's config; "/options/<name>" for a limit; "" for the key; "/settings/…"
+  pointer: string; // where it goes: in the step's config; limitPointer(name) for a limit; "" for the key; "/settings/…"
   path: Path; // the same as a path: a limit's is [its name]; a name's is its map's; the key's is []
   label: string; // the field's label, for the question that lists it
   text: string;
@@ -99,12 +99,12 @@ export function lineageOf(doc: GraphDoc, u: Pick<Unapplied, "node" | "path">): u
 export const isStale = (doc: GraphDoc, u: Unapplied): boolean =>
   baseOf(doc, u) !== u.base || lineageOf(doc, u).some((root, i) => root !== u.lineage[i]) || lineageOf(doc, u).length !== u.lineage.length;
 
-/** A number typed (rulings 7 and 18). What the draft keeps must be what was typed: never an infinity, never a whole
- * number past 2^53, in whatever notation, which Number() rounds. Empty text is no value. */
+/** A number typed (rulings 7 and 18). What the draft keeps must be what was typed: decimal only (#73), never an
+ * infinity, never a whole number past 2^53, in whatever notation, which Number() rounds. Empty text is no value. */
 export function parseNumber(text: string, whole: boolean): { value: number | undefined } | { problem: string } {
   const t = text.trim();
   if (t === "") return { value: undefined };
-  const n = Number(t);
+  const n = DECIMAL.test(t) ? Number(t) : NaN;
   if (Number.isNaN(n) || (whole && Number.isFinite(n) && !Number.isInteger(n))) {
     return { problem: whole ? "A whole number, like 42." : "A number, like 42 or 2.5." };
   }
@@ -119,6 +119,10 @@ const LIMITS = {
   timeout_s: { ok: (n: number) => n > 0 && n <= 86_400, problem: "A number of seconds above 0, up to 86,400." },
 } as const;
 export type Limit = keyof typeof LIMITS;
+
+/** A held limit's pointer: outside the config's, which start with "/", so no config field's Clear or restructure covers
+ * it, even a field named `options` (#73); only the whole step's ("") does. */
+export const limitPointer = (name: Limit): string => `#/options/${name}`;
 
 /** Why a limit's text isn't one the graph takes, or null: empty text leaves it to the type's default. */
 export function limitProblem(name: Limit, text: string): string | null {
