@@ -335,7 +335,7 @@ export function renamePort(doc: GraphDoc, nodeId: string, index: number, name: s
   }
   if (portsOf(node, type).includes(name)) return { problem: `Another port of this step is already called ${name}.` };
   const after = { ...node, config: setAt(node.config ?? {}, [field, index, "port"], name) as Record<string, unknown> };
-  const next = withNode(doc, nodeId, after);
+  const next = renamedEntry(withNode(doc, nodeId, after), nodeId, `/${field}/${index}/when`, old, name);
   // Another entry may still declare the old name (a duplicate): its edges are that entry's then.
   if (typeof old !== "string" || portsOf(after, type).includes(old)) return { doc: next };
   return {
@@ -344,6 +344,15 @@ export function renamePort(doc: GraphDoc, nodeId: string, index: number, name: s
       edges: edgesOf(next).map((e) => (sameId(e.from.node, nodeId) && portOf(e) === old ? { ...e, from: { ...e.from, port: name } } : e)),
     },
   };
+}
+
+/** The draft with the declassify entry that names a case by its old port renamed with it (#78): the entry still names
+ * the case at its place. Another case's entry, or one already naming another port, stays as it was. */
+function renamedEntry(doc: GraphDoc, nodeId: string, field: string, old: unknown, name: string): GraphDoc {
+  const entries = doc.settings?.declassify;
+  if (!entries || typeof old !== "string") return doc;
+  const renamed = entries.map((e) => (sameId(e.node, nodeId) && e.field === field && e.port === old ? { ...e, port: name } : e));
+  return renamed.every((e, i) => e === entries[i]) ? doc : { ...doc, settings: { ...doc.settings, declassify: renamed } };
 }
 
 /** A map's entry renamed in place, keeping its order; refused, with the reason, when the name is empty, `$value`
@@ -424,11 +433,27 @@ export function renameKey(doc: GraphDoc, nodeId: string, key: string): { doc: Gr
   return { doc: { ...doc, nodes, ...(settings ? { settings } : {}) }, mentions };
 }
 
-/** The draft with a decision declassified (4c-2b): its entry added to `settings.declassify`, once. */
+/** The port of the switch case whose decision `field` names, or undefined: a case's entry names it (#78), so a reorder
+ * outside the editor is reported by the server, never followed to another case. A port the graph's format refuses
+ * isn't one to write (the draft wouldn't save): the step's own diagnostic asks for a name first. */
+export function casePort(doc: GraphDoc, site: { node: string; field: string }): string | undefined {
+  const node = findNode(doc, site.node);
+  const index = /^\/cases\/(0|[1-9]\d*)\/when$/.exec(site.field)?.[1];
+  if (!node || index === undefined || !node.type.startsWith("flow.switch@")) return undefined;
+  const port = valueAt(node.config ?? {}, ["cases", Number(index), "port"]);
+  return typeof port === "string" && PORT.test(port) ? port : undefined;
+}
+
+/** The draft with a decision declassified (4c-2b): its entry added to `settings.declassify`, once; a switch case's
+ * with its case's port (#78), which an entry written without it, or naming another case, gets again. */
 export function declassify(doc: GraphDoc, site: { node: string; field: string }): GraphDoc {
   const entries = doc.settings?.declassify ?? [];
-  if (entries.some((e) => sameId(e.node, site.node) && e.field === site.field)) return doc;
-  return { ...doc, settings: { ...doc.settings, declassify: [...entries, { node: site.node, field: site.field }] } };
+  const port = casePort(doc, site);
+  const at = entries.findIndex((e) => sameId(e.node, site.node) && e.field === site.field);
+  if (at >= 0 && (entries[at]!.port ?? undefined) === port) return doc;
+  const own = { node: at >= 0 ? entries[at]!.node : site.node, field: site.field, ...(port === undefined ? {} : { port }) };
+  const next = at >= 0 ? entries.map((e, i) => (i === at ? own : e)) : [...entries, own];
+  return { ...doc, settings: { ...doc.settings, declassify: next } };
 }
 
 /** The draft without its `index`th declassify entry; with none left, without the list. */

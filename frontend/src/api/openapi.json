@@ -1064,7 +1064,7 @@
       },
       "DeclassifySite": {
         "additionalProperties": false,
-        "description": "A decision that may turn tainted input into plain output (engine 2b spec \u00a74.3): a node and its field.",
+        "description": "A decision that may turn tainted input into plain output (engine 2b spec \u00a74.3): a node and its field, and for a\nswitch case's `when` the case's port (#78), so a reordered case keeps or loses its own entry, never another's.",
         "properties": {
           "field": {
             "maxLength": 200,
@@ -1075,6 +1075,19 @@
             "format": "uuid",
             "title": "Node",
             "type": "string"
+          },
+          "port": {
+            "anyOf": [
+              {
+                "pattern": "^[a-z][a-z0-9_]{0,30}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Port"
           }
         },
         "required": [

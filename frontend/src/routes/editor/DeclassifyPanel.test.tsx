@@ -9,7 +9,7 @@ import { DeclassifyPanel } from "./DeclassifyPanel";
 const CHECK = "00000000-0000-4000-8000-00000000000c";
 const ROUTE = "00000000-0000-4000-8000-00000000000d";
 const types = new Map([["flow.if@1", IF], ["flow.switch@1", SWITCH]]);
-const doc = (declassify: { node: string; field: string }[] = []): GraphDoc => ({
+const doc = (declassify: { node: string; field: string; port?: string }[] = []): GraphDoc => ({
   graph_format: 1,
   nodes: [
     { id: CHECK, key: "check_status", type: "flow.if@1", config: {} },
@@ -60,6 +60,22 @@ describe("Declassify", () => {
     expect(screen.getByText(/declassifies nothing/)).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: "Remove check_status · Condition" }));
     expect(p.onRemove).toHaveBeenCalledWith(1);
+  });
+
+  it("says why a repeated entry, or one not naming its case, declassifies nothing, never what its decision reveals", () => {
+    const entries = [{ node: CHECK, field: "/condition" }, { node: CHECK, field: "/condition" }, { node: ROUTE, field: "/cases/0/when", port: "b" }];
+    const repeated = "This entry repeats an earlier one: removing one copy wouldn't stop declassifying the decision.";
+    const misnamed = "This entry doesn't name the case at its place: a switch case's decision is declassified by its port, so a reordered case keeps or loses its own.";
+    show(doc(entries), check({
+      taint: { sites: [], declassified: [{ node: CHECK, field: "/condition", reveals: "the branch taken" }] },
+      diagnostics: [
+        { code: "taint.repeated_declassify", severity: "error", node: null, field: "/settings/declassify/1", message: repeated, fix: "Remove it." },
+        { code: "taint.case_declassify", severity: "error", node: null, field: "/settings/declassify/2", message: misnamed, fix: "Declassify the case's decision again." },
+      ],
+    }));  // prettier-ignore
+    expect(screen.getAllByText("Reveals the branch taken.")).toHaveLength(1); // the first copy alone
+    expect(screen.getByText(repeated)).toBeTruthy();
+    expect(screen.getByText(misnamed)).toBeTruthy();
   });
 
   it("offers no change where the draft can't be changed, and says decisions show once checked", () => {

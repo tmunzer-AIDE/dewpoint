@@ -131,7 +131,7 @@ describe("declassify entries", () => {
   const caseA = { port: "a", when: formula("trigger.secret == 1") };
   const caseB = { port: "b", when: formula("trigger.secret == 2") };
   const caseC = { port: "c", when: formula("trigger.secret == 3") };
-  const declassified = (...entries: { node: string; field: string }[]): GraphDoc => ({
+  const declassified = (...entries: { node: string; field: string; port?: string }[]): GraphDoc => ({
     graph_format: 1,
     nodes: [
       { id: A, key: "pick", type: "flow.switch@1", config: { cases: [caseA, caseB, caseC] } },
@@ -140,6 +140,66 @@ describe("declassify entries", () => {
     settings: { declassify: entries },
   });
   const cases = (doc: GraphDoc) => doc.nodes![0]!.config!.cases as unknown[];
+
+  it("names a switch case's port when it declassifies its decision (#78), and nothing else's", () => {
+    expect(declassify(declassified(), { node: A, field: "/cases/1/when" }).settings?.declassify).toEqual([
+      { node: A, field: "/cases/1/when", port: "b" },
+    ]);
+    expect(declassify(declassified(), { node: B, field: "/condition" }).settings?.declassify).toEqual([{ node: B, field: "/condition" }]);
+  });
+
+  it("gives an entry without its case's port (written before #78, or moved by another client) the port again", () => {
+    const doc = declassified({ node: B, field: "/condition" }, { node: A, field: "/cases/1/when" }, { node: A, field: "/cases/2/when", port: "a" });
+    const fixed = declassify(declassify(doc, { node: A, field: "/cases/1/when" }), { node: A, field: "/cases/2/when" });
+    expect(fixed.settings?.declassify).toEqual([
+      { node: B, field: "/condition" },
+      { node: A, field: "/cases/1/when", port: "b" },
+      { node: A, field: "/cases/2/when", port: "c" },
+    ]);
+    expect(declassify(fixed, { node: A, field: "/cases/1/when" })).toBe(fixed); // once
+  });
+
+  it("keeps a case's entry when its port is renamed, and every other entry as it was", () => {
+    const doc = declassified(
+      { node: A, field: "/cases/1/when", port: "b" },
+      { node: A, field: "/cases/0/when", port: "a" },
+      { node: B, field: "/condition" },
+      { node: A, field: "/cases/1/when", port: "zzz" }, // already naming another port: the server reports it
+      { node: A, field: "/cases/2/when", port: "b" }, // another case's, naming the renamed one: reported too
+    );
+    const result = renamePort(doc, A, 1, "bee", SWITCH);
+    if ("problem" in result) throw new Error(result.problem);
+    expect(result.doc.settings?.declassify).toEqual([
+      { node: A, field: "/cases/1/when", port: "bee" },
+      { node: A, field: "/cases/0/when", port: "a" },
+      { node: B, field: "/condition" },
+      { node: A, field: "/cases/1/when", port: "zzz" },
+      { node: A, field: "/cases/2/when", port: "b" },
+    ]);
+  });
+
+  it("writes no port the graph's format would refuse, so the draft stays savable (the review of the build)", () => {
+    const doc: GraphDoc = {
+      graph_format: 1,
+      nodes: [{ id: A, key: "pick", type: "flow.switch@1", config: { cases: [{ port: "Approved", when: formula("trigger.secret == 1") }] } }],
+    };
+    expect(declassify(doc, { node: A, field: "/cases/0/when" }).settings?.declassify).toEqual([{ node: A, field: "/cases/0/when" }]);
+  });
+
+  it("names a port only for a switch's case, never for another step whose config has cases", () => {
+    const doc: GraphDoc = {
+      graph_format: 1,
+      nodes: [{ id: B, key: "other", type: "testkit.cases@1", config: { cases: [{ port: "a", when: true }] } }],
+    };
+    expect(declassify(doc, { node: B, field: "/cases/0/when" }).settings?.declassify).toEqual([{ node: B, field: "/cases/0/when" }]);
+  });
+
+  it("keeps a case's port when the cases move", () => {
+    const doc = declassified({ node: A, field: "/cases/0/when", port: "a" });
+    const [a, b, c] = cases(doc);
+    const { doc: next } = setConfig(doc, A, ["cases"], [c, a, b], SWITCH);
+    expect(next.settings?.declassify).toEqual([{ node: A, field: "/cases/1/when", port: "a" }]);
+  });
 
   it("follows its case when the cases move", () => {
     const doc = declassified({ node: A, field: "/cases/0/when" }, { node: B, field: "/condition" }, { node: A, field: "/cases/2/when" });

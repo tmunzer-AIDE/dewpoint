@@ -10,6 +10,8 @@ import type { Diagnostic, GraphDoc, NodeType, Validation } from "../../lib/workf
 import { findNode, sameId } from "../../lib/graph";
 import { SIDE } from "./side";
 
+const ENTRY_CODES: ReadonlySet<string> = new Set(["taint.stale_declassify", "taint.repeated_declassify", "taint.case_declassify"]);
+
 export interface Site {
   node: string;
   field: string;
@@ -57,11 +59,14 @@ export function DeclassifyPanel({ doc, types, check, editable, onDeclassify, onR
     (d): d is Diagnostic & Site => d.code === "taint.undeclassified" && d.node !== null && d.field !== null,
   );
   const entries = doc.settings?.declassify ?? [];
+  // Why this entry declassifies nothing, as the server says it at the entry's own place: stale, a repeat of an earlier
+  // one, or not naming the case at its place (#78). Only an entry without one says what its decision reveals.
   const noteOf = (site: Site, index: number): string | null => {
     if (!check) return null;
+    const own = check.diagnostics.find((d) => ENTRY_CODES.has(d.code) && d.field === `/settings/declassify/${index}`);
+    if (own) return own.message;
     const hit = check.taint.declassified.find((x) => sameId(x.node, site.node) && x.field === site.field);
-    if (hit) return `Reveals ${hit.reveals}.`;
-    return check.diagnostics.find((d) => d.code === "taint.stale_declassify" && d.field === `/settings/declassify/${index}`)?.message ?? null;
+    return hit ? `Reveals ${hit.reveals}.` : null;
   };
   return (
     <aside aria-labelledby="declassify-title" className={`${SIDE} flex flex-col gap-4 overflow-y-auto p-5`}>

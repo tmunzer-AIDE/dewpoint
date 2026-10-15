@@ -23,6 +23,18 @@ def test_round_trip_keeps_the_from_alias() -> None:
     assert parse_graph(data) == g
 
 
+def test_a_declassify_entry_writes_its_port_only_when_set() -> None:
+    """#78: a switch case's entry names its case's port; one without a port is written as before, so a document's hash
+    stays what it was."""
+    plain, named = G().node("a", "testkit.echo@1"), G().node("a", "testkit.echo@1")
+    plain.settings = {"declassify": [{"node": str(nid("a")), "field": "/condition"}]}
+    named.settings = {"declassify": [{"node": str(nid("a")), "field": "/cases/0/when", "port": "approved"}]}
+    assert graph_json(plain.build())["settings"]["declassify"] == [{"node": str(nid("a")), "field": "/condition"}]
+    data = graph_json(named.build())
+    assert data["settings"]["declassify"] == [{"node": str(nid("a")), "field": "/cases/0/when", "port": "approved"}]
+    assert parse_graph(data) == named.build()
+
+
 def test_graph_hash_is_stable_and_sensitive() -> None:
     a = G().node("a", "testkit.echo@1", {"value": 1}).build()
     b = G().node("a", "testkit.echo@1", {"value": 1}).build()
@@ -56,8 +68,10 @@ def test_version_hash_covers_what_publish_resolves() -> None:
         ({"nodes": [{"id": str(nid("a")), "key": "Bad Key", "type": "testkit.echo@1"}]}, "/nodes/0/key"),
         ({"nodes": [{"id": str(nid("a")), "key": "a", "type": "testkit.echo"}]}, "/nodes/0/type"),
         ({"surprise": True}, "/surprise"),
+        ({"settings": {"declassify": [{"node": str(nid("a")), "field": "/cases/0/when", "port": "Bad Port"}]}},
+         "/settings/declassify/0/port"),  # a port, as a step's own ports
     ],
-)
+)  # fmt: skip
 def test_format_errors_point_at_the_field(data: dict[str, Any], field: str) -> None:
     with pytest.raises(GraphFormatError) as e:
         parse_graph(data)

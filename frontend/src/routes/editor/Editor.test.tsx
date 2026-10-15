@@ -1938,6 +1938,29 @@ it("declassifies a decision from the toolbar's Declassify, and the draft saves t
   expect(await within(panel).findByText("Needs your decision · 0")).toBeTruthy();
 });
 
+it("offers a switch case's decision again when its entry doesn't name the case's port (#78), and saves the port", async () => {
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, SWITCH]));
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: switched([{ node: "id-pick", field: "/cases/1/when" }]) }));
+  answers.set(`POST ${BASE}/validate`, () =>
+    json({
+      draft_revision: sent.some((r) => r.method === "PUT") ? 2 : 1,
+      valid: false, expressions: [], conditional_steps: [], taint: { sites: [{ node: "id-pick", field: "/cases/1/when" }], declassified: [] },
+      diagnostics: [
+        { code: "taint.undeclassified", severity: "error", node: "id-pick", field: "/cases/1/when", message: "This decision reads sensitive data, so the port taken becomes visible.", fix: null },
+        { code: "taint.case_declassify", severity: "error", node: null, field: "/settings/declassify/0", message: "This entry doesn't name the case at its place: a switch case's decision is declassified by its port, so a reordered case keeps or loses its own.", fix: "Declassify the case's decision again." },
+      ],
+    }));  // prettier-ignore
+  await show();
+  await userEvent.click(await screen.findByRole("button", { name: "Declassify" }));
+  const panel = screen.getByRole("complementary", { name: "Declassify" });
+  expect(await within(panel).findByText("Needs your decision · 1")).toBeTruthy(); // a draft written before #78
+  await userEvent.click(within(panel).getByLabelText(/may be visible in run history/));
+  await userEvent.click(within(panel).getByRole("button", { name: "Declassify this decision" }));
+  await vi.waitFor(() => expect(sent.find((r) => r.method === "PUT")).toBeTruthy(), { timeout: 3000 });
+  const put = sent.find((r) => r.method === "PUT")!;
+  expect((put.body as GraphDoc).settings?.declassify).toEqual([{ node: "id-pick", field: "/cases/1/when", port: "b" }]);
+});
+
 it("lands on Versions when Declassify closes after its last entry is removed (the final review)", async () => {
   answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: { ...draftWith("a"), settings: { declassify: [{ node: "id-a", field: "/x" }] } } }));
   answers.set(`POST ${BASE}/validate`, () =>

@@ -169,7 +169,7 @@ async def test_a_reference_to_a_sensitive_value_decides_a_listed_branch_and_case
         "outputs": {},
         "declassify": [
             {"node": str(nid("c")), "field": "/condition"},
-            {"node": str(nid("s")), "field": "/cases/0/when"},
+            {"node": str(nid("s")), "field": "/cases/0/when", "port": "gold"},  # its case, by port (#78)
         ],
     }
     g.node("c", "flow.if@1", {"condition": ref("trigger.vip")})
