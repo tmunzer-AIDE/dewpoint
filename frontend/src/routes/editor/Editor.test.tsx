@@ -40,6 +40,8 @@ vi.mock("./Canvas", async () => {
           data-problems={String(props.problems.size)}
           data-problem-steps={[...props.problems.keys()].join(",")}
           data-conditional={[...props.conditional].join(",")}
+          data-simulated={JSON.stringify((props.simulated ? [...props.simulated.entries()] : []).map(([k, tags]) => [k, tags.map((t) => t.text)]))}
+          data-start-tags={(props.start.tags ?? []).map((t) => t.text).join(",")}
         >
           <button data-item="start" data-summary={props.start.summary} aria-expanded={props.start.open} onClick={props.start.onOpen}>Start</button>
           <button onClick={() => props.onItem({ kind: "after", from: null })}>Add the first step</button>
@@ -2206,6 +2208,27 @@ describe("Simulate workflow", () => {
     expect(strip.getAttribute("aria-expanded")).toBe("false");
     await userEvent.click(strip);
     expect(await screen.findByRole("complementary", { name: "Simulation" })).toBeTruthy();
+  });
+
+  it("shows the result beside each step, under the banner, until it's hidden (§7.3)", async () => {
+    const summary = {
+      given: "input",
+      steps: [{ step_id: "id-transform", key: "transform", type: "flow.transform@1", origin: "evaluated", instances: 1, statuses: { succeeded: 1 }, ports: {}, final: { attempt: 1, status: "succeeded" } }],
+    };  // prettier-ignore
+    const ended = { ...simState("started"), run: { status: "succeeded", queued_at: null, started_at: "2026-10-15T10:42:05Z", ended_at: "2026-10-15T10:42:19Z", error: null, iterations: 0 } };
+    answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: draftWith("transform") }));
+    answers.set(`GET ${SIM}`, () => json([simRequest("started")])); // a reload finds the latest
+    answers.set(`GET ${SIM}/r1`, () => json(ended));
+    answers.set(`GET ${SIM}/r1/steps`, () => json(summary));
+    await show();
+    await vi.waitFor(() => expect(steps().dataset.simulated).toBe(JSON.stringify([["id-transform", ["succeeded", "evaluated"]]])));
+    expect(steps().dataset.startTags).toBe("input");
+    expect(screen.getByText("Hide the result")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Hide the result" }));
+    expect(steps().dataset.simulated).toBe("[]");
+    expect(screen.getByText("Simulation result hidden · Succeeded · revision 2")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Show the result" }));
+    expect(steps().dataset.simulated).toBe(JSON.stringify([["id-transform", ["succeeded", "evaluated"]]]));
   });
 
   it("asks Publish's own question about edits not applied, worded for simulating", async () => {

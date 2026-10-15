@@ -21,7 +21,7 @@ import { begin, record, redo, undo, type History } from "../../lib/history";
 import { CARD, layout } from "../../lib/layout";
 import { guardLeaving } from "../../lib/leaving";
 import type { Path } from "../../lib/schemaForm";
-import { freeze } from "../../lib/simulations";
+import { ENDED, freeze } from "../../lib/simulations";
 import { useDocumentTitle } from "../../lib/title";
 import { schedulesQuery, startSummary, workflowBindingsQuery } from "../../lib/triggers";
 import {
@@ -44,6 +44,8 @@ import { DeclassifyPanel } from "./DeclassifyPanel";
 import { ProblemsPanel, type PublishProblems } from "./ProblemsPanel";
 import { SaveState } from "./SaveState";
 import { SimulateDialog } from "./simulation/SimulateDialog";
+import { ResultBar } from "./simulation/ResultBar";
+import { tagsOf, type SimTag } from "./simulation/results";
 import { SimulationPanel } from "./simulation/SimulationPanel";
 import { useSimulation } from "./simulation/useSimulation";
 import { type Problems } from "./StepCard";
@@ -477,6 +479,22 @@ function Editor({
   const simulator = canEdit(role) && viewing === null;
   const [simulateAt, setSimulateAt] = useState<{ revision: number; doc: GraphDoc } | null>(null); // the input, asked
   const [saving, setSaving] = useState(false); // the save Simulate waits for
+  // Its result on the canvas (§7.3): tags beside each step, under the banner, until "Hide the result", which hides this
+  // simulation's only (the next one shows again).
+  const simulationId = simulation.state?.request.id ?? null;
+  const [hiddenFor, setHiddenFor] = useState<string | null>(null);
+  const resultShown = simulator && simulationId !== null && simulation.phase !== null && hiddenFor !== simulationId;
+  const simulated = useMemo(() => {
+    const tags = new Map<string, SimTag[]>();
+    if (!resultShown) return tags;
+    const ended = simulation.phase !== null && ENDED.has(simulation.phase);
+    for (const s of simulation.steps?.steps ?? []) {
+      const node = findNode(doc, s.step_id);
+      const maxAttempts = node?.options?.max_attempts ?? typeMap.get(s.type)?.retry.max_attempts ?? null;
+      tags.set(idKey(s.step_id), tagsOf(s, { maxAttempts, ended }));
+    }
+    return tags;
+  }, [resultShown, simulation.phase, simulation.steps, doc, typeMap]);
   // When editing stops (a conflict, an exit, a publication), what only editing offers stops with it: an open dialog
   // closes, placing ends (a click on a read-only canvas places nothing) and says so. Focus held by what's gone (the
   // dialog, a "+", Auto layout, Add step, a panel's buttons) goes to what's drawn: a panel's heading when it was in
@@ -1280,6 +1298,19 @@ function Editor({
           <Button size="sm" variant="primary" onClick={() => setReloading(true)}>Reload</Button>
         </div>
       )}
+      {simulator && simulationId !== null && simulation.phase !== null && simulation.state && (
+        <ResultBar
+          phase={simulation.phase}
+          revision={simulation.state.request.draft_revision}
+          endedAt={simulation.state.run?.ended_at ?? simulation.state.request.ended_at}
+          notWaited={(simulation.steps?.steps ?? []).some((s) => s.origin === "evaluated_not_waited")}
+          hidden={!resultShown}
+          onHide={() => setHiddenFor(simulationId)}
+          onShow={() => setHiddenFor(null)}
+          onPanel={() => setSide({ kind: "simulation" })}
+          onCancel={() => void simulation.cancel()}
+        />
+      )}
       <div className="flex min-h-0 flex-1 @max-3xl:flex-col">
         <div className="relative flex min-h-0 min-w-0 flex-1">
           {placing && editable && (
@@ -1316,7 +1347,9 @@ function Editor({
             summary,
             open: side?.kind === "triggers",
             onOpen: () => setSide(side?.kind === "triggers" ? null : { kind: "triggers" }),
+            tags: resultShown && simulation.steps?.given === "input" ? [{ text: "input", kind: "given" }] : undefined,
           }}
+          simulated={simulated}
           />
         </div>
         {open && (
