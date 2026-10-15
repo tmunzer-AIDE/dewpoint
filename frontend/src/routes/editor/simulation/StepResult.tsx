@@ -3,6 +3,7 @@
 // runs; once ended, what a simulation proves, its status and where its data came from, its attempt, revision and run,
 // a failure's code and message, the port a branch took or what a step set, the values used ("seeded", sensitive ones
 // redacted) and its output.
+import type { ReactNode } from "react";
 import { Button } from "../../../components/Button";
 import { ENDED, type StepSummary } from "../../../lib/simulations";
 import { StatusChip } from "./chips";
@@ -18,6 +19,31 @@ const REDACTED = "[redacted]";
 const something = (v: unknown) =>
   v !== undefined && v !== null && !(typeof v === "object" && !Array.isArray(v) && Object.keys(v).length === 0);
 
+/** What one instance of a step did, from its final attempt: a failure, the port a branch took or what a step set, and its
+ * output (`used`, the values it was given, before it). Its status and origin are said beside it. */
+export function InstanceDetail({ final, max, used }: { final: unknown; max: number | null; used?: ReactNode }) {
+  const output = field(final, "output");
+  const port = field(field(final, "effect"), "port");
+  const assignments = field(field(final, "effect"), "assignments");
+  return (
+    <>
+      <Failure final={final} max={max} />
+      {typeof port === "string" && <p className="text-small">{`Takes → ${port}.`}</p>}
+      {typeof assignments === "object" && assignments !== null && (
+        <Section title="Sets">
+          <Pairs pairs={Object.entries(assignments).map(([k, v]): [string, unknown] => [k, v === REDACTED ? v : JSON.stringify(v)])} />
+        </Section>
+      )}
+      {used}
+      {something(output) && (
+        <Section title="Output">
+          <pre className="overflow-x-auto rounded-md border border-line bg-surface-2 p-2 font-mono text-meta">{JSON.stringify(output, null, 2)}</pre>
+        </Section>
+      )}
+    </>
+  );
+}
+
 export function StepResult({ session, stepKey, attemptsOf }: {
   session: SimulationSession; stepKey: string; attemptsOf: (s: StepSummary) => number | null;
 }) {  // prettier-ignore
@@ -28,9 +54,6 @@ export function StepResult({ session, stepKey, attemptsOf }: {
   const final = s?.final;
   const max = s ? attemptsOf(s) : null;
   const attempt = field(final, "attempt");
-  const output = field(final, "output");
-  const port = field(field(final, "effect"), "port");
-  const assignments = field(field(final, "effect"), "assignments");
   const facts = state
     ? [typeof attempt === "number" && max ? `attempt ${attempt} of ${max}` : null, `revision ${state.request.draft_revision}`, `run ${runId(state.request.id)}`]
     : [];  // prettier-ignore
@@ -52,19 +75,7 @@ export function StepResult({ session, stepKey, attemptsOf }: {
             {s && <InlineTags tags={[originTag(s.origin)]} />}
             <span className="text-small text-muted">{facts.filter(Boolean).join(" · ")}</span>
           </p>
-          <Failure final={final} max={max} />
-          {typeof port === "string" && <p className="text-small">{`Takes → ${port}.`}</p>}
-          {typeof assignments === "object" && assignments !== null && (
-            <Section title="Sets">
-              <Pairs pairs={Object.entries(assignments).map(([k, v]): [string, unknown] => [k, v === REDACTED ? v : JSON.stringify(v)])} />
-            </Section>
-          )}
-          <UsedValues state={state} />
-          {something(output) && (
-            <Section title="Output">
-              <pre className="overflow-x-auto rounded-md border border-line bg-surface-2 p-2 font-mono text-meta">{JSON.stringify(output, null, 2)}</pre>
-            </Section>
-          )}
+          <InstanceDetail final={final} max={max} used={<UsedValues state={state} />} />
         </>
       )}
     </Section>

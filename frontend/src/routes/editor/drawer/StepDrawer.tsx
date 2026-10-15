@@ -80,13 +80,14 @@ function locate(root: HTMLElement, { pointer, kind }: FocusRequest): HTMLElement
 
 export function StepDrawer({
   node, type, tenantId, workflowId, revision, steps, openDeclassify, ports, problems, expressions, editable, adds, actions, note, focusField,
-  test, onAdd, onDelete, onConnectPort, onPlace, onNudge, onClose,
+  test, testAt, onAdd, onDelete, onConnectPort, onPlace, onNudge, onClose,
 }: {
   node: GraphNode; type: NodeType | undefined; tenantId: string; workflowId: string; revision: number | null;
   steps: { id: string; key: string; title: string | null }[]; openDeclassify?: () => void; ports: string[];
   problems: Diagnostic[] | null; expressions: Expression[]; editable: boolean; adds: { label: string; action: ItemAction }[];
   actions: DrawerActions; note: string | null; focusField: { pointer: string; kind?: UnappliedKind; n: number } | null;
   test?: ReactNode; // the Test tab, for editors (4d-1c, §7.6), even on a step with nothing to set up
+  testAt?: number | null; // asked to show the Test tab (the Simulation panel's "Open"), counted
   onAdd: (action: ItemAction) => void; onDelete: () => void; onConnectPort: (port: string) => void;
   onPlace: () => void; onNudge: (key: Nudge) => void; onClose: () => void;
 }) {  // prettier-ignore
@@ -99,7 +100,10 @@ export function StepDrawer({
   }, [node.id]);
   const fields = useMemo(() => (type ? fieldsOf(type) : []), [type]);
   const { setup, options } = tabsOf(fields);
-  const [tab, setTab] = useState<Tab>(setup.length > 0 ? "setup" : "options");
+  const [tab, setTab] = useState<Tab>(test && testAt ? "test" : setup.length > 0 ? "setup" : "options");
+  useEffect(() => {
+    if (test && testAt) setTab("test");
+  }, [testAt]);
   const [handling, setHandling] = useState(false);
   // "Go to" (ruling 16; the review of 66fc658): a config field on its tab; a held key at the key field; a held limit in
   // the error handling, opened; a held entry name at its name. Its control takes focus once it has rendered, and one

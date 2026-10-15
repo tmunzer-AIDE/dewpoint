@@ -64,7 +64,8 @@ type Opened = { workflow: WorkflowDetail; types: NodeType[]; role: string | null
 /** The editor's right column: a step's panel, the problems, the versions, the edits not applied, Declassify, or the
  * Triggers panel (4c-3b), at a place in it when "Go to it" sent it there. */
 type Side =
-  | { kind: "step"; node: string; field?: { pointer: string; kind?: UnappliedKind; n: number } } | { kind: "problems" } | { kind: "versions" }
+  | { kind: "step"; node: string; field?: { pointer: string; kind?: UnappliedKind; n: number }; test?: { key: string; n: number } }
+  | { kind: "problems" } | { kind: "versions" }
   | { kind: "unapplied" } | { kind: "declassify" } | { kind: "triggers"; at?: { pointer: string; n: number } } | { kind: "simulation" } | null;  // prettier-ignore
 const NO_DIAGNOSTICS: Diagnostic[] = []; // one empty list, so a memo over it holds
 const NO_STEPS: ReadonlySet<string> = new Set();
@@ -1403,6 +1404,7 @@ function Editor({
             actions={viewing ? VERSION_ACTIONS : actionsFor(open.id)}
             note={noteFor(open.id)}
             focusField={side?.kind === "step" ? (side.field ?? null) : null}
+            testAt={side?.kind === "step" ? (side.test?.n ?? null) : null}
             test={
               simulator ? (
                 <TestTab
@@ -1412,6 +1414,7 @@ function Editor({
                   onStart={(frozen) => void simulation.start(frozen)}
                   onSimulateWorkflow={() => whenSettled("simulate", () => void simulate())}
                   onGoTo={(id) => focus(item.node(id))} onShowProblems={() => setSide({ kind: "problems" })} attemptsOf={attemptsOf}
+                  iteration={side?.kind === "step" ? (side.test ?? null) : null}
                 />
               ) : undefined
             }
@@ -1519,6 +1522,7 @@ function Editor({
             <SimulationResult
               tenantId={tenantId} workflowId={workflow.id} session={simulation} doc={doc} ran={ran} stale={stale} changes={changes}
               attemptsOf={attemptsOf} onGoTo={(id) => focus(item.node(id))} onShowProblems={() => setSide({ kind: "problems" })}
+              onOpen={(id, iteration) => setSide({ kind: "step", node: id, test: { key: iteration, n: ++jumps.current } })}
             />
           </SimulationPanel>
         )}

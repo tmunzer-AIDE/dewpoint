@@ -4,7 +4,7 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../../../lib/client";
-import type { SeedContract, SeedEntry } from "../../../lib/simulations";
+import type { SeedContract, SeedEntry, SimulationRequest, StepSummary } from "../../../lib/simulations";
 import type { GraphDoc, GraphNode, NodeType } from "../../../lib/workflows";
 import { TestTab } from "./TestTab";
 import type { SimulationSession } from "./useSimulation";
@@ -15,6 +15,7 @@ const DOC = { graph_format: 1, nodes: [NOTIFY], edges: [] } as unknown as GraphD
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
 let contract: (revision: number) => Response;
+let instances: () => Response;
 let asked: string[];
 beforeEach(() => {
   asked = [];
@@ -22,7 +23,9 @@ beforeEach(() => {
   vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
     const url = new URL((input as Request).url);
     asked.push(url.pathname + url.search);
-    return Promise.resolve(url.pathname === SEEDS ? contract(Number(url.searchParams.get("revision"))) : json({ error: "not_found" }, 404));
+    if (url.pathname === SEEDS) return Promise.resolve(contract(Number(url.searchParams.get("revision"))));
+    if (url.pathname.endsWith("/steps/id-notify/instances")) return Promise.resolve(instances());
+    return Promise.resolve(json({ error: "not_found" }, 404));
   });
 });
 afterEach(() => vi.restoreAllMocks());
@@ -205,5 +208,66 @@ describe("the values a step test sends (§7.6; the TestTab and TestOther boards)
   it("waits while Simulate waits", async () => {
     show({ blocked: true });
     expect((await screen.findByRole("button", { name: "◌ Simulate step" })).hasAttribute("disabled")).toBe(true);
+  });
+});
+
+// The person's latest simulation of the whole workflow, ended (§7.6: "After a workflow simulation, the step's result in it").
+function latest(s: StepSummary): SimulationSession {
+  const request: SimulationRequest = {
+    id: "r1", workflow_id: "w1", draft_snapshot_id: "s1", draft_revision: 14, target_step_id: null, mode: "simulate", source: "manual",
+    status: "started", reason: null, queued_at: "2026-10-15T10:42:05Z", ended_at: null, admission_checks: [],
+  };  // prettier-ignore
+  const run = { status: "failed" as const, queued_at: null, started_at: "2026-10-15T10:42:05Z", ended_at: "2026-10-15T10:42:19Z", error: null, iterations: 12 };
+  return {
+    ...idle(), local: { kind: "admitted", frozen: null, request, latest: true }, phase: "failed",
+    state: { request, run, cancel_requested: false, read_back: "kept", input: {}, seeds: null }, steps: { given: "input", steps: [s] },
+  };  // prettier-ignore
+}
+const notify = (over: Partial<StepSummary> = {}): StepSummary => ({
+  step_id: "id-notify", key: "notify", type: "slack.post@1", origin: "fixture_not_sent", instances: 1, statuses: { succeeded: 1 }, ports: {},
+  final: { attempt: 1, status: "succeeded", output: { ok: true } }, ...over,
+});  // prettier-ignore
+const at = (iso: string) => new Date(iso).toLocaleTimeString("en-GB");
+const instance = (n: number, status: string) => ({
+  step_id: "id-notify", key: "notify", iteration_key: `each_ap:${n}`, attempt: status === "failed" ? 3 : 1, status, output: null,
+  error: status === "failed" ? { code: "invalid_blocks", message: "Block 2 has no text." } : null,
+});  // prettier-ignore
+
+describe("the step in your latest simulation (§7.6; the TestTab and TestOther boards)", () => {
+  beforeEach(() => {
+    instances = () => json({ total: 4, items: [instance(0, "skipped"), instance(1, "succeeded"), instance(2, "skipped"), instance(3, "failed")] });
+  });
+
+  it("shows the step's result in the person's latest simulation of the workflow", async () => {
+    show({ session: latest(notify()) });
+    const found = await screen.findByRole("region", { name: "In your latest simulation" });
+    expect(within(found).getByText(`Revision 14, ${at("2026-10-15T10:42:05Z")}: succeeded · fixture · not sent.`)).toBeTruthy();
+    expect(within(found).getByRole("region", { name: "Output" })).toBeTruthy();
+  });
+
+  it("picks one of a looped step's iterations", async () => {
+    show({ session: latest(notify({ instances: 4, statuses: { succeeded: 1, failed: 1, skipped: 2 }, final: null })) });
+    const found = await screen.findByRole("region", { name: "In your latest simulation" });
+    expect(within(found).getByText(`Revision 14, ${at("2026-10-15T10:42:05Z")}: 4 instances: 1 succeeded · 1 failed · 2 skipped · fixture · not sent.`)).toBeTruthy();
+    const picker = await within(found).findByRole("combobox", { name: "Iteration" });
+    expect(within(picker).getAllByRole("option").map((o) => o.textContent)).toEqual(["1 · skipped", "2 · succeeded", "3 · skipped", "4 · failed · invalid_blocks"]);
+    await userEvent.selectOptions(picker, "4 · failed · invalid_blocks");
+    await userEvent.click(within(found).getByRole("button", { name: "Show" }));
+    expect(within(found).getByText("invalid_blocks").parentElement?.textContent).toBe("invalid_blocks Block 2 has no text. 3 attempts, the configured retries. Nothing was sent.");
+    expect(asked).toContain("/api/v1/t/t1/workflows/w1/draft/simulations/r1/steps/id-notify/instances?offset=0&limit=50");
+  });
+
+  it("opens at the iteration asked for", async () => {
+    show({ session: latest(notify({ instances: 4, statuses: { succeeded: 1, failed: 1, skipped: 2 }, final: null })), iteration: { key: "each_ap:3", n: 1 } });
+    const found = await screen.findByRole("region", { name: "In your latest simulation" });
+    expect(await within(found).findByText("invalid_blocks")).toBeTruthy();
+    expect(within(found).getByRole("combobox", { name: "Iteration" })).toHaveProperty("value", "each_ap:3");
+  });
+
+  it("shows it beside a step that can't run alone", async () => {
+    contract = () => json({ draft_revision: 14, step_id: "id-notify", refused: "This step can't be simulated alone: simulate the workflow to see it run.", entries: [] });
+    show({ session: latest(notify({ type: "flow.loop@1", origin: "evaluated", final: { attempt: 1, status: "succeeded", output: { items: [], failures: [], count: 12 } } })) });
+    const found = await screen.findByRole("region", { name: "In your latest simulation" });
+    expect(within(found).getByText(`Revision 14, ${at("2026-10-15T10:42:05Z")}: succeeded · 12 iterations.`)).toBeTruthy();
   });
 });

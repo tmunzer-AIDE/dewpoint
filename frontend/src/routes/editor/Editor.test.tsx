@@ -2205,6 +2205,37 @@ describe("Simulate step", () => {
     expect(screen.getByText("Step test: transform.").parentElement?.textContent).toBe("Step test: transform. Only this step ran. Nothing was sent.");
   });
 
+  it("opens a failed iteration's step on its Test tab, at that iteration (§7.5, §7.6)", async () => {
+    const SIM = `${BASE}/draft/simulations`;
+    answers.set("GET /api/v1/node-types", () => json([...TYPES, LOOP]));
+    const draft = {
+      graph_format: 1, edges: [{ from: { node: "id-each", port: "body" }, to: { node: "id-notify" } }],
+      nodes: [{ id: "id-each", key: "each", type: "flow.loop@1", config: {}, position: { x: 0, y: 140 } }, { id: "id-notify", key: "notify", type: "flow.transform@1", config: {}, position: { x: 0, y: 280 } }],
+    };  // prettier-ignore
+    const request = { id: "r1", workflow_id: "w1", version_id: null, draft_snapshot_id: "s1", draft_revision: 1, target_step_id: null, mode: "simulate", source: "manual", status: "started", reason: null, queued_at: "2026-10-15T10:42:05Z", ended_at: null, admission_checks: [] };
+    const run = { status: "failed", queued_at: null, started_at: "2026-10-15T10:42:05Z", ended_at: "2026-10-15T10:42:19Z", error: null, iterations: 2 };
+    const failed = { step_id: "id-notify", key: "notify", iteration_key: "each:1", attempt: 1, status: "failed", error: { code: "invalid_blocks", message: "Block 2 has no text." } };
+    answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft }));
+    answers.set(`GET ${SIM}`, () => json([request]));
+    answers.set(`GET ${SIM}/r1`, () => json({ request, run, cancel_requested: false, read_back: "kept", input: {}, seeds: null }));
+    answers.set(`GET ${SIM}/r1/steps`, () => json({ given: "input", steps: [
+      { step_id: "id-each", key: "each", type: "flow.loop@1", origin: "evaluated", instances: 1, statuses: { failed: 1 }, ports: {}, final: { attempt: 1, status: "failed", output: { items: [], failures: [], count: 2 } } },
+      { step_id: "id-notify", key: "notify", type: "flow.transform@1", origin: "evaluated", instances: 2, statuses: { succeeded: 1, failed: 1 }, ports: {}, final: null },
+    ] }));  // prettier-ignore
+    answers.set(`GET ${SIM}/r1/steps/id-notify/instances`, () => json({ total: 2, items: [{ ...failed, iteration_key: "each:0", status: "succeeded", error: null }, failed] }));
+    answers.set(`GET ${BASE}/draft/steps/id-notify/seeds`, () => json({ draft_revision: 1, step_id: "id-notify", refused: null, entries: [] }));
+    await show();
+    await screen.findByRole("button", { name: "Hide the result" });
+    await userEvent.click(screen.getByRole("button", { name: "Simulation" }));
+    const panel = await screen.findByRole("complementary", { name: "Simulation" });
+    await userEvent.click(within(panel).getByRole("button", { name: "Iterations of each" }));
+    await userEvent.click(await within(panel).findByRole("button", { name: "Open notify, iteration 2" }));
+    const drawer = await screen.findByRole("complementary", { name: "notify" });
+    expect(within(drawer).getByRole("tab", { name: "Test" }).getAttribute("aria-selected")).toBe("true");
+    const found = await within(drawer).findByRole("region", { name: "In your latest simulation" });
+    expect(await within(found).findByText("invalid_blocks")).toBeTruthy();
+  });
+
   it("isn't offered to a viewer", async () => {
     role = "viewer";
     await show();

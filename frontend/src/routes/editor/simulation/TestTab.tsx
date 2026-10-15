@@ -11,6 +11,7 @@ import { ApiError } from "../../../lib/client";
 import { sameId } from "../../../lib/graph";
 import { freeze, seedContractQuery, type Frozen, type StepSummary } from "../../../lib/simulations";
 import type { GraphDoc, GraphNode, NodeType } from "../../../lib/workflows";
+import { LatestResult } from "./LatestResult";
 import { Refusal } from "./Refusal";
 import { SeedField } from "./SeedField";
 import { collect, initialOf, titleOf, type SeedInput } from "./seeds";
@@ -32,6 +33,7 @@ export interface TestTabProps {
   onGoTo: (stepId: string) => void;
   onShowProblems: () => void;
   attemptsOf: (s: StepSummary) => number | null;
+  iteration?: { key: string; n: number } | null; // the iteration the Simulation panel's "Open" asked for
 }
 
 const missingWords = (n: number) => `Not simulated: ${n} ${n === 1 ? "value is" : "values are"} missing.`;
@@ -39,6 +41,7 @@ const unreadWords = (n: number) => `Not simulated: ${n} ${n === 1 ? "value isn't
 
 export function TestTab(props: TestTabProps) {
   const { tenantId, workflowId, node, doc, types, revision, session, blocked, onSave, onStart, onSimulateWorkflow, onGoTo, onShowProblems, attemptsOf } = props;
+  const latest = <LatestResult tenantId={tenantId} workflowId={workflowId} session={session} node={node} attemptsOf={attemptsOf} iteration={props.iteration ?? null} />;
   // The contract at the saved revision; while a newer one is read, the older stays shown (it's never sent with it).
   const contract = useQuery({ ...seedContractQuery(tenantId, workflowId, node.id, revision), placeholderData: keepPreviousData });
   const [inputs, setInputs] = useState<Record<string, SeedInput>>({});
@@ -68,6 +71,7 @@ export function TestTab(props: TestTabProps) {
         <div>
           <Button variant="simulate" size="md" onClick={onSimulateWorkflow}>◌ Simulate workflow</Button>
         </div>
+        {latest}
       </>
     );
   }
@@ -147,6 +151,7 @@ export function TestTab(props: TestTabProps) {
         <p className="text-small text-muted">{`Each value is checked against what ${node.key} reads.`}</p>
       </div>
       {mine && <StepResult session={session} stepKey={node.key} attemptsOf={attemptsOf} />}
+      {latest}
     </>
   );
 }
