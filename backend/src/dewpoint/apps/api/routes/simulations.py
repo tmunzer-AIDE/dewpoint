@@ -4,6 +4,7 @@ on a snapshot of the draft at the revision `If-Match` names, under an `Idempoten
 `manual`, and the dispatcher starts it as any run. `{input}` simulates the workflow; `{target}` a step alone with the
 values it reads (S2). It needs `workflow.edit` and `run.start`; cancelling is the run's own route (`run.cancel`)."""
 
+import asyncio
 import uuid
 from typing import Any
 
@@ -12,9 +13,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from dewpoint.apps import admission, step_summary
+from dewpoint.apps import admission, seed_form, step_summary, workflow_ops
 from dewpoint.apps.api.responses import (
     DraftSnapshotOut,
+    DraftStartFormOut,
+    SeedContractOut,
     SimulationOut,
     SimulationStateOut,
     SimulationStepsOut,
@@ -30,7 +33,8 @@ from dewpoint.apps.api.routes.run_requests import (
     request_body,
 )
 from dewpoint.apps.api.routes.runs import _step
-from dewpoint.apps.api.routes.workflows import _revision
+from dewpoint.apps.api.routes.workflows import _get, _revision
+from dewpoint.apps.forms import csv_form, form_fields
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.claims import service as claims
 from dewpoint.core.claims.cipher import ClaimCipher
@@ -39,9 +43,11 @@ from dewpoint.core.crypto.keys import KeySource
 from dewpoint.core.http import TenantContext, get_db, get_settings_dep, require
 from dewpoint.core.models.requests import RunRequest
 from dewpoint.core.models.runs import Run
-from dewpoint.core.models.workflows import DraftSnapshot
+from dewpoint.core.models.workflows import DraftSnapshot, Workflow
 from dewpoint.core.retention import cutoff as retention
 from dewpoint.core.workflows.service import DraftConflictError
+from dewpoint.engine.graph import seeds
+from dewpoint.engine.graph.model import GraphFormatError, parse_graph
 from dewpoint.engine.handles import ClaimRef
 from dewpoint.engine.runtime.projection import REDACTED
 
@@ -299,3 +305,70 @@ async def _steps_of(db: AsyncSession, r: RunRequest) -> list[dict[str, Any]]:
     snapshot = await db.get(DraftSnapshot, r.draft_snapshot_id)
     nodes: list[dict[str, Any]] = [] if snapshot is None else snapshot.graph["nodes"]
     return [n for n in nodes if r.target_step_id is None or n["id"] == str(r.target_step_id)]
+
+
+async def _draft_at(db: AsyncSession, ctx: TenantContext, workflow_id: uuid.UUID, revision: int) -> Workflow:
+    """The workflow, its draft at `revision`: else 409 `draft_conflict`, naming the draft's (a form never pairs a new
+    revision with an older read)."""
+    wf = await _get(db, ctx, workflow_id)
+    if wf.draft_revision != revision:
+        raise HTTPException(409, detail={"error": "draft_conflict", "draft_revision": wf.draft_revision})
+    return wf
+
+
+@router.get("/t/{tenant_id}/workflows/{workflow_id}/draft/start-form", response_model=DraftStartFormOut,
+            response_model_exclude_unset=True)  # fmt: skip
+async def draft_start_form(
+    workflow_id: uuid.UUID,
+    revision: int = Query(ge=1),
+    ctx: TenantContext = Depends(require(P.WORKFLOW_EDIT, P.RUN_START)),
+    db: AsyncSession = Depends(get_db, scope="function"),
+) -> dict[str, object]:
+    """The draft's input at `revision`, as a form (§7.1): `start-form`'s, which reads only the active version."""
+    wf = await _draft_at(db, ctx, workflow_id, revision)
+    try:
+        graph = parse_graph(wf.draft)
+    except GraphFormatError as e:
+        diagnostics = [d.to_json() for d in e.diagnostics]
+        raise HTTPException(422, detail={"error": "invalid", "diagnostics": diagnostics}) from None
+    csv = graph.settings.csv
+    return {
+        "workflow_id": str(wf.id),
+        "draft_revision": wf.draft_revision,
+        "fields": form_fields(graph.settings.input_schema),
+        "csv": csv_form(csv.model_dump(mode="json") if csv is not None else None),
+    }
+
+
+@router.get("/t/{tenant_id}/workflows/{workflow_id}/draft/steps/{step_id}/seeds", response_model=SeedContractOut)
+async def seed_contract(
+    workflow_id: uuid.UUID,
+    step_id: uuid.UUID,
+    revision: int = Query(ge=1),
+    ctx: TenantContext = Depends(require(P.WORKFLOW_EDIT, P.RUN_START, P.RUN_VIEW)),
+    db: AsyncSession = Depends(get_db, scope="function"),
+    settings: Settings = Depends(get_settings_dep),
+) -> dict[str, object]:
+    """A step's seed contract at `revision` (§5.2, §6.6), the draft validated first as admission validates it (422
+    `invalid`, its blocking problems: an invalid draft's contract would miss reads), each entry prefilled from its
+    step's own sample where D-s2 allows (run data: `run.view`), else typed, saying why."""
+    wf = await _draft_at(db, ctx, workflow_id, revision)
+    checked = await workflow_ops.check_draft(db, ctx.tenant_id, wf.draft, settings)
+    sim = await workflow_ops.simulatable(db, ctx, wf, checked)
+    if sim.new is None or checked.graph is None or checked.context is None:
+        diagnostics = [d.to_json() for d in [*sim.blocking, *sim.warnings]]
+        raise HTTPException(422, detail={"error": "invalid", "diagnostics": diagnostics})
+    contract = await asyncio.to_thread(seeds.contract, checked.graph, checked.context, step_id)
+    steps = {n.key: n.id for n in checked.graph.nodes}
+    filled = await seed_form.prefills(db, ctx.tenant_id, wf.id, steps, contract,
+                                      await retention.cutoff(db, ctx.tenant_id))  # fmt: skip
+    return {
+        "draft_revision": wf.draft_revision,
+        "step_id": str(step_id),
+        "refused": contract.refused,
+        "entries": [
+            {"pointer": e.pointer, "types": list(e.types), "required": e.required, "nullable": e.nullable,
+             "sensitive": e.sensitive, "prefill": filled[e.pointer].to_json()}
+            for e in contract.entries
+        ],
+    }  # fmt: skip

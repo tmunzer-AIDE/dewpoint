@@ -700,3 +700,42 @@ class StepInstancesOut(_Answer):
 
     total: int
     items: list[dict[str, Any]]
+
+
+class DraftStartFormOut(_Answer):
+    """The draft's input as a form, at its revision (B8; the simulation design §7.1): `start-form`'s fields and CSV
+    declaration, for a draft that may never have been published. A draft declaring a CSV can't be simulated whole."""
+
+    workflow_id: str
+    draft_revision: int
+    fields: list[StartFieldOut]
+    csv: CsvFormOut | None
+
+
+class SeedPrefillOut(_Answer):
+    """A seed's value from its step's own sample (D-s2), or why the person types it."""
+
+    state: Literal["prefilled", "typed"]
+    value: Any  # the sample's, when prefilled (null may be one)
+    reason: Literal["sensitive", "not_step_output", "no_sample", "not_faithful", "not_in_sample", "doesnt_fit"] | None
+
+
+class SeedEntryOut(_Answer):
+    """One value the step reads (§5.2): its pointer, the JSON types it may have (none listed: any value), whether it's
+    required (else it may be absent), whether null is taken, and whether it's sensitive (typed and masked)."""
+
+    pointer: str
+    types: list[str]
+    required: bool
+    nullable: bool
+    sensitive: bool
+    prefill: SeedPrefillOut
+
+
+class SeedContractOut(_Answer):
+    """A step's seed contract at the draft's revision (§5.2, §6.6), or why the step can't run alone."""
+
+    draft_revision: int
+    step_id: str
+    refused: str | None
+    entries: list[SeedEntryOut]
