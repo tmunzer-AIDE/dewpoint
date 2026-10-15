@@ -10,7 +10,7 @@ const LOOP = "flow.loop@";
 export const PAGE = 4;
 
 /** Every step reachable from a loop's `body` port, as the engine reads a loop's region (engine/graph/structure.py). */
-function regionOf(doc: GraphDoc, loopId: string): Set<string> {
+export function regionOf(doc: GraphDoc, loopId: string): Set<string> {
   const edges = edgesOf(doc);
   const region = new Set<string>();
   const queue = edges.filter((e) => sameId(e.from.node, loopId) && portOf(e) === "body").map((e) => idKey(e.to.node));

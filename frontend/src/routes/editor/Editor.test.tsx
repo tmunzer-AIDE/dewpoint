@@ -2173,6 +2173,23 @@ describe("Simulate step", () => {
     expect(await within(drawer).findByText((_, el) => el?.tagName === "P" && el.textContent === intro)).toBeTruthy();
   });
 
+  it("sends the step's own simulation, saved first, at the revision the save made", async () => {
+    const sampled = { pointer: "/vars/region", types: ["string"], required: true, nullable: false, sensitive: false, prefill: { state: "typed", reason: "not_step_output", value: null } };
+    answers.set(`GET ${SEEDS}`, () => json({ draft_revision: 1, step_id: "id-transform", refused: null, entries: [sampled] }));
+    answers.set(`POST ${BASE}/draft/simulations`, () => json({ id: "r1", workflow_id: "w1", version_id: null, draft_snapshot_id: "s1", draft_revision: 1, target_step_id: "id-transform", mode: "simulate", source: "manual", status: "queued", reason: null, queued_at: "2026-10-15T10:42:05Z", ended_at: null, admission_checks: [] }, 202));
+    await show();
+    await userEvent.click(screen.getByRole("button", { name: "transform" }));
+    const drawer = screen.getByRole("complementary", { name: "transform" });
+    await userEvent.click(within(drawer).getByRole("tab", { name: "Test" }));
+    await userEvent.type(await within(drawer).findByLabelText("region required text"), "emea");
+    await userEvent.click(within(drawer).getByRole("button", { name: "◌ Simulate step" }));
+    await vi.waitFor(() => expect(sent.some((r) => r.method === "POST" && r.path === `${BASE}/draft/simulations`)).toBe(true));
+    const post = sent.find((r) => r.method === "POST" && r.path === `${BASE}/draft/simulations`)!;
+    expect(post.headers.get("If-Match")).toBe("1");
+    expect(post.body).toEqual({ target: { step_id: "id-transform", values: { "/vars/region": "emea" }, absent: [] } });
+    expect(screen.getByRole("complementary", { name: "transform" })).toBeTruthy(); // the drawer stays: its result comes in the tab
+  });
+
   it("isn't offered to a viewer", async () => {
     role = "viewer";
     await show();
