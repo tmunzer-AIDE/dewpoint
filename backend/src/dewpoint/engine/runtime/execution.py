@@ -420,7 +420,11 @@ class Execution:
                         "bytes": [workflow.info().get_current_history_size()],
                         "units": self._units(tasks),  # what the drain waits for
                     }
-                if (self._draining or length >= self.checkpoint_events) and self._quiescent(tasks):
+                if (
+                    (self._draining or length >= self.checkpoint_events)
+                    and self._quiescent(tasks)
+                    and self.seeds is None  # a single step carries nothing a continue could (S2; ruling 164)
+                ):
                     if self._draining:  # measured, for the headroom (spec §6): what draining added
                         self._drained["events"].append(length)
                         self._drained["bytes"].append(workflow.info().get_current_history_size())

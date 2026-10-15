@@ -132,18 +132,23 @@ async def precreate_run(
     run_id: uuid.UUID,
     tenant_id: uuid.UUID,
     workflow_id: uuid.UUID,
-    version_id: uuid.UUID,
+    version_id: uuid.UUID | None,
     mode: str,
     started_by: uuid.UUID | None,
     queued_at: datetime,
+    draft_snapshot_id: uuid.UUID | None = None,
+    target_step_id: uuid.UUID | None = None,
 ) -> None:
     """A root run's row, written at dispatch before Temporal answers (engine 2b spec §7.3): queued with its request,
-    not yet started. An earlier attempt's row is reused: a retried dispatch changes nothing."""
+    not yet started; a draft simulation's names its snapshot and its target (B8). An earlier attempt's row is reused: a
+    retried dispatch changes nothing."""
     statement = insert(Run).values(
         id=run_id,
         tenant_id=tenant_id,
         workflow_id=workflow_id,
         workflow_version_id=version_id,
+        draft_snapshot_id=draft_snapshot_id,
+        target_step_id=target_step_id,
         mode=mode,
         status="running",
         iterations=0,
