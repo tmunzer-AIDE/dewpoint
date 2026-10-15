@@ -9,7 +9,8 @@ from typing import Any
 
 import pytest
 
-from tests.apps.api.test_run_requests_api import as_role, keyed_app
+from dewpoint.apps.inputs import NOT_FINITE
+from tests.apps.api.test_run_requests_api import JSON, NON_FINITE, as_role, keyed_app, with_number
 from tests.apps.test_admission import current
 from tests.apps.test_admission_drafts import LOOP_GRAPH, STEPS_GRAPH, drafted, simulate
 from tests.apps.test_workflow_ops import create, save
@@ -196,3 +197,26 @@ async def test_a_draft_taking_a_csv_isnt_simulated_whole_and_a_step_of_it_still_
         assert TOKEN not in answer.text
     step = await client.post(url(ctx, wf), json={"target": {"step_id": str(nid("a"))}}, headers=headers("s"))
     assert step.status_code == 202, step.text
+
+
+@pytest.mark.parametrize("literal", NON_FINITE)
+async def test_an_input_or_a_seed_holding_nan_or_an_infinity_is_422_with_the_fixed_reason(
+    keyed_app, ready, owner_sessionmaker, api_settings, literal: str
+) -> None:
+    """As a run's start (#106): the idempotency digest, the claims and Postgres JSONB can't hold such a number. Refused
+    first, whatever the key holds, the input's or a seed's, with a fixed reason that never quotes it; nothing is
+    recorded."""
+    from sqlalchemy import text
+
+    ctx, wf = ready
+    client = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "editor")
+    assert (await client.post(url(ctx, wf), json={"input": {}}, headers=headers("used"))).status_code == 202
+    refused = (422, {"error": "input_invalid", "messages": [NOT_FINITE]})
+    whole = with_number(literal, {"input": {"n": [1.5, {"x": "#"}]}})
+    step = with_number(literal, {"target": {"step_id": str(nid("b")), "values": {"/steps/a/output/value": "#"}}})
+    for body, key in ((whole, "used"), (whole, "w-new"), (step, "s-new")):
+        answer = await client.post(url(ctx, wf), content=body, headers=JSON | headers(key))
+        assert (answer.status_code, answer.json()) == refused, key
+    async with owner_sessionmaker() as s:
+        mine = text("select count(*) from run_requests where workflow_id = :w")
+        assert (await s.execute(mine, {"w": wf})).scalar_one() == 1

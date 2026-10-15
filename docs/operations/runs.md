@@ -117,19 +117,19 @@ workflow need not be enabled, nor ever published. The body is `{"input": {...}}`
 reads (its seeds). It answers 202 with the request, `queued`, in `simulate` mode, frozen on a **draft snapshot**: the
 draft's graph, pins, CEL profile and engine ABI as a version holds them, shared by the simulations of the same draft.
 
-- Admission checks the key first: an exact retry returns its request even after the draft changed. Then the tenant and
-  the production gate, as a start; the revision (409 `draft_conflict`, with the draft's `draft_revision`); the draft,
-  validated: an error diagnostic, `declassify.forbidden` (a draft that declassifies, without `workflow.declassify`),
-  `version.unbounded`, a sub-flow's cycle, depth or engine version and a retired type refuse it (422 `invalid`, with
-  the diagnostics); so do no current build or one of another engine ABI, with the start's codes. Unknown or mis-typed
-  connections, pickers and deprecated step types don't (a simulation opens no connection): they're kept on the request
-  as `admission_checks` and returned. Then the input, against the draft's input schema (a draft whose input takes a
-  CSV can't be simulated whole: 422 `csv_not_simulated`, and a step of it can), or the seeds, against the step's seed
-  contract: every pointer in exactly one of
-  `values` (null only where it's nullable) and `absent` (only where it's optional), else 422 `seed_missing`,
-  `seed_alias`, `seed_unknown` or `seed_invalid`, each problem with its pointer; 422 `target_invalid` for a step that
-  can't run alone. One audit entry, `run.request`, names the snapshot, the revision, its graph hash, the target and
-  the declassified sites.
+- An input or a seed nested deeper than 64 levels, or holding NaN or an infinity, is refused first, 422 `input_invalid`,
+  whatever its key holds. Admission checks the key next: an exact retry returns its request even after the draft
+  changed. Then the tenant and the production gate, as a start; the revision (409 `draft_conflict`, with the draft's
+  `draft_revision`); the draft, validated: an error diagnostic, `declassify.forbidden` (a draft that declassifies,
+  without `workflow.declassify`), `version.unbounded`, a sub-flow's cycle, depth or engine version and a retired type
+  refuse it (422 `invalid`, with the diagnostics); so do no current build or one of another engine ABI, with the start's
+  codes. Unknown or mis-typed connections, pickers and deprecated step types don't (a simulation opens no connection):
+  they're kept on the request as `admission_checks` and returned. Then the input, against the draft's input schema (a
+  draft whose input takes a CSV can't be simulated whole: 422 `csv_not_simulated`, and a step of it can), or the seeds,
+  against the step's seed contract: every pointer in exactly one of `values` (null only where it's nullable) and
+  `absent` (only where it's optional), else 422 `seed_missing`, `seed_alias`, `seed_unknown` or `seed_invalid`, each
+  problem with its pointer; 422 `target_invalid` for a step that can't run alone. One audit entry, `run.request`, names
+  the snapshot, the revision, its graph hash, the target and the declassified sites.
 - The run takes the tenant's slots and the dispatcher as any run. A step alone runs only that step, from its seeds, and
   ends with it: no outputs, no failure handler, no edge followed; the other steps have no rows.
 - A draft run is never re-run (409 `draft_run`, its published sub-runs included): simulate the draft again. Draft runs

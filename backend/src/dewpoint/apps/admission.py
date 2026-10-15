@@ -315,6 +315,8 @@ async def admit_draft(
     DraftInvalidError (what can't run), SeedsRefusedError, AdmissionRefusedError."""
     if nests_too_deep(input) or nests_too_deep(simulation.values):  # before its key's digest reads them
         raise AdmissionRefusedError(INPUT_INVALID, [TOO_DEEP])
+    if holds_non_finite(input) or holds_non_finite(simulation.values):  # which its key's digest can't encode (#106)
+        raise AdmissionRefusedError(INPUT_INVALID, [NOT_FINITE])
     await lifecycle.assert_read_committed(s)
     await tenant_scope(s, ctx.tenant_id)
     fields: dict[str, Any] = {"source": "manual", "workflow_id": workflow_id, "mode": SIMULATE, "input": input}
