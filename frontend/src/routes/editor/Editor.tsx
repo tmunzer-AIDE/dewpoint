@@ -49,6 +49,7 @@ import { tagsOf, type SimTag } from "./simulation/results";
 import { SimulationPanel } from "./simulation/SimulationPanel";
 import { SimulationResult } from "./simulation/SimulationResult";
 import { changesOf, staleOf } from "./simulation/stale";
+import { TestTab } from "./simulation/TestTab";
 import { useSimulation } from "./simulation/useSimulation";
 import { type Problems } from "./StepCard";
 import { StepPicker, type PickMode } from "./StepPicker";
@@ -935,24 +936,31 @@ function Editor({
     return left;
   }
 
-  /** Simulate workflow's preflight, Publish's own (§7.1): with the edits not applied settled, the save is flushed, and
-   * the input is asked for at the revision that save made, never an older one. A failed save sends nothing. */
-  async function simulate() {
+  /** A simulation's save, Publish's own (§7.1): the draft as it is, saved; the revision saved, else null, said why. A
+   * failed save sends nothing. Called with the edits not applied settled (`whenSettled`). */
+  async function saveFirst(): Promise<number | null> {
     setSaving(true);
     setNotice({ tone: "info", text: "Saving before the simulation…" });
     try {
       const revision = await saver.current!.flush();
       setNotice(null);
-      setSimulateAt({ revision, doc: draftNow() });
+      return revision;
     } catch (e) {
       // A conflict has its own banner.
       setNotice(e instanceof ConflictError ? null : {
         tone: "danger", text: "Not simulated: your latest edits aren't saved. Retry the save, then simulate.",
         action: { label: "Retry", run: () => saver.current?.retry() },
       });  // prettier-ignore
+      return null;
     } finally {
       setSaving(false);
     }
+  }
+
+  /** Simulate workflow: the input is asked for at the revision the save made, never an older one. */
+  async function simulate() {
+    const revision = await saveFirst();
+    if (revision !== null) setSimulateAt({ revision, doc: draftNow() });
   }
 
   /** `then`, once every unapplied edit is in the draft; when one can't be, the person decides first (ruling 18). */
@@ -1394,6 +1402,18 @@ function Editor({
             actions={viewing ? VERSION_ACTIONS : actionsFor(open.id)}
             note={noteFor(open.id)}
             focusField={side?.kind === "step" ? (side.field ?? null) : null}
+            test={
+              simulator ? (
+                <TestTab
+                  tenantId={tenantId} workflowId={workflow.id} node={open} doc={doc} types={typeMap} revision={sync.revision}
+                  session={simulation} blocked={sync.status === "conflict" || simulation.busy || saving || busy !== null}
+                  onSave={() => new Promise((resolve) => whenSettled("simulate", () => void saveFirst().then(resolve)))}
+                  onStart={(frozen) => void simulation.start(frozen)}
+                  onSimulateWorkflow={() => whenSettled("simulate", () => void simulate())}
+                  onGoTo={(id) => focus(item.node(id))} onShowProblems={() => setSide({ kind: "problems" })}
+                />
+              ) : undefined
+            }
             onAdd={onItem}
             onDelete={() => setAsking({ kind: "node", id: open.id })}
             onConnectPort={(port) => setConnecting({ node: open.id, port })}

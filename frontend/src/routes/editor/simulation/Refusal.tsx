@@ -3,7 +3,8 @@
 // in the server's words, never a catalogue of the client's. A draft's problems ("Fix N problems first", each with Go to,
 // and the Problems panel); a declassifying draft without the permission; the deployment's gate; a retired type (Go to
 // each step of it); no current build (Try again: a refusal is never recorded, so the same request can be sent again);
-// a step test's values by their pointer; the draft changed elsewhere. Nothing ran.
+// a step test's values by their pointer; the draft changed elsewhere. Nothing ran. The Test tab shows a draft's problems
+// before anything is tried, without "Not simulated" (`heading` null).
 import { Button } from "../../../components/Button";
 import type { ApiError } from "../../../lib/client";
 import { findNode, nodesOf } from "../../../lib/graph";
@@ -11,8 +12,9 @@ import type { Diagnostic, GraphDoc } from "../../../lib/workflows";
 
 const DECLASSIFY = "declassify.forbidden";
 
-export function Refusal({ error, doc, onGoTo, onShowProblems, onTryAgain }: {
-  error: ApiError; doc: GraphDoc; onGoTo: (stepId: string) => void; onShowProblems: () => void; onTryAgain: () => void;
+export function Refusal({ error, doc, heading = "Not simulated", onGoTo, onShowProblems, onTryAgain }: {
+  error: ApiError; doc: GraphDoc; heading?: string | null; onGoTo: (stepId: string) => void; onShowProblems: () => void;
+  onTryAgain: () => void;
 }) {  // prettier-ignore
   const body = (typeof error.body === "object" && error.body !== null ? error.body : {}) as {
     diagnostics?: Diagnostic[]; messages?: unknown; problems?: { pointer: string; message: string }[];
@@ -76,7 +78,7 @@ export function Refusal({ error, doc, onGoTo, onShowProblems, onTryAgain }: {
   }
   return (
     <div className="flex flex-col gap-2 text-small">
-      <p className="font-semibold">Not simulated</p>
+      {heading && <p className="font-semibold">{heading}</p>}
       {said}
     </div>
   );

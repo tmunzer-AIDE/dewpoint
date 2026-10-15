@@ -2154,6 +2154,35 @@ describe("the Triggers panel (4c-3b)", () => {
   });
 });
 
+// Simulate step (4d-1c; the simulation design §7.6; the TestTab, TestResult and TestOther boards).
+describe("Simulate step", () => {
+  const SEEDS = `${BASE}/draft/steps/id-transform/seeds`;
+  beforeEach(() => {
+    answers.set(`GET ${BASE}/draft/simulations`, () => json([]));
+    answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: draftWith("transform") }));
+    answers.set(`GET ${SEEDS}`, () => json({ draft_revision: 1, step_id: "id-transform", refused: null, entries: [] }));
+  });
+
+  it("is a Test tab beside Setup and Options, even on a step with nothing to set up", async () => {
+    await show();
+    await userEvent.click(screen.getByRole("button", { name: "transform" }));
+    const drawer = screen.getByRole("complementary", { name: "transform" });
+    expect(within(drawer).getAllByRole("tab").map((t) => t.textContent)).toEqual(["Setup", "Options", "Test"]);
+    await userEvent.click(within(drawer).getByRole("tab", { name: "Test" }));
+    const intro = "Runs transform alone, with these values in place of what the steps before it would give. Nothing is sent.";
+    expect(await within(drawer).findByText((_, el) => el?.tagName === "P" && el.textContent === intro)).toBeTruthy();
+  });
+
+  it("isn't offered to a viewer", async () => {
+    role = "viewer";
+    await show();
+    await userEvent.click(screen.getByRole("button", { name: "transform" }));
+    const drawer = screen.getByRole("complementary", { name: "transform" });
+    expect(within(drawer).queryByRole("tab", { name: "Test" })).toBeNull();
+    expect(within(drawer).getByText("This step has nothing to set up.")).toBeTruthy();
+  });
+});
+
 // Simulate workflow (4d-1c; the simulation design §7.1; the Main, Preflight and ReadOnly boards).
 describe("Simulate workflow", () => {
   const SIM = `${BASE}/draft/simulations`;
