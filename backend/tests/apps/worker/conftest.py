@@ -8,27 +8,51 @@ from temporalio.testing import WorkflowEnvironment
 from dewpoint.apps import runs as run_ops
 from dewpoint.engine import ENGINE_ABI
 from tests.support.keys import FIXTURE_CONVERTER
-from tests.support.temporal import probe_temporal
+from tests.support.temporal import probe_temporal, skips_time, start_test_server
 
 
 @pytest.fixture(scope="session")
-async def env() -> AsyncIterator[WorkflowEnvironment]:
-    """Temporal's time-skipping test server (downloaded once by the SDK), shared by the session. Its client encrypts
-    as every Dewpoint process does, with fixture keys (engine 2b spec §6.2). It refuses a run's cancel of an activity
-    that completed while the run's workflow task was in flight (`ACTIVITY_UNKNOWN for scheduledEventId=…`), and that
-    run stalls: a test whose run may end as a quick activity completes runs on `dev_env`, a real server, which records
-    the cancel and lets the run end (`test_real_server.py`'s
-    `test_a_run_ending_as_its_running_activity_completes_cancels_it_and_ends`)."""
-    async with await WorkflowEnvironment.start_time_skipping(data_converter=FIXTURE_CONVERTER) as environment:
-        yield environment
+async def shared_servers() -> AsyncIterator[list[WorkflowEnvironment]]:
+    """The time-skipping test servers the worker tests share, the one in use last: `env` starts the next once a test
+    leaves the one in use unable to skip time. Each is shut down with the session."""
+    servers = [await start_test_server()]
+    try:
+        yield servers
+    finally:
+        for server in servers:
+            await server.shutdown()
+
+
+@pytest.fixture
+async def env(shared_servers: list[WorkflowEnvironment]) -> AsyncIterator[WorkflowEnvironment]:
+    """Temporal's time-skipping test server (`start_test_server`), shared by the worker tests. It refuses a run's
+    cancel of an activity that completed while the run's workflow task was in flight (`ACTIVITY_UNKNOWN for
+    scheduledEventId=…`), and that run stalls: a test whose run may end as a quick activity completes runs on
+    `dev_env`, a real server, which records the cancel and lets the run end (`test_real_server.py`'s
+    `test_a_run_ending_as_its_running_activity_completes_cancels_it_and_ends`).
+
+    After each test it must still skip time (`skips_time`, about 10 ms): a test whose run closed with an activity still
+    scheduled or running has held its clock for good, and every later timer on it would wait in real time (the 2-day
+    `wait_until` of `test_run_graph_policies.py` timed out at 60 s). That test fails here, and the tests after it get a
+    fresh server."""
+    server = shared_servers[-1]
+    yield server
+    if not await skips_time(server):
+        shared_servers.append(await start_test_server())
+        pytest.fail(
+            "This test left the shared test server unable to skip time: a run closed with an activity still scheduled "
+            "or running (or was terminated before a worker took its first task), and the server never releases its "
+            "clock for it (`skips_time`). Give the test `own_env`."
+        )
 
 
 @pytest.fixture
 async def own_env() -> AsyncIterator[WorkflowEnvironment]:
-    """A test server of the test's own, for a test that ends a run while an activity still runs. That activity never
-    completes against its closed run, and the time-skipping server stops skipping time while any activity is
-    outstanding: every later timer on a shared server would wait in real time."""
-    async with await WorkflowEnvironment.start_time_skipping(data_converter=FIXTURE_CONVERTER) as environment:
+    """A test server of the test's own, for a test that ends a run while one of its activities is still scheduled or
+    running. Nothing completes that activity against its closed run, and the time-skipping server holds its clock for
+    an activity from the moment it is scheduled until it completes: on a shared server every later timer would wait in
+    real time (`env` checks for it)."""
+    async with await start_test_server() as environment:
         yield environment
 
 
