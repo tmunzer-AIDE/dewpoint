@@ -27,7 +27,7 @@ from dewpoint.core.crypto.keys import KeySource
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.models.claims import SecretIndex
 from dewpoint.core.models.requests import RunSlot
-from dewpoint.core.models.workflows import WorkflowVersion
+from dewpoint.core.models.workflows import DraftSnapshot, WorkflowVersion
 from dewpoint.core.plugins.registry import load_node_types
 from dewpoint.core.runs import service as runs
 from dewpoint.engine.handles import StoredClaim, handles_in
@@ -218,7 +218,10 @@ class DbRunStore:
     async def version(self, tenant_id: str, version_id: str) -> VersionData:
         async with self.sessionmaker() as s, s.begin():
             await tenant_scope(s, uuid.UUID(tenant_id))
-            v = await s.get(WorkflowVersion, uuid.UUID(version_id))
+            found = uuid.UUID(version_id)  # or a draft simulation's snapshot (B8): the same fields, the same names
+            v: WorkflowVersion | DraftSnapshot | None = await s.get(WorkflowVersion, found)
+            if v is None:
+                v = await s.get(DraftSnapshot, found)
             if v is None:
                 raise ApplicationError(f"version {version_id} not found", type="version_not_found", non_retryable=True)
             types = await load_node_types(s, v.node_refs)

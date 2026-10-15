@@ -20,20 +20,22 @@ from dewpoint.engine.graph.model import GraphFormatError, graph_hash, parse_grap
 ATTENTION_STATUSES = ("failed", "deadline_exceeded")
 
 # Each workflow's last root run of each mode, in one statement for every workflow (4b ruling 5), meant as one ordered
-# lookup of `runs_workflow_last` (migration 0047) per workflow and mode, however long its history; a workflow and mode
-# with no root run give no row. The mode is a lower bound that leads the order, checked for equality outside the
-# lookup (ledger M5): the first row is the mode's newest, or another mode's when it has none, which the outer
-# equality drops, so the answer is the exact-mode lookup's. Why not an equality inside: the planner then drops the mode
-# from the order, and `runs_tenant_queued (tenant_id, queued_at DESC, id DESC)` serves the order too; on a live-only
-# history it chose that index and read the tenant's whole history for each workflow and mode with no run. Bounded on
-# both sides, its default range estimate (0.5%) made it sort each workflow's runs of the mode. With this form, only
-# `runs_workflow_last` gives the order without a sort, and the probe and the work-unit test observed the ordered scan
-# on every workload they tried; it's what the planner chose there, not a guarantee for every future plan.
+# lookup of `runs_workflow_last_published` (migration 0072: 0047's `runs_workflow_last` without draft simulations, which
+# never count, B8) per workflow and mode, however long its history; a workflow and mode with no root run give no row.
+# The mode is a lower bound that leads the order, checked for equality outside the lookup (ledger M5): the first row is
+# the mode's newest, or another mode's when it has none, which the outer equality drops, so the answer is the exact-mode
+# lookup's. Why not an equality inside: the planner then drops the mode from the order, and `runs_tenant_queued
+# (tenant_id, queued_at DESC, id DESC)` serves the order too; on a live-only history it chose that index and read the
+# tenant's whole history for each workflow and mode with no run. Bounded on both sides, its default range estimate
+# (0.5%) made it sort each workflow's runs of the mode. With this form, only the index gives the order without a sort,
+# and the probe and the work-unit test observed the ordered scan on every workload they tried; it's what the planner
+# chose there, not a guarantee for every future plan.
 LAST_RUNS = text(
     "select w.id as workflow_id, m.mode, r.status, r.at"
     " from unnest(cast(:ids as uuid[])) as w(id) cross join (values ('live'), ('simulate')) as m(mode)"
     " cross join lateral (select mode, status, coalesce(ended_at, started_at, queued_at) as at from runs"
-    " where tenant_id = :tenant and kind = 'run' and workflow_id = w.id and mode >= m.mode"
+    " where tenant_id = :tenant and kind = 'run' and draft_snapshot_id is null and workflow_id = w.id"
+    " and mode >= m.mode"
     " order by mode, queued_at desc, id desc limit 1) as r where r.mode = m.mode"
 )
 # Each workflow's root runs queued in the last 24 hours, by the database's clock (its clock wrote the rows): a range of
@@ -41,8 +43,8 @@ LAST_RUNS = text(
 COUNTS_24H = text(
     "select workflow_id, count(*) filter (where mode = 'live') as live,"
     " count(*) filter (where mode = 'simulate') as simulated"
-    " from runs where tenant_id = :tenant and kind = 'run' and workflow_id = any(cast(:ids as uuid[]))"
-    " and queued_at >= now() - interval '24 hours' group by workflow_id"
+    " from runs where tenant_id = :tenant and kind = 'run' and draft_snapshot_id is null"
+    " and workflow_id = any(cast(:ids as uuid[])) and queued_at >= now() - interval '24 hours' group by workflow_id"
 )
 
 # Each workflow's triggers, in one statement for every workflow (4c-3a ruling 3): its live schedules (a deleted one's

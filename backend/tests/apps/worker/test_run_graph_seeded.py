@@ -250,3 +250,19 @@ async def test_a_failing_step_fails_its_run_whatever_its_error_policy(env: Workf
     assert (result.status, result.error["code"]) == ("failed", "simulation_unavailable")  # it has no simulator
     [row] = store.steps(run_id)
     assert (row.status, row.outcome) == ("failed", "simulated")
+
+
+async def test_a_single_step_never_continues_as_new_however_long_its_history(env: WorkflowEnvironment) -> None:
+    """Ruling 164's guard (4d-1a's deferred minor): a single-step run has no state a continue-as-new could carry, so
+    past its checkpoint it carries on to its end rather than continue."""
+    from temporalio.api.enums.v1 import EventType
+
+    store = MemoryStore()
+    g = graph().node("b", ECHO, {"value": 1})
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, {"values": {}, "absent": []}, mode="simulate",
+                             target_step_id=str(nid("b")), checkpoint_events=1)  # fmt: skip
+        result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
+        kinds = [e.event_type for e in (await handle.fetch_history()).events]
+    assert result.status == "succeeded", result.error
+    assert EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CONTINUED_AS_NEW not in kinds

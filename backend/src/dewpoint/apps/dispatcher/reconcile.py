@@ -189,11 +189,12 @@ async def _expected(
         request = (
             await s.execute(select(RunRequest).where(RunRequest.id == request_id, RunRequest.status == "starting"))
         ).scalar_one_or_none()
-        if request is None or request.workflow_version_id is None:
+        frozen_on = request.workflow_version_id or request.draft_snapshot_id if request is not None else None
+        if request is None or frozen_on is None:
             return None
         cipher = ClaimCipher(dispatch.KeyFailures(keys))
         envelope = await claims.read_envelope(s, cipher, tenant_id, request_id=request_id)
-        start = dispatch.run_input(request, request.workflow_version_id, envelope, settings)
+        start = dispatch.run_input(request, frozen_on, envelope, settings)
         recorded = request.start_request_id
     return dispatch.Starting(request_id, tenant_id, start, recorded)
 

@@ -110,3 +110,22 @@ async def test_the_admin_cancels_only_a_queued_request_even_within_a_tenant_scop
             await tenant_scope(s, tenant)
             await s.execute(text("update run_requests set status = 'dead', ended_at = now() where id = :i"),
                             {"i": queued["id"]})  # fmt: skip
+
+
+async def test_a_queued_draft_simulation_blocks_normal_retirement_and_a_forced_one_cancels_it(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    """B8 (the simulation design §6.5): a draft simulation's closure is its snapshot's, read as a version's would be,
+    so retirement never misses it."""
+    from tests.apps.test_admission_drafts import drafted, simulate
+
+    ctx, wf = await drafted(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, ECHO_GRAPH)
+    await current(dispatch_sessionmaker)
+    request = (await simulate(api_sessionmaker, ctx, wf, api_settings)).request
+    with pytest.raises(lifecycle.ReferencedError) as blocked:
+        async with admin_sessionmaker() as s, s.begin():
+            await lifecycle.retire(s, ECHO)
+    assert [(q.tenant_id, q.request_id) for q in blocked.value.preview.queued] == [(ctx.tenant_id, request.id)]
+    async with admin_sessionmaker() as s, s.begin():
+        await lifecycle.retire(s, ECHO, force=True, confirm=True)
+    assert await status(owner_sessionmaker, request.id) == ("cancelled", "node_type_retired", True)

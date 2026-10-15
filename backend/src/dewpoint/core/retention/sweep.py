@@ -30,6 +30,7 @@ from dewpoint.core.db import tenant_scope
 from dewpoint.core.ingress.counters import lock_tenant_shared
 from dewpoint.core.models.retention import RetentionSweep
 from dewpoint.core.retention import policy
+from dewpoint.core.workflows import drafts
 
 log = structlog.get_logger("dewpoint.retention")
 BATCH = 100
@@ -242,6 +243,13 @@ async def sweep_tenant(
                 return swept
             pruned = (await s.execute(_FIRINGS, {"kept": FIRINGS_KEPT, "n": batch})).rowcount  # type: ignore[attr-defined]
         if pruned < batch:
+            break
+    while True:  # draft snapshots nothing names now, the trees that named them gone (B8; the simulation design §6.2)
+        async with sessionmaker() as s, s.begin():
+            if not await _active(s, tenant_id):
+                return swept
+            chosen, deleted = await drafts.sweep(s, tenant_id, batch)
+        if chosen < batch or deleted == 0:  # the rest of a full batch are held: the next sweep takes them
             break
     async with sessionmaker() as s, s.begin():
         await tenant_scope(s, tenant_id)

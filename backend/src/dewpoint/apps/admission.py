@@ -27,7 +27,7 @@ upload, all in the same savepoint."""
 
 import asyncio
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import timedelta
 from typing import Any
 
@@ -35,7 +35,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from dewpoint.apps import csv_uploads
+from dewpoint.apps import csv_uploads, workflow_ops
 from dewpoint.apps.csv_input import Built, CsvFileError, RowError, build_rows, mapping_problems, read_table
 from dewpoint.apps.inputs import (
     INPUT_INVALID,
@@ -51,18 +51,23 @@ from dewpoint.apps.workflow_ops import abi_reasons
 from dewpoint.core.audit import service as audit
 from dewpoint.core.claims import service as claims
 from dewpoint.core.claims.cipher import ClaimCipher
+from dewpoint.core.config import Settings
 from dewpoint.core.crypto.keys import KeySource
 from dewpoint.core.db import tenant_scope
+from dewpoint.core.http import TenantContext
 from dewpoint.core.models.requests import CurrentBuild, RunRequest
 from dewpoint.core.models.tenancy import Tenant
 from dewpoint.core.models.uploads import CsvUpload
-from dewpoint.core.models.workflows import WorkflowVersion
+from dewpoint.core.models.workflows import Workflow, WorkflowVersion
 from dewpoint.core.platform.service import NOT_RECORDED, PRODUCTION, recorded
 from dewpoint.core.plugins import lifecycle
 from dewpoint.core.requests import digest as digests
 from dewpoint.core.tenancy import lifecycle as tenant_lifecycle
-from dewpoint.core.workflows.service import lock_for_admission, other_abi
+from dewpoint.core.workflows import drafts
+from dewpoint.core.workflows.service import DraftConflictError, lock_for_admission, other_abi
+from dewpoint.engine.graph import seeds
 from dewpoint.engine.graph.csv import RESERVED, trigger_schema
+from dewpoint.engine.graph.diagnostics import Diagnostic
 from dewpoint.engine.runtime.activities import LIVE, SIMULATE
 
 INTERACTIVE = ("manual", "rerun", "dev")  # refused while the gate is off; a refusal is raised
@@ -85,6 +90,13 @@ CSV_MAPPING_INVALID = "csv_mapping_invalid"
 UPLOAD_NOT_FOUND = "upload_not_found"
 UPLOAD_EXPIRED = "upload_expired"
 UPLOAD_CONSUMED = "upload_consumed"
+TARGET_INVALID = "target_invalid"
+CSV_NOT_SIMULATED = "csv_not_simulated"
+CSV_NOT_SIMULATED_MESSAGE = (
+    "This draft's input takes a CSV file, which a simulation can't be given yet: simulate one of its steps instead."
+)
+# A seeds refusal's code (S2; the simulation design §5.2): the first of these among its problems, every problem listed.
+SEED_CODES = (seeds.SEED_ALIAS, seeds.SEED_UNKNOWN, seeds.SEED_MISSING, seeds.SEED_INVALID)
 _LISTED = 5  # a refusal lists this many of the CSV's problems
 
 GATE_OFF = (
@@ -111,6 +123,25 @@ class IdempotencyConflictError(Exception):
 
 class WorkflowNotFoundError(LookupError):
     """No such workflow in the caller's tenant."""
+
+
+class DraftInvalidError(Exception):
+    """A draft simulation's draft that can't run (B8; the simulation design §6.3, step 4): what blocks it, with what it
+    would report and the validator's warnings."""
+
+    def __init__(self, blocking: list[Diagnostic], reported: list[Diagnostic], warnings: list[Diagnostic]) -> None:
+        super().__init__("; ".join(d.code for d in blocking))
+        self.blocking, self.reported, self.warnings = blocking, reported, warnings
+
+
+class SeedsRefusedError(Exception):
+    """A step's seeds its contract doesn't take (S2; the simulation design §5.2): every problem, and the refusal's code,
+    the first of `SEED_CODES` among them."""
+
+    def __init__(self, problems: list[seeds.SeedProblem]) -> None:
+        super().__init__("; ".join(f"{p.code} {p.pointer}" for p in problems))
+        self.problems = problems
+        self.reason = next(code for code in SEED_CODES if any(p.code == code for p in problems))
 
 
 @dataclass(frozen=True)
@@ -144,6 +175,24 @@ class Rerun:
 
 
 @dataclass(frozen=True)
+class Simulation:
+    """A draft simulation's identity (B8; the simulation design §6.3): the draft revision it simulates, and for a step
+    alone (S2) its target and seeds, given or absent by pointer. Its idempotency digest covers it beside the input, so
+    the digests of the requests that aren't simulations keep their bytes."""
+
+    revision: int
+    target: uuid.UUID | None = None
+    values: dict[str, Any] = field(default_factory=dict)
+    absent: tuple[str, ...] = ()
+
+    def digested(self) -> dict[str, Any]:
+        digested: dict[str, Any] = {"draft_revision": self.revision}
+        if self.target is not None:
+            digested |= {"target": str(self.target), "values": self.values, "absent": sorted(self.absent)}
+        return digested
+
+
+@dataclass(frozen=True)
 class Admitted:
     request: RunRequest
     new: bool  # False: an exact retry, the frozen request as it is now
@@ -163,6 +212,16 @@ class _Frozen:
     version_id: uuid.UUID
     envelope_id: uuid.UUID
     details: dict[str, object]  # the audit entry's, beyond the request's own
+
+
+@dataclass(frozen=True)
+class _DraftFrozen:
+    snapshot_id: uuid.UUID
+    envelope_id: uuid.UUID
+    revision: int
+    target: uuid.UUID | None
+    checks: list[dict[str, Any]]  # what it reports, kept on the request
+    details: dict[str, object]
 
 
 async def _before_insert() -> None:
@@ -236,6 +295,50 @@ async def admit_request(
     else:
         await savepoint.rollback()  # another transaction won the key: this call's claims and envelope go with it
         return await _retry(keys, tenant_id, await _winner(s, idempotency_key), digested, owner)
+    return admitted
+
+
+async def admit_draft(
+    s: AsyncSession,
+    keys: KeySource,
+    ctx: TenantContext,
+    *,
+    workflow_id: uuid.UUID,
+    idempotency_key: str,
+    input: dict[str, Any],
+    simulation: Simulation,
+    settings: Settings,
+) -> Admitted:
+    """A draft simulation's request under `idempotency_key` (B8; the simulation design §6.3): an exact retry's, as it
+    is now, whatever the draft became; or a new one, `simulate` and `manual`, frozen on a snapshot of the revision it
+    names. Raises IdempotencyConflictError, WorkflowNotFoundError, DraftConflictError (another revision),
+    DraftInvalidError (what can't run), SeedsRefusedError, AdmissionRefusedError."""
+    if nests_too_deep(input) or nests_too_deep(simulation.values):  # before its key's digest reads them
+        raise AdmissionRefusedError(INPUT_INVALID, [TOO_DEEP])
+    if holds_non_finite(input) or holds_non_finite(simulation.values):  # which its key's digest can't encode (#106)
+        raise AdmissionRefusedError(INPUT_INVALID, [NOT_FINITE])
+    await lifecycle.assert_read_committed(s)
+    await tenant_scope(s, ctx.tenant_id)
+    fields: dict[str, Any] = {"source": "manual", "workflow_id": workflow_id, "mode": SIMULATE, "input": input}
+    digested = {**fields, "draft": simulation.digested()}
+    existing = await _by_key(s, idempotency_key)
+    if existing is not None:
+        return await _retry(keys, ctx.tenant_id, existing, digested)
+    request_id = uuid.uuid4()
+    savepoint = await s.begin_nested()
+    try:
+        frozen = await _draft_frozen(s, keys, ctx, request_id, fields, simulation, settings)
+    except _Refused as refused:
+        await savepoint.rollback()
+        raise AdmissionRefusedError(refused.reason, refused.messages) from None
+    await _before_insert()
+    admitted = await _insert(s, keys, ctx.tenant_id, request_id, ctx.user.id, idempotency_key, digested, None,
+                             frozen.envelope_id, extra=frozen.details, draft=frozen)  # fmt: skip
+    if admitted.new:
+        await savepoint.commit()
+    else:
+        await savepoint.rollback()  # another transaction won the key: this call's claims, envelope and snapshot go
+        return await _retry(keys, ctx.tenant_id, await _winner(s, idempotency_key), digested)
     return admitted
 
 
@@ -316,18 +419,7 @@ async def _frozen(
 ) -> _Frozen:  # fmt: skip
     """The mutable checks, then the trigger claimed and its envelope stored (a CSV start's rows built and its upload
     consumed first): the frozen version, the envelope and what the audit entry adds."""
-    await tenant_lifecycle.hold_shared(s, tenant_id)  # an erasure's step 1 waits for this request, or it sees `erasing`
-    tenant = await s.get(Tenant, tenant_id, populate_existing=True)
-    if tenant is None:
-        raise WorkflowNotFoundError(str(fields["workflow_id"]))
-    if tenant.status != "active":  # erasing, or erased: a retained tombstone is never eligible again
-        raise _Refused(TENANT_ERASING, ["This tenant is being erased: it starts no run."])
-    if fields["source"] in INTERACTIVE:
-        platform = await recorded(s)
-        if platform is None:
-            raise _Refused(ENVIRONMENT_NOT_RECORDED, [NOT_RECORDED])
-        if platform.environment == PRODUCTION and not platform.production_runs:
-            raise _Refused(PRODUCTION_RUNS_DISABLED, [GATE_OFF])
+    await _open(s, tenant_id, fields)
     workflow = await lock_for_admission(s, tenant_id, fields["workflow_id"])  # stands until the request is frozen
     if workflow is None:
         raise WorkflowNotFoundError(str(fields["workflow_id"]))
@@ -338,11 +430,7 @@ async def _frozen(
     version = await s.get(WorkflowVersion, workflow.active_version_id)
     if version is None:
         raise RuntimeError("A workflow's active version that isn't there.")
-    build = (
-        await s.execute(
-            select(CurrentBuild.engine_abi).where(CurrentBuild.observed_at >= func.statement_timestamp() - BUILD_STALE)
-        )
-    ).scalar_one_or_none()
+    build = await _current_build(s)
     if build is None:
         raise _Refused(NO_CURRENT_BUILD, [NO_BUILD], version.id)
     stale = await other_abi(s, version.closure_version_ids, build)  # versions never change: no lock needed
@@ -391,6 +479,110 @@ async def _frozen(
     )
     return _Frozen(version.id, envelope_id, {"csv_digest": built.file_digest.hex(), "csv_rows": len(built.rows),
                                              "csv_skipped": len(built.skipped)})  # fmt: skip
+
+
+async def _draft_frozen(
+    s: AsyncSession, keys: KeySource, ctx: TenantContext, request_id: uuid.UUID, fields: dict[str, Any],
+    simulation: Simulation, settings: Settings,
+) -> _DraftFrozen:  # fmt: skip
+    """§6.3's steps 2 to 7: the tenant and the gate; the workflow's admission lock (enabled or not, published or not:
+    D-b1); the revision; the draft checked, blocking and reported; the current build of its ABI and its pins'; the
+    input against the draft's trigger schema, or the step's seeds against its contract, claimed into the envelope; and
+    the snapshot found or made, held against the sweep until the request is committed."""
+    tenant_id = ctx.tenant_id
+    await _open(s, tenant_id, fields)
+    if await lock_for_admission(s, tenant_id, fields["workflow_id"]) is None:
+        raise WorkflowNotFoundError(str(fields["workflow_id"]))
+    found = select(Workflow).where(Workflow.id == fields["workflow_id"]).execution_options(populate_existing=True)
+    wf = (await s.execute(found)).scalar_one()
+    if wf.draft_revision != simulation.revision:
+        raise DraftConflictError(wf.draft_revision)
+    checked = await workflow_ops.check_draft(s, tenant_id, wf.draft, settings)
+    sim = await workflow_ops.simulatable(s, ctx, wf, checked)
+    if sim.new is None or checked.graph is None or checked.context is None:
+        raise DraftInvalidError(sim.blocking, sim.reported, sim.warnings)
+    build = await _current_build(s)
+    if build is None:
+        raise _Refused(NO_CURRENT_BUILD, [NO_BUILD])
+    if sim.new.engine_abi != build:
+        raise _Refused(VERSION_UNUSABLE, [
+            f"This draft is simulated for engine ABI {sim.new.engine_abi}, this server's, and the current build runs "
+            f"ABI {build}: simulate it again once they're the same build."
+        ])  # fmt: skip
+    stale = await other_abi(s, sim.new.closure_version_ids, build)  # its pins'
+    if stale:
+        raise _Refused(VERSION_UNUSABLE, abi_reasons(wf.id, stale, build))
+    schema: dict[str, Any]
+    value: dict[str, Any]
+    if simulation.target is None:
+        if workflow_ops.declares_csv(sim.new.graph):  # only an upload gives its rows, and none comes here (D-b7)
+            raise _Refused(CSV_NOT_SIMULATED, [CSV_NOT_SIMULATED_MESSAGE])
+        if any(name in fields["input"] for name in RESERVED):  # only a CSV upload supplies them: none here (D-b8)
+            raise _Refused(INPUT_INVALID, [RESERVED_INPUT])
+        schema, value = trigger_schema(sim.new.graph.get("settings") or {}), fields["input"]
+    else:
+        contract = await asyncio.to_thread(seeds.contract, checked.graph, checked.context, simulation.target)
+        if contract.refused is not None:
+            raise _Refused(TARGET_INVALID, [contract.refused])
+        problems = seeds.check(contract, simulation.values, simulation.absent)
+        if problems:
+            raise SeedsRefusedError(problems)
+        schema, value = _seeded(contract), {"values": dict(simulation.values), "absent": sorted(simulation.absent)}
+    try:
+        envelope = await claim_input(s, keys, tenant_id=tenant_id, run_id=request_id, root_run_id=request_id,
+                                     schema=schema, value=value, against_schema=simulation.target is None)  # fmt: skip
+    except InputRefusedError as e:
+        raise _Refused(e.reason, e.reasons) from None
+    envelope_id = await claims.write_envelope(s, ClaimCipher(keys), tenant_id, request_id=request_id, envelope=envelope)
+    snapshot = await drafts.snapshot_for(s, wf, sim.new, revision=wf.draft_revision, created_by=ctx.user.id)
+    details: dict[str, object] = {"draft_snapshot_id": str(snapshot.id), "draft_revision": wf.draft_revision,
+                                  "graph_hash": snapshot.graph_hash}  # fmt: skip
+    if simulation.target is not None:
+        details["target_step_id"] = str(simulation.target)
+    if snapshot.declassified:
+        details["declassify"] = snapshot.declassified
+    checks = [d.to_json() for d in sim.reported]
+    return _DraftFrozen(snapshot.id, envelope_id, wf.draft_revision, simulation.target, checks, details)
+
+
+def _seeded(contract: seeds.SeedContract) -> dict[str, Any]:
+    """The seeds' envelope schema, each entry's own: a value is split as the run's input would be (§5.3), a sensitive
+    one, or a sensitive part of one, claimed, a handle. Never checked against it: `seeds.check` has."""
+    values = {e.pointer: {**(e.schema or {}), **({"x-sensitive": True} if e.sensitive else {})}
+              for e in contract.entries}  # fmt: skip
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "values": {"type": "object", "additionalProperties": False, "properties": values},
+            "absent": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+
+
+async def _open(s: AsyncSession, tenant_id: uuid.UUID, fields: dict[str, Any]) -> None:
+    """The tenant starts runs: it's active (an erasure's step 1 waits for this request, or this one sees `erasing`),
+    and, for an interactive source, the gate is open."""
+    await tenant_lifecycle.hold_shared(s, tenant_id)
+    tenant = await s.get(Tenant, tenant_id, populate_existing=True)
+    if tenant is None:
+        raise WorkflowNotFoundError(str(fields["workflow_id"]))
+    if tenant.status != "active":  # erasing, or erased: a retained tombstone is never eligible again
+        raise _Refused(TENANT_ERASING, ["This tenant is being erased: it starts no run."])
+    if fields["source"] in INTERACTIVE:
+        platform = await recorded(s)
+        if platform is None:
+            raise _Refused(ENVIRONMENT_NOT_RECORDED, [NOT_RECORDED])
+        if platform.environment == PRODUCTION and not platform.production_runs:
+            raise _Refused(PRODUCTION_RUNS_DISABLED, [GATE_OFF])
+
+
+async def _current_build(s: AsyncSession) -> int | None:
+    """The current build's engine ABI, as the dispatcher recorded it lately; None: no record, or a stale one."""
+    found = await s.execute(
+        select(CurrentBuild.engine_abi).where(CurrentBuild.observed_at >= func.statement_timestamp() - BUILD_STALE)
+    )
+    return found.scalar_one_or_none()
 
 
 @dataclass(frozen=True)
@@ -463,8 +655,10 @@ async def _insert(
     refused: _Refused | None = None,
     rerun: Rerun | None = None,
     extra: dict[str, object] | None = None,
+    draft: _DraftFrozen | None = None,
 ) -> Admitted:
-    """The request row, queued or refused, and its audit entry; `new` False when another transaction won the key."""
+    """The request row, queued or refused, and its audit entry; `new` False when another transaction won the key. A
+    draft simulation's (`draft`) is frozen on its snapshot."""
     key_version, digest = await digests.digest(keys, str(tenant_id), **fields)  # the tenant's active key (§7.2)
     status = "refused" if refused else "queued"
     row = {
@@ -483,6 +677,9 @@ async def _insert(
         "ended_at": func.now() if refused else None,
         "envelope_id": envelope_id,
     }
+    if draft is not None:
+        row |= {"draft_snapshot_id": draft.snapshot_id, "target_step_id": draft.target,
+                "draft_revision": draft.revision, "admission_checks": draft.checks}  # fmt: skip
     written = await s.execute(
         insert(RunRequest)
         .values(row)

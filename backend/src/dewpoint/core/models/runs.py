@@ -41,13 +41,20 @@ class Run(Base):
             ["workflow_versions.id", "workflow_versions.workflow_id", "workflow_versions.tenant_id"],
             name="runs_version_fk",
         ),
+        ForeignKeyConstraint(  # or a draft snapshot of it (B8): exactly one of the two
+            ["draft_snapshot_id", "workflow_id", "tenant_id"],
+            ["draft_snapshots.id", "draft_snapshots.workflow_id", "draft_snapshots.tenant_id"],
+            name="runs_draft_fk",
+        ),
         ForeignKeyConstraint(["parent_run_id", "tenant_id"], ["runs.id", "runs.tenant_id"], name="runs_parent_run"),
         ForeignKeyConstraint(["root_run_id", "tenant_id"], ["runs.id", "runs.tenant_id"], name="runs_root_run"),
     )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"))
     workflow_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
-    workflow_version_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    workflow_version_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))  # None: a draft snapshot's
+    draft_snapshot_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))  # a draft simulation's (B8)
+    target_step_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))  # the step it ran alone (S2)
     mode: Mapped[str] = mapped_column(String(16))
     status: Mapped[str] = mapped_column(String(32))
     # A root run's row is written at dispatch, before Temporal answers (engine 2b spec §7.3): queued then, started

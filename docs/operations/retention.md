@@ -65,6 +65,8 @@ lifecycle lock, in batches that each commit, so a sweep that stops resumes where
 - a run tree past the cutoff, whole: its runs and their steps, its claims, grants and secret index, and its request
   with its envelope, together;
 - a request that ended without starting, with its inputs;
+- a draft snapshot no request or run names any more: a simulation admitted at the same moment keeps it (both take
+  the snapshot's lock);
 - an event that ended, freeing its endpoint's and its tenant's retained counters (so `retained_full` clears);
 - an upload, an hour after it was made, whether a start consumed it or not;
 - a schedule's tombstone, once the dispatcher's sync has recorded its Temporal schedule gone;

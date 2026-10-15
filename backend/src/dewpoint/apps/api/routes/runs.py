@@ -28,6 +28,10 @@ def _when(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
 
 
+def _id(value: uuid.UUID | None) -> str | None:
+    return str(value) if value else None
+
+
 def _request(r: RunRequest | None) -> dict[str, object] | None:
     return {"status": r.status, "source": r.source, "reason": r.reason} if r is not None else None
 
@@ -36,7 +40,9 @@ def _item(i: service.Listed) -> dict[str, object]:
     return {
         "id": str(i.id),
         "workflow_id": str(i.workflow_id),
-        "version_id": str(i.version_id) if i.version_id else None,
+        "version_id": _id(i.version_id),
+        "draft_snapshot_id": _id(i.draft_snapshot_id),  # a draft simulation's (B8): no version
+        "target_step_id": _id(i.target_step_id),
         "mode": i.mode,
         "status": i.status,
         "queued_at": _when(i.queued_at),
@@ -55,7 +61,9 @@ def _unstarted(r: RunRequest) -> dict[str, object]:
     return {
         "id": str(r.id),
         "workflow_id": str(r.workflow_id),
-        "version_id": str(r.workflow_version_id) if r.workflow_version_id else None,
+        "version_id": _id(r.workflow_version_id),
+        "draft_snapshot_id": _id(r.draft_snapshot_id),
+        "target_step_id": _id(r.target_step_id),
         "mode": r.mode,
         "status": r.status,
         "queued_at": _when(r.queued_at),
@@ -73,7 +81,9 @@ def _run(r: Run) -> dict[str, object]:
     return {
         "id": str(r.id),
         "workflow_id": str(r.workflow_id),
-        "version_id": str(r.workflow_version_id),
+        "version_id": _id(r.workflow_version_id),
+        "draft_snapshot_id": _id(r.draft_snapshot_id),
+        "target_step_id": _id(r.target_step_id),
         "mode": r.mode,
         "status": r.status,
         "queued_at": _when(r.queued_at),
@@ -108,6 +118,7 @@ def _step(r: RunStep) -> dict[str, object]:
         "error": {"code": r.error_code, "message": r.error_message} if r.error_code else None,
         "outcome": r.outcome,
         "cel_mode": r.cel_mode,
+        "effect": r.effect_preview,  # a control step's port or assignments (4d-1a), masked as its previews are
     }
 
 

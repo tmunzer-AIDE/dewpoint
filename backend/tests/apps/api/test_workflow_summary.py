@@ -28,18 +28,20 @@ async def synced(admin_sessionmaker) -> None:
     await sync_test_plugins(admin_sessionmaker)
 
 
-async def add_run(owner, tid, wid, vid, *, status, mode="live", hours_ago=1.0, parent=None) -> uuid.UUID:
-    """A run row as the dispatcher writes one: a root run, or a sub-flow's when `parent` is given."""
+async def add_run(owner, tid, wid, vid, *, status, mode="live", hours_ago=1.0, parent=None, snapshot=None) -> uuid.UUID:
+    """A run row as the dispatcher writes one: a root run, or a sub-flow's when `parent` is given, or a draft
+    simulation's of `snapshot` (B8)."""
     rid = uuid.uuid4()
     async with owner() as s, s.begin():
         await s.execute(
             text(
-                "insert into runs (id, tenant_id, workflow_id, workflow_version_id, mode, status, queued_at,"
-                " iterations, kind, parent_run_id, parent_step_id) values (:i, :t, :w, :v, :m, :st,"
+                "insert into runs (id, tenant_id, workflow_id, workflow_version_id, draft_snapshot_id, mode, status,"
+                " queued_at, iterations, kind, parent_run_id, parent_step_id) values (:i, :t, :w, :v, :snap, :m, :st,"
                 " now() - make_interval(secs => :ago), 0, :k, :p, :ps)"
             ),
             {
-                "i": rid, "t": tid, "w": wid, "v": vid, "m": mode, "st": status, "ago": hours_ago * 3600,
+                "i": rid, "t": tid, "w": wid, "v": None if snapshot else vid, "snap": snapshot,
+                "m": "simulate" if snapshot else mode, "st": status, "ago": hours_ago * 3600,
                 "k": "subflow" if parent else "run", "p": parent, "ps": uuid.uuid4() if parent else None,
             },
         )  # fmt: skip
@@ -113,6 +115,22 @@ async def test_a_failed_simulation_never_needs_attention(app, owner_sessionmaker
         row = (await c.get(f"/api/v1/t/{tid}/workflows/{wid}")).json()
     assert row["last_run"]["status"] == "succeeded" and row["last_simulation"]["status"] == "failed"
     assert row["needs_attention"] == []
+
+
+async def test_a_draft_simulation_never_counts_in_the_list(app, owner_sessionmaker, api_settings) -> None:
+    """B8 (the simulation design §6.5): a draft simulation is the editor's, not the workflow's: it's no last
+    simulation, no run of the last 24 hours, and never needs attention."""
+    from tests.core.retention.support import snapshot
+
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    async with c:
+        wid, vid = await published(c, tid)
+        await add_run(owner_sessionmaker, tid, wid, vid, status="succeeded", mode="simulate", hours_ago=2)
+        draft = await snapshot(owner_sessionmaker, {"v": uuid.UUID(str(vid))})
+        await add_run(owner_sessionmaker, tid, wid, vid, status="failed", hours_ago=1, snapshot=draft)
+        row = (await c.get(f"/api/v1/t/{tid}/workflows/{wid}")).json()
+    assert row["last_simulation"]["status"] == "succeeded" and row["runs_24h"] == {"live": 0, "simulate": 1}
+    assert row["last_run"] is None and row["needs_attention"] == []
 
 
 async def test_another_tenants_runs_never_count(app, owner_sessionmaker, api_settings) -> None:
@@ -311,8 +329,8 @@ async def test_the_lists_reads_dont_grow_with_its_workflows(app, owner_sessionma
 # (migration 0047). REFERENCE is the statement it replaced, kept to prove the two answer the same.
 REFERENCE = text(
     "select distinct on (workflow_id, mode) workflow_id, mode, status, coalesce(ended_at, started_at, queued_at) as at"
-    " from runs where tenant_id = :tenant and kind = 'run' and workflow_id = any(cast(:ids as uuid[]))"
-    " order by workflow_id, mode, queued_at desc, id desc"
+    " from runs where tenant_id = :tenant and kind = 'run' and draft_snapshot_id is null"
+    " and workflow_id = any(cast(:ids as uuid[])) order by workflow_id, mode, queued_at desc, id desc"
 )
 
 
@@ -335,13 +353,18 @@ async def put_run(owner, tid, wid, vid, *, mode, status, at, rid=None, parent=No
 
 
 async def test_the_index_is_the_one_reserved(owner_sessionmaker) -> None:
+    """0047's, and 0072's, which leaves draft simulations out (B8): the read uses it."""
     async with owner_sessionmaker() as s:
-        found = await s.execute(text("select indexdef from pg_indexes where indexname = 'runs_workflow_last'"))
-        definition = found.scalar_one()
-    assert definition == (
-        "CREATE INDEX runs_workflow_last ON public.runs USING btree (workflow_id, mode, queued_at DESC, id DESC)"
-        " WHERE ((kind)::text = 'run'::text)"
-    )
+        named = "('runs_workflow_last', 'runs_workflow_last_published')"
+        found = await s.execute(text(f"select indexname, indexdef from pg_indexes where indexname in {named}"))
+        definitions = dict(found.all())
+    assert definitions == {
+        "runs_workflow_last": "CREATE INDEX runs_workflow_last ON public.runs USING btree (workflow_id, mode,"
+        " queued_at DESC, id DESC) WHERE ((kind)::text = 'run'::text)",
+        "runs_workflow_last_published": "CREATE INDEX runs_workflow_last_published ON public.runs USING btree"
+        " (workflow_id, mode, queued_at DESC, id DESC) WHERE (((kind)::text = 'run'::text) AND"
+        " (draft_snapshot_id IS NULL))",
+    }
 
 
 async def test_the_last_runs_read_answers_as_the_statement_it_replaced(
@@ -432,5 +455,5 @@ async def test_the_last_runs_read_examines_one_run_per_workflow_and_mode(
         query = text(f"explain (analyze, buffers, format json) {workflow_summary.LAST_RUNS.text}")
         plan = (await s.execute(query, params)).scalar_one()[0]["Plan"]
     rows, pages, how = runs_scanned(plan)
-    assert how == {"Index Scan runs_workflow_last"}  # ordered, stopping at the first row: no bitmap, no sort
+    assert how == {"Index Scan runs_workflow_last_published"}  # ordered, stopping at the first row: no bitmap, no sort
     assert rows <= 4 and pages <= 16  # 2 workflows x 2 modes: one lookup each, a few pages of the index and heap

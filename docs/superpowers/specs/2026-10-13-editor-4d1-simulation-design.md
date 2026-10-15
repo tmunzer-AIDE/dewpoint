@@ -28,7 +28,7 @@ the runs list and run pages (4e); simulating a published version from the editor
 
 | Plan | Contents | ABI | Migration |
 |---|---|---|---|
-| 4d-1a, engine | B4b (§3), simulated attempts and flow timers (§4), S2's engine part (§5) | 8 | 0071 |
+| 4d-1a, engine | B4b (§3), simulated attempts and flow timers (§4), S2's engine part (§5) | 9 | 0071 |
 | 4d-1b, backend | B8: draft snapshots, admission, execution path, readers, the reads the UI needs (§6) | none | 0072 |
 | 4d-1c, UI | the screens of §7, built against the signed-off boards | none | none |
 
@@ -320,9 +320,12 @@ The production gate, the tenant's slots and the dispatcher apply as to every run
 - The person's latest draft simulations of a workflow (labelled as such: never proof of a given submission).
 - A simulation's state, including whether a cancel was requested.
 - A per-step summary: per step, its instance counts by final status, ports counted, the final attempt for a single
-  instance, and each step's data origin (§7.4). Tags come from it, never from a partial page.
+  instance, and each step's data origin (§7.4). Tags come from it, never from a partial page. The server sends each
+  as a code (`evaluated`, `evaluated_not_waited`, `fixture_not_sent`, `skipped`, `not_started`, `cancelled`,
+  `didnt_run`, `not_recorded`, `not_reached_yet`; `input` or `seeded` for the values a person gave); the UI words them.
 - Instances paged and filtered by iteration (decision 5).
-- The seed contract at a revision: `GET …/draft/steps/{step_id}/seeds?revision=N`.
+- The seed contract at a revision: `GET …/draft/steps/{step_id}/seeds?revision=N`, each entry with its prefill
+  (D-s2) computed on the server: the contract's own check decides whether a sample fits.
 - The draft's start form at a revision: `GET …/draft/start-form?revision=N`, in `start-form`'s shape (which reads only
   the active version).
 - Read-back from the original request: `admission_checks`, and the input or seeds used, redacted from the envelope,

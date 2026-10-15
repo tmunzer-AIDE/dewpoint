@@ -191,6 +191,26 @@ def test_slice_4c3_routes_name_their_answer(method: str, path: str) -> None:
     assert "$ref" in body or "$ref" in body.get("items", {}), body
 
 
+SLICE_4D1 = [  # B8 (the simulation design §6.3, §6.6)
+    ("post", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/simulations"),
+    ("get", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/snapshots/{snapshot_id}"),
+    ("get", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/simulations"),
+    ("get", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/simulations/{request_id}"),
+    ("get", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/simulations/{request_id}/steps"),
+    ("get", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/simulations/{request_id}/steps/{step_id}/instances"),
+    ("get", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/start-form"),
+    ("get", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/steps/{step_id}/seeds"),
+]
+
+
+@pytest.mark.parametrize("method,path", SLICE_4D1)
+def test_slice_4d1_routes_name_their_answer(method: str, path: str) -> None:
+    responses = schema()["paths"][path][method]["responses"]
+    ok = next(code for code in responses if code.startswith("2"))
+    body = responses[ok]["content"]["application/json"]["schema"]
+    assert "$ref" in body or "$ref" in body.get("items", {}), body
+
+
 def test_a_schedules_uncounted_span_keeps_its_wire_names() -> None:
     """`from` and `class` are Python keywords: the model aliases them, and the schema says the names on the wire."""
     span = schema()["components"]["schemas"]["UncountedOut"]
