@@ -5,13 +5,14 @@ the API has no Temporal client. An exact retry returns the same request; another
 refusal says why, with a code and fixed messages that never quote a value. `GET .../start-form` describes the active
 version's input, masking what's sensitive."""
 
+import json
 import uuid
 from typing import Any
 
 import pytest
 from sqlalchemy import text
 
-from dewpoint.apps.inputs import TOO_DEEP
+from dewpoint.apps.inputs import NOT_FINITE, TOO_DEEP
 from dewpoint.core.claims import service as claims
 from dewpoint.core.claims.cipher import ClaimCipher
 from dewpoint.core.db import tenant_scope
@@ -547,3 +548,40 @@ async def test_a_rerun_rebuilding_a_kept_claim_too_deep_to_resolve_is_refused_wi
         )
     answer = await client.post(rerun_url(ctx, old["id"]), json={}, headers={"Idempotency-Key": "r1"})
     assert (answer.status_code, answer.json()) == (422, {"error": "input_invalid", "messages": [TOO_DEEP]})
+
+
+NON_FINITE = ("NaN", "Infinity", "-Infinity", "1e400")  # what Python's JSON parser, and so a request's body, accepts
+
+
+def with_number(literal: str, body: dict[str, Any]) -> bytes:
+    """`body` as JSON, its `"#"` written as `literal`: a number no JSON encoder writes."""
+    return json.dumps(body).replace('"#"', literal).encode()
+
+
+JSON = {"Content-Type": "application/json"}  # a body sent as `content=`
+
+
+def raw(key: str) -> dict[str, str]:
+    return JSON | {"Idempotency-Key": key}
+
+
+@pytest.mark.parametrize("literal", NON_FINITE)
+async def test_an_input_holding_nan_or_an_infinity_is_422_with_the_fixed_reason(
+    keyed_app, permissive, owner_sessionmaker, api_settings, literal: str
+) -> None:
+    """The idempotency digest, the claims and Postgres JSONB can't hold such a number: it raised `ValueError`, a 500
+    (`key_unusable` re-raises what isn't a key's failure), under a new key from the claims, under a used one from the
+    digest. Refused first, whatever the key holds, with a fixed reason that never quotes it; nothing is recorded."""
+    ctx, wf = permissive
+    client = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx)
+    old = await started_request(client, ctx, wf, key="used")
+    refused = (422, {"error": "input_invalid", "messages": [NOT_FINITE]})
+    body = with_number(literal, {"input": {"token": TOKEN, "n": [1.5, {"x": "#"}]}, "mode": "live"})
+    for key in ("used", "new"):
+        answer = await client.post(runs_url(ctx, wf), content=body, headers=raw(key))
+        assert (answer.status_code, answer.json()) == refused, key
+    body = with_number(literal, {"input": {"token": TOKEN, "n": "#"}})
+    for key in ("used", "r-new"):
+        answer = await client.post(rerun_url(ctx, old["id"]), content=body, headers=raw(key))
+        assert (answer.status_code, answer.json()) == refused, key
+    assert await count(owner_sessionmaker, "run_requests") == 1

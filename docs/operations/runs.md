@@ -28,9 +28,9 @@ talks to Temporal.
 - Admission takes the workflow's active version, if the workflow is enabled, and freezes it in the request. It checks
   the deployment's environment is recorded and, in `production`, that production runs are on; that the dispatcher
   recorded a current build within the last 2 minutes, of the version's engine ABI; that nothing the version uses is
-  retired; and the input: at most 64 levels deep, then against the version's input schema. Then it claims the
-  input, as any run's ([below](#sensitive-and-large-values-claims)), and keeps the request's input, with handles in
-  place of its claimed values, encrypted beside them (its trigger envelope).
+  retired; and the input: at most 64 levels deep, its numbers finite, then against the version's input schema. Then it
+  claims the input, as any run's ([below](#sensitive-and-large-values-claims)), and keeps the request's input, with
+  handles in place of its claimed values, encrypted beside them (its trigger envelope).
 - A refusal answers with its code and fixed messages that never quote a value: 503 `production_runs_disabled`,
   `environment_not_recorded`, `no_current_build` or `key_unusable` (the tenant's data key can't be read); 422
   `input_invalid` or `secret_index_limit`, with each place and rule the input breaks; 409 `workflow_disabled`,
@@ -459,6 +459,14 @@ is read and whatever its idempotency key already holds: at a start; at a re-run,
 original (one kept before the limit is refused so, and a re-run given a new input proceeds); at a schedule's create or
 replace (422); and at a firing, a `refused` request (a schedule stored before the limit fires refused until its input is
 replaced; validate and publish warn that it fails at every firing already). Nothing already kept is changed.
+
+An input's numbers are finite, as JSON's are. The API reads a body with Python's JSON parser, which takes `NaN`,
+`Infinity`, `-Infinity` and a number past a float's range (`1e400`); its idempotency digest, its claims and Postgres
+can't hold them, and such an input answered 500. It's refused `input_invalid` with "The run's input holds a number that
+isn't finite: NaN and infinity aren't valid JSON.", which never quotes it, after its depth and before its schema is
+read, whatever its idempotency key already holds: at a start, at a re-run given a new input, and at a schedule's create
+or replace (422). Nothing is recorded. Nothing kept can hold one, and a webhook event holding one is malformed
+([ingress](ingress.md)).
 
 ## Reading runs
 
