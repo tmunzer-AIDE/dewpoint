@@ -207,7 +207,7 @@ def running(store: MemoryStore, run_id: str, prefix: str) -> bool:
 
 
 async def test_a_batchs_bug_closes_its_own_iterations_running_rows_and_no_siblings(
-    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+    own_env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
 ) -> None:  # fmt: skip
     """The owner's ruling: a batch shares its run's id, so its parent closes that batch's iterations alone. Two loops
     run in batches side by side (two items a batch); `a`'s first batch fails on a bug once its rows are persisted
@@ -228,8 +228,8 @@ async def test_a_batchs_bug_closes_its_own_iterations_running_rows_and_no_siblin
     g.node("a", "flow.loop@1", {"items": [0, 1, 2]}, on_error="continue").node("x", "testkit.slow@1", {"seconds": 5})
     g.node("b", "flow.loop@1", {"items": [0, 1, 2]}).node("y", "testkit.echo@1", {"value": ref("item")})
     g.edge("a", "x", "body").edge("b", "y", "body")
-    async with workers(env.client, store):
-        handle = await start(env.client, store, g, {})
+    async with workers(own_env.client, store):
+        handle = await start(own_env.client, store, g, {})
         result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
     assert (result.status, result.outputs) == ("succeeded", {"code": INTERNAL_ERROR}), result
     assert store.closed_batches == [(run_id_of(handle), UnconfirmedBatch("", "a", 0, 2))]
@@ -241,7 +241,7 @@ async def test_a_batchs_bug_closes_its_own_iterations_running_rows_and_no_siblin
 
 
 async def test_a_sub_runs_bug_leaves_none_of_its_steps_running(
-    env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
+    own_env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
 ) -> None:  # fmt: skip
     """The parent writes the end of a sub-run its bug failed, and that end leaves none of the sub-run's steps
     `running`: a step persisted `running` ends `outcome_unconfirmed`; one whose end was never projected is absent."""
@@ -254,8 +254,8 @@ async def test_a_sub_runs_bug_leaves_none_of_its_steps_running(
     sub = graph().node("s", "testkit.slow@1", {"seconds": 5}).node("t", "testkit.slow@1", {"seconds": 1})  # t wakes it
     g = graph(code=ref("steps.r.error.code", default="none"))
     g.node("r", "flow.run_workflow@1", {"workflow_id": str(store.publish(sub))}, on_error="continue")
-    async with workers(env.client, store):
-        handle = await start(env.client, store, g, {})
+    async with workers(own_env.client, store):
+        handle = await start(own_env.client, store, g, {})
         result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
     assert (result.status, result.outputs) == ("succeeded", {"code": INTERNAL_ERROR}), result
     [sub_run] = [s for s in store.starts if s != run_id_of(handle)]
@@ -297,14 +297,14 @@ async def test_a_runs_bug_carries_the_iterations_its_interpreter_counted(
     assert isinstance(cause, ApplicationError) and list(cause.details) == [{"iterations": 3}]
 
 
-async def test_an_ordinary_failure_keeps_its_rows_as_projected(env: WorkflowEnvironment) -> None:
+async def test_an_ordinary_failure_keeps_its_rows_as_projected(own_env: WorkflowEnvironment) -> None:
     """The owner's ruling: ordinary failures are untouched. A step fails, its sibling (still working) is cancelled, the
     run fails: each row says so, none is `outcome_unconfirmed`."""
     store = MemoryStore()
     g = graph().node("s", "testkit.slow@1", {"seconds": 1}).node("f", "flow.fail@1", {"message": "it went wrong"})
     g.edge("s", "f").node("d", "testkit.slow@1", {"seconds": 30})
-    async with workers(env.client, store):
-        handle = await start(env.client, store, g, {})
+    async with workers(own_env.client, store):
+        handle = await start(own_env.client, store, g, {})
         result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
     assert result.status == "failed", result
     statuses = {r.node_key: r.status for r in store.steps(run_id_of(handle))}

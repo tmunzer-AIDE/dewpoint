@@ -674,13 +674,13 @@ async def output_evaluation_started(handle: Any) -> None:
         await asyncio.sleep(0.05)
 
 
-async def test_a_cancel_while_the_outputs_are_evaluated_projects_cancelled(env: WorkflowEnvironment) -> None:
+async def test_a_cancel_while_the_outputs_are_evaluated_projects_cancelled(own_env: WorkflowEnvironment) -> None:
     """Checkpoint-2 finding: the outputs were evaluated outside the run's cancellation handler, so a cancel then
     closed the workflow with nothing projected: the run stayed `running`."""
     store = MemoryStore()
     g = graph(n=cel(f"trigger.x + {EVALUATOR_ONLY}")).node("a", ECHO)
-    async with workers(env.client, store, evaluate=None):  # no evaluator: the output's CEL waits for one
-        handle = await start(env.client, store, g, TRIGGER, cel_schedule_to_start_s=60)
+    async with workers(own_env.client, store, evaluate=None):  # no evaluator: the output's CEL waits for one
+        handle = await start(own_env.client, store, g, TRIGGER, cel_schedule_to_start_s=60)
         await asyncio.wait_for(output_evaluation_started(handle), 10)
         await handle.cancel()
         with pytest.raises(WorkflowFailureError):
@@ -688,12 +688,12 @@ async def test_a_cancel_while_the_outputs_are_evaluated_projects_cancelled(env: 
     assert store.runs[run_id_of(handle)].status == "cancelled"
 
 
-async def test_the_deadline_holds_while_the_outputs_are_evaluated(env: WorkflowEnvironment) -> None:
+async def test_the_deadline_holds_while_the_outputs_are_evaluated(own_env: WorkflowEnvironment) -> None:
     """Checkpoint-2 finding: past the deadline, a run waited on its outputs' evaluator and ended as its failure."""
     store = MemoryStore()
     g = graph(n=cel(f"trigger.x + {EVALUATOR_ONLY}")).node("a", ECHO)
-    async with workers(env.client, store, evaluate=None):
-        handle = await start(env.client, store, g, TRIGGER, max_run_duration_s=1, cel_schedule_to_start_s=5)
+    async with workers(own_env.client, store, evaluate=None):
+        handle = await start(own_env.client, store, g, TRIGGER, max_run_duration_s=1, cel_schedule_to_start_s=5)
         result = await asyncio.wait_for(handle.result(), 10)
     assert (result.status, result.error and result.error["code"]) == ("deadline_exceeded", "deadline_exceeded")
     assert store.runs[run_id_of(handle)].status == "deadline_exceeded"
