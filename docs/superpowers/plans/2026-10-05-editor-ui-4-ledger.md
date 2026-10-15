@@ -3052,3 +3052,20 @@ failed, then passed, as its steps say; after each, the type check and ESLint wer
 
 At the milestone, the editor's, the guards', `lib`'s and the components' tests together: 902 passed (76 files).
 Mid-slice rulings: none in this milestone. Nothing pushed.
+
+### 4d-1c, milestone 3 (2026-10-15)
+
+The owner, in chat: "Milestone 2 accepted, continue". Tasks 9–12, every diff applied as written; each task's tests
+failed, then passed, as its steps say; after each, the type check and ESLint were silent.
+- Task 9, 2e64f98f: the Test tab, its seed contract read at the saved revision; a step that can't run alone says so in
+  the server's words. Red: the tab's test file couldn't import its module, 1 failed and 169 passed; green: 175 passed.
+- Task 10, 6ce74ac0: the values as fields (prefill, Null and Absent, sensitive masked), Simulate step, the contract
+  read again when the save moved the draft. Red: `seeds.test.ts` couldn't import its module, 9 failed and 169 passed;
+  green: 185 passed.
+- Task 11, 56751d5a: a step test's result in its tab, "Step test: <key>" on the bar and in the panel, the values used.
+  Red: `StepResult.test.tsx` couldn't import its module, 4 failed and 254 passed; green: 264 passed.
+- Task 12, 83051502: the step in the latest simulation, its iterations picked one at a time, and the panel's "Open".
+  Red: 5 failed and 264 passed; green: 269 passed.
+
+At the milestone, the editor's, the guards', `lib`'s and the components' tests together: 940 passed (79 files).
+Mid-slice rulings: none in this milestone. Nothing pushed.
