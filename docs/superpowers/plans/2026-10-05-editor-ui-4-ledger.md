@@ -2836,3 +2836,13 @@ suite, with 3 failed, 6119 passed and 131 skipped.
 cd1a44a1 holds both (test-only; the owner: "Commit and push it; keep asking for Auto-fix pushes"). CI's second run, on
 cd1a44a1: every job passed (the backend in 23 min), as did CodeQL. Main has since gained #102 (a CEL compile fix: no
 ABI, migration or runtime change), which merges cleanly.
+
+### 4c-1's deferred minors, fixed (#73) (2026-10-15)
+
+M55's eight minors (issue #73), on the owner's choice and "go, build it with option A". The plan, its rulings and its
+record: `2026-10-15-editor-4c1-minors.md`. A held limit's pointer is `#/options/<name>`, so a config field named
+`options` can't sweep it up or be blocked by it (the latent text loss); typed numbers are decimal only; a list's items
+start afresh when the list is rebuilt, and a map's entries keep their state by name through a rename; each "Show
+choices" is named by its field; a picker's messages are `<output>`s its label names; `muted` on `disabled-bg` is under
+the contrast check; Escape closes the drawer as Close does; a Go to doesn't focus the heading first. The fresh review's
+findings are fixed but one Low left open (a map re-sorted by a rename, in a real browser).
