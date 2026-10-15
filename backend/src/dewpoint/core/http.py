@@ -72,11 +72,12 @@ async def _after_require() -> None:
     here."""
 
 
-def require(permission: P) -> Callable[..., Awaitable[TenantContext]]:
-    """The caller's role in the tenant, checked for `permission`. A write (any non-safe method) takes the tenant's
-    lifecycle lock, shared, in the request's transaction (`get_db`'s, which commits before the response) before it
-    reads the tenant, and is refused unless the tenant is active (409 `tenant_erasing`): an erasure's step 1, which
-    takes it exclusively, waits for the write to commit, or the write sees `erasing` (the 2b-4 outline's fencing)."""
+def require(*permissions: P) -> Callable[..., Awaitable[TenantContext]]:
+    """The caller's role in the tenant, checked for every one of `permissions`. A write (any non-safe method) takes the
+    tenant's lifecycle lock, shared, in the request's transaction (`get_db`'s, which commits before the response)
+    before it reads the tenant, and is refused unless the tenant is active (409 `tenant_erasing`): an erasure's step 1,
+    which takes it exclusively, waits for the write to commit, or the write sees `erasing` (the 2b-4 outline's
+    fencing)."""
 
     async def _dep(
         tenant_id: uuid.UUID,
@@ -101,7 +102,7 @@ def require(permission: P) -> Callable[..., Awaitable[TenantContext]]:
         role, require_passkey, status = row
         if require_passkey and "passkey" not in sess.auth_methods:
             raise HTTPException(403, detail={"error": "step_up_required"})
-        if permission not in ROLE_PERMISSIONS[role]:
+        if any(p not in ROLE_PERMISSIONS[role] for p in permissions):
             raise HTTPException(403, detail={"error": "forbidden"})
         if writes and status != "active":
             raise HTTPException(409, detail={"error": "tenant_erasing"})

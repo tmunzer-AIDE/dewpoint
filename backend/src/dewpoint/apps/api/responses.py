@@ -607,3 +607,22 @@ class StartFormOut(_Answer):
     version_id: str
     fields: list[StartFieldOut]
     csv: CsvFormOut | None
+
+
+class SimulationOut(_Answer):
+    """A draft simulation's request (B8; the simulation design §6.3): frozen on its draft snapshot, at the revision it
+    was admitted at, with the step it runs alone (S2) and what admission reported without refusing. Never its input."""
+
+    id: str
+    workflow_id: str
+    version_id: None
+    draft_snapshot_id: str
+    draft_revision: int
+    target_step_id: str | None
+    mode: Literal["simulate"]
+    source: str
+    status: Literal["queued", "starting", "started", "cancelled", "refused", "dead"]
+    reason: str | None
+    queued_at: str | None
+    ended_at: str | None
+    admission_checks: list[DiagnosticOut]

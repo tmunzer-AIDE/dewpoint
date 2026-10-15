@@ -26,6 +26,7 @@ from dewpoint.apps.api.routes import (
     run_requests,
     runs,
     schedules,
+    simulations,
     tenants,
     webhooks,
     workflows,
@@ -58,6 +59,7 @@ ROUTERS: tuple[APIRouter, ...] = (
     retention.router,
     schedules.router,
     webhooks.router,
+    simulations.router,
 )
 
 
