@@ -2191,6 +2191,23 @@ describe("Simulate workflow", () => {
     expect(screen.getByRole("button", { name: "◌ Simulate workflow" }).hasAttribute("disabled")).toBe(true);
   });
 
+  it("opens the Simulation panel once sent, and the strip opens it again while it runs", async () => {
+    answers.set(`POST ${SIM}`, () => json(simRequest("queued"), 202));
+    answers.set(`GET ${SIM}/r1`, () => json(simState("queued")));
+    await show();
+    await userEvent.click(await screen.findByRole("button", { name: "◌ Simulate workflow" }));
+    const dialog = await screen.findByRole("dialog", { name: "Simulate workflow" });
+    await userEvent.click(await within(dialog).findByRole("button", { name: "◌ Simulate" }));
+    const panel = await screen.findByRole("complementary", { name: "Simulation" });
+    expect(await within(panel).findByText("Waiting for a free run slot.")).toBeTruthy();
+    await userEvent.click(within(panel).getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("complementary", { name: "Simulation" })).toBeNull();
+    const strip = screen.getByRole("button", { name: "Simulation" });
+    expect(strip.getAttribute("aria-expanded")).toBe("false");
+    await userEvent.click(strip);
+    expect(await screen.findByRole("complementary", { name: "Simulation" })).toBeTruthy();
+  });
+
   it("asks Publish's own question about edits not applied, worded for simulating", async () => {
     await unappliedDuration();
     await userEvent.click(screen.getByRole("button", { name: "◌ Simulate workflow" }));

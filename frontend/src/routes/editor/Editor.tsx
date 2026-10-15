@@ -44,6 +44,7 @@ import { DeclassifyPanel } from "./DeclassifyPanel";
 import { ProblemsPanel, type PublishProblems } from "./ProblemsPanel";
 import { SaveState } from "./SaveState";
 import { SimulateDialog } from "./simulation/SimulateDialog";
+import { SimulationPanel } from "./simulation/SimulationPanel";
 import { useSimulation } from "./simulation/useSimulation";
 import { type Problems } from "./StepCard";
 import { StepPicker, type PickMode } from "./StepPicker";
@@ -59,7 +60,7 @@ type Opened = { workflow: WorkflowDetail; types: NodeType[]; role: string | null
  * Triggers panel (4c-3b), at a place in it when "Go to it" sent it there. */
 type Side =
   | { kind: "step"; node: string; field?: { pointer: string; kind?: UnappliedKind; n: number } } | { kind: "problems" } | { kind: "versions" }
-  | { kind: "unapplied" } | { kind: "declassify" } | { kind: "triggers"; at?: { pointer: string; n: number } } | null;  // prettier-ignore
+  | { kind: "unapplied" } | { kind: "declassify" } | { kind: "triggers"; at?: { pointer: string; n: number } } | { kind: "simulation" } | null;  // prettier-ignore
 const NO_DIAGNOSTICS: Diagnostic[] = []; // one empty list, so a memo over it holds
 const NO_STEPS: ReadonlySet<string> = new Set();
 
@@ -371,7 +372,7 @@ function Editor({
   const simulateButton = useRef<HTMLButtonElement>(null);
   const jumps = useRef(0); // each "Go to" a field, so the same one twice still focuses it
   const [landing, setLanding] = useState<{
-    on: "problems" | "versions" | "publish" | "problems-panel" | "versions-panel" | "unapplied" | "unapplied-panel" | "declassify" | "declassify-panel" | "triggers-panel" | "simulate";
+    on: "problems" | "versions" | "publish" | "problems-panel" | "versions-panel" | "unapplied" | "unapplied-panel" | "declassify" | "declassify-panel" | "triggers-panel" | "simulate" | "simulation-panel";
     n: number;
   } | null>(null);
   const land = (on: NonNullable<typeof landing>["on"]) => setLanding((l) => ({ on, n: (l?.n ?? 0) + 1 }));
@@ -392,6 +393,7 @@ function Editor({
         "declassify-panel": () => document.getElementById("declassify-title") ?? usable(declassifyButton.current),
         "triggers-panel": () => document.getElementById("triggers-title"),
         simulate: () => usable(simulateButton.current) ?? usable(versionsButton.current),
+        "simulation-panel": () => document.getElementById("simulation-title") ?? usable(simulateButton.current),
       }[landing.on]();
       target?.focus();
     });
@@ -1222,6 +1224,9 @@ function Editor({
       {simulator && simulation.busy && (
         <p id="simulate-busy" className="flex flex-wrap items-center gap-3 border-b border-line bg-surface-2 px-5 py-2.5 text-small">
           <span className="grow">Your simulation hasn&apos;t ended. Simulate again once it has.</span>
+          <Button size="sm" aria-expanded={side?.kind === "simulation"} onClick={() => setSide(side?.kind === "simulation" ? null : { kind: "simulation" })}>
+            Simulation
+          </Button>
         </p>
       )}
       {viewing && (
@@ -1426,6 +1431,16 @@ function Editor({
             }}
           />
         )}
+        {side?.kind === "simulation" && (
+          <SimulationPanel
+            session={simulation}
+            onSimulateAgain={simulator && sync.status !== "conflict" && !simulation.busy ? () => whenSettled("simulate", () => void simulate()) : undefined}
+            onClose={() => {
+              setSide(null);
+              land("simulate");
+            }}
+          />
+        )}
         {side?.kind === "problems" && (
           <ProblemsPanel
             state={checked}
@@ -1465,7 +1480,7 @@ function Editor({
           onSimulate={(input) => {
             setSimulateAt(null);
             void simulation.start(freeze(simulateAt.revision, { input }));
-            land("simulate");
+            setSide({ kind: "simulation" }); // its heading takes focus
           }}
           onClose={() => {
             setSimulateAt(null);
