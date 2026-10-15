@@ -16,6 +16,7 @@ export type SeedContract = Schemas["SeedContractOut"];
 export type SeedEntry = Schemas["SeedEntryOut"];
 export type DraftStartForm = Schemas["DraftStartFormOut"];
 export type SimulateBody = Schemas["SimulateIn"];
+export type DraftSnapshot = Schemas["DraftSnapshotOut"];
 export type Origin = StepSummary["origin"];
 
 /** A simulation as the editor sent it: its key, the revision it was frozen at and its body. An answer lost sends this
@@ -115,6 +116,15 @@ export const stepInstancesQuery = (
         params: { path: { ...path(tenantId, workflowId), request_id: requestId, step_id: stepId }, query: { offset: page.offset, limit: page.limit, within: page.within } },
       })),
   });  // prettier-ignore
+
+/** The draft a simulation ran, as frozen for it (§6.5): never changes, so it's read once. */
+export const draftSnapshotQuery = (tenantId: string, workflowId: string, snapshotId: string) =>
+  queryOptions({
+    queryKey: ["draft-snapshot", tenantId, workflowId, snapshotId],
+    queryFn: () =>
+      ok(client.GET("/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/snapshots/{snapshot_id}", { params: { path: { ...path(tenantId, workflowId), snapshot_id: snapshotId } } })),
+    staleTime: Infinity,
+  });
 
 /** A step's seed contract at a revision, each value prefilled where its step's own sample allows (§6.6, D-s2). */
 export const seedContractQuery = (tenantId: string, workflowId: string, stepId: string, revision: number) =>

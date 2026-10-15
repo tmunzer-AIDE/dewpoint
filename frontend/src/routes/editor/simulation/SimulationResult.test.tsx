@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ApiError } from "../../../lib/client";
 import type { SimulationRequest, SimulationState, StepSummary } from "../../../lib/simulations";
 import type { GraphDoc } from "../../../lib/workflows";
 import { SimulationResult } from "./SimulationResult";
@@ -53,14 +54,17 @@ beforeEach(() => {
 });
 afterEach(() => vi.restoreAllMocks());
 
-function show(s: SimulationSession) {
+function show(s: SimulationSession, over: Partial<Parameters<typeof SimulationResult>[0]> = {}) {
   const onGoTo = vi.fn();
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={qc}>
-      <SimulationResult tenantId="t1" workflowId="w1" session={s} doc={DOC} attemptsOf={() => 3} onGoTo={onGoTo} />
+      <SimulationResult
+        tenantId="t1" workflowId="w1" session={s} doc={DOC} ran={null} stale={null} changes={null} attemptsOf={() => 3} onGoTo={onGoTo}
+        onShowProblems={vi.fn()} {...over}
+      />
     </QueryClientProvider>,
-  );
+  );  // prettier-ignore
   return { onGoTo };
 }
 const section = (name: string) => screen.getByRole("region", { name });
@@ -129,5 +133,42 @@ describe("the Simulation panel's result (§7.5; the ResultPanel board)", () => {
   it("says when the input used can't be read back", () => {
     show(session({ state: { read_back: "unreadable", input: null } }));
     expect(within(section("Input used")).getByText("The input used couldn't be read back.")).toBeTruthy();
+  });
+});
+
+describe("a result before the person's edits, and what failed (§7.7; the Stale and Refusals boards)", () => {
+  it("says it's for an older revision, and marks each step changed since, or no longer in the draft", () => {
+    show(session(), { stale: { kind: "revision", from: 14, to: 16 }, changes: { changed: new Set(["id-notify"]), added: new Set(), gone: new Set(["id-gone"]) } });
+    expect(screen.getByText("Before your edits:").parentElement?.textContent).toBe(
+      "Before your edits: this result is for revision 14; the draft is at revision 16. Simulate again to see the draft as it is.",
+    );
+    const rows = within(section("Steps, in run order")).getAllByRole("listitem");
+    expect(within(rows[2]!).getByText("changed since")).toBeTruthy();
+    expect(within(rows[2]!).getByRole("button", { name: "Go to notify" })).toBeTruthy();
+    expect(within(rows[4]!).getByText("no longer in the draft")).toBeTruthy();
+  });
+
+  it("says a failed step's code and message, its attempts, and that nothing was sent", () => {
+    const failed = (key: string, attempt: number, code: string, message: string) =>
+      step(key, { statuses: { failed: 1 }, final: { attempt, status: "failed", error: { code, message } } });
+    show(session({ phase: "failed", steps: [failed("post_ticket", 1, "simulation_unavailable", "http.request@1 can't be simulated."), failed("notify", 3, "invalid_blocks", "Block 2 has no text.")] }));
+    expect(screen.getByText("simulation_unavailable").parentElement?.textContent).toBe("simulation_unavailable http.request@1 can't be simulated. 1 attempt. Nothing was sent.");
+    expect(screen.getByText("invalid_blocks").parentElement?.textContent).toBe("invalid_blocks Block 2 has no text. 3 attempts, the configured retries. Nothing was sent.");
+  });
+
+  it("shows a refusal in the server's words", () => {
+    const s = session();
+    s.local = { kind: "refused", frozen: { key: "k1", revision: 14, body: { input: {} } }, error: new ApiError(503, "production_runs_disabled", { error: "production_runs_disabled", messages: ["Production runs are off in this deployment."] }) };
+    s.state = null;
+    s.phase = null;
+    show(s);
+    expect(screen.getByText("Not simulated")).toBeTruthy();
+    expect(screen.getByText("Production runs are off in this deployment.")).toBeTruthy();
+  });
+
+  it("pages a loop's iterations over the draft it ran, whatever the draft is now", async () => {
+    show(session(), { doc: { ...DOC, edges: [] }, ran: DOC });
+    await userEvent.click(screen.getByRole("button", { name: "Iterations of each_ap" }));
+    expect(await screen.findByRole("list", { name: "each_ap's iterations, 1 to 2 of 2" })).toBeTruthy();
   });
 });

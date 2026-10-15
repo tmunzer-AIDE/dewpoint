@@ -2216,7 +2216,7 @@ describe("Simulate workflow", () => {
       steps: [{ step_id: "id-transform", key: "transform", type: "flow.transform@1", origin: "evaluated", instances: 1, statuses: { succeeded: 1 }, ports: {}, final: { attempt: 1, status: "succeeded" } }],
     };  // prettier-ignore
     const ended = { ...simState("started"), run: { status: "succeeded", queued_at: null, started_at: "2026-10-15T10:42:05Z", ended_at: "2026-10-15T10:42:19Z", error: null, iterations: 0 } };
-    answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: draftWith("transform") }));
+    answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft_revision: 2, draft: draftWith("transform") }));
     answers.set(`GET ${SIM}`, () => json([simRequest("started")])); // a reload finds the latest
     answers.set(`GET ${SIM}/r1`, () => json(ended));
     answers.set(`GET ${SIM}/r1/steps`, () => json(summary));
@@ -2237,7 +2237,7 @@ describe("Simulate workflow", () => {
       steps: [{ step_id: "id-transform", key: "transform", type: "flow.transform@1", origin: "evaluated", instances: 1, statuses: { succeeded: 1 }, ports: {}, final: { attempt: 1, status: "succeeded" } }],
     };  // prettier-ignore
     const ended = { ...simState("started"), run: { status: "succeeded", queued_at: null, started_at: "2026-10-15T10:42:05Z", ended_at: "2026-10-15T10:42:19Z", error: null, iterations: 0 } };
-    answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: draftWith("transform") }));
+    answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft_revision: 2, draft: draftWith("transform") }));
     answers.set(`GET ${SIM}`, () => json([simRequest("started")]));
     answers.set(`GET ${SIM}/r1`, () => json(ended));
     answers.set(`GET ${SIM}/r1/steps`, () => json(summary));
@@ -2249,6 +2249,62 @@ describe("Simulate workflow", () => {
     expect(within(listed).getByText("evaluated")).toBeTruthy();
     await userEvent.click(within(listed).getByRole("button", { name: "Go to transform" }));
     await vi.waitFor(() => expect(document.activeElement?.getAttribute("data-item")).toBe("node:id-transform"));
+  });
+
+  it("marks a result from before the person's edits, on the canvas and in the panel (§7.7; the Stale board)", async () => {
+    const step = (key: string) => ({ step_id: `id-${key}`, key, type: "flow.transform@1", origin: "evaluated", instances: 1, statuses: { succeeded: 1 }, ports: {}, final: { attempt: 1, status: "succeeded" } });
+    const options = { timeout_s: null, max_attempts: null, on_error: "fail" };
+    const snapshot = {
+      id: "s1", workflow_id: "w1", draft_revision: 2, created_at: "", graph_hash: "g", version_hash: "v", cel_profile: "p", engine_abi: 9, node_refs: [], expressions: [],
+      graph: { graph_format: 1, edges: [], nodes: [
+        { id: "id-transform", key: "transform", type: "flow.transform@1", config: { note: { kind: "literal", value: "old" } }, position: { x: 0, y: 140 }, options },
+        { id: "id-kept", key: "kept", type: "flow.transform@1", config: {}, position: { x: 0, y: 280 }, options },
+        { id: "id-old", key: "old", type: "flow.transform@1", config: {}, position: { x: 0, y: 420 }, options },
+      ] },
+    };  // prettier-ignore
+    const ended = { ...simState("started"), run: { status: "succeeded", queued_at: null, started_at: "2026-10-15T10:42:05Z", ended_at: "2026-10-15T10:42:19Z", error: null, iterations: 0 } };
+    answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft_revision: 3, draft: draftWith("transform", "kept", "added") }));
+    answers.set(`GET ${SIM}`, () => json([simRequest("started")]));
+    answers.set(`GET ${SIM}/r1`, () => json(ended));
+    answers.set(`GET ${SIM}/r1/steps`, () => json({ given: "input", steps: [step("transform"), step("kept"), step("old")] }));
+    answers.set(`GET ${BASE}/draft/snapshots/s1`, () => json(snapshot));
+    await show();
+    await vi.waitFor(() =>
+      expect(steps().dataset.simulated).toBe(JSON.stringify([
+        ["id-transform", ["succeeded", "evaluated", "changed since"]], ["id-kept", ["succeeded", "evaluated"]], ["id-added", ["new since revision 2: no result"]],
+      ])),
+    );  // prettier-ignore
+    expect(screen.getByText("Before your edits:").parentElement?.textContent).toBe("Before your edits: this result is for revision 2; the draft is at revision 3.");
+    await userEvent.click(screen.getByRole("button", { name: "Simulation" }));
+    const panel = await screen.findByRole("complementary", { name: "Simulation" });
+    expect(within(panel).getByText("no longer in the draft")).toBeTruthy();
+    expect(panel.textContent).toContain("Simulate again to see the draft as it is.");
+  });
+
+  it("stops when the draft was changed elsewhere, and says so (§7.7)", async () => {
+    answers.set(`POST ${SIM}`, () => json({ error: "draft_conflict", draft_revision: 7 }, 409));
+    await show();
+    await userEvent.click(await screen.findByRole("button", { name: "◌ Simulate workflow" }));
+    const dialog = await screen.findByRole("dialog", { name: "Simulate workflow" });
+    await userEvent.click(await within(dialog).findByRole("button", { name: "◌ Simulate" }));
+    const panel = await screen.findByRole("complementary", { name: "Simulation" });
+    expect(await within(panel).findByText("The draft was changed elsewhere, so it wasn't simulated.")).toBeTruthy();
+    expect((await screen.findByRole("alert")).textContent).toContain("changed elsewhere");
+  });
+
+  it("shows a refusal's problems, and the Problems panel from it (§7.7; the Refusals board)", async () => {
+    const problem = { code: "ref.unknown", message: "A reference to get_sit, which isn't a step.", node: "id-transform", field: null, fix: null, severity: "error" };
+    answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: draftWith("transform") }));
+    answers.set(`POST ${SIM}`, () => json({ error: "invalid", diagnostics: [problem] }, 422));
+    await show();
+    await userEvent.click(await screen.findByRole("button", { name: "◌ Simulate workflow" }));
+    const dialog = await screen.findByRole("dialog", { name: "Simulate workflow" });
+    await userEvent.click(await within(dialog).findByRole("button", { name: "◌ Simulate" }));
+    const panel = await screen.findByRole("complementary", { name: "Simulation" });
+    expect(await within(panel).findByText("Fix 1 problem first: a draft with problems isn't simulated.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "◌ Simulate workflow" }).hasAttribute("disabled")).toBe(false); // nothing runs
+    await userEvent.click(within(panel).getByRole("button", { name: "Show the problems" }));
+    expect(await screen.findByRole("complementary", { name: "Problems" })).toBeTruthy();
   });
 
   it("asks Publish's own question about edits not applied, worded for simulating", async () => {

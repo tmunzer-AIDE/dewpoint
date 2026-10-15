@@ -70,6 +70,28 @@ describe("a simulation the editor sends (§7.1, §7.2)", () => {
     expect(result.current.busy).toBe(false);
   });
 
+  it("refused by the deployment says so too: a 503 in the server's words isn't a lost answer", async () => {
+    answers.set(`POST ${BASE}`, () => json({ error: "production_runs_disabled", messages: ["Production runs are off in this deployment."] }, 503));
+    const { result } = session();
+    await act(() => result.current.start(freeze(14, { input: {} })));
+    expect(result.current.local).toMatchObject({ kind: "refused", error: { status: 503, code: "production_runs_disabled" } });
+    answers.set(`POST ${BASE}`, () => new Response("Bad gateway", { status: 502 })); // a proxy's, not the API's
+    await act(() => result.current.start(freeze(14, { input: {} })));
+    expect(result.current.local.kind).toBe("unknown");
+  });
+
+  it("tried again after a refusal is the same request: a refusal is never recorded, so its key is free", async () => {
+    answers.set(`POST ${BASE}`, () => json({ error: "no_current_build", messages: ["No current build has been recorded lately."] }, 503));
+    const { result } = session();
+    await act(() => result.current.start(freeze(14, { input: {} }, "k1")));
+    expect(result.current.local.kind).toBe("refused"); // a known answer, not a lost one
+    answers.set(`POST ${BASE}`, () => json(request("queued"), 202));
+    answers.set(`GET ${BASE}/r1`, () => json(state("queued")));
+    await act(() => result.current.checkAgain());
+    await waitFor(() => expect(result.current.phase).toBe("queued"));
+    expect(sent.filter((s) => s.method === "POST").map((s) => s.key)).toEqual(["k1", "k1"]);
+  });
+
   it("can be cancelled, and is read again at once", async () => {
     let cancelled = false;
     answers.set(`POST ${BASE}`, () => json(request("started"), 202));

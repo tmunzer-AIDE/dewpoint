@@ -36,8 +36,9 @@ export interface SimulationSession {
   readAgain: () => void;
 }
 
-/** Whether a request's outcome is unknown: no answer reached the editor, or a 5xx came in the API's place. */
-const uncertain = (e: unknown) => !(e instanceof ApiError) || e.status >= 500;
+/** Whether a request's outcome is unknown: no answer reached the editor, or a 5xx came in the API's place. The API's
+ * own 503 says why, in its code (the production gate, no current build): a refusal, known. */
+const uncertain = (e: unknown) => !(e instanceof ApiError) || (e.status >= 500 && !(e.status === 503 && e.code !== "http_error"));
 
 export function useSimulation(tenantId: string, workflowId: string): SimulationSession {
   const qc = useQueryClient();
@@ -79,8 +80,9 @@ export function useSimulation(tenantId: string, workflowId: string): SimulationS
     },
     [tenantId, workflowId],
   );
+  // The same request again: its answer lost, or refused (admission rolls a refusal back, so its key is free).
   const checkAgain = useCallback(async () => {
-    if (local.kind === "unknown") await send(local.frozen);
+    if (local.kind === "unknown" || local.kind === "refused") await send(local.frozen);
   }, [local, send]);
   const cancel = useCallback(async () => {
     if (requestId === null) return null;

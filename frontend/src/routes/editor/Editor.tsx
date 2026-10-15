@@ -21,7 +21,7 @@ import { begin, record, redo, undo, type History } from "../../lib/history";
 import { CARD, layout } from "../../lib/layout";
 import { guardLeaving } from "../../lib/leaving";
 import type { Path } from "../../lib/schemaForm";
-import { ENDED, freeze, type StepSummary } from "../../lib/simulations";
+import { ENDED, draftSnapshotQuery, freeze, type StepSummary } from "../../lib/simulations";
 import { useDocumentTitle } from "../../lib/title";
 import { schedulesQuery, startSummary, workflowBindingsQuery } from "../../lib/triggers";
 import {
@@ -48,6 +48,7 @@ import { ResultBar } from "./simulation/ResultBar";
 import { tagsOf, type SimTag } from "./simulation/results";
 import { SimulationPanel } from "./simulation/SimulationPanel";
 import { SimulationResult } from "./simulation/SimulationResult";
+import { changesOf, staleOf } from "./simulation/stale";
 import { useSimulation } from "./simulation/useSimulation";
 import { type Problems } from "./StepCard";
 import { StepPicker, type PickMode } from "./StepPicker";
@@ -490,13 +491,31 @@ function Editor({
     (s: StepSummary) => findNode(doc, s.step_id)?.options?.max_attempts ?? typeMap.get(s.type)?.retry.max_attempts ?? null,
     [doc, typeMap],
   );
+  // Before the person's edits (§7.7): once it ended, when the server's draft moved on or an edit here isn't saved; then
+  // the draft it ran (its snapshot, read once) says which steps changed since, are new since, or are gone.
+  const simulationEnded = simulation.phase !== null && ENDED.has(simulation.phase);
+  const stale = simulationEnded && simulation.state ? staleOf(simulation.state.request.draft_revision, sync) : null;
+  const snapshotId = simulation.state?.request.draft_snapshot_id ?? null;
+  const snapshot = useQuery({ ...draftSnapshotQuery(tenantId, workflow.id, snapshotId ?? ""), enabled: snapshotId !== null && stale !== null });
+  const ran = snapshotId !== null && snapshot.data?.id === snapshotId ? snapshot.data.graph : null;
+  const changes = useMemo(() => (stale && ran ? changesOf(ran, doc) : null), [stale, ran, doc]);
   const simulated = useMemo(() => {
     const tags = new Map<string, SimTag[]>();
     if (!resultShown) return tags;
-    const ended = simulation.phase !== null && ENDED.has(simulation.phase);
-    for (const s of simulation.steps?.steps ?? []) tags.set(idKey(s.step_id), tagsOf(s, { maxAttempts: attemptsOf(s), ended }));
+    for (const s of simulation.steps?.steps ?? []) {
+      if (!findNode(doc, s.step_id)) continue; // no longer in the draft: the panel says so
+      const since: SimTag[] = changes?.changed.has(idKey(s.step_id)) ? [{ text: "changed since", kind: "note" }] : [];
+      tags.set(idKey(s.step_id), [...tagsOf(s, { maxAttempts: attemptsOf(s), ended: simulationEnded }), ...since]);
+    }
+    const from = simulation.state?.request.draft_revision;
+    for (const id of changes?.added ?? []) tags.set(id, [{ text: `new since revision ${from}: no result`, kind: "note" }]);
     return tags;
-  }, [resultShown, simulation.phase, simulation.steps, attemptsOf]);
+  }, [resultShown, simulation.steps, simulation.state, simulationEnded, doc, changes, attemptsOf]);
+  // A draft changed elsewhere refuses the simulation as it refuses a save: the editor stops, as on a save's 409.
+  const conflicted = simulation.local.kind === "refused" && simulation.local.error.code === "draft_conflict" ? simulation.local : null;
+  useEffect(() => {
+    if (conflicted) saver.current?.conflict();
+  }, [conflicted]);
   // When editing stops (a conflict, an exit, a publication), what only editing offers stops with it: an open dialog
   // closes, placing ends (a click on a read-only canvas places nothing) and says so. Focus held by what's gone (the
   // dialog, a "+", Auto layout, Add step, a panel's buttons) goes to what's drawn: a panel's heading when it was in
@@ -1306,6 +1325,7 @@ function Editor({
           revision={simulation.state.request.draft_revision}
           endedAt={simulation.state.run?.ended_at ?? simulation.state.request.ended_at}
           notWaited={(simulation.steps?.steps ?? []).some((s) => s.origin === "evaluated_not_waited")}
+          stale={stale}
           hidden={!resultShown}
           onHide={() => setHiddenFor(simulationId)}
           onShow={() => setHiddenFor(null)}
@@ -1476,8 +1496,8 @@ function Editor({
             }}
           >
             <SimulationResult
-              tenantId={tenantId} workflowId={workflow.id} session={simulation} doc={doc} attemptsOf={attemptsOf}
-              onGoTo={(id) => focus(item.node(id))}
+              tenantId={tenantId} workflowId={workflow.id} session={simulation} doc={doc} ran={ran} stale={stale} changes={changes}
+              attemptsOf={attemptsOf} onGoTo={(id) => focus(item.node(id))} onShowProblems={() => setSide({ kind: "problems" })}
             />
           </SimulationPanel>
         )}

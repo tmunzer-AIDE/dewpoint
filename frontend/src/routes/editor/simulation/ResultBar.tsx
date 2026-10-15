@@ -2,17 +2,19 @@
 // The canvas's bar for the editor's simulation (4d-1c; the simulation design §7.3; the Running and ResultCanvas
 // boards). While it runs: that nothing is sent, and Cancel. Once ended: the hatched banner (nothing was sent, and what
 // that doesn't prove; that flow timers weren't waited, when one wasn't), its status, revision and end, the panel, and
-// "Hide the result". Hidden: one bar that brings it back; the simulation, its history, and one running are untouched.
+// "Hide the result". Hidden: one bar that brings it back; the simulation, its history, and one running are untouched. A
+// result from before the person's edits says so in it (§7.7; the Stale board).
 import { Button } from "../../../components/Button";
 import { ENDED, type Phase } from "../../../lib/simulations";
 import { StatusChip } from "./chips";
 import { STATUS, clock } from "./lifecycle";
 import { SimBanner } from "./SimBanner";
+import { STALE, staleWords, type Stale } from "./stale";
 
 const BAR = "flex flex-wrap items-center gap-3 border-b border-line bg-surface-2 px-5 py-2.5 text-small";
 
-export function ResultBar({ phase, revision, endedAt, notWaited, hidden, onHide, onShow, onPanel, onCancel }: {
-  phase: Phase; revision: number; endedAt: string | null; notWaited: boolean; hidden: boolean;
+export function ResultBar({ phase, revision, endedAt, notWaited, stale, hidden, onHide, onShow, onPanel, onCancel }: {
+  phase: Phase; revision: number; endedAt: string | null; notWaited: boolean; stale: Stale | null; hidden: boolean;
   onHide: () => void; onShow: () => void; onPanel: () => void; onCancel: () => void;
 }) {  // prettier-ignore
   if (!ENDED.has(phase)) {
@@ -37,6 +39,11 @@ export function ResultBar({ phase, revision, endedAt, notWaited, hidden, onHide,
       <SimBanner role="status">
         <p><strong>Simulated.</strong> Nothing was sent. Results don&apos;t prove the live call will succeed.</p>
         {notWaited && <p>Flow delays and wait-until weren&apos;t waited; the simulation clock wasn&apos;t advanced.</p>}
+        {stale && (
+          <p className={STALE}>
+            <strong>Before your edits:</strong> {staleWords(stale, false)}
+          </p>
+        )}
         <p className="flex flex-wrap items-center gap-2 text-ink">
           <StatusChip phase={phase} />
           <span className="grow text-muted">{`revision ${revision}${endedAt ? ` · ${clock(endedAt)}` : ""}`}</span>
