@@ -46,47 +46,69 @@ async def _claim(owner: Any, table: str, ctx: dict[str, Any], owner_run: uuid.UU
     return claim
 
 
+SNAPSHOT_FIELDS = (
+    "graph, node_refs, engine_abi, cel_profile, connection_ids, subflow_version_ids, failure_handler_version_id, "
+    "input_schema, output_schema, vars_schema, expressions, tainted_sites, output_taint, open_scopes_cap, loop_depth, "
+    "closure_version_ids, closure_workflow_ids, closure_node_refs, closure_cel_profiles, closure_depth, graph_hash"
+)
+
+
+async def snapshot(owner: Any, ctx: dict[str, Any], version_hash: str | None = None) -> uuid.UUID:
+    """A draft snapshot of the tenant's workflow (B8), its version's fields under `version_hash` (or a new one)."""
+    snapshot_id = uuid.uuid4()
+    await sql(owner, f"insert into draft_snapshots (id, tenant_id, workflow_id, draft_revision, version_hash, "  # noqa: S608
+              f"{SNAPSHOT_FIELDS}) select :i, tenant_id, workflow_id, 1, :h, {SNAPSHOT_FIELDS} "
+              "from workflow_versions where id = :v",
+              i=snapshot_id, h=version_hash or uuid.uuid4().hex * 2, v=ctx["v"])  # fmt: skip
+    return snapshot_id
+
+
 async def request(owner: Any, ctx: dict[str, Any], status: str, ago: timedelta | None,
-                  request_id: uuid.UUID | None = None) -> uuid.UUID:  # fmt: skip
-    """A request in `status`, ended `ago` when terminal, with its envelope and one claim unless refused."""
+                  request_id: uuid.UUID | None = None, snapshot: uuid.UUID | None = None) -> uuid.UUID:  # fmt: skip
+    """A request in `status`, ended `ago` when terminal, with its envelope and one claim unless refused; a draft
+    simulation's of `snapshot` when given."""
     rid = request_id or uuid.uuid4()
     envelope = None
     if status != "refused":
         envelope = await _claim(owner, "run_inputs", ctx, rid, rid, role="envelope")
         await _claim(owner, "run_inputs", ctx, rid, rid)
     terminal = status in ("cancelled", "refused", "dead")
-    await sql(owner, "insert into run_requests (id, tenant_id, workflow_id, workflow_version_id, source, mode, "
-              "idempotency_key, digest, digest_key_version, status, reason, envelope_id, queued_at, starting_at, "
-              "ended_at) values (:i, :t, :w, :v, 'manual', 'live', :k, :d, 1, :s, :reason, :e, "
-              "now() - interval '3 days', case when cast(:s as varchar) = 'starting' then now() end, "
+    await sql(owner, "insert into run_requests (id, tenant_id, workflow_id, workflow_version_id, draft_snapshot_id, "
+              "draft_revision, source, mode, idempotency_key, digest, digest_key_version, status, reason, envelope_id, "
+              "queued_at, starting_at, ended_at) values (:i, :t, :w, :v, :snap, :rev, 'manual', :m, :k, :d, 1, :s, "
+              ":reason, :e, now() - interval '3 days', case when cast(:s as varchar) = 'starting' then now() end, "
               "case when :terminal then now() - cast(:ago as interval) end)",
-              i=rid, t=ctx["t"], w=ctx["w"], v=ctx["v"], k=uuid.uuid4().hex, d=b"\x00" * 32, s=status,
+              i=rid, t=ctx["t"], w=ctx["w"], v=None if snapshot else ctx["v"], snap=snapshot,
+              rev=1 if snapshot else None, m="simulate" if snapshot else "live", k=uuid.uuid4().hex, d=b"\x00" * 32,
+              s=status,
               reason="r" if terminal else None, e=envelope, terminal=terminal, ago=ago or timedelta())  # fmt: skip
     return rid
 
 
 async def run(owner: Any, ctx: dict[str, Any], ago: timedelta | None, parent: uuid.UUID | None = None,
-              run_id: uuid.UUID | None = None) -> uuid.UUID:  # fmt: skip
-    """A run that ended `ago`, or is still running; a sub-run of `parent` when given."""
+              run_id: uuid.UUID | None = None, snapshot: uuid.UUID | None = None) -> uuid.UUID:  # fmt: skip
+    """A run that ended `ago`, or is still running; a sub-run of `parent` when given; a draft simulation of
+    `snapshot` when given."""
     rid = run_id or uuid.uuid4()
-    await sql(owner, "insert into runs (id, tenant_id, workflow_id, workflow_version_id, mode, status, kind, "
-              "parent_run_id, queued_at, ended_at) values (:i, :t, :w, :v, 'live', :s, :k, :p, "
+    await sql(owner, "insert into runs (id, tenant_id, workflow_id, workflow_version_id, draft_snapshot_id, mode, "
+              "status, kind, parent_run_id, queued_at, ended_at) values (:i, :t, :w, :v, :snap, :m, :s, :k, :p, "
               "now() - interval '3 days', now() - cast(:ago as interval))",
-              i=rid, t=ctx["t"], w=ctx["w"], v=ctx["v"], s="running" if ago is None else "succeeded",
+              i=rid, t=ctx["t"], w=ctx["w"], v=None if snapshot else ctx["v"], snap=snapshot,
+              m="simulate" if snapshot else "live", s="running" if ago is None else "succeeded",
               k="run" if parent is None else "subflow", p=parent, ago=ago)  # fmt: skip
     return rid
 
 
 async def tree(owner: Any, ctx: dict[str, Any], ago: timedelta | None, *, request_status: str | None = "started",
-               sub_ago: timedelta | None | str = "same",
-               root: uuid.UUID | None = None) -> dict[str, uuid.UUID]:  # fmt: skip
+               sub_ago: timedelta | None | str = "same", root: uuid.UUID | None = None,
+               snapshot: uuid.UUID | None = None) -> dict[str, uuid.UUID]:  # fmt: skip
     """A run tree rooted in a run (`root`, or a new one) that ended `ago`: its request (`request_status`, or none, as a
     run from before 2b-2), a sub-run that ended with it (or `sub_ago`), a step of each, and claims of every kind on the
-    tree."""
+    tree. With `snapshot`, a draft simulation's, its sub-run a published version's, as a sub-flow in one is."""
     root = root or uuid.uuid4()
     if request_status is not None:
-        await request(owner, ctx, request_status, None, request_id=root)
-    await run(owner, ctx, ago, run_id=root)
+        await request(owner, ctx, request_status, None, request_id=root, snapshot=snapshot)
+    await run(owner, ctx, ago, run_id=root, snapshot=snapshot)
     sub = await run(owner, ctx, ago if sub_ago == "same" else sub_ago, parent=root)  # type: ignore[arg-type]
     for r in (root, sub):
         step = uuid.uuid4()

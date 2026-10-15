@@ -13,15 +13,16 @@ from dewpoint.core.erasure import service
 from dewpoint.engine.runtime.ids import run_workflow_id
 from tests.core.erasure.test_fence import FENCED_TABLES
 from tests.core.ingress.support import KEYRING, digest, endpoint, key, record
-from tests.core.retention.support import CIPHER, OLD, request, sql, tree
+from tests.core.retention.support import CIPHER, OLD, request, snapshot, sql, tree
 from tests.support.workflows import seed_workflow
 
 
 async def populated(owner: Any, ingress: Any) -> dict[str, Any]:
-    """A tenant holding a row in each of its tables: its keys and keypair, a webhook endpoint with a pending event and
-    a binding, a workflow and version, a run tree that ended (its steps, claims, grants, secret index, request and
-    envelope, its evidence), a queued request, a schedule and a tick's record of a firing, a connection, a member, an
-    upload and a saved mapping, its retention, limits and a slot, and a plugin call's answer."""
+    """A tenant holding a row in each of its tables: its keys and keypair, a webhook endpoint with a pending event and a
+    binding, a workflow and version, a run tree that ended (its steps, claims, grants, secret index, request and
+    envelope, its evidence), a queued request, a draft snapshot and a queued simulation of it, a schedule and a tick's
+    record of a firing, a connection, a member, an upload and a saved mapping, its retention, limits and a slot, and a
+    plugin call's answer."""
     tenant, endpoint_id = await endpoint(owner)
     _, workflow_id, version_id = await seed_workflow(owner, tenant_id=tenant)
     async with owner() as s, s.begin():
@@ -31,6 +32,8 @@ async def populated(owner: Any, ingress: Any) -> dict[str, Any]:
     await record(ingress, endpoint_id, [(key(1), digest(1), b"one")])
     run_tree = await tree(owner, ctx, OLD)
     queued = await request(owner, ctx, "queued", None)
+    draft = await snapshot(owner, ctx)  # a draft simulation's, queued (B8): its request goes before it
+    await request(owner, ctx, "queued", None, snapshot=draft)
     schedule_id, release = uuid.uuid4(), uuid.uuid4()  # a release command (0057) and its snapshot
     for statement, params in (
         ("insert into memberships (tenant_id, user_id, role) values (:t, :u, 'owner')", {}),
