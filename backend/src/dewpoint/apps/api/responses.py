@@ -643,3 +643,27 @@ class DraftSnapshotOut(_Answer):
     node_refs: list[str]
     graph: dict[str, Any]
     expressions: list[ExpressionOut]
+
+
+class SimulationRunOut(_Answer):
+    """A draft simulation's run, once dispatch wrote it (B8): its own state."""
+
+    status: Literal["running", "succeeded", "failed", "cancelled", "deadline_exceeded"]
+    queued_at: str | None
+    started_at: str | None
+    ended_at: str | None
+    error: dict[str, Any] | None  # {code, message}
+    iterations: int
+
+
+class SimulationStateOut(_Answer):
+    """A draft simulation where it is (B8; the simulation design §6.6): its request, its run once there is one,
+    whether a cancel was requested, and what it ran with, read back from its own request, redacted (`[redacted]` in
+    place of what its envelope holds as claims), never recomputed from the draft as it is now: its `input`, or a step
+    test's `seeds` (S2)."""
+
+    request: SimulationOut
+    run: SimulationRunOut | None
+    cancel_requested: bool
+    input: dict[str, Any] | None
+    seeds: dict[str, Any] | None

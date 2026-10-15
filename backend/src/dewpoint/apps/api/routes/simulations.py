@@ -7,13 +7,13 @@ values it reads (S2). It needs `workflow.edit` and `run.start`; cancelling is th
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps import admission
-from dewpoint.apps.api.responses import DraftSnapshotOut, SimulationOut
+from dewpoint.apps.api.responses import DraftSnapshotOut, SimulationOut, SimulationStateOut
 from dewpoint.apps.api.routes.run_requests import (
     INVALID,
     UNAVAILABLE,
@@ -25,12 +25,18 @@ from dewpoint.apps.api.routes.run_requests import (
 )
 from dewpoint.apps.api.routes.workflows import _revision
 from dewpoint.core.authz.permissions import P
+from dewpoint.core.claims import service as claims
+from dewpoint.core.claims.cipher import ClaimCipher
 from dewpoint.core.config import Settings
 from dewpoint.core.crypto.keys import KeySource
 from dewpoint.core.http import TenantContext, get_db, get_settings_dep, require
 from dewpoint.core.models.requests import RunRequest
+from dewpoint.core.models.runs import Run
 from dewpoint.core.models.workflows import DraftSnapshot
+from dewpoint.core.retention import cutoff as retention
 from dewpoint.core.workflows.service import DraftConflictError
+from dewpoint.engine.handles import ClaimRef
+from dewpoint.engine.runtime.projection import REDACTED
 
 router = APIRouter(prefix="/api/v1", tags=["simulations"])
 
@@ -141,3 +147,93 @@ async def snapshot(
             for e in s.expressions
         ],
     }
+
+
+@router.get("/t/{tenant_id}/workflows/{workflow_id}/draft/simulations", response_model=list[SimulationOut])
+async def mine(
+    workflow_id: uuid.UUID,
+    limit: int = Query(20, ge=1, le=50),
+    ctx: TenantContext = Depends(require(P.RUN_VIEW)),
+    db: AsyncSession = Depends(get_db, scope="function"),
+) -> list[dict[str, object]]:
+    """The caller's own latest draft simulations of the workflow, newest first (§6.6): what they started, labelled
+    with their revision, never proof of what a submission was (the editor recovers by its own request's key)."""
+    found = await db.execute(
+        select(RunRequest)
+        .where(
+            RunRequest.workflow_id == workflow_id,
+            RunRequest.actor_id == ctx.user.id,
+            RunRequest.draft_snapshot_id.is_not(None),
+            retention.kept(RunRequest.ended_at, await retention.cutoff(db, ctx.tenant_id)),
+        )
+        .order_by(RunRequest.queued_at.desc(), RunRequest.id.desc())
+        .limit(limit)
+    )
+    return [simulation_body(r) for r in found.scalars()]
+
+
+@router.get("/t/{tenant_id}/workflows/{workflow_id}/draft/simulations/{request_id}", response_model=SimulationStateOut)
+async def state(
+    workflow_id: uuid.UUID,
+    request_id: uuid.UUID,
+    ctx: TenantContext = Depends(require(P.RUN_VIEW)),
+    db: AsyncSession = Depends(get_db, scope="function"),
+    keys: KeySource = Depends(get_keys),
+) -> dict[str, object]:
+    """A draft simulation where it is (§6.6), and what it ran with, read back redacted from its own request."""
+    r = await simulation_of(db, ctx, workflow_id, request_id)
+    run = await db.get(Run, r.id)
+    used = await read_back(db, keys, ctx, r)
+    return {
+        "request": simulation_body(r),
+        "run": None if run is None else {
+            "status": run.status,
+            "queued_at": run.queued_at.isoformat() if run.queued_at else None,
+            "started_at": run.started_at.isoformat() if run.started_at else None,
+            "ended_at": run.ended_at.isoformat() if run.ended_at else None,
+            "error": {"code": run.error_code, "message": run.error_message} if run.error_code else None,
+            "iterations": run.iterations,
+        },
+        "cancel_requested": r.cancel_requested_at is not None,
+        "input": used if r.target_step_id is None else None,
+        "seeds": used if r.target_step_id is not None else None,
+    }  # fmt: skip
+
+
+async def simulation_of(
+    db: AsyncSession, ctx: TenantContext, workflow_id: uuid.UUID, request_id: uuid.UUID
+) -> RunRequest:
+    """The workflow's draft simulation `request_id`, within retention; else 404."""
+    found = await db.execute(
+        select(RunRequest).where(
+            RunRequest.id == request_id,
+            RunRequest.workflow_id == workflow_id,
+            RunRequest.draft_snapshot_id.is_not(None),
+        )
+    )
+    r = found.scalar_one_or_none()
+    if r is None or not await retention.request_kept(db, await retention.cutoff(db, ctx.tenant_id), r):
+        raise HTTPException(404, detail={"error": "not_found"})
+    return r
+
+
+async def read_back(db: AsyncSession, keys: KeySource, ctx: TenantContext, r: RunRequest) -> Any:
+    """The request's own envelope, each claim in it `[redacted]` (a sensitive value, or one claimed by its size): the
+    input or seeds it was admitted with, never recomputed. None once retention removed it."""
+    try:
+        envelope = await claims.read_envelope(db, ClaimCipher(keys), ctx.tenant_id, request_id=r.id)
+    except claims.EnvelopeUnavailableError:
+        return None
+    except Exception as e:
+        raise key_unusable(e) from None
+    return _redacted(envelope)
+
+
+def _redacted(value: Any) -> Any:
+    if ClaimRef.of(value) is not None:
+        return REDACTED
+    if isinstance(value, dict):
+        return {k: _redacted(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redacted(v) for v in value]
+    return value
