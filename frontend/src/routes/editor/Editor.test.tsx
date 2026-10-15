@@ -2231,6 +2231,26 @@ describe("Simulate workflow", () => {
     expect(steps().dataset.simulated).toBe(JSON.stringify([["id-transform", ["succeeded", "evaluated"]]]));
   });
 
+  it("lists the result in the Simulation panel, and goes to a step from it (§7.5)", async () => {
+    const summary = {
+      given: "input",
+      steps: [{ step_id: "id-transform", key: "transform", type: "flow.transform@1", origin: "evaluated", instances: 1, statuses: { succeeded: 1 }, ports: {}, final: { attempt: 1, status: "succeeded" } }],
+    };  // prettier-ignore
+    const ended = { ...simState("started"), run: { status: "succeeded", queued_at: null, started_at: "2026-10-15T10:42:05Z", ended_at: "2026-10-15T10:42:19Z", error: null, iterations: 0 } };
+    answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: draftWith("transform") }));
+    answers.set(`GET ${SIM}`, () => json([simRequest("started")]));
+    answers.set(`GET ${SIM}/r1`, () => json(ended));
+    answers.set(`GET ${SIM}/r1/steps`, () => json(summary));
+    await show();
+    await screen.findByRole("button", { name: "Hide the result" }); // the simulation's read, ended
+    await userEvent.click(screen.getByRole("button", { name: "Simulation" }));
+    const panel = await screen.findByRole("complementary", { name: "Simulation" });
+    const listed = within(panel).getByRole("region", { name: "Steps, in run order" });
+    expect(within(listed).getByText("evaluated")).toBeTruthy();
+    await userEvent.click(within(listed).getByRole("button", { name: "Go to transform" }));
+    await vi.waitFor(() => expect(document.activeElement?.getAttribute("data-item")).toBe("node:id-transform"));
+  });
+
   it("asks Publish's own question about edits not applied, worded for simulating", async () => {
     await unappliedDuration();
     await userEvent.click(screen.getByRole("button", { name: "◌ Simulate workflow" }));

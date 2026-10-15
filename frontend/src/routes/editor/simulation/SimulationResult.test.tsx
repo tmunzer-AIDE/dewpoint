@@ -1,0 +1,133 @@
+// SPDX-License-Identifier: Apache-2.0
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { SimulationRequest, SimulationState, StepSummary } from "../../../lib/simulations";
+import type { GraphDoc } from "../../../lib/workflows";
+import { SimulationResult } from "./SimulationResult";
+import type { SimulationSession } from "./useSimulation";
+
+const request = (over: Partial<SimulationRequest> = {}): SimulationRequest => ({
+  id: "r1", workflow_id: "w1", draft_snapshot_id: "s1", draft_revision: 14, target_step_id: null, mode: "simulate",
+  source: "manual", status: "started", reason: null, queued_at: "2026-10-15T10:42:05Z", ended_at: null, admission_checks: [], ...over,
+});  // prettier-ignore
+const step = (key: string, over: Partial<StepSummary> = {}): StepSummary => ({
+  step_id: `id-${key}`, key, type: "testkit.echo@1", origin: "fixture_not_sent", instances: 1, statuses: { succeeded: 1 }, ports: {},
+  final: { attempt: 1, status: "succeeded" }, ...over,
+});  // prettier-ignore
+const node = (key: string, type: string) => ({ id: `id-${key}`, key, type, config: {} });
+const DOC = {
+  graph_format: 1,
+  nodes: [node("get_site", "testkit.echo@1"), node("each_ap", "flow.loop@1"), node("notify", "slack.post@1"), node("wait_10m", "flow.delay@1")],
+  edges: [{ from: { node: "id-each_ap", port: "body" }, to: { node: "id-notify" } }, { from: { node: "id-each_ap", port: "done" }, to: { node: "id-wait_10m" } }],
+} as unknown as GraphDoc;  // prettier-ignore
+const STEPS = [
+  step("get_site"),
+  step("each_ap", { type: "flow.loop@1", origin: "evaluated", final: { attempt: 1, status: "succeeded", output: { items: [], failures: [], count: 2 } } }),
+  step("notify", { instances: 2, statuses: { succeeded: 1, skipped: 1 }, final: null }),
+  step("wait_10m", { type: "flow.delay@1", origin: "evaluated_not_waited" }),
+  step("gone", { origin: "didnt_run", instances: 0, statuses: {}, final: null }),
+];
+
+function session(over: { phase?: SimulationSession["phase"]; state?: Partial<SimulationState>; request?: Partial<SimulationRequest>; steps?: StepSummary[] } = {}): SimulationSession {
+  const state: SimulationState = { request: request(over.request), run: null, cancel_requested: false, read_back: "kept", input: { site: "HQ Paris", floor: 3, api_token: "[redacted]" }, seeds: null, ...over.state };
+  return {
+    local: { kind: "admitted", frozen: null, request: state.request, latest: false }, state, steps: { given: "input", steps: over.steps ?? STEPS },
+    phase: over.phase ?? "succeeded", busy: false, readFailed: false, asOf: null, start: vi.fn(), checkAgain: vi.fn(), cancel: vi.fn(), readAgain: vi.fn(),
+  };  // prettier-ignore
+}
+
+const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+beforeEach(() => {
+  vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+    const url = new URL((input as Request).url);
+    if (url.pathname.endsWith("/steps/id-notify/instances")) {
+      return Promise.resolve(json({ total: 2, items: [
+        { step_id: "id-notify", key: "notify", iteration_key: "each_ap:0", attempt: 1, status: "succeeded" },
+        { step_id: "id-notify", key: "notify", iteration_key: "each_ap:1", attempt: 1, status: "skipped" },
+      ] }));  // prettier-ignore
+    }
+    return Promise.resolve(json({ error: "not_found" }, 404));
+  });
+});
+afterEach(() => vi.restoreAllMocks());
+
+function show(s: SimulationSession) {
+  const onGoTo = vi.fn();
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={qc}>
+      <SimulationResult tenantId="t1" workflowId="w1" session={s} doc={DOC} attemptsOf={() => 3} onGoTo={onGoTo} />
+    </QueryClientProvider>,
+  );
+  return { onGoTo };
+}
+const section = (name: string) => screen.getByRole("region", { name });
+
+describe("the Simulation panel's result (§7.5; the ResultPanel board)", () => {
+  it("says what a simulation proves, and that a flow timer wasn't waited", () => {
+    show(session());
+    expect(screen.getByText("Simulated.").parentElement?.textContent).toBe("Simulated. Nothing was sent. Results don't prove the live call will succeed.");
+    expect(screen.getByText("Flow delays and wait-until weren't waited; the simulation clock wasn't advanced.")).toBeTruthy();
+  });
+
+  it("lists the checks the server found at admission, each with Go to", async () => {
+    const check = { code: "connection.missing", message: "The connection “Slack ops” no longer exists.", node: "id-notify", field: null, fix: null, severity: "warning" as const };
+    const { onGoTo } = show(session({ request: { admission_checks: [check] } }));
+    const checks = section("Checks on the server");
+    expect(within(checks).getByText("Found when the simulation was admitted. They didn't stop it; a live run would meet them.")).toBeTruthy();
+    expect(within(checks).getByText("The connection “Slack ops” no longer exists.")).toBeTruthy();
+    await userEvent.click(within(checks).getByRole("button", { name: "Go to notify" }));
+    expect(onGoTo).toHaveBeenCalledWith("id-notify");
+  });
+
+  it("lists the steps in run order, with their tags and Go to", async () => {
+    const { onGoTo } = show(session());
+    const steps = section("Steps, in run order");
+    const rows = within(steps).getAllByRole("listitem");
+    expect(rows.map((r) => r.querySelector("[data-key]")?.textContent)).toEqual(["get_site", "each_ap", "notify", "wait_10m", "gone"]);
+    expect(within(rows[0]!).getByText("fixture · not sent")).toBeTruthy();
+    expect(within(rows[2]!).getByText("2 instances: 1 succeeded · 1 skipped")).toBeTruthy();
+    expect(within(rows[3]!).getByText("evaluated · not waited")).toBeTruthy();
+    expect(within(rows[4]!).getByText("didn't run")).toBeTruthy();
+    expect(within(rows[4]!).queryByRole("button", { name: /^Go to/ })).toBeNull(); // not in the draft any more
+    await userEvent.click(within(rows[0]!).getByRole("button", { name: "Go to get_site" }));
+    expect(onGoTo).toHaveBeenCalledWith("id-get_site");
+  });
+
+  it("opens a loop's iterations under it", async () => {
+    show(session());
+    const toggle = screen.getByRole("button", { name: "Iterations of each_ap" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    await userEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(await screen.findByRole("list", { name: "each_ap's iterations, 1 to 2 of 2" })).toBeTruthy();
+  });
+
+  it("while it runs, lists only the steps reached so far, and no banner", () => {
+    show(session({ phase: "running", steps: [step("get_site"), step("each_ap", { type: "flow.loop@1", origin: "evaluated", statuses: { running: 1 }, final: { attempt: 1, status: "running" } }), step("notify", { origin: "not_reached_yet", instances: 0, statuses: {}, final: null })] }));
+    const rows = within(section("Steps so far")).getAllByRole("listitem");
+    expect(rows.map((r) => r.querySelector("[data-key]")?.textContent)).toEqual(["get_site", "each_ap"]);
+    expect(screen.queryByText("Simulated.")).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Iterations of/ })).toBeNull();
+  });
+
+  it("shows the input used as the request stored it, sensitive values redacted", () => {
+    show(session());
+    const used = section("Input used");
+    expect(within(used).getByText("As this simulation's request stored it, sensitive values redacted.")).toBeTruthy();
+    const pairs = within(used).getAllByRole("term").map((t) => `${t.textContent}=${t.nextElementSibling?.textContent}`);
+    expect(pairs).toEqual(["site=HQ Paris", "floor=3", "api_token=redacted"]);
+  });
+
+  it("says when the input used isn't kept any more", () => {
+    show(session({ state: { read_back: "absent", input: null } }));
+    expect(within(section("Input used")).getByText("The input used isn't kept any more.")).toBeTruthy();
+  });
+
+  it("says when the input used can't be read back", () => {
+    show(session({ state: { read_back: "unreadable", input: null } }));
+    expect(within(section("Input used")).getByText("The input used couldn't be read back.")).toBeTruthy();
+  });
+});

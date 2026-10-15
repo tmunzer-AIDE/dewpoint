@@ -29,3 +29,10 @@ export function SimTags({ label, tags }: { label: string; tags: SimTag[] }) {
     </ul>
   );
 }
+
+/** The same tags in a line of text: the Simulation panel's steps (§7.5). */
+export function InlineTags({ tags }: { tags: SimTag[] }) {
+  return tags.map((t, i) => (
+    <span key={i} className={`text-meta leading-[18px] whitespace-nowrap ${LOOK[t.kind]}`}>{t.text}</span>
+  ));
+}

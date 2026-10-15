@@ -3,7 +3,7 @@
 // adds problems, Task 15 publishing and versions.
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useBlocker, useMatch, useRouter } from "@tanstack/react-router";
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { Button } from "../../components/Button";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { LoadError } from "../../components/LoadError";
@@ -21,7 +21,7 @@ import { begin, record, redo, undo, type History } from "../../lib/history";
 import { CARD, layout } from "../../lib/layout";
 import { guardLeaving } from "../../lib/leaving";
 import type { Path } from "../../lib/schemaForm";
-import { ENDED, freeze } from "../../lib/simulations";
+import { ENDED, freeze, type StepSummary } from "../../lib/simulations";
 import { useDocumentTitle } from "../../lib/title";
 import { schedulesQuery, startSummary, workflowBindingsQuery } from "../../lib/triggers";
 import {
@@ -47,6 +47,7 @@ import { SimulateDialog } from "./simulation/SimulateDialog";
 import { ResultBar } from "./simulation/ResultBar";
 import { tagsOf, type SimTag } from "./simulation/results";
 import { SimulationPanel } from "./simulation/SimulationPanel";
+import { SimulationResult } from "./simulation/SimulationResult";
 import { useSimulation } from "./simulation/useSimulation";
 import { type Problems } from "./StepCard";
 import { StepPicker, type PickMode } from "./StepPicker";
@@ -484,17 +485,18 @@ function Editor({
   const simulationId = simulation.state?.request.id ?? null;
   const [hiddenFor, setHiddenFor] = useState<string | null>(null);
   const resultShown = simulator && simulationId !== null && simulation.phase !== null && hiddenFor !== simulationId;
+  // An attempt is said "of" the step's own limit, else its type's.
+  const attemptsOf = useCallback(
+    (s: StepSummary) => findNode(doc, s.step_id)?.options?.max_attempts ?? typeMap.get(s.type)?.retry.max_attempts ?? null,
+    [doc, typeMap],
+  );
   const simulated = useMemo(() => {
     const tags = new Map<string, SimTag[]>();
     if (!resultShown) return tags;
     const ended = simulation.phase !== null && ENDED.has(simulation.phase);
-    for (const s of simulation.steps?.steps ?? []) {
-      const node = findNode(doc, s.step_id);
-      const maxAttempts = node?.options?.max_attempts ?? typeMap.get(s.type)?.retry.max_attempts ?? null;
-      tags.set(idKey(s.step_id), tagsOf(s, { maxAttempts, ended }));
-    }
+    for (const s of simulation.steps?.steps ?? []) tags.set(idKey(s.step_id), tagsOf(s, { maxAttempts: attemptsOf(s), ended }));
     return tags;
-  }, [resultShown, simulation.phase, simulation.steps, doc, typeMap]);
+  }, [resultShown, simulation.phase, simulation.steps, attemptsOf]);
   // When editing stops (a conflict, an exit, a publication), what only editing offers stops with it: an open dialog
   // closes, placing ends (a click on a read-only canvas places nothing) and says so. Focus held by what's gone (the
   // dialog, a "+", Auto layout, Add step, a panel's buttons) goes to what's drawn: a panel's heading when it was in
@@ -1472,7 +1474,12 @@ function Editor({
               setSide(null);
               land("simulate");
             }}
-          />
+          >
+            <SimulationResult
+              tenantId={tenantId} workflowId={workflow.id} session={simulation} doc={doc} attemptsOf={attemptsOf}
+              onGoTo={(id) => focus(item.node(id))}
+            />
+          </SimulationPanel>
         )}
         {side?.kind === "problems" && (
           <ProblemsPanel
