@@ -111,6 +111,8 @@ def request_body(r: RunRequest) -> dict[str, object]:
         "id": str(r.id),
         "workflow_id": str(r.workflow_id),
         "version_id": str(r.workflow_version_id) if r.workflow_version_id else None,
+        "draft_snapshot_id": str(r.draft_snapshot_id) if r.draft_snapshot_id else None,  # a draft simulation's (B8)
+        "target_step_id": str(r.target_step_id) if r.target_step_id else None,
         "mode": r.mode,
         "source": r.source,
         "status": r.status,

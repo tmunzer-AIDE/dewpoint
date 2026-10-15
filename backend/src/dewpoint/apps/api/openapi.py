@@ -72,6 +72,7 @@ GRAPH_PROPERTIES: tuple[tuple[str, str], ...] = (
     ("WorkflowDetailOut", "draft"),
     ("VersionDetailOut", "graph"),
     ("WorkflowDocument", "graph"),
+    ("DraftSnapshotOut", "graph"),
 )
 
 

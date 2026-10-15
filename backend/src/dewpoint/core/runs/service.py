@@ -376,6 +376,8 @@ class Listed:
     id: uuid.UUID
     workflow_id: uuid.UUID
     version_id: uuid.UUID | None
+    draft_snapshot_id: uuid.UUID | None  # a draft simulation's (B8), and the step it ran alone (S2)
+    target_step_id: uuid.UUID | None
     mode: str
     status: str
     queued_at: datetime
@@ -403,7 +405,8 @@ async def list_items(
     the retention cutoff `kept_after` is (§10.1): every run listed is a root, so its own end is its tree's."""
     runs = (
         select(
-            Run.id, Run.workflow_id, Run.workflow_version_id.label("version_id"), Run.mode, Run.status, Run.queued_at,
+            Run.id, Run.workflow_id, Run.workflow_version_id.label("version_id"), Run.draft_snapshot_id,
+            Run.target_step_id, Run.mode, Run.status, Run.queued_at,
             Run.started_at, Run.ended_at, Run.error_code, Run.error_message, Run.iterations, Run.kind,
             RunRequest.status.label("request_status"), RunRequest.source, RunRequest.reason,
         )
@@ -412,7 +415,8 @@ async def list_items(
                kept(Run.ended_at, kept_after))
     )  # fmt: skip
     requests = select(
-        RunRequest.id, RunRequest.workflow_id, RunRequest.workflow_version_id.label("version_id"), RunRequest.mode,
+        RunRequest.id, RunRequest.workflow_id, RunRequest.workflow_version_id.label("version_id"),
+        RunRequest.draft_snapshot_id, RunRequest.target_step_id, RunRequest.mode,
         RunRequest.status, RunRequest.queued_at, null().label("started_at"), RunRequest.ended_at,
         null().label("error_code"), null().label("error_message"), literal(0).label("iterations"),
         literal("run").label("kind"), RunRequest.status.label("request_status"), RunRequest.source, RunRequest.reason,

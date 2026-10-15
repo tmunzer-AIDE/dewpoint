@@ -9,10 +9,11 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps import admission
-from dewpoint.apps.api.responses import SimulationOut
+from dewpoint.apps.api.responses import DraftSnapshotOut, SimulationOut
 from dewpoint.apps.api.routes.run_requests import (
     INVALID,
     UNAVAILABLE,
@@ -28,6 +29,7 @@ from dewpoint.core.config import Settings
 from dewpoint.core.crypto.keys import KeySource
 from dewpoint.core.http import TenantContext, get_db, get_settings_dep, require
 from dewpoint.core.models.requests import RunRequest
+from dewpoint.core.models.workflows import DraftSnapshot
 from dewpoint.core.workflows.service import DraftConflictError
 
 router = APIRouter(prefix="/api/v1", tags=["simulations"])
@@ -107,3 +109,35 @@ async def simulate(
     if not admitted.new:
         await not_past_cutoff(db, ctx, admitted.request)
     return simulation_body(admitted.request)
+
+
+@router.get("/t/{tenant_id}/workflows/{workflow_id}/draft/snapshots/{snapshot_id}", response_model=DraftSnapshotOut)
+async def snapshot(
+    workflow_id: uuid.UUID,
+    snapshot_id: uuid.UUID,
+    ctx: TenantContext = Depends(require(P.WORKFLOW_VIEW)),
+    db: AsyncSession = Depends(get_db, scope="function"),
+) -> dict[str, object]:
+    """A draft run's snapshot (B8; the simulation design §6.5), as B4a's read shows a version."""
+    found = await db.execute(
+        select(DraftSnapshot).where(DraftSnapshot.id == snapshot_id, DraftSnapshot.workflow_id == workflow_id)
+    )
+    s = found.scalar_one_or_none()
+    if s is None:
+        raise HTTPException(404, detail={"error": "not_found"})
+    return {
+        "id": str(s.id),
+        "workflow_id": str(s.workflow_id),
+        "draft_revision": s.draft_revision,
+        "created_at": s.created_at.isoformat(),
+        "graph_hash": s.graph_hash,
+        "version_hash": s.version_hash,
+        "cel_profile": s.cel_profile,
+        "engine_abi": s.engine_abi,
+        "node_refs": list(s.node_refs),
+        "graph": s.graph,
+        "expressions": [
+            {"node": e.get("node"), "field": e["field"], "mode": e["mode"], "reason": e.get("reason")}
+            for e in s.expressions
+        ],
+    }

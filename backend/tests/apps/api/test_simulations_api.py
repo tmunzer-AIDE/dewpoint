@@ -11,7 +11,7 @@ import pytest
 
 from tests.apps.api.test_run_requests_api import as_role, keyed_app
 from tests.apps.test_admission import current
-from tests.apps.test_admission_drafts import LOOP_GRAPH, STEPS_GRAPH, drafted
+from tests.apps.test_admission_drafts import LOOP_GRAPH, STEPS_GRAPH, drafted, simulate
 from tests.apps.test_workflow_ops import create, save
 from tests.support.graphs import G, nid
 
@@ -127,3 +127,54 @@ async def test_re_running_a_draft_run_or_a_published_child_of_one_is_refused(
         answer = await client.post(f"/api/v1/t/{ctx.tenant_id}/runs/{run_id}/rerun", json={},
                                    headers={"Idempotency-Key": f"r{n}"})  # fmt: skip
         assert (answer.status_code, answer.json()["error"]) == (409, "draft_run")
+
+
+async def test_the_runs_api_shows_a_draft_runs_snapshot_target_and_each_steps_effect(
+    keyed_app, ready, owner_sessionmaker, api_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    """Spec §6.5: a draft run, queued or started, names its snapshot and its target, and no version (D-b3: readable
+    with `run.view`); a step shows what it did besides its output (4d-1a's `effect_preview`)."""
+    from sqlalchemy import text
+
+    from tests.apps.dispatcher.support import begin, workers
+
+    ctx, wf = ready
+    request = (await simulate(api_sessionmaker, ctx, wf, api_settings, target=nid("b"),
+                              values={"/steps/a/output/value": 5})).request  # fmt: skip
+    viewer = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "viewer")
+    shown = {k: v for k, v in (await viewer.get(f"/api/v1/t/{ctx.tenant_id}/runs")).json()[0].items()
+             if k in ("id", "version_id", "draft_snapshot_id", "target_step_id")}  # fmt: skip
+    assert shown == {"id": str(request.id), "version_id": None, "draft_snapshot_id": str(request.draft_snapshot_id),
+                     "target_step_id": str(nid("b"))}  # fmt: skip
+    await workers(owner_sessionmaker)
+    await begin(dispatch_sessionmaker, request, api_settings)
+    async with owner_sessionmaker() as s, s.begin():  # as the worker's projection leaves it
+        await s.execute(text("update run_requests set status = 'started' where id = :i"), {"i": request.id})
+        await s.execute(text("update runs set started_at = now() where id = :i"), {"i": request.id})
+        await s.execute(text("insert into run_steps (tenant_id, run_id, step_id, iteration_key, attempt, node_key, "
+                             "status, effect_preview) values (:t, :r, :s, '', 1, 'b', 'succeeded', :e)"),
+                        {"t": ctx.tenant_id, "r": request.id, "s": nid("b"), "e": '{"port": "true"}'})  # fmt: skip
+    run = (await viewer.get(f"/api/v1/t/{ctx.tenant_id}/runs/{request.id}")).json()
+    assert (run["version_id"], run["draft_snapshot_id"], run["target_step_id"]) == (
+        None, str(request.draft_snapshot_id), str(nid("b")),
+    )  # fmt: skip
+    assert [(step["key"], step["effect"]) for step in run["steps"]] == [("b", {"port": "true"})]
+
+
+async def test_a_draft_snapshot_is_read_with_its_graph(
+    keyed_app, ready, owner_sessionmaker, api_sessionmaker, api_settings
+) -> None:
+    """Spec §6.5: B4a's version read, for a draft run's snapshot (`workflow.view`)."""
+    ctx, wf = ready
+    request = (await simulate(api_sessionmaker, ctx, wf, api_settings)).request
+    viewer = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "viewer")
+    base = f"/api/v1/t/{ctx.tenant_id}/workflows"
+    answer = await viewer.get(f"{base}/{wf}/draft/snapshots/{request.draft_snapshot_id}")
+    assert answer.status_code == 200, answer.text
+    body = answer.json()
+    assert (body["id"], body["draft_revision"]) == (str(request.draft_snapshot_id), 1)
+    assert [n["key"] for n in body["graph"]["nodes"]] == ["a", "b"] and body["expressions"] == []
+    other = await create(api_sessionmaker, ctx, STEPS_GRAPH, name="other")
+    for path in (f"{base}/{other}/draft/snapshots/{request.draft_snapshot_id}",
+                 f"{base}/{wf}/draft/snapshots/{uuid.uuid4()}"):  # fmt: skip
+        assert (await viewer.get(path)).status_code == 404

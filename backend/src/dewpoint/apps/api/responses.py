@@ -626,3 +626,20 @@ class SimulationOut(_Answer):
     queued_at: str | None
     ended_at: str | None
     admission_checks: list[DiagnosticOut]
+
+
+class DraftSnapshotOut(_Answer):
+    """A draft simulation's snapshot whole (B8; the simulation design §6.5): what B4a's version read is for a version,
+    its graph verbatim as frozen (documented as a Graph), and how each of its expressions runs."""
+
+    id: str
+    workflow_id: str
+    draft_revision: int
+    created_at: str
+    graph_hash: str
+    version_hash: str
+    cel_profile: str
+    engine_abi: int
+    node_refs: list[str]
+    graph: dict[str, Any]
+    expressions: list[ExpressionOut]
