@@ -9,6 +9,7 @@ supplied (a map's key can be a secret, and a sub-flow's refusal is an activity r
 handle marker is refused: data from outside never crosses into a run as a handle (§3.2)."""
 
 import asyncio
+import math
 import uuid
 from collections.abc import Mapping
 from typing import Any
@@ -31,6 +32,7 @@ RESERVED_INPUT = "The run's input holds `rows` or `row_count`, which only a CSV 
 _REASONS = 5  # an input that breaks more rules is told about the first ones
 TOO_DEEP = f"The run's input nests deeper than {MAX_DEPTH} levels."
 TOO_DEEP_TO_CHECK = "The run's input is nested too deeply to check against the workflow's input schema."
+NOT_FINITE = "The run's input holds a number that isn't finite: NaN and infinity aren't valid JSON."
 
 
 def nests_too_deep(value: Any, *, handles: bool = False) -> bool:
@@ -53,6 +55,23 @@ def nests_too_deep(value: Any, *, handles: bool = False) -> bool:
         if depth > MAX_DEPTH:
             return True
         stack.extend((child, depth + 1) for child in children)
+    return False
+
+
+def holds_non_finite(value: Any) -> bool:
+    """Whether `value` holds NaN or an infinity, which Python's JSON parser, and so a request's body, accepts (`NaN`,
+    `Infinity`, or a number past a float's range) and JSON can't hold: the idempotency digest's canonical JSON, the
+    claims and Postgres JSONB refuse it. Iterative, like `nests_too_deep`."""
+    stack: list[Any] = [value]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, float):
+            if not math.isfinite(current):
+                return True
+        elif isinstance(current, Mapping):
+            stack.extend(current.values())
+        elif isinstance(current, list | tuple):
+            stack.extend(current)
     return False
 
 

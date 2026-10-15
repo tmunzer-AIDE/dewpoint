@@ -272,7 +272,7 @@ async def rerun(
         )  # fmt: skip
     except admission.IdempotencyConflictError:
         raise HTTPException(409, detail={"error": "idempotency_conflict"}) from None
-    except admission.AdmissionRefusedError as e:  # a new input past the input limit (issue #88)
+    except admission.AdmissionRefusedError as e:  # a new input past the input limit (issue #88), or not finite
         raise HTTPException(422, detail={"error": e.reason, "messages": e.messages}) from None
     except Exception as e:
         raise key_unusable(e) from None

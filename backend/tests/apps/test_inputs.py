@@ -3,12 +3,22 @@
 the rule, never what's there. A place the data supplied, a map's key, shows as `*`: the key can be a secret."""
 
 import json
+import math
 import threading
 from typing import Any
 
 import pytest
 
-from dewpoint.apps.inputs import TOO_DEEP, TOO_DEEP_TO_CHECK, InputRefusedError, checked, nests_too_deep, reasons
+from dewpoint.apps.inputs import (
+    NOT_FINITE,
+    TOO_DEEP,
+    TOO_DEEP_TO_CHECK,
+    InputRefusedError,
+    checked,
+    holds_non_finite,
+    nests_too_deep,
+    reasons,
+)
 from dewpoint.core.ingress.parsing import MalformedError, parse
 from dewpoint.engine.graph.model import MAX_DEPTH
 
@@ -151,3 +161,28 @@ def test_at_a_crossing_a_handle_is_a_leaf() -> None:
         value = {"n": value}
     assert nests_too_deep(value) and not nests_too_deep(value, handles=True)
     assert nests_too_deep({"n": value}, handles=True)  # 65 levels without the handle
+
+
+@pytest.mark.parametrize("number", [math.nan, math.inf, -math.inf])
+def test_nan_and_the_infinities_are_found_wherever_they_are(number: float) -> None:
+    """Python's JSON parser, and so a request's body, accepts NaN, the infinities and a number past a float's range,
+    which the idempotency digest, the claims and Postgres JSONB can't hold."""
+    assert holds_non_finite(number)
+    assert holds_non_finite({"a": [1, {"b": number}]})
+    deep: Any = number
+    for _ in range(100_000):  # any depth, without error
+        deep = {"n": [deep]}
+    assert holds_non_finite(deep)
+
+
+def test_what_pythons_json_parser_reads_as_not_finite_is_found() -> None:
+    for text in ("NaN", "Infinity", "-Infinity", "1e400", "-1e400"):
+        assert holds_non_finite(json.loads(f'{{"a": [{text}]}}')), text
+
+
+def test_finite_numbers_and_other_values_hold_none() -> None:
+    """An integer past a float's range is finite, and JSON holds it; a string naming NaN is a string."""
+    value = {"NaN": [0, -0.0, 1.5, 1e308, -(10**400), True, None, "NaN", "Infinity"], "inf": {}}
+    assert not holds_non_finite(value)
+    assert not holds_non_finite(objects(100_000))
+    assert NOT_FINITE == "The run's input holds a number that isn't finite: NaN and infinity aren't valid JSON."
