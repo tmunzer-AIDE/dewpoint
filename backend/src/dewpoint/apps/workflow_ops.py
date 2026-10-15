@@ -373,57 +373,120 @@ async def publish(
     if errors:
         return Published(None, errors, warnings)
     version_id = uuid.uuid4()
-    graph_settings = checked.graph.settings
-    authored = graph_hash(checked.graph)
     try:
         cap, depth = await _pinned(s, checked)
     except BoundError as e:  # engine 2b spec §5.3: the continued-input bound can't be established for it
         return Published(None, [Diagnostic(code="version.unbounded", message=str(e))], warnings)
-    fh = checked.result.failure_handler_version_id
-    version = await service.insert_version(
-        s,
-        ctx,
-        wf,
-        service.NewVersion(
-            id=version_id,
-            graph=graph_json(checked.graph),
-            node_refs=list(checked.result.node_refs),
-            engine_abi=ENGINE_ABI,
-            cel_profile=CURRENT_CEL_PROFILE,
-            subflow_version_ids=dict(checked.result.subflow_pins),
-            failure_handler_version_id=checked.result.failure_handler_version_id,
-            input_schema=dict(graph_settings.input_schema),
-            output_schema=dict(checked.result.output_schema),
-            vars_schema=dict(graph_settings.vars_schema),
-            closure_version_ids=[version_id, *sorted({i for v in pins for i in v.closure_version_ids}, key=str)],
-            closure_workflow_ids=[wf.id, *sorted({i for v in pins for i in v.closure_workflow_ids}, key=str)],
-            closure_node_refs=closure_node_refs,
-            closure_cel_profiles=closure_cel_profiles,
-            closure_depth=_depth(checked.pins),
-            expressions=[r.to_json() for r in checked.result.expressions],
-            tainted_sites=[{"node": node, "field": fld} for node, fld in checked.result.tainted_sites],
-            output_taint=dict(checked.result.output_taint),
-            open_scopes_cap=cap,
-            loop_depth=depth,
-            declassified=[
-                {"node": node, "field": fld, "reveals": reveals} for node, fld, reveals in checked.result.declassified
-            ],
-            connection_ids=sorted(
-                {named for _, _, named, _ in checked.result.connections}
-                | {named for _, _, _, named, _ in checked.result.pickers},
-                key=str,
-            ),
+    version = await service.insert_version(s, ctx, wf, frozen(checked, wf.id, cap, depth, version_id=version_id))
+    return Published(version, [], warnings)
+
+
+def frozen(
+    checked: Checked, workflow_id: uuid.UUID, cap: int, depth: int, *, version_id: uuid.UUID | None
+) -> service.NewVersion:
+    """What a version carries, from a checked draft: publish's, and a draft snapshot's (B8; the simulation design
+    §6.1). A version's closure starts with its own id; a snapshot isn't a version, nothing pins it, so its closure is
+    its pins' alone (`version_id` None)."""
+    if checked.graph is None or checked.result is None:
+        raise ValueError("a draft is frozen only once checked")
+    pins = list(checked.pins.values())
+    result, graph_settings = checked.result, checked.graph.settings
+    authored = graph_hash(checked.graph)
+    fh = result.failure_handler_version_id
+    return service.NewVersion(
+        id=version_id or uuid.uuid4(),
+        graph=graph_json(checked.graph),
+        node_refs=list(result.node_refs),
+        engine_abi=ENGINE_ABI,
+        cel_profile=CURRENT_CEL_PROFILE,
+        subflow_version_ids=dict(result.subflow_pins),
+        failure_handler_version_id=result.failure_handler_version_id,
+        input_schema=dict(graph_settings.input_schema),
+        output_schema=dict(result.output_schema),
+        vars_schema=dict(graph_settings.vars_schema),
+        closure_version_ids=[
+            *([version_id] if version_id else []),
+            *sorted({i for v in pins for i in v.closure_version_ids}, key=str),
+        ],
+        closure_workflow_ids=[workflow_id, *sorted({i for v in pins for i in v.closure_workflow_ids}, key=str)],
+        closure_node_refs=sorted({*result.node_refs, *(r for v in pins for r in v.closure_node_refs)}),
+        closure_cel_profiles=sorted({CURRENT_CEL_PROFILE, *(p for v in pins for p in v.closure_cel_profiles)}),
+        closure_depth=_depth(checked.pins),
+        expressions=[r.to_json() for r in result.expressions],
+        tainted_sites=[{"node": node, "field": fld} for node, fld in result.tainted_sites],
+        output_taint=dict(result.output_taint),
+        open_scopes_cap=cap,
+        loop_depth=depth,
+        declassified=[{"node": node, "field": fld, "reveals": reveals} for node, fld, reveals in result.declassified],
+        connection_ids=sorted(
+            {named for _, _, named, _ in result.connections} | {named for _, _, _, named, _ in result.pickers},
+            key=str,
+        ),
+        graph_hash=authored,
+        version_hash=version_hash(
             graph_hash=authored,
-            version_hash=version_hash(
-                graph_hash=authored,
-                subflow_pins=checked.result.subflow_pins,
-                failure_handler_version_id=str(fh) if fh else None,
-                cel_profile=CURRENT_CEL_PROFILE,
-                engine_abi=ENGINE_ABI,
-            ),
+            subflow_pins=result.subflow_pins,
+            failure_handler_version_id=str(fh) if fh else None,
+            cel_profile=CURRENT_CEL_PROFILE,
+            engine_abi=ENGINE_ABI,
         ),
     )
-    return Published(version, [], warnings)
+
+
+_DECLASSIFY_SIMULATING = Diagnostic(
+    code="declassify.forbidden",
+    field="/settings/declassify",
+    message="Simulating a draft that declassifies sensitive data needs the workflow.declassify permission "
+    "(tenant admins and owners).",
+)
+REPORTED = ("lifecycle.deprecated",)  # what the validator refuses for publish and a simulation only reports
+
+
+@dataclass(frozen=True)
+class Simulatable:
+    """A draft as a simulation freezes it (B8; the simulation design §6.3, steps 4 and 5): `new` unless something
+    blocks it; what it reports without refusing (connections, pickers, deprecated types: a simulation opens no
+    connection and runs what's installed today); the validator's warnings."""
+
+    new: service.NewVersion | None
+    blocking: list[Diagnostic]
+    reported: list[Diagnostic]
+    warnings: list[Diagnostic]
+
+
+async def simulatable(s: AsyncSession, ctx: TenantContext, wf: Workflow, checked: Checked) -> Simulatable:
+    """Blocking: any error but what's reported, `declassify.forbidden` (in a simulation's words), the sub-flows' cycle,
+    depth and engine ABI, retired types in the closure, `version.unbounded`. The current build is admission's."""
+    warnings = [d for d in checked.diagnostics if d.severity == "warning"]
+    reported = [d for d in checked.diagnostics if d.severity == "error" and d.code in REPORTED]
+    errors = [d for d in checked.diagnostics if d.severity == "error" and d.code not in REPORTED]
+    if checked.graph is None or checked.result is None or errors:
+        return Simulatable(None, errors, reported, warnings)
+    if checked.graph.settings.declassify and P.WORKFLOW_DECLASSIFY not in ROLE_PERMISSIONS[ctx.role]:
+        return Simulatable(None, [_DECLASSIFY_SIMULATING], reported, warnings)
+    pins = list(checked.pins.values())
+    errors = _pin_errors(wf.id, checked.pins) or await _pin_abi_errors(s, pins)
+    if errors:
+        return Simulatable(None, errors, reported, warnings)
+    closure_node_refs = sorted({*checked.result.node_refs, *(r for v in pins for r in v.closure_node_refs)})
+    closure_cel_profiles = sorted({CURRENT_CEL_PROFILE, *(p for v in pins for p in v.closure_cel_profiles)})
+    entries = lifecycle.entries_for(closure_node_refs, closure_cel_profiles)
+    await lifecycle.lock_shared(s, entries)
+    lifecycled = _lifecycle_errors(await lifecycle.states(s, entries), refuse_deprecated=True)
+    errors = [d for d in lifecycled if d.code not in REPORTED]
+    reported += [d for d in lifecycled if d.code in REPORTED and d.code not in {r.code for r in reported}]
+    if errors:
+        return Simulatable(None, errors, reported, warnings)
+    reported += await _connection_errors(s, ctx.tenant_id, checked.result.connections)
+    reported += await _picker_errors(s, ctx.tenant_id, checked.result.pickers)
+    reported += await _closure_connection_errors(
+        s, ctx.tenant_id, sorted({i for v in pins for i in v.closure_version_ids}, key=str)
+    )
+    try:
+        cap, depth = await _pinned(s, checked)
+    except BoundError as e:
+        return Simulatable(None, [Diagnostic(code="version.unbounded", message=str(e))], reported, warnings)
+    return Simulatable(frozen(checked, wf.id, cap, depth, version_id=None), [], reported, warnings)
 
 
 async def _pinned(s: AsyncSession, checked: Checked) -> tuple[int, int]:
