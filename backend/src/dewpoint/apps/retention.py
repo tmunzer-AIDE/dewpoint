@@ -22,6 +22,7 @@ from temporalio.client import Client
 
 from dewpoint.apps.erasure.bound import reconcile_erased
 from dewpoint.apps.erasure.process import erase_pass
+from dewpoint.apps.stopping import pause
 from dewpoint.core.db import make_engine, make_sessionmaker
 from dewpoint.core.platform.service import EnvironmentMismatchError, EnvironmentNotRecordedError, check_namespace
 from dewpoint.core.retention.sweep import BATCH, Sweep
@@ -77,10 +78,15 @@ async def _unattended(sessionmaker: async_sessionmaker[AsyncSession]) -> None:
         log.error("erasures_unattended", erasures=int(waiting))
 
 
-async def run(settings: RetentionSettings, *, once: bool = False) -> Sweep | None:
-    """Sweeps every `retention_interval_s` and carries erasures on every `erasure_interval_s`, for as long as the
-    process lives; with `once`, one sweep, which it returns (None when another process is sweeping; its failure
+async def run(
+    settings: RetentionSettings, *, once: bool = False, stop_requested: asyncio.Event | None = None
+) -> Sweep | None:
+    """Sweeps every `retention_interval_s` and carries erasures on every `erasure_interval_s`, until a stop is
+    requested (`stop_requested`, set by SIGTERM or SIGINT: apps/stopping.py): the step in hand ends, and no other
+    begins (the owner's ruling T1); a sweep or a pass still running when Compose's grace ends is cut, and the next
+    process resumes it. With `once`, one sweep, which it returns (None when another process is sweeping; its failure
     raised)."""
+    requested = stop_requested if stop_requested is not None else asyncio.Event()
     engine = make_engine(settings.database_url)
     try:
         sessionmaker = make_sessionmaker(engine)
@@ -89,7 +95,7 @@ async def run(settings: RetentionSettings, *, once: bool = False) -> Sweep | Non
         client: Client | None = None
         every = max(1, round(settings.retention_interval_s / settings.erasure_interval_s))  # passes between sweeps
         tick = 0
-        while True:
+        while not requested.is_set():
             if settings.temporal_address and client is None:
                 try:
                     client = await _erasure_client(sessionmaker, settings)
@@ -97,24 +103,27 @@ async def run(settings: RetentionSettings, *, once: bool = False) -> Sweep | Non
                     log.error("erasure_temporal_unreachable", error=type(e).__name__)
             if client is not None and settings.temporal_bearer_token_file:  # a rotated token, without a restart
                 await refresh_token(client, settings.temporal_bearer_token_file)
-            if tick % every == 0:
+            if tick % every == 0 and not requested.is_set():
                 try:
                     await sweep_all(sessionmaker, batch=settings.retention_batch)
                 except Exception as e:  # the database unreachable, say: the next interval tries again
                     log.error("retention_sweep_failed", error=type(e).__name__)
-                if client is not None:
+                if client is not None and not requested.is_set():
                     try:
                         await reconcile_erased(sessionmaker, client)
                     except Exception as e:
                         log.error("erasure_reconciliation_failed", error=type(e).__name__)
-            try:
-                if client is not None:
-                    await erase_pass(sessionmaker, client)
-                elif not settings.temporal_address:
-                    await _unattended(sessionmaker)
-            except Exception as e:
-                log.error("erasure_pass_failed", error=type(e).__name__)
+            if not requested.is_set():
+                try:
+                    if client is not None:
+                        await erase_pass(sessionmaker, client)
+                    elif not settings.temporal_address:
+                        await _unattended(sessionmaker)
+                except Exception as e:
+                    log.error("erasure_pass_failed", error=type(e).__name__)
             tick += 1
-            await asyncio.sleep(settings.erasure_interval_s)
+            await pause(requested, settings.erasure_interval_s)
     finally:
         await engine.dispose()
+    log.info("retention_stopped")
+    return None

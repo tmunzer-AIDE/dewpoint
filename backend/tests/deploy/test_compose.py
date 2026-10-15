@@ -320,3 +320,82 @@ def test_the_ingress_keys_holders_take_a_previous_key_for_its_rollout(name: str)
     it; unset, it's empty."""
     env = environment(name)
     assert env["DEWPOINT_INGRESS_KEY_PREVIOUS_B64"] == "" and env["DEWPOINT_INGRESS_KEY_PREVIOUS_ID"] == ""
+
+
+def test_a_worker_that_exits_is_restarted() -> None:
+    """The owner's ruling C1 (graceful stop): a worker that ends on its own (exit 3 after a failed self-check, engine 2b
+    spec §2.7, or a crash) comes back, as its process manager should bring it back (docs/operations/deployment.md)."""
+    assert service("worker")["restart"] == "unless-stopped"
+
+
+def test_a_stopping_worker_outlasts_its_shutdown_grace() -> None:
+    """SIGTERM: running attempts get DEWPOINT_WORKER_SHUTDOWN_GRACE_S, plugin calls in flight their answer, before
+    Compose's SIGKILL."""
+    from dewpoint.apps.worker.plugin_calls import CALL_TIMEOUT_S
+    from dewpoint.core.config import Settings
+
+    grace, attempts = service("worker")["stop_grace_period"], Settings.model_fields["worker_shutdown_grace_s"].default
+    assert "DEWPOINT_WORKER_SHUTDOWN_GRACE_S" not in service("worker")["environment"]  # the default, then
+    assert grace.endswith("s") and int(grace[:-1]) > attempts + CALL_TIMEOUT_S
+
+
+def test_the_app_image_reports_a_native_crash_with_its_threads_stacks() -> None:
+    """The owner's ruling O1: a native crash (temporalio's bridge, say) prints each thread's stack, files, functions and
+    lines, never a value, instead of a bare 139."""
+    image = (COMPOSE.parents[1] / "docker" / "app.Dockerfile").read_text()
+    [env] = [line for line in image.splitlines() if line.startswith("ENV PATH=")]
+    assert "PYTHONFAULTHANDLER=1" in env.split()
+
+
+STOP_PROOF = "The worker, dispatcher and retention stop on SIGTERM (the owner's ruling V1)"
+
+
+def _stop_proof(tmp_path: Path, exits: dict[str, int], stopped: set[str]) -> subprocess.CompletedProcess[str]:
+    """The CI step's script, run as GitHub runs it (`bash -eo pipefail`) against a stand-in `docker`: each service's
+    exit code, and its log's stop line where `stopped` names it."""
+    run = {step.get("name", ""): step for step in yaml.safe_load(CI.read_text())["jobs"]["e2e"]["steps"]}[STOP_PROOF]
+    docker = tmp_path / "docker"
+    docker.write_text("\n".join([
+        "#!/bin/bash",
+        'case "$*" in',
+        "  'compose stop worker dispatcher retention') ;;",
+        "  'compose ps --all --quiet '*) echo \"id-${@: -1}\" ;;",
+        *(f"  'inspect --format {{{{.State.ExitCode}}}} id-{name}') echo {code} ;;" for name, code in exits.items()),
+        *(f"  'compose logs --no-color {name}') echo '{name}-1  | {{\"event\": \"{name}_stopped\", \"level\": "
+          f"\"info\"}}' ;;" for name in stopped),
+        "  'compose logs --no-color '*) echo 'some-1  | {\"event\": \"stop_requested\"}' ;;",
+        '  *) echo "unexpected: docker $*" >&2; exit 2 ;;',
+        "esac",
+    ]) + "\n")  # fmt: skip
+    docker.chmod(0o755)
+    env = {"PATH": f"{tmp_path}:/usr/bin:/bin"}
+    return subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", run["run"]], cwd=tmp_path, env=env,
+                          capture_output=True, text=True, timeout=30)  # fmt: skip
+
+
+SERVICES = ("worker", "dispatcher", "retention")
+
+
+@pytest.mark.parametrize(
+    ("exits", "stopped", "passes"),
+    [
+        ({name: 0 for name in SERVICES}, set(SERVICES), True),
+        ({**{name: 0 for name in SERVICES}, "worker": 137}, set(SERVICES), False),  # SIGKILLed at its grace
+        ({name: 0 for name in SERVICES}, {"worker", "retention"}, False),  # exit 0, but not its own stop
+    ],
+)
+def test_cis_stop_proof_passes_only_when_each_service_stopped_itself(
+    tmp_path: Path, exits: dict[str, int], stopped: set[str], passes: bool
+) -> None:
+    """Exit 0 is what only a stop of its own gives (Compose's SIGKILL is 137), with its `<service>_stopped` line: no
+    clock, so a slow runner can't fail it."""
+    proof = _stop_proof(tmp_path, exits, stopped)
+    assert (proof.returncode == 0) is passes, proof.stderr
+    assert "unexpected: docker" not in proof.stderr
+
+
+def test_cis_stop_proof_runs_once_everything_else_the_job_proves_is_done() -> None:
+    """It stops the services the earlier steps (the run, the schedule, the webhook, the end-to-end tests) need."""
+    steps = [step.get("name", step.get("run", "")) for step in yaml.safe_load(CI.read_text())["jobs"]["e2e"]["steps"]]
+    always = [i for i, step in enumerate(yaml.safe_load(CI.read_text())["jobs"]["e2e"]["steps"]) if "if" in step]
+    assert steps.index(STOP_PROOF) == min(always) - 1

@@ -3,15 +3,22 @@
 current build fails (Temporal briefly unavailable) dispatches nothing, and the next one dispatches again; any cycle
 that fails is logged by type and the loop goes on."""
 
+import asyncio
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from datetime import timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from sqlalchemy import text
 from temporalio.service import RPCStatusCode
+from temporalio.testing import WorkflowEnvironment
 
 from dewpoint.apps.dispatcher import dispatch, main
 from dewpoint.apps.worker.deployment import this_build
+from dewpoint.core.config import Settings
 from tests.apps.dispatcher.support import state
 from tests.apps.test_admission import KEYS
 from tests.apps.test_runs import FakeClient, FakeDeployment, rpc
@@ -222,3 +229,105 @@ async def test_the_leader_clears_the_entries_of_settled_items_each_cycle(
     async with owner_sessionmaker() as s:
         assert (await s.execute(text("select count(*) from work_failures where tenant_id = :t"),
                                 {"t": ctx["t"]})).scalar_one() == 0  # fmt: skip
+
+
+async def test_a_stop_request_ends_the_loop_once_the_cycle_in_hand_ends(monkeypatch) -> None:
+    """The owner's ruling D1 (graceful stop): SIGTERM lets the cycle in hand end, a start in flight getting its answer,
+    starts no other, and cuts the wait between cycles short."""
+    monkeypatch.setattr(main, "CYCLE_S", 3600.0)  # a wait the stop didn't cut short would outlast the test
+    requested, events = asyncio.Event(), []
+
+    async def cycle() -> None:
+        events.append("began")
+        requested.set()
+        await asyncio.sleep(0)
+        events.append("ended")
+
+    await asyncio.wait_for(main.serve(cycle, stop=requested), 10)
+    assert events == ["began", "ended"]
+
+
+class Parts:
+    """The dispatcher process's parts around its cycles: what each did, in order."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, requested: asyncio.Event) -> None:
+        self.events: list[str] = []
+        test = self
+
+        class Engine:
+            async def dispose(self) -> None:
+                test.events.append("disposed")
+
+        class Leader:
+            def __init__(self, engine: object) -> None: ...
+
+            async def close(self) -> None:
+                test.events.append("lead released")
+
+        @asynccontextmanager
+        async def admission_worker(*args: object) -> AsyncIterator[None]:
+            test.events.append("admitting")
+            try:
+                yield
+            finally:
+                test.events.append("admission stopped")
+
+        async def cycle(*args: object, **kwargs: object) -> None:
+            test.events.append("cycle")
+            requested.set()
+
+        async def recorded(*args: object) -> object:
+            return SimpleNamespace(environment="development")
+
+        async def connect(*args: object, **kwargs: object) -> object:
+            test.events.append("connected")
+            return SimpleNamespace()
+
+        monkeypatch.setattr(main, "make_engine", lambda url: Engine())
+        monkeypatch.setattr(main, "make_sessionmaker", lambda engine: None)
+        monkeypatch.setattr(main, "startup", recorded)
+        monkeypatch.setattr(main, "temporal_connect", connect)
+        monkeypatch.setattr(main.budget, "instrument", lambda client: None)
+        monkeypatch.setattr(main.start_call, "install", lambda client: None)
+        monkeypatch.setattr(main, "Leader", Leader)
+        monkeypatch.setattr(main, "admission_worker", admission_worker)
+        monkeypatch.setattr(main, "cycle", cycle)
+        monkeypatch.setattr(main, "CYCLE_S", 3600.0)
+
+
+def settings() -> Settings:
+    return Settings(database_url="postgresql+asyncpg://u:p@localhost/x", kek_b64="A" * 43 + "=",
+                    public_origin="https://dewpoint.test")  # fmt: skip
+
+
+async def test_a_stopped_dispatcher_stops_admitting_then_hands_over_the_lead(monkeypatch) -> None:
+    """The owner's rulings D1, D2: after its last cycle, the admission worker stops (a tick in hand gets its grace),
+    the leader's lock goes, for another dispatcher to take, and then the engine."""
+    requested = asyncio.Event()
+    parts = Parts(monkeypatch, requested)
+    await asyncio.wait_for(main.run(settings(), stop_requested=requested), 10)
+    assert parts.events == ["connected", "admitting", "cycle", "admission stopped", "lead released", "disposed"]
+
+
+async def test_a_stop_while_starting_abandons_the_start(monkeypatch) -> None:
+    """The owner's ruling W2, for the dispatcher: one still starting (its database not answering) stops at once."""
+    requested = asyncio.Event()
+    parts = Parts(monkeypatch, requested)
+
+    async def unanswered(*args: object) -> object:
+        requested.set()
+        await asyncio.Event().wait()
+        raise AssertionError("never answered")
+
+    monkeypatch.setattr(main, "startup", unanswered)
+    await asyncio.wait_for(main.run(settings(), stop_requested=requested), 10)
+    assert parts.events == ["disposed"]
+
+
+async def test_a_stopping_admission_worker_lets_a_tick_in_hand_finish() -> None:
+    """The owner's ruling D2: a tick being admitted when the dispatcher stops gets 5 seconds, inside Compose's 15 (the
+    cycle in hand ends first): admitted, rather than cancelled and retried. (A server of its own: the worker only is
+    made, never run.)"""
+    async with await WorkflowEnvironment.start_time_skipping() as env:
+        worker = main.admission_worker(env.client, None, KEYS)  # type: ignore[arg-type]
+        assert worker.config()["graceful_shutdown_timeout"] == timedelta(seconds=5)

@@ -20,7 +20,8 @@ RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin dewpoint
 RUN mkdir /anchors && chown 10001:10001 /anchors
 WORKDIR /app
 COPY --from=build --chown=10001:10001 /app /app
-ENV PATH="/app/.venv/bin:$PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+# A native crash prints each thread's stack (files, functions and lines, never a value) instead of a bare 139
+ENV PATH="/app/.venv/bin:$PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1
 USER 10001
 EXPOSE 8000
 # --forwarded-allow-ips "*" is acceptable ONLY because `api` is not published and is reachable solely through `web`

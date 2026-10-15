@@ -4,6 +4,7 @@ import os
 import subprocess
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
+from typing import NoReturn
 
 import httpx
 import pytest
@@ -158,6 +159,18 @@ def _pass_budgets(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     yield
     for remembered in (budget._visits, budget._limited, budget._ended):
         remembered.clear()
+
+
+@pytest.fixture(autouse=True)
+def _process_stays(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A command that leaves (`stopping.leave`, os._exit in production) ends a test with SystemExit and its code, which
+    the CLI runner reports, never the pytest worker's process."""
+    from dewpoint.apps import stopping
+
+    def leave(code: int) -> NoReturn:
+        raise SystemExit(code)
+
+    monkeypatch.setattr(stopping, "_exit", leave)
 
 
 @pytest.fixture(autouse=True)

@@ -221,6 +221,19 @@ jobs:
         with: { node-version: 22, cache: pnpm, cache-dependency-path: frontend/pnpm-lock.yaml }
       - working-directory: frontend
         run: pnpm install --frozen-lockfile && pnpm exec playwright install --with-deps chromium && pnpm e2e
+      - name: The worker, dispatcher and retention stop on SIGTERM (the owner's ruling V1)
+        working-directory: deploy/compose
+        timeout-minutes: 3
+        run: |
+          # Compose's stop: SIGTERM, then SIGKILL once a service's stop_grace_period is out. Exit 0 is a stop of its
+          # own, inside its grace (SIGKILL's is 137), and its `<service>_stopped` line says it ran to its end. No clock:
+          # a slow runner can't fail it. Each check is a command of its own (`bash -e` and a list's last `&&`).
+          docker compose stop worker dispatcher retention
+          for service in worker dispatcher retention; do
+            test "$(docker inspect --format '{{.State.ExitCode}}' "$(docker compose ps --all --quiet "$service")")" = 0
+            docker compose logs --no-color "$service" > "$service.log"
+            grep -q "\"event\": \"${service}_stopped\"" "$service.log"
+          done
       - if: failure()
         working-directory: deploy/compose
         run: docker compose logs --no-color > compose.log

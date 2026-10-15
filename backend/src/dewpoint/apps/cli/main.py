@@ -21,7 +21,7 @@ from temporalio.api.enums.v1 import ArchivalState
 from temporalio.api.workflowservice.v1 import DescribeNamespaceRequest
 from temporalio.client import Client
 
-from dewpoint.apps import admission, dev_run, tick_contract
+from dewpoint.apps import admission, dev_run, stopping, tick_contract
 from dewpoint.apps.cli import recovery as recovery_commands
 from dewpoint.apps.cli.recovery import recovery_cli
 from dewpoint.apps.codec import KeyringKeys, data_converter
@@ -984,39 +984,55 @@ def lifecycle_retire(
 
 @app.command("dispatcher")
 def dispatcher() -> None:
-    """Run the dispatcher: it starts every admitted run within its tenant's slots (engine 2b spec §7.3)."""
+    """Run the dispatcher: it starts every admitted run within its tenant's slots (engine 2b spec §7.3). SIGTERM or
+    SIGINT stops it once the cycle in hand ends: exit 0 (apps/stopping.py)."""
     from dewpoint.apps.dispatcher.main import run as run_dispatcher
 
+    settings, code = get_settings(), 0
     try:
-        asyncio.run(run_dispatcher(get_settings()))
+        asyncio.run(stopping.stoppable(lambda requested: run_dispatcher(settings, stop_requested=requested)))
     except (EnvironmentNotRecordedError, EnvironmentMismatchError) as e:
         typer.echo(f"ERROR: {e}")
-        raise typer.Exit(2) from None
+        code = 2
+    stopping.leave(code)  # past interpreter finalization, where temporalio's bridge can crash
 
 
 @app.command("worker")
 def worker() -> None:
-    """Run the Temporal worker: RunGraph and its activities, and cel.evaluate when DEWPOINT_CEL_SOCKET is set."""
+    """Run the Temporal worker: RunGraph and its activities, and cel.evaluate when DEWPOINT_CEL_SOCKET is set. SIGTERM
+    or SIGINT stops it once running attempts end, within DEWPOINT_WORKER_SHUTDOWN_GRACE_S: exit 0 (apps/stopping.py)."""
+    settings, code = get_settings(), 0
     try:
-        asyncio.run(run_worker(get_settings()))
+        asyncio.run(stopping.stoppable(lambda requested: run_worker(settings, stop_requested=requested)))
     except (EnvironmentNotRecordedError, EnvironmentMismatchError) as e:
         typer.echo(f"ERROR: {e}")
-        raise typer.Exit(2) from None
+        code = 2
     except WorkerUnhealthyError as e:  # its orchestrator restarts it (engine 2b spec §2.7)
         typer.echo(f"ERROR: {e}")
-        raise typer.Exit(3) from None
+        code = 3
+    stopping.leave(code)  # past interpreter finalization, where temporalio's bridge can crash
 
 
 @app.command("retention")
 def retention(once: bool = typer.Option(False, "--once", help="One sweep, then exit 0 if it succeeded")) -> None:
     """Run the retention job (engine 2b spec §10.3): every tenant's data past its retention deleted, every interval
-    (DEWPOINT_RETENTION_INTERVAL_S), as the retention login. It holds no key."""
+    (DEWPOINT_RETENTION_INTERVAL_S), as the retention login. It holds no key. SIGTERM or SIGINT stops the job once the
+    step in hand ends: exit 0 (apps/stopping.py)."""
     from dewpoint.apps.retention import RetentionSettings
     from dewpoint.apps.retention import run as run_retention
 
+    if not once:  # the job retries what fails: only what it can't (its settings, say) ends it, exit 1
+        code = 0
+        try:
+            asyncio.run(stopping.stoppable(lambda requested: run_retention(RetentionSettings(),
+                                                                           stop_requested=requested)))  # fmt: skip
+        except Exception as e:
+            typer.echo(f"retention sweep failed: {type(e).__name__}")
+            code = 1
+        stopping.leave(code)  # past interpreter finalization, where temporalio's bridge can crash
     try:
-        done = asyncio.run(run_retention(RetentionSettings(), once=once))
-    except Exception as e:  # only --once returns: the job itself retries
+        done = asyncio.run(run_retention(RetentionSettings(), once=True))
+    except Exception as e:  # its failure raised
         typer.echo(f"retention sweep failed: {type(e).__name__}")
         raise typer.Exit(1) from None
     if done is None:

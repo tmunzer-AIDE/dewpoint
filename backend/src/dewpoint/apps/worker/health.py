@@ -94,13 +94,12 @@ async def start_healthy(check: Callable[[], Awaitable[bool | None]], report: Cal
 async def watch(
     check: Callable[[], Awaitable[bool | None]],
     report: Callable[[bool], Awaitable[None]],
-    stop: Callable[[], Awaitable[None]],
     *,
     interval_s: float = HEALTH_INTERVAL_S,
 ) -> None:
-    """Every `interval_s`: check, and record the result. A failed check stops the workers polling (`stop`, which lets
-    running attempts finish within the shutdown grace), then raises WorkerUnhealthyError. An unanswered one records
-    nothing and changes nothing."""
+    """Every `interval_s`: check, and record the result. A failed check raises WorkerUnhealthyError, and the worker
+    process stops its workers polling (`stopping.serve`, which lets running attempts finish within the shutdown grace)
+    before it ends. An unanswered one records nothing and changes nothing."""
     while True:
         await asyncio.sleep(interval_s)
         healthy = await check()
@@ -111,5 +110,4 @@ async def watch(
         except Exception as e:  # an outage: the row goes stale, and stale rows aren't live instances
             log.warning("worker_health_not_recorded", error=type(e).__name__)
         if not healthy:
-            await stop()
             raise WorkerUnhealthyError("This worker failed its self-check: it stopped polling.")

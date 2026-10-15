@@ -55,7 +55,9 @@ no key; its settings come from its environment only:
 | `DEWPOINT_TEMPORAL_ADDRESS`, `DEWPOINT_TEMPORAL_NAMESPACE` | Temporal, for erasures ([erasure](erasure.md)); none: erasures under way are alerted on, never carried on |
 
 `dewpoint retention --once` sweeps once and exits 0 only if the sweep succeeded (1 if it failed, or if another
-retention process is sweeping). Compose runs the `retention` service, restarting it if it ends. The same process
+retention process is sweeping). Compose runs the `retention` service, restarting it if it ends. SIGTERM or SIGINT
+stops it once the step in hand ends, exit 0; a sweep still running when Compose's 10 seconds are out is cut, and the
+next process resumes it. The same process
 carries tenant erasures on ([erasure](erasure.md)): a pass every erasure interval, and with every sweep the
 reconciliation of completed erasures.
 

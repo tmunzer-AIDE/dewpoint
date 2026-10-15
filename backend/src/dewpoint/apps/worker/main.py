@@ -6,7 +6,7 @@ Deployment (deployment.py); the CEL worker is outside it, routed by profile."""
 
 import asyncio
 import uuid
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from datetime import timedelta
 
 import structlog
@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-from dewpoint.apps import cel_client
+from dewpoint.apps import cel_client, stopping
 from dewpoint.apps.codec import KeyringKeys, data_converter
 from dewpoint.apps.environment import verify_environment
 from dewpoint.apps.plugin_loader import installed_plugins
@@ -77,12 +77,17 @@ def engine_worker(
     )
 
 
-def cel_worker(client: Client, socket_path: str, profile: str, store: ClaimStore, *, max_concurrent: int) -> Worker:
+def cel_worker(
+    client: Client, socket_path: str, profile: str, store: ClaimStore, *, max_concurrent: int, grace: timedelta
+) -> Worker:
+    """A stopping worker lets running evaluations finish for `grace`, as the engine worker lets its attempts (the
+    owner's ruling W3): one cancelled at once spends one of `cel.evaluate`'s three attempts."""
     return Worker(
         client,
         task_queue=cel_queue(profile),
         activities=[cel_activity(remote_evaluator(socket_path, profile), store)],
         max_concurrent_activities=max_concurrent,
+        graceful_shutdown_timeout=grace,
     )
 
 
@@ -106,50 +111,67 @@ def engines(url: str) -> tuple[AsyncEngine, AsyncEngine]:
             make_engine(url, pool_size=PLUGIN_CALLS, max_overflow=0))  # fmt: skip
 
 
-async def run(settings: Settings) -> None:
+async def run(settings: Settings, stop_requested: asyncio.Event | None = None) -> None:
     """Raises EnvironmentNotRecordedError or EnvironmentMismatchError before connecting to Temporal: a worker never
     serves a namespace its database wasn't recorded with (engine 2b spec §2.1). Every payload it sends or reads is
     encrypted with its tenant's key, read through the worker's role (§6.2–6.3). It records itself as an instance of
     its build, with its capabilities, and raises WorkerUnhealthyError once a self-check fails, at startup before it
-    polls or later after its workers stop polling (§2.7). It also serves plugin calls for the API (plugins-3 D3)."""
+    polls or later after its workers stop polling (§2.7). It also serves plugin calls for the API (plugins-3 D3).
+
+    A stop request (`stop_requested`, set by SIGTERM or SIGINT: apps/stopping.py) is answered at its safe points
+    (the owner's rulings W1, W2): while it starts, it abandons the start, nothing having polled; once it polls, its
+    workers stop as on a failed check, then what only helped them is cancelled, and it returns. Whatever else ends it
+    (a helper's failure, a worker's) stops its workers first too."""
+    requested = stop_requested if stop_requested is not None else asyncio.Event()
     engine, guard_engine = engines(settings.database_url)
     try:
-        sessionmaker = make_sessionmaker(engine)
-        recorded = await verify_environment(sessionmaker, settings)
-        keyring = Keyring(KekSet.from_settings(settings))
-        report = reporter(sessionmaker, uuid.uuid4(), this_build())
-        await start_healthy(lambda: self_check(keyring, sessionmaker), report)
-        keys = KeyringKeys(sessionmaker, keyring)
-        client = await temporal_connect(settings, recorded.environment, data_converter=data_converter(keys))
-        store = DbRunStore(sessionmaker, keys)  # claims, sealed with the same keys (engine 2b spec §3.1)
-        guard = Guard(resolver=SystemResolver(), allowlist=allowlist.source(sessionmaker))  # plugins-3 D7, D8
-        plugins = installed_plugins()
-        network = Network(
-            guard=guard, connections=DbConnections(sessionmaker), sessionmaker=sessionmaker, keys=keys,
-            types=worker_types(plugins),  # the installed plugins' connection types (D11)
-        )  # fmt: skip
-        workers = [engine_worker(client, store, plugins, settings, network=network)]
-        if settings.cel_socket:
-            profile = await evaluator_profile(settings.cel_socket)
-            log.info("cel_queue", profile=profile)
-            workers.append(
-                cel_worker(client, settings.cel_socket, profile, store, max_concurrent=settings.cel_max_concurrent)
-            )
-
-        plugin_calls = PluginCallServer(sessionmaker, network, plugins, engine=engine, concurrency=PLUGIN_CALLS,
-                                        guards=make_sessionmaker(guard_engine))  # plugins-3 D3  # fmt: skip
-
-        async def stop() -> None:
-            plugin_calls.stop()
-            await asyncio.gather(*(w.shutdown() for w in workers))
-
-        tasks = [w.run() for w in workers]
-        tasks.append(plugin_calls.run())
-        tasks.append(watch(lambda: self_check(keyring, sessionmaker), report, stop))
-        tasks.append(keep_token_fresh(client, settings))  # bearer mode: a rotated token, without a restart
-        if settings.worker_set_current:
-            tasks.append(promote(client))
-        await asyncio.gather(*tasks)
+        serve = await stopping.unless_stopped(requested, _started(settings, engine, guard_engine))
+        if serve is not None:
+            await serve(requested)
     finally:
         await engine.dispose()
         await guard_engine.dispose()
+    log.info("worker_stopped")
+
+
+async def _started(
+    settings: Settings, engine: AsyncEngine, guard_engine: AsyncEngine
+) -> Callable[[asyncio.Event], Awaitable[None]]:
+    """Everything before it polls; what serves, until its workers stop."""
+    sessionmaker = make_sessionmaker(engine)
+    recorded = await verify_environment(sessionmaker, settings)
+    keyring = Keyring(KekSet.from_settings(settings))
+    report = reporter(sessionmaker, uuid.uuid4(), this_build())
+    await start_healthy(lambda: self_check(keyring, sessionmaker), report)
+    keys = KeyringKeys(sessionmaker, keyring)
+    client = await temporal_connect(settings, recorded.environment, data_converter=data_converter(keys))
+    store = DbRunStore(sessionmaker, keys)  # claims, sealed with the same keys (engine 2b spec §3.1)
+    guard = Guard(resolver=SystemResolver(), allowlist=allowlist.source(sessionmaker))  # plugins-3 D7, D8
+    plugins = installed_plugins()
+    network = Network(
+        guard=guard, connections=DbConnections(sessionmaker), sessionmaker=sessionmaker, keys=keys,
+        types=worker_types(plugins),  # the installed plugins' connection types (D11)
+    )  # fmt: skip
+    workers = [engine_worker(client, store, plugins, settings, network=network)]
+    if settings.cel_socket:
+        profile = await evaluator_profile(settings.cel_socket)
+        log.info("cel_queue", profile=profile)
+        concurrent, grace = settings.cel_max_concurrent, timedelta(seconds=settings.worker_shutdown_grace_s)
+        workers.append(cel_worker(client, settings.cel_socket, profile, store, max_concurrent=concurrent, grace=grace))
+
+    plugin_calls = PluginCallServer(sessionmaker, network, plugins, engine=engine, concurrency=PLUGIN_CALLS,
+                                    guards=make_sessionmaker(guard_engine))  # plugins-3 D3  # fmt: skip
+
+    async def stop() -> None:
+        plugin_calls.stop()
+        await asyncio.gather(*(w.shutdown() for w in workers))
+
+    async def serve(requested: asyncio.Event) -> None:
+        helpers = [watch(lambda: self_check(keyring, sessionmaker), report)]  # a failed check stops them as it raises
+        helpers.append(keep_token_fresh(client, settings))  # bearer mode: a rotated token, without a restart
+        if settings.worker_set_current:
+            helpers.append(promote(client))
+        await stopping.serve([*(w.run() for w in workers), plugin_calls.run()], helpers, halt=stop,
+                             requested=requested)  # fmt: skip
+
+    return serve

@@ -34,22 +34,17 @@ async def test_a_failed_sweep_is_logged_and_the_next_one_tried(monkeypatch, pg_u
             raise ConnectionError("the database went away")
         return sweep.Sweep(1, True, 0, 0.0)
 
-    async def sleep(seconds: float) -> None:
+    async def pause(requested: asyncio.Event, seconds: float) -> None:
         calls.append(f"sleep {seconds:g}")
         if calls.count("sweep") == 2:
-            raise Stop
+            requested.set()
 
     monkeypatch.setattr(retention, "sweep_all", failing_then_fine)
-    monkeypatch.setattr(asyncio, "sleep", sleep)
+    monkeypatch.setattr(retention, "pause", pause)
     settings = retention.RetentionSettings(database_url=_url_for(pg_url, "dewpoint_retention"), retention_interval_s=90,
                                            erasure_interval_s=90)  # fmt: skip
-    with pytest.raises(Stop):
-        await retention.run(settings)
+    await retention.run(settings, stop_requested=asyncio.Event())
     assert calls == ["sweep", "sleep 90", "sweep", "sleep 90"]
-
-
-class Stop(Exception):
-    pass
 
 
 async def test_each_interval_carries_erasures_on_and_each_sweep_reconciles_completed_ones(
@@ -73,23 +68,21 @@ async def test_each_interval_carries_erasures_on_and_each_sweep_reconciles_compl
     async def connected(settings: Any, environment: str) -> str:
         return f"temporal@{settings.temporal_address}"
 
-    async def sleep(seconds: float) -> None:
+    async def pause(requested: asyncio.Event, seconds: float) -> None:
         calls.append(f"sleep {seconds:g}")
         if calls.count("sweep") == 2:
-            raise Stop
+            requested.set()
 
     for name, fake in (("sweep_all", swept), ("reconcile_erased", reconciled), ("erase_pass", erased),
-                       ("connect", connected)):  # fmt: skip
+                       ("connect", connected), ("pause", pause)):  # fmt: skip
         monkeypatch.setattr(retention, name, fake)
-    monkeypatch.setattr(asyncio, "sleep", sleep)
     settings = retention.RetentionSettings(
         database_url=_url_for(pg_url, "dewpoint_retention"),
         retention_interval_s=120,
         erasure_interval_s=60,
         temporal_address="temporal:7233",
     )
-    with pytest.raises(Stop):
-        await retention.run(settings)
+    await retention.run(settings, stop_requested=asyncio.Event())
     t = "temporal@temporal:7233"
     assert calls == ["sweep", f"reconcile {t}", f"erase {t}", "sleep 60", f"erase {t}", "sleep 60",
                      "sweep", f"reconcile {t}", f"erase {t}", "sleep 60"]  # fmt: skip
@@ -109,13 +102,13 @@ async def test_without_temporal_an_erasure_under_way_alerts_every_interval(
     await sql(owner_sessionmaker, "insert into tenant_erasures (tenant_id, requested_by) values (:t, :u)", t=ctx["t"],
               u=uuid.uuid4())  # fmt: skip
 
-    async def sleep(seconds: float) -> None:
-        raise Stop
+    async def pause(requested: asyncio.Event, seconds: float) -> None:
+        requested.set()
 
-    monkeypatch.setattr(asyncio, "sleep", sleep)
+    monkeypatch.setattr(retention, "pause", pause)
     settings = retention.RetentionSettings(database_url=_url_for(pg_url, "dewpoint_retention"))
-    with structlog.testing.capture_logs() as logs, pytest.raises(Stop):
-        await retention.run(settings)
+    with structlog.testing.capture_logs() as logs:
+        await retention.run(settings, stop_requested=asyncio.Event())
     assert [(e["event"], e.get("erasures")) for e in logs if e["log_level"] == "error"] == [("erasures_unattended", 1)]
 
 
@@ -170,14 +163,14 @@ async def test_no_erasure_work_reaches_temporal_unless_its_namespace_is_the_depl
     async def connected(*_: Any) -> Any:
         raise AssertionError("connected to Temporal")
 
-    async def sleep(seconds: float) -> None:
+    async def pause(requested: asyncio.Event, seconds: float) -> None:
         calls.append("sleep")
         if calls.count("sleep") == 2:
-            raise Stop
+            requested.set()
 
     monkeypatch.setattr(retention, "sweep_all", swept)
     monkeypatch.setattr(retention, "connect", connected)
-    monkeypatch.setattr(asyncio, "sleep", sleep)
+    monkeypatch.setattr(retention, "pause", pause)
     settings = retention.RetentionSettings(
         database_url=_url_for(pg_url, "dewpoint_retention"),
         retention_interval_s=60,
@@ -185,7 +178,55 @@ async def test_no_erasure_work_reaches_temporal_unless_its_namespace_is_the_depl
         temporal_address="temporal:7233",
         temporal_namespace="default",
     )
-    with structlog.testing.capture_logs() as logs, pytest.raises(Stop):
-        await retention.run(settings)
+    with structlog.testing.capture_logs() as logs:
+        await retention.run(settings, stop_requested=asyncio.Event())
     assert calls == ["sweep", "sleep", "sweep", "sleep"]  # sweeping goes on
     assert [e["event"] for e in logs if e["log_level"] == "error"] == [alert, alert]
+
+
+async def test_a_stop_request_ends_the_job_once_the_step_in_hand_ends(monkeypatch, pg_url, _test_users) -> None:
+    """The owner's ruling T1 (graceful stop): SIGTERM lets the sweep in hand end (one still running at Compose's
+    10 seconds is cut, and the next process resumes it); no other step follows."""
+    calls: list[str] = []
+    requested = asyncio.Event()
+
+    async def swept(_: Any, *, batch: int) -> sweep.Sweep:
+        calls.append("sweep began")
+        requested.set()
+        await asyncio.sleep(0)
+        calls.append("sweep ended")
+        return sweep.Sweep(1, True, 0, 0.0)
+
+    async def unattended(_: Any) -> None:
+        calls.append("erasures checked")
+
+    monkeypatch.setattr(retention, "sweep_all", swept)
+    monkeypatch.setattr(retention, "_unattended", unattended)
+    settings = retention.RetentionSettings(database_url=_url_for(pg_url, "dewpoint_retention"))
+    await asyncio.wait_for(retention.run(settings, stop_requested=requested), 10)
+    assert calls == ["sweep began", "sweep ended"]
+
+
+async def test_a_stop_during_the_wait_ends_it_at_once(monkeypatch, pg_url, _test_users) -> None:
+    """Most of the time the job waits for its next interval: a stop then takes no time, not Compose's 10 seconds."""
+    calls: list[str] = []
+    requested = asyncio.Event()
+
+    async def swept(_: Any, *, batch: int) -> sweep.Sweep:
+        calls.append("sweep")
+        return sweep.Sweep(1, True, 0, 0.0)
+
+    async def unattended(_: Any) -> None:
+        calls.append("erasures checked")
+
+    monkeypatch.setattr(retention, "sweep_all", swept)
+    monkeypatch.setattr(retention, "_unattended", unattended)
+    settings = retention.RetentionSettings(database_url=_url_for(pg_url, "dewpoint_retention"), erasure_interval_s=3600)
+    running = asyncio.ensure_future(retention.run(settings, stop_requested=requested))
+    for _ in range(100):  # the loop's turns, until the job waits: its steps here are stand-ins, done within a few
+        if calls == ["sweep", "erasures checked"]:
+            break
+        await asyncio.sleep(0)
+    requested.set()
+    await asyncio.wait_for(running, 10)  # not the hour its wait was
+    assert calls == ["sweep", "erasures checked"]
