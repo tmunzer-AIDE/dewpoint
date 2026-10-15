@@ -667,3 +667,36 @@ class SimulationStateOut(_Answer):
     cancel_requested: bool
     input: dict[str, Any] | None
     seeds: dict[str, Any] | None
+
+
+class StepSummaryOut(_Answer):
+    """A step of the draft a simulation ran (B8; the simulation design §6.6): its instances' final attempts counted by
+    status and by the port they took, a single instance's final attempt, and where its data came from (§7.4)."""
+
+    step_id: str
+    key: str
+    type: str
+    origin: Literal[
+        "evaluated", "evaluated_not_waited", "fixture_not_sent", "skipped", "not_started", "cancelled", "didnt_run",
+        "not_recorded", "not_reached_yet",
+    ]  # fmt: skip
+    instances: int
+    statuses: dict[str, int]
+    ports: dict[str, int]
+    final: dict[str, Any] | None  # the run API's step: a single instance's final attempt
+
+
+class SimulationStepsOut(_Answer):
+    """A draft simulation's steps in run order (§6.6), and what the values a person gave were (§7.4): the workflow's
+    input, or a step test's seeds. A step test lists its target alone: the other steps are outside the test."""
+
+    given: Literal["input", "seeded"]
+    steps: list[StepSummaryOut]
+
+
+class StepInstancesOut(_Answer):
+    """A step's instances in a draft simulation, one per iteration, each its final attempt (the run API's step), in
+    iteration order (§6.6): a page of them, and their total."""
+
+    total: int
+    items: list[dict[str, Any]]

@@ -12,8 +12,14 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from dewpoint.apps import admission
-from dewpoint.apps.api.responses import DraftSnapshotOut, SimulationOut, SimulationStateOut
+from dewpoint.apps import admission, step_summary
+from dewpoint.apps.api.responses import (
+    DraftSnapshotOut,
+    SimulationOut,
+    SimulationStateOut,
+    SimulationStepsOut,
+    StepInstancesOut,
+)
 from dewpoint.apps.api.routes.run_requests import (
     INVALID,
     UNAVAILABLE,
@@ -23,6 +29,7 @@ from dewpoint.apps.api.routes.run_requests import (
     not_past_cutoff,
     request_body,
 )
+from dewpoint.apps.api.routes.runs import _step
 from dewpoint.apps.api.routes.workflows import _revision
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.claims import service as claims
@@ -237,3 +244,58 @@ def _redacted(value: Any) -> Any:
     if isinstance(value, list):
         return [_redacted(v) for v in value]
     return value
+
+
+@router.get("/t/{tenant_id}/workflows/{workflow_id}/draft/simulations/{request_id}/steps",
+            response_model=SimulationStepsOut)  # fmt: skip
+async def simulation_steps(
+    workflow_id: uuid.UUID,
+    request_id: uuid.UUID,
+    ctx: TenantContext = Depends(require(P.RUN_VIEW)),
+    db: AsyncSession = Depends(get_db, scope="function"),
+) -> dict[str, object]:
+    """A draft simulation's steps in run order, summarized (§6.6): the tags the editor shows come from here, never
+    from a partial page of instances."""
+    r = await simulation_of(db, ctx, workflow_id, request_id)
+    run = await db.get(Run, r.id)
+    summarized = await step_summary.summarize(
+        db, None if run is None else run.id, await _steps_of(db, r),
+        ended=r.ended_at is not None if run is None else run.status != "running",
+        error_code=None if run is None else run.error_code,
+    )  # fmt: skip
+    return {
+        "given": "input" if r.target_step_id is None else "seeded",
+        "steps": [
+            {"step_id": str(x.step_id), "key": x.key, "type": x.type, "origin": x.origin, "instances": x.instances,
+             "statuses": x.statuses, "ports": x.ports, "final": None if x.final is None else _step(x.final)}
+            for x in summarized
+        ],
+    }  # fmt: skip
+
+
+@router.get("/t/{tenant_id}/workflows/{workflow_id}/draft/simulations/{request_id}/steps/{step_id}/instances",
+            response_model=StepInstancesOut)  # fmt: skip
+async def step_instances(
+    workflow_id: uuid.UUID,
+    request_id: uuid.UUID,
+    step_id: uuid.UUID,
+    within: str | None = None,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+    ctx: TenantContext = Depends(require(P.RUN_VIEW)),
+    db: AsyncSession = Depends(get_db, scope="function"),
+) -> dict[str, object]:
+    """A step's instances in a draft simulation, one per iteration (its final attempt), in iteration order, paged
+    from `offset`; with `within`, only that iteration's (itself and every iteration nested in it)."""
+    r = await simulation_of(db, ctx, workflow_id, request_id)
+    if str(step_id) not in {n["id"] for n in await _steps_of(db, r)}:
+        raise HTTPException(404, detail={"error": "not_found"})
+    total, rows = await step_summary.instances(db, r.id, step_id, within=within, offset=offset, limit=limit)
+    return {"total": total, "items": [_step(x) for x in rows]}
+
+
+async def _steps_of(db: AsyncSession, r: RunRequest) -> list[dict[str, Any]]:
+    """The steps a simulation ran: its snapshot's, or a step test's target alone."""
+    snapshot = await db.get(DraftSnapshot, r.draft_snapshot_id)
+    nodes: list[dict[str, Any]] = [] if snapshot is None else snapshot.graph["nodes"]
+    return [n for n in nodes if r.target_step_id is None or n["id"] == str(r.target_step_id)]

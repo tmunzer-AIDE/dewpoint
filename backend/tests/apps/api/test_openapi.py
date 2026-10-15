@@ -196,6 +196,8 @@ SLICE_4D1 = [  # B8 (the simulation design §6.3, §6.6)
     ("get", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/snapshots/{snapshot_id}"),
     ("get", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/simulations"),
     ("get", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/simulations/{request_id}"),
+    ("get", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/simulations/{request_id}/steps"),
+    ("get", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/simulations/{request_id}/steps/{step_id}/instances"),
 ]
 
 
