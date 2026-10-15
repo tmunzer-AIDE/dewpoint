@@ -13,9 +13,9 @@ from typing import Any
 import pytest
 from sqlalchemy import text
 
-from dewpoint.apps.inputs import RESERVED_INPUT, TOO_DEEP
-from tests.apps.api.test_run_requests_api import as_role
-from tests.apps.test_admission import KEYS, TOKEN, published
+from dewpoint.apps.inputs import NOT_FINITE, RESERVED_INPUT, TOO_DEEP
+from tests.apps.api.test_run_requests_api import JSON, NON_FINITE, as_role, with_number
+from tests.apps.test_admission import KEYS, OPEN_GRAPH, TOKEN, count, published
 from tests.apps.test_admission_csv import GRAPH as CSV_GRAPH
 from tests.apps.test_inputs import objects
 
@@ -320,3 +320,24 @@ async def test_an_input_nested_past_64_levels_is_refused_on_create_and_replace(
     created = (await editor.post(schedules_url(ctx, wf), json=BODY)).json()
     answer = await editor.patch(schedule_url(ctx, created["id"]), json={"input": deep})
     assert (answer.status_code, answer.json()) == (422, {"error": "input_invalid", "messages": [TOO_DEEP]})
+
+
+@pytest.mark.parametrize("literal", NON_FINITE)
+async def test_an_input_holding_nan_or_an_infinity_is_refused_on_create_and_replace(
+    keyed_app, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, literal: str
+) -> None:
+    """Sealing such a number raised `ValueError`, a 500, under a schema that admits it: refused with the fixed reason,
+    never quoting it; the schedule is untouched."""
+    ctx, wf = await published(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, OPEN_GRAPH)
+    editor = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "editor")
+    refused = (422, {"error": "input_invalid", "messages": [NOT_FINITE]})
+    body = with_number(literal, BODY | {"input": {"token": TOKEN, "n": [1.5, {"x": "#"}]}})
+    answer = await editor.post(schedules_url(ctx, wf), content=body, headers=JSON)
+    assert (answer.status_code, answer.json()) == refused
+    created = (await editor.post(schedules_url(ctx, wf), json=BODY)).json()
+    before = await row(owner_sessionmaker, created["id"])
+    body = with_number(literal, {"input": {"token": TOKEN, "n": "#"}})
+    answer = await editor.patch(schedule_url(ctx, created["id"]), content=body, headers=JSON)
+    assert (answer.status_code, answer.json()) == refused
+    assert await row(owner_sessionmaker, created["id"]) == before
+    assert await count(owner_sessionmaker, "schedules") == 1

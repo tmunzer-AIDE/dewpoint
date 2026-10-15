@@ -37,7 +37,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps import csv_uploads
 from dewpoint.apps.csv_input import Built, CsvFileError, RowError, build_rows, mapping_problems, read_table
-from dewpoint.apps.inputs import INPUT_INVALID, RESERVED_INPUT, TOO_DEEP, InputRefusedError, claim_input, nests_too_deep
+from dewpoint.apps.inputs import (
+    INPUT_INVALID,
+    NOT_FINITE,
+    RESERVED_INPUT,
+    TOO_DEEP,
+    InputRefusedError,
+    claim_input,
+    holds_non_finite,
+    nests_too_deep,
+)
 from dewpoint.apps.workflow_ops import abi_reasons
 from dewpoint.core.audit import service as audit
 from dewpoint.core.claims import service as claims
@@ -188,6 +197,8 @@ async def admit_request(
         raise ValueError(f"a {source} start takes no CSV")
     if source in INTERACTIVE and nests_too_deep(input):  # before its key's digest reads it (issue #88, the review's L2)
         raise AdmissionRefusedError(INPUT_INVALID, [TOO_DEEP])
+    if source in INTERACTIVE and holds_non_finite(input):  # which its key's digest can't encode, nor its claims
+        raise AdmissionRefusedError(INPUT_INVALID, [NOT_FINITE])
     await lifecycle.assert_read_committed(s)
     await tenant_scope(s, tenant_id)
     fields: dict[str, Any] = {"source": source, "workflow_id": workflow_id, "mode": mode, "input": input}
@@ -255,9 +266,11 @@ async def admitted_under(
     """The request an exact retry of this re-run finds under its key, before its input is rebuilt; None when the key
     is free. Raises IdempotencyConflictError for another request under the key, or, for a re-run with a new CSV, one
     another user admitted, or AdmissionRefusedError for a new input past the input limit, read before its digest
-    (issue #88, the review's L2)."""
+    (issue #88, the review's L2), or holding NaN or an infinity, which its digest can't encode."""
     if rerun.input is not None and nests_too_deep(rerun.input):
         raise AdmissionRefusedError(INPUT_INVALID, [TOO_DEEP])
+    if rerun.input is not None and holds_non_finite(rerun.input):
+        raise AdmissionRefusedError(INPUT_INVALID, [NOT_FINITE])
     await tenant_scope(s, tenant_id)
     existing = await _by_key(s, idempotency_key)
     if existing is None:
