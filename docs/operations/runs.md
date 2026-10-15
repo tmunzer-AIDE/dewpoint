@@ -124,7 +124,8 @@ draft's graph, pins, CEL profile and engine ABI as a version holds them, shared 
   the diagnostics); so do no current build or one of another engine ABI, with the start's codes. Unknown or mis-typed
   connections, pickers and deprecated step types don't (a simulation opens no connection): they're kept on the request
   as `admission_checks` and returned. Then the input, against the draft's input schema (a draft whose input takes a
-  CSV can't be simulated whole), or the seeds, against the step's seed contract: every pointer in exactly one of
+  CSV can't be simulated whole: 422 `csv_not_simulated`, and a step of it can), or the seeds, against the step's seed
+  contract: every pointer in exactly one of
   `values` (null only where it's nullable) and `absent` (only where it's optional), else 422 `seed_missing`,
   `seed_alias`, `seed_unknown` or `seed_invalid`, each problem with its pointer; 422 `target_invalid` for a step that
   can't run alone. One audit entry, `run.request`, names the snapshot, the revision, its graph hash, the target and
@@ -140,13 +141,13 @@ The editor's reads, `run.view` unless said otherwise:
 
 | Route (under `/api/v1/t/{tenant}/workflows/{workflow}`) | |
 |---|---|
-| `GET /draft/simulations` | the caller's own latest simulations of the workflow, newest first (`limit`, 1 to 50, 20 by default), each with its `draft_revision` |
-| `GET /draft/simulations/{id}` | where it is: its request, its run once there is one, `cancel_requested`, and the `input` or `seeds` it was admitted with, read back from its own request, its claimed values `[redacted]` |
+| `GET /draft/simulations` | the caller's own latest simulations of the workflow, newest first (`limit`, 1 to 50, 20 by default), each with its `draft_revision`; 404 for a workflow the tenant doesn't have |
+| `GET /draft/simulations/{id}` | where it is: its request, its run once there is one, `cancel_requested`, and the `input` or `seeds` it was admitted with, read back from its own request, its claimed values `[redacted]`; `read_back` says whether that was `kept`, is `absent`, or is `unreadable` (stored but it doesn't open: never shown as absent) |
 | `GET /draft/simulations/{id}/steps` | a summary per step, in run order: its instances' final attempts counted by status and by port, a single instance's final attempt, and where its data came from: `evaluated`, `evaluated_not_waited` (a delay or wait-until), `fixture_not_sent` (a plugin's simulation), `skipped`, `not_started`, `cancelled`, `didnt_run`, `not_recorded` (the run ended outside the workflow: `internal_error`, `terminated`, `history_lost`), `not_reached_yet`; `given` says whether a person gave `input` or `seeded` values |
 | `GET /draft/simulations/{id}/steps/{step}/instances` | a step's instances, one per iteration (its final attempt), by iteration number, with their `total` (`offset`; `limit`, 1 to 100; `within`, one iteration and those nested in it) |
 | `GET /draft/snapshots/{snapshot}` | a snapshot's graph (`workflow.view`) |
 | `GET /draft/start-form?revision=N` | the draft's input as a form, as `start-form` describes the active version's (`workflow.edit` and `run.start`) |
-| `GET /draft/steps/{step}/seeds?revision=N` | the step's seed contract: each pointer it reads, its types, whether it's required, nullable and sensitive, and its prefill: its step's newest sample there when that's faithful (nothing redacted, cut or claimed, no U+FFFD, no `nan`, `inf` or `-inf`) and fits, else why it's typed; or why the step can't run alone. The draft is validated first, as admission validates it (422 `invalid`). `workflow.edit`, `run.start` and `run.view` |
+| `GET /draft/steps/{step}/seeds?revision=N` | the step's seed contract: each pointer it reads, its types, whether it's required, nullable and sensitive, and its prefill: its step's newest sample there when that's faithful (nothing redacted, cut or claimed, no U+FFFD, no `nan`, `inf` or `-inf`) and fits, else why it's typed; or why the step can't run alone; 404 for a step the draft doesn't hold. The draft is validated first, as admission validates it (422 `invalid`). `workflow.edit`, `run.start` and `run.view` |
 
 The two revision-bound reads answer 409 `draft_conflict` for another revision. Draft snapshots follow the tenant's
 retention ([retention](retention.md)).

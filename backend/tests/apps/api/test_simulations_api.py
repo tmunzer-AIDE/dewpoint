@@ -178,3 +178,21 @@ async def test_a_draft_snapshot_is_read_with_its_graph(
     for path in (f"{base}/{other}/draft/snapshots/{request.draft_snapshot_id}",
                  f"{base}/{wf}/draft/snapshots/{uuid.uuid4()}"):  # fmt: skip
         assert (await viewer.get(path)).status_code == 404
+
+
+async def test_a_draft_taking_a_csv_isnt_simulated_whole_and_a_step_of_it_still_is(
+    keyed_app, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    """D-b7: whole, it's refused saying so, rows given or not (only an upload gives them); a step of it still runs
+    (§7.1)."""
+    from tests.apps.test_admission import CSV_GRAPH, TOKEN
+
+    await current(dispatch_sessionmaker)
+    ctx, wf = await drafted(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, CSV_GRAPH)
+    client = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "editor")
+    for n, sent in enumerate(({"token": TOKEN}, {"token": TOKEN, "rows": [], "row_count": 0})):
+        answer = await client.post(url(ctx, wf), json={"input": sent}, headers=headers(f"c{n}"))
+        assert (answer.status_code, answer.json()["error"]) == (422, "csv_not_simulated"), answer.text
+        assert TOKEN not in answer.text
+    step = await client.post(url(ctx, wf), json={"target": {"step_id": str(nid("a"))}}, headers=headers("s"))
+    assert step.status_code == 202, step.text

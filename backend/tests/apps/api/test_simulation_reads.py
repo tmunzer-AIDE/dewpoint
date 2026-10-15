@@ -7,6 +7,7 @@ import uuid
 from typing import Any
 
 import pytest
+from sqlalchemy import text
 
 from tests.apps.api.test_run_requests_api import as_role, keyed_app
 from tests.apps.dispatcher.support import begin, workers
@@ -81,6 +82,7 @@ async def test_the_input_used_is_read_back_redacted_from_the_request_whatever_th
     viewer = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "viewer")
     answer = await viewer.get(simulations(ctx, wf, request.id))
     assert answer.json()["input"] == {"token": "[redacted]", "site": "a"} and answer.json()["seeds"] is None
+    assert answer.json()["read_back"] == "kept"
     assert TOKEN not in answer.text
 
 
@@ -106,3 +108,30 @@ async def test_another_workflows_or_a_published_runs_request_is_not_a_simulation
     viewer = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "viewer")
     for path in (simulations(ctx, other, request.id), simulations(ctx, wf, uuid.uuid4())):
         assert (await viewer.get(path)).status_code == 404
+
+
+async def test_the_simulations_of_a_workflow_the_tenant_doesnt_have_are_not_found(
+    keyed_app, ready, owner_sessionmaker, api_settings
+) -> None:
+    ctx, _ = ready
+    viewer = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "viewer")
+    answer = await viewer.get(simulations(ctx, uuid.uuid4()))
+    assert (answer.status_code, answer.json()) == (404, {"error": "not_found"})
+
+
+async def test_an_input_that_doesnt_open_is_said_unreadable_never_read_as_absent(
+    keyed_app, ready, owner_sessionmaker, api_sessionmaker, api_settings
+) -> None:
+    """Its ciphertext corrupted: the state still answers, its read-back marked `unreadable`, nothing shown."""
+    ctx, wf = ready
+    request = (await simulate(api_sessionmaker, ctx, wf, api_settings, input={"token": TOKEN, "site": "a"})).request
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text("update run_inputs set ciphertext = :junk "
+                             "where id = (select envelope_id from run_requests where id = :r)"),
+                        {"junk": b"\x00" * 48, "r": request.id})  # fmt: skip
+    viewer = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "viewer")
+    answer = await viewer.get(simulations(ctx, wf, request.id))
+    assert answer.status_code == 200, answer.text
+    state = answer.json()
+    assert (state["read_back"], state["input"], state["seeds"]) == ("unreadable", None, None)
+    assert state["request"]["id"] == str(request.id)

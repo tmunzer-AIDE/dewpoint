@@ -665,6 +665,7 @@ class SimulationStateOut(_Answer):
     request: SimulationOut
     run: SimulationRunOut | None
     cancel_requested: bool
+    read_back: Literal["kept", "absent", "unreadable"]  # unreadable: there, but it doesn't open (never shown as absent)
     input: dict[str, Any] | None
     seeds: dict[str, Any] | None
 

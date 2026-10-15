@@ -82,6 +82,10 @@ UPLOAD_NOT_FOUND = "upload_not_found"
 UPLOAD_EXPIRED = "upload_expired"
 UPLOAD_CONSUMED = "upload_consumed"
 TARGET_INVALID = "target_invalid"
+CSV_NOT_SIMULATED = "csv_not_simulated"
+CSV_NOT_SIMULATED_MESSAGE = (
+    "This draft's input takes a CSV file, which a simulation can't be given yet: simulate one of its steps instead."
+)
 # A seeds refusal's code (S2; the simulation design §5.2): the first of these among its problems, every problem listed.
 SEED_CODES = (seeds.SEED_ALIAS, seeds.SEED_UNKNOWN, seeds.SEED_MISSING, seeds.SEED_INVALID)
 _LISTED = 5  # a refusal lists this many of the CSV's problems
@@ -496,6 +500,8 @@ async def _draft_frozen(
     schema: dict[str, Any]
     value: dict[str, Any]
     if simulation.target is None:
+        if workflow_ops.declares_csv(sim.new.graph):  # only an upload gives its rows, and none comes here (D-b7)
+            raise _Refused(CSV_NOT_SIMULATED, [CSV_NOT_SIMULATED_MESSAGE])
         if any(name in fields["input"] for name in RESERVED):  # only a CSV upload supplies them: none here (D-b8)
             raise _Refused(INPUT_INVALID, [RESERVED_INPUT])
         schema, value = trigger_schema(sim.new.graph.get("settings") or {}), fields["input"]

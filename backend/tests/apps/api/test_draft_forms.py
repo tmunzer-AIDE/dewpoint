@@ -137,3 +137,14 @@ async def test_the_seeds_read_validates_the_draft_first_and_says_why_a_step_cant
     invalid = await editor.get(url(ctx, broken, f"steps/{nid('y')}/seeds"), params={"revision": 1})
     assert (invalid.status_code, invalid.json()["error"]) == (422, "invalid")
     assert "node.unknown_type" in [d["code"] for d in invalid.json()["diagnostics"]]
+
+
+async def test_a_step_that_isnt_in_the_draft_has_no_seed_contract(
+    keyed_app, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    """Not found, as the draft's other reads of what isn't there; a step that is there but can't run alone says why."""
+    await current(dispatch_sessionmaker)
+    ctx, wf = await drafted(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, LOOP_GRAPH)
+    editor = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "editor")
+    answer = await editor.get(url(ctx, wf, f"steps/{uuid.uuid4()}/seeds"), params={"revision": 1})
+    assert (answer.status_code, answer.json()) == (404, {"error": "not_found"})

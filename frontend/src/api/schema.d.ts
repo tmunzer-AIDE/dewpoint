@@ -3279,6 +3279,11 @@ export interface components {
             input: {
                 [key: string]: unknown;
             } | null;
+            /**
+             * Read Back
+             * @enum {string}
+             */
+            read_back: "kept" | "absent" | "unreadable";
             request: components["schemas"]["SimulationOut"];
             run: components["schemas"]["SimulationRunOut"] | null;
             /** Seeds */

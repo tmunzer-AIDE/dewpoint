@@ -121,7 +121,8 @@ async def simulate(
         problems = [{"code": p.code, "pointer": p.pointer, "message": p.message} for p in e.problems]
         raise HTTPException(422, detail={"error": e.reason, "problems": problems}) from None
     except admission.AdmissionRefusedError as e:
-        status = 503 if e.reason in UNAVAILABLE else 422 if e.reason in INVALID | {admission.TARGET_INVALID} else 409
+        refused = INVALID | {admission.TARGET_INVALID, admission.CSV_NOT_SIMULATED}
+        status = 503 if e.reason in UNAVAILABLE else 422 if e.reason in refused else 409
         raise HTTPException(status, detail={"error": e.reason, "messages": e.messages}) from None
     except Exception as e:
         raise key_unusable(e) from None
@@ -171,6 +172,7 @@ async def mine(
 ) -> list[dict[str, object]]:
     """The caller's own latest draft simulations of the workflow, newest first (§6.6): what they started, labelled
     with their revision, never proof of what a submission was (the editor recovers by its own request's key)."""
+    await _get(db, ctx, workflow_id)  # a workflow the tenant doesn't have isn't found, as its other reads say
     found = await db.execute(
         select(RunRequest)
         .where(
@@ -196,7 +198,7 @@ async def state(
     """A draft simulation where it is (§6.6), and what it ran with, read back redacted from its own request."""
     r = await simulation_of(db, ctx, workflow_id, request_id)
     run = await db.get(Run, r.id)
-    used = await read_back(db, keys, ctx, r)
+    kept, used = await read_back(db, keys, ctx, r)
     return {
         "request": simulation_body(r),
         "run": None if run is None else {
@@ -208,6 +210,7 @@ async def state(
             "iterations": run.iterations,
         },
         "cancel_requested": r.cancel_requested_at is not None,
+        "read_back": kept,
         "input": used if r.target_step_id is None else None,
         "seeds": used if r.target_step_id is not None else None,
     }  # fmt: skip
@@ -230,16 +233,19 @@ async def simulation_of(
     return r
 
 
-async def read_back(db: AsyncSession, keys: KeySource, ctx: TenantContext, r: RunRequest) -> Any:
+async def read_back(db: AsyncSession, keys: KeySource, ctx: TenantContext, r: RunRequest) -> tuple[str, Any]:
     """The request's own envelope, each claim in it `[redacted]` (a sensitive value, or one claimed by its size): the
-    input or seeds it was admitted with, never recomputed. None once retention removed it."""
+    input or seeds it was admitted with, never recomputed. `kept` with it; `absent` when the request has none;
+    `unreadable` when it's there but doesn't open under its tenant or isn't JSON: never read as absent."""
     try:
         envelope = await claims.read_envelope(db, ClaimCipher(keys), ctx.tenant_id, request_id=r.id)
+    except claims.EnvelopeUnreadableError:
+        return "unreadable", None
     except claims.EnvelopeUnavailableError:
-        return None
+        return "absent", None
     except Exception as e:
         raise key_unusable(e) from None
-    return _redacted(envelope)
+    return "kept", _redacted(envelope)
 
 
 def _redacted(value: Any) -> Any:
@@ -353,6 +359,8 @@ async def seed_contract(
     `invalid`, its blocking problems: an invalid draft's contract would miss reads), each entry prefilled from its
     step's own sample where D-s2 allows (run data: `run.view`), else typed, saying why."""
     wf = await _draft_at(db, ctx, workflow_id, revision)
+    if workflow_ops.draft_node(wf.draft, step_id) is None:
+        raise HTTPException(404, detail={"error": "not_found"})
     checked = await workflow_ops.check_draft(db, ctx.tenant_id, wf.draft, settings)
     sim = await workflow_ops.simulatable(db, ctx, wf, checked)
     if sim.new is None or checked.graph is None or checked.context is None:

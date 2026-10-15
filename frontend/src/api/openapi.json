@@ -4343,6 +4343,15 @@
             ],
             "title": "Input"
           },
+          "read_back": {
+            "enum": [
+              "kept",
+              "absent",
+              "unreadable"
+            ],
+            "title": "Read Back",
+            "type": "string"
+          },
           "request": {
             "$ref": "#/components/schemas/SimulationOut"
           },
@@ -4373,6 +4382,7 @@
           "request",
           "run",
           "cancel_requested",
+          "read_back",
           "input",
           "seeds"
         ],
