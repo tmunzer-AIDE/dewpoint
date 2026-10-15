@@ -663,7 +663,8 @@ test("a Mist step's connection is chosen from the tenant's, and its choices neve
   await page.getByRole("option", { name: /mist\.site_devices\.list@1/ }).click();
   await page.getByRole("button", { name: /^list, / }).click();
   const drawer = page.getByRole("complementary", { name: "list" });
-  await drawer.getByLabel("Connection").selectOption({ label: "Acme Prod · not verified yet" });
+  // The list, not its loading message, which the label names too while it loads (#73).
+  await drawer.getByRole("combobox", { name: "Connection" }).selectOption({ label: "Acme Prod · not verified yet" });
   await expect(page.getByText("Saved · not published")).toBeVisible({ timeout: 10_000 });
   await expectAccessible(page, "editor: drawer, a connection");
   expect(options).toEqual([]);

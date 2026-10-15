@@ -28,9 +28,9 @@ talks to Temporal.
 - Admission takes the workflow's active version, if the workflow is enabled, and freezes it in the request. It checks
   the deployment's environment is recorded and, in `production`, that production runs are on; that the dispatcher
   recorded a current build within the last 2 minutes, of the version's engine ABI; that nothing the version uses is
-  retired; and the input: at most 64 levels deep, then against the version's input schema. Then it claims the
-  input, as any run's ([below](#sensitive-and-large-values-claims)), and keeps the request's input, with handles in
-  place of its claimed values, encrypted beside them (its trigger envelope).
+  retired; and the input: at most 64 levels deep, its numbers finite, then against the version's input schema. Then it
+  claims the input, as any run's ([below](#sensitive-and-large-values-claims)), and keeps the request's input, with
+  handles in place of its claimed values, encrypted beside them (its trigger envelope).
 - A refusal answers with its code and fixed messages that never quote a value: 503 `production_runs_disabled`,
   `environment_not_recorded`, `no_current_build` or `key_unusable` (the tenant's data key can't be read); 422
   `input_invalid` or `secret_index_limit`, with each place and rule the input breaks; 409 `workflow_disabled`,
@@ -106,6 +106,51 @@ sees `trigger.rows` (one object per row, each column by its name) and `trigger.r
   together pass 64 KiB are one claim, and the loop gives each iteration a handle to its row: a step's reference to a
   cell is read in its own activity, but CEL over a cell (a condition on `item.status`) runs in `cel.evaluate`, one
   activity per row ([its cost](#limits-in-this-build)).
+
+## Simulating a draft
+
+`POST /api/v1/t/{tenant}/workflows/{workflow}/draft/simulations`, with `workflow.edit` and `run.start` (editors and
+up), an `If-Match` header holding the draft's revision (without one, 428 `revision_required`; not a number, 400
+`bad_revision`) and an `Idempotency-Key` (428 `idempotency_key_required`), simulates the saved draft as it stands: the
+workflow need not be enabled, nor ever published. The body is `{"input": {...}}` for the whole workflow, or
+`{"target": {"step_id": ..., "values": {pointer: value}, "absent": [pointer]}}` for one step alone, given the values it
+reads (its seeds). It answers 202 with the request, `queued`, in `simulate` mode, frozen on a **draft snapshot**: the
+draft's graph, pins, CEL profile and engine ABI as a version holds them, shared by the simulations of the same draft.
+
+- An input or a seed nested deeper than 64 levels, or holding NaN or an infinity, is refused first, 422 `input_invalid`,
+  whatever its key holds. Admission checks the key next: an exact retry returns its request even after the draft
+  changed. Then the tenant and the production gate, as a start; the revision (409 `draft_conflict`, with the draft's
+  `draft_revision`); the draft, validated: an error diagnostic, `declassify.forbidden` (a draft that declassifies,
+  without `workflow.declassify`), `version.unbounded`, a sub-flow's cycle, depth or engine version and a retired type
+  refuse it (422 `invalid`, with the diagnostics); so do no current build or one of another engine ABI, with the start's
+  codes. Unknown or mis-typed connections, pickers and deprecated step types don't (a simulation opens no connection):
+  they're kept on the request as `admission_checks` and returned. Then the input, against the draft's input schema (a
+  draft whose input takes a CSV can't be simulated whole: 422 `csv_not_simulated`, and a step of it can), or the seeds,
+  against the step's seed contract: every pointer in exactly one of `values` (null only where it's nullable) and
+  `absent` (only where it's optional), else 422 `seed_missing`, `seed_alias`, `seed_unknown` or `seed_invalid`, each
+  problem with its pointer; 422 `target_invalid` for a step that can't run alone. One audit entry, `run.request`, names
+  the snapshot, the revision, its graph hash, the target and the declassified sites.
+- The run takes the tenant's slots and the dispatcher as any run. A step alone runs only that step, from its seeds, and
+  ends with it: no outputs, no failure handler, no edge followed; the other steps have no rows.
+- A draft run is never re-run (409 `draft_run`, its published sub-runs included): simulate the draft again. Draft runs
+  show in `GET …/runs` with their `draft_snapshot_id` and `target_step_id` and no `version_id`; they're never a step's
+  sample, nor counted in a workflow's last runs and 24-hour counts. Cancelling one is the run's own route
+  ([below](#cancelling-and-re-running)).
+
+The editor's reads, `run.view` unless said otherwise:
+
+| Route (under `/api/v1/t/{tenant}/workflows/{workflow}`) | |
+|---|---|
+| `GET /draft/simulations` | the caller's own latest simulations of the workflow, newest first (`limit`, 1 to 50, 20 by default), each with its `draft_revision`; 404 for a workflow the tenant doesn't have |
+| `GET /draft/simulations/{id}` | where it is: its request, its run once there is one, `cancel_requested`, and the `input` or `seeds` it was admitted with, read back from its own request, its claimed values `[redacted]`; `read_back` says whether that was `kept`, is `absent`, or is `unreadable` (stored but it doesn't open: never shown as absent) |
+| `GET /draft/simulations/{id}/steps` | a summary per step, in run order: its instances' final attempts counted by status and by port, a single instance's final attempt, and where its data came from: `evaluated`, `evaluated_not_waited` (a delay or wait-until), `fixture_not_sent` (a plugin's simulation), `skipped`, `not_started`, `cancelled`, `didnt_run`, `not_recorded` (the run ended outside the workflow: `internal_error`, `terminated`, `history_lost`), `not_reached_yet`; `given` says whether a person gave `input` or `seeded` values |
+| `GET /draft/simulations/{id}/steps/{step}/instances` | a step's instances, one per iteration (its final attempt), by iteration number, with their `total` (`offset`; `limit`, 1 to 100; `within`, one iteration and those nested in it) |
+| `GET /draft/snapshots/{snapshot}` | a snapshot's graph (`workflow.view`) |
+| `GET /draft/start-form?revision=N` | the draft's input as a form, as `start-form` describes the active version's (`workflow.edit` and `run.start`) |
+| `GET /draft/steps/{step}/seeds?revision=N` | the step's seed contract: each pointer it reads, its types, whether it's required, nullable and sensitive, and its prefill: its step's newest sample there when that's faithful (nothing redacted, cut or claimed, no U+FFFD, no `nan`, `inf` or `-inf`) and fits, else why it's typed; or why the step can't run alone; 404 for a step the draft doesn't hold. The draft is validated first, as admission validates it (422 `invalid`). `workflow.edit`, `run.start` and `run.view` |
+
+The two revision-bound reads answer 409 `draft_conflict` for another revision. Draft snapshots follow the tenant's
+retention ([retention](retention.md)).
 
 ## Schedules
 
@@ -381,7 +426,8 @@ refused request, a request past its tenant's retention cutoff, or an input reten
 optional (the old one's by default). The key covers what was asked (the request re-run, the mode, any new input), and is
 checked before anything is rebuilt: an exact retry returns the request it admitted even once retention has removed the
 old input, while the re-run's own request is within its cutoff (410 `request_not_retained` past it), and another re-run
-under the key is 409 `idempotency_conflict`. The audit entry names the request re-run (`rerun_of`).
+under the key is 409 `idempotency_conflict`. The audit entry names the request re-run (`rerun_of`). A draft simulation's
+run, or any run of its tree, is never re-run: 409 `draft_run`.
 
 ## The worker
 
@@ -459,6 +505,14 @@ is read and whatever its idempotency key already holds: at a start; at a re-run,
 original (one kept before the limit is refused so, and a re-run given a new input proceeds); at a schedule's create or
 replace (422); and at a firing, a `refused` request (a schedule stored before the limit fires refused until its input is
 replaced; validate and publish warn that it fails at every firing already). Nothing already kept is changed.
+
+An input's numbers are finite, as JSON's are. The API reads a body with Python's JSON parser, which takes `NaN`,
+`Infinity`, `-Infinity` and a number past a float's range (`1e400`); its idempotency digest, its claims and Postgres
+can't hold them, and such an input answered 500. It's refused `input_invalid` with "The run's input holds a number that
+isn't finite: NaN and infinity aren't valid JSON.", which never quotes it, after its depth and before its schema is
+read, whatever its idempotency key already holds: at a start, at a re-run given a new input, and at a schedule's create
+or replace (422). Nothing is recorded. Nothing kept can hold one, and a webhook event holding one is malformed
+([ingress](ingress.md)).
 
 ## Reading runs
 
@@ -650,12 +704,16 @@ its error class's either way.
 | `failed` | `terminated` | A sub-run that an operator terminated in Temporal. It couldn't record its end, so its parent did, and the step or loop that started it failed with the same code. |
 | `deadline_exceeded` | `deadline_exceeded` | The run passed `DEWPOINT_MAX_RUN_DURATION_DAYS` (default 30). Running steps were cancelled. |
 | `cancelled` | `cancelled` | The run was cancelled in Temporal. A cancel that arrives while the run's end is being written leaves that end. |
+| `failed` | `seeded_live_refused` | A step alone was started outside a simulation; admission never does. Nothing ran. |
+| `failed` | `target_invalid` | A step alone that can't run alone, or whose values aren't values and absences by pointer; admission refuses both first. Nothing ran. |
 
 Step error codes include the plugin's own codes and `config_invalid`, `output_schema_violation` (an output holding the
 key `$claim` too), `unexpected_error`, `evaluation_error`, `type_mismatch`, `timeout`, `cel_profile_unavailable`,
 `input_too_large`, `history_too_large` (the step's requests to the CEL evaluator would take the run's history past
 32 MiB, under Temporal's limit, which would terminate the run: the rest are never sent), `item_cap_exceeded`,
-`iteration_cap_exceeded`, `outcome_unconfirmed` (the run ended before the step's outcome was recorded: a bug in the
+`iteration_cap_exceeded`, `seed_missing` (a step run alone read a value its seeds don't hold: a guard, which the seed
+contract's check at admission should make unreachable), `outcome_unconfirmed` (the run ended before the step's
+outcome was recorded: a bug in the
 interpreter failed the run, or a batch of its loop, or the run ended from outside; whether the step ran is unconfirmed,
 and it is never a plugin's failure; a projection landing after the run's end, or after its batch's closing while the
 run still runs, writes its steps so too: the run's row keeps each closed batch, `unconfirmed_batches`; each projection

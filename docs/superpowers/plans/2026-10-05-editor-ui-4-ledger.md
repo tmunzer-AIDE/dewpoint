@@ -36,7 +36,7 @@ cover local work only: anything outward-facing (push, PR, issues) is confirmed i
 | 0048–0065 | 2b-4b's work (#90, merged 2026-10-12, chained 0044 → 0047 → 0045 → 0070 → 0048 → … → 0065). B4b and B8, reserved at 0048 and 0049 on 2026-10-08, moved to 0071 and 0072 (the owner, 2026-10-11) |
 | 0070 | 4c-3a: `webhook_endpoints.trigger_key`, an endpoint's sender (the owner; it was 0054 until 2026-10-11, which 2b-4b's work also names) |
 | 0071 | B4b: `skipped` and `not_started` projection statuses and `run_steps.effect_preview` (the owner, 2026-10-08; the slot, 2026-10-11); 4d-1a, chained after 0065 |
-| 0072 | B8: draft and single-step simulation (the owner, 2026-10-08; the slot, 2026-10-11) |
+| 0072 | B8: `draft_snapshots`, and the requests' and runs' draft columns (the owner, 2026-10-08; the slot, 2026-10-11); 4d-1b, chained after 0071 |
 
 - One Alembic chain: before merging, the first unmerged migration's `down_revision` is reconciled with the actual head.
 - Deployed migrations are never rewritten; 0035–0042 are never altered.
@@ -2836,3 +2836,154 @@ suite, with 3 failed, 6119 passed and 131 skipped.
 cd1a44a1 holds both (test-only; the owner: "Commit and push it; keep asking for Auto-fix pushes"). CI's second run, on
 cd1a44a1: every job passed (the backend in 23 min), as did CodeQL. Main has since gained #102 (a CEL compile fix: no
 ABI, migration or runtime change), which merges cleanly.
+
+### 4c-1's deferred minors, fixed (#73) (2026-10-15)
+
+M55's eight minors (issue #73), on the owner's choice and "go, build it with option A". The plan, its rulings and its
+record: `2026-10-15-editor-4c1-minors.md`. A held limit's pointer is `#/options/<name>`, so a config field named
+`options` can't sweep it up or be blocked by it (the latent text loss); typed numbers are decimal only; a list's items
+start afresh when the list is rebuilt, and a map's entries keep their state by name through a rename; each "Show
+choices" is named by its field; a picker's messages are `<output>`s its label names; `muted` on `disabled-bg` is under
+the contrast check; Escape closes the drawer as Close does; a Go to doesn't focus the heading first. The fresh review's
+findings are fixed but one Low left open (a map re-sorted by a rename, in a real browser).
+
+### 4d-1b plan accepted (2026-10-15, in chat)
+
+`docs/superpowers/plans/2026-10-14-editor-ui-4d1b-backend.md`, revision 1 (d12b9144): one plan for the whole of the
+spec's §6, with milestone pauses (the owner, 2026-10-14: "One plan"). The owner, in their own words: "I accept rulings
+9, 12, 13 and 15; inline", then "Accept the rest; commit the plan, branch from 4c729417; installs OK". The plan's
+rulings 1–16 join this ledger as 175–190; the plan says each one's why and its cost. Rulings 183 and 187 add to the
+spec's §6.6, amended in the same commit. It carries 4d-1a's deferred minors that are 4d-1b's: the seeds read validates
+the draft first (186), the operations doc's codes (Task 14), and ruling 164's guard (189).
+
+175. **Accepted. A draft simulation's source is `manual`** (plan ruling 1), as the spec's §6.3 has it.
+176. **Accepted. The worker loads a version, then a snapshot, by the same id** (plan ruling 2): no new field in the
+     run's input, so no ABI change.
+177. **Accepted. A snapshot's closure is its pins' alone** (plan ruling 3); its own engine ABI is checked beside its
+     pins'.
+178. **Accepted. What a simulation reports without blocking** (plan ruling 4): `lifecycle.deprecated`, connections
+     and pickers, as `admission_checks`; the rest blocks, `declassify.forbidden` in a simulation's words.
+179. **Accepted. "At a revision" means the current one** (plan ruling 5): another answers 409 `draft_conflict`.
+180. **Accepted. The seeds envelope is claimed with each entry's own schema**, never checked against it there (plan
+     ruling 6): `seeds.check` has.
+181. **Accepted. The idempotency digest grows only for drafts** (plan ruling 7).
+182. **Accepted. Snapshot reuse against the sweep** (plan ruling 8): the snapshot's advisory lock, shared by
+     admission, tried exclusively by the sweep, whose DELETE checks again; its deletions uncounted.
+183. **Accepted. The data-origin tags are sent as codes** (plan ruling 9); the UI words them. Spec §6.6.
+184. **Accepted. A step's instances are paged by offset, in iteration order by number** (plan ruling 10), `within`
+     one iteration; a step test's summary lists its target alone.
+185. **Accepted. The person's simulations list is theirs alone** (plan ruling 11).
+186. **Accepted. The seeds read validates the draft first, as admission does** (plan ruling 12); a step that can't run
+     alone answers `refused`.
+187. **Accepted. D-s2's prefill is computed by the server, in the seeds read** (plan ruling 13), which then needs
+     `run.view` too. Spec §6.6.
+188. **Accepted. The draft's start form needs what simulating needs** (plan ruling 14), in `start-form`'s shape with
+     `draft_revision`.
+189. **Accepted. A single step never continues as new** (plan ruling 15): 4d-1a's ruling 164 gets its guard.
+190. **Accepted. A new partial index, `runs_workflow_last_published`** (plan ruling 16), for the workflow list's last
+     runs without draft runs.
+
+Mid-slice rulings:
+M98. **Task 1 says "accepted"**: the owner accepted every ruling before Task 1 ran, so this section and its commit say
+     so, not "proposed" as the plan's text has it.
+M99. **The branch starts at 4c729417**, the owner's word: main gained #104 (the declassify entries) after the plan's
+     a914a799. The plan's 26 diff blocks apply on it unchanged (checked before the branch was made).
+
+
+### 4d-1b, milestone 1 (2026-10-15)
+
+Tasks 1–4 on `feat/editor-4d1b` (from origin/main 4c729417, the plan merged in a5422657), each test-first, as the
+plan's steps say; every run matched its Expected line:
+- Task 1, 0a34f682: the 0072 slot, rulings 175–190 accepted, the spec's §2 (4d-1a at ABI 9) and §6.6 (rulings 183 and
+  187).
+- Task 2, 09d03478, migration 0072: red, 6 failed and 18 passed (no revision `0072`, the chain's head `0071`, the fence
+  without `draft_snapshots`); green, 24 passed, the privilege reference regenerated.
+- Task 3, 8e519a57, a draft frozen as its version would be: red at collection (`drafts` not importable), 20 passed;
+  green, 26 passed, publish's tests and the snapshots' row-level security among them.
+- Task 4, 350b8054, retention and erasure of snapshots: the new tests red, 3 failed; green with retention and erasure
+  whole, 165 passed (about 4 minutes).
+
+After each task: ruff (check and format), mypy (312 to 313 source files) and the import contracts (11 kept): clean.
+Mid-slice rulings: M98 and M99, above; none since. #104's declassify change met no task's tests. Deploy order, as the
+plan says: 0072 first.
+
+### 4d-1b, milestone 2 (2026-10-15)
+
+The owner accepted milestone 1 in their own words: "Milestone 1 accepted, continue". Tasks 5–8, each test-first; every
+run matched its Expected line:
+- Task 5, 4cfa48cf, admitting a draft simulation: red, 10 failed and 91 passed (no `admit_draft`, `DraftInvalidError`,
+  `SeedsRefusedError`; `digest()` without `draft`); green, 101 passed, every existing admission, input and publish test
+  among them.
+- Task 6, 2fdf55d8, `POST …/draft/simulations`: red, 9 failed and 103 passed (404s, no schema path); green, 112 passed.
+- Task 7, 36818704, dispatch, the reconciler and the worker on a snapshot, and the single step's guard: red, 4 failed
+  and 774 passed (no draft request started or begun; the single step continued as new and never ended); green, 778
+  passed (about 3 minutes).
+- Task 8, d53c354b, re-runs, retirement and connections: red, 2 failed and 64 passed (a draft run's re-run answered
+  410, a normal retirement missed the queued simulation); the connection pin passed at once, as planned; green, 66
+  passed.
+
+After each task: ruff (check and format), mypy (313 to 314 source files) and the import contracts (11 kept): clean.
+No mid-slice ruling. Draft simulations run from here.
+
+### 4d-1b, milestone 3 and the final checkpoint (2026-10-15)
+
+The owner accepted milestone 2 in their own words: "Milestone 2 accepted, continue". Tasks 9–14, each test-first;
+every run matched its Expected line:
+- Task 9, 26935909, samples and the workflow list leave draft runs out: red, 3 failed and 25 passed; green, 28.
+- Task 10, ca0347e9, the run API's draft fields and a snapshot's graph: red, 3 failed and 123 passed; green, 126.
+- Task 11, e771da80, the person's simulations, a simulation's state, the read-back: red, 6 failed and 74 passed;
+  green, 80.
+- Task 12, 7d129ba7, the per-step summary and a step's instances: red, 6 failed, 76 passed and 1 error; green, 98, no
+  warning.
+- Task 13, a184c0d7, the draft's start form and the seed contract with its prefills: red, 9 failed, 77 passed and 1
+  error; green, 120.
+- Task 14, 886adc80, the role matrix, the docs, the API's schema and the client's types: the matrix passed at once (a
+  pin, as planned), 6 passed; the schema only added (7 paths, 13 schemas); `check:api` and the type check passed; the
+  API suite whole, 551 passed.
+
+Mid-slice rulings:
+M100. **Test runs set `UV_FROZEN=1 UV_NO_SYNC=1`**: the tests' own fixture runs `uv run alembic upgrade head` without
+      `--frozen`, and uv revalidated the CEL wheel's GitHub URL while GitHub timed out (4 setup errors in Task 14's
+      first run). With the lock as installed and no network, the run matched.
+M101. **The tick codec's test leaves a draft simulation's refusals out**: it lists every refusal code admission
+      defines, and met `target_invalid` (Task 5) and `csv_not_simulated` (below), which no task's tests ran. A tick
+      admits its schedule's active version, never a draft, so the allowlist stays as narrow as it was.
+
+The final review: a fresh reviewer (Fable), read-only, on 4c729417..886adc80: no critical or important finding, ten
+minor ones, "Ready to merge: Yes". The owner, in their own words: "Run the suite; fix minors 1–3 first". Each fix was
+reproduced by a test that failed first:
+- a draft whose input takes a CSV, simulated whole: 422 `csv_not_simulated`, rows given or not; a step of it still
+  runs;
+- 404 for the simulations of a workflow the tenant doesn't have, and for the seeds of a step the draft doesn't hold;
+- the state's read-back says `read_back`: `kept`, `absent`, or `unreadable` (stored but it doesn't open), never
+  showing an unreadable input as absent, while the rest of the state still answers.
+Deferred (minor): the seeds read takes the lifecycle's blocking shared locks; the seed contract analyses the draft
+again; instance paging sorts every iteration of a step per page; 0072's downgrade message could say what to do; the
+summary's step entries are untyped; lifecycle deprecations are deduplicated by code; reconcile.py:192's precedence.
+A NaN or Infinity in a request body fails as a server error on `POST …/runs` too: separate work, flagged apart.
+
+Checks, on 886adc80 with the fixes (not yet committed):
+- ruff (check and format), mypy (316 source files) and the import contracts (11 kept): clean.
+- The CEL gates' tests, serial in a process of their own: 594 passed, 10 skipped.
+- The backend suite without them, 8 workers, once: 6362 passed, 131 skipped, **3 failed**, in 54 minutes. It was not
+  re-run whole. One was real: the tick codec's test (M101); its file, after the fix: 25 passed. The other two, re-run
+  alone afterwards, passed: a golden history's replay (under load, Temporal's deadlock detector: the workflow "didn't
+  yield within 2 second(s)") and an online migration's test (its database connection closed mid-operation). That
+  points to load in the parallel run; it doesn't prove it.
+- The frontend's `check:api`, lint, type check, tests (72 files, 1003 tests) and build on 886adc80; after the fixes,
+  the regenerated types, `check:api` and the type check again.
+- Local CodeQL (CLI 2.27.2, python-queries 1.8.12): no finding, on 886adc80 and on the fixed tree.
+
+The deploy order, as the plan says: migration 0072 first, then this build's API, dispatcher and worker. Push and a
+pull request wait for the owner's word.
+
+### 4d-1b, main merged and the non-finite guard (2026-10-15)
+
+The owner's go ("go") to commit the fixes and the final checkpoint (40ec281f, 87f96d33), merge origin/main and add #106's
+guard. Main gained #106 (f443c002: an input holding NaN or an infinity is refused 422 `input_invalid`, not a 500),
+merged in d7a26cba without a conflict. 8bfecbf2: `admit_draft` checks `holds_non_finite` on the input
+and the seeds' values beside its depth check, before the key is read. Its test, red first (each number reached the
+digest: "Out of range float values are not JSON compliant"), then 4 passed (NaN, Infinity, -Infinity, 1e400, in the
+input under a used and a new key and in a seed). Then the API suite, admission's, the inputs', the digest's, publish's
+and the tick codec's tests: 699 passed; ruff, mypy and the import contracts clean; the API's schema unchanged
+(`check:api` passes). The whole backend suite wasn't run again.

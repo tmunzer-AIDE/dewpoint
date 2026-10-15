@@ -325,6 +325,23 @@ describe("the input's CSV file", () => {
     expect(panel.settings()?.csv?.max_bytes).toBe(1_572_864);
   });
 
+  it("holds a number column's default and the largest file typed in another notation than decimal (#73)", async () => {
+    const panel = await showPanel({ doc: draft({ csv: { columns: [{ header: "Price", name: "price", type: "number" as const }] } }) });
+    await userEvent.click(within(input()).getByRole("button", { name: "Edit Price" }));
+    await userEvent.click(within(input()).getByRole("textbox", { name: "Default (an empty cell gets it)" }));
+    await userEvent.paste("0x2");
+    expect(input().textContent).toContain("A number, like 42 or 2.5.");
+    expect(panel.settings()?.csv?.columns[0]).not.toHaveProperty("default");
+    await userEvent.click(within(input()).getByRole("button", { name: "Done" }));
+    // Focus comes back to Edit Price a frame later: clicked before it lands, the size field would lose it.
+    await vi.waitFor(() => expect(document.activeElement).toBe(within(input()).getByRole("button", { name: "Edit Price" })));
+    await userEvent.click(within(input()).getByRole("textbox", { name: "Largest file (MB)" }));
+    await userEvent.paste("0x2");
+    expect(input().textContent).toContain("A size in MB, above 0 and up to 5.");
+    expect(panel.settings()?.csv).not.toHaveProperty("max_bytes");
+    expect(panel.held().map((u) => u.text)).toEqual(["0x2", "0x2"]);
+  });
+
   it("gives a held limit focus when Go to it lands on it", async () => {
     // 4c-3b's final review: Go to it opened the CSV file but focused nothing for a limit.
     await showPanel({ doc: draft({ csv: { columns: [{ header: "A", name: "a", type: "string" }] } }), focusAt: { pointer: "/settings/csv/max_rows", n: 1 } });

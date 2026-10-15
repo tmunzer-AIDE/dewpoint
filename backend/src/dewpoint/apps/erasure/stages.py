@@ -455,7 +455,7 @@ SWEPT: tuple[tuple[str, str], ...] = (
     ("claim_grants", "claim_id, run_id"), ("step_outputs", "id"), ("run_secret_index", "root_run_id"),
     ("run_slots", "run_id"), ("execution_evidence", "id"), ("schedule_firings", "workflow_id, run_id"),
     ("schedule_incarnations", "temporal_id"), ("schedule_intervals", "id"), ("runs", "root_run_id"),
-    ("run_requests", "id"), ("run_inputs", "id"), ("inbound_events", "id"),
+    ("run_requests", "id"), ("draft_snapshots", "id"), ("run_inputs", "id"), ("inbound_events", "id"),
     ("trigger_bindings", "id"), ("webhook_endpoints", "id"), ("tenant_event_counters", "tenant_id"),
     ("csv_mappings", "workflow_id"), ("csv_uploads", "id"), ("schedules", "id"), ("workflow_versions", "id"),
     ("workflows", "id"), ("plugin_calls", "id"),  # 0042's: an options call names no connection, so nothing cascades

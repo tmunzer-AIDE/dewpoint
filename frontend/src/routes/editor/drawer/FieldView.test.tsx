@@ -51,6 +51,15 @@ it("labels a field by its title, its hint and the server's problems described by
   expect(name.getAttribute("aria-required")).toBe("true");
 });
 
+it("holds a number typed in another notation than decimal, never writing it (#73)", async () => {
+  const { config, held } = showFields(PLAIN);
+  await userEvent.click(screen.getByLabelText("Count"));
+  await userEvent.paste("0x10");
+  expect(screen.getByText("A whole number, like 42.")).toBeTruthy();
+  expect(config()).toEqual({});
+  expect(held().map((u) => [u.kind, u.text])).toEqual([["number", "0x10"]]);
+});
+
 it("writes a number as typed, and holds what isn't one, with why", async () => {
   const { config, held } = showFields(PLAIN);
   await userEvent.type(screen.getByLabelText("Count"), "12");

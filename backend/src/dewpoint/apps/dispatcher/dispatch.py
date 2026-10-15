@@ -51,7 +51,7 @@ from dewpoint.core.models.platform import PlatformSettings
 from dewpoint.core.models.requests import RunRequest, RunSlot, TenantRunLimits
 from dewpoint.core.models.runs import ExecutionEvidence
 from dewpoint.core.models.tenancy import Tenant
-from dewpoint.core.models.workflows import WorkflowVersion
+from dewpoint.core.models.workflows import DraftSnapshot, WorkflowVersion
 from dewpoint.core.platform.service import PRODUCTION, workers_ready
 from dewpoint.core.plugins import lifecycle
 from dewpoint.core.retention import slo as retention_slo
@@ -292,7 +292,7 @@ async def _begin(
             .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
-    if request is None or request.workflow_version_id is None:
+    if request is None or (request.workflow_version_id is None and request.draft_snapshot_id is None):
         return None
     ran = (await s.execute(text("select status from runs where id = :i for update"), {"i": request.id})).scalar()
     if ran is not None and ran != "running":  # an earlier attempt's execution ran to its end: never a second start
@@ -324,9 +324,7 @@ async def _begin(
     if problems:
         log.warning("dispatch_waiting", reason="workers_not_ready", problems=problems)
         return Waiting("workers_not_ready")
-    version = await s.get(WorkflowVersion, request.workflow_version_id)
-    if version is None:
-        raise RuntimeError("A request frozen on a version that isn't there.")
+    version = await frozen(s, request)  # or a draft simulation's snapshot (B8): what a run starts from, alike
     entries = lifecycle.entries_for(version.closure_node_refs, version.closure_cel_profiles)
     # Never waited for: this transaction holds the request's row, which a retirement holding these locks cancels.
     if not await lifecycle.try_lock_shared(s, entries):
@@ -337,8 +335,8 @@ async def _begin(
         reason = "node_type_retired" if any(e.kind == "node" for e in blocked) else "cel_profile_retired"
         log.warning("dispatch_defensive_cancel", request_id=str(request.id), reason=reason)
         return await _cancel(s, request, reason, {"reason": reason})
-    stale = await other_abi(s, version.closure_version_ids, build.engine_abi)
-    if stale:
+    stale = await other_abi(s, version.closure_version_ids, build.engine_abi)  # a snapshot's closure: its pins'
+    if stale or version.engine_abi != build.engine_abi:
         details: dict[str, object] = {"reason": "engine_abi_changed", "version_abi": version.engine_abi,
                                       "build_abi": build.engine_abi}  # fmt: skip
         return await _cancel(s, request, "engine_abi_changed", details)
@@ -368,8 +366,10 @@ async def _begin(
         return Waiting(KEY_UNUSABLE)
     s.add(RunSlot(run_id=request.id, tenant_id=tenant_id))
     await runs.precreate_run(
-        s, run_id=request.id, tenant_id=tenant_id, workflow_id=request.workflow_id, version_id=version.id,
-        mode=request.mode, started_by=request.actor_id, queued_at=request.queued_at,
+        s, run_id=request.id, tenant_id=tenant_id, workflow_id=request.workflow_id,
+        version_id=request.workflow_version_id, draft_snapshot_id=request.draft_snapshot_id,
+        target_step_id=request.target_step_id, mode=request.mode, started_by=request.actor_id,
+        queued_at=request.queued_at,
     )  # fmt: skip
     await runs.record_attempt(s, tenant_id, request.id)  # its execution's evidence, before Temporal is asked
     if request.start_request_id is None:  # recorded once: every start of it carries it (the start-check slice)
@@ -391,7 +391,8 @@ async def _held(s: AsyncSession) -> None:
 
 
 def run_input(request: RunRequest, version_id: uuid.UUID, envelope: Any, settings: Settings) -> RunInput:
-    """A request's start: its frozen version and its envelope, with the deployment's run bounds."""
+    """A request's start: its frozen version (or a draft simulation's snapshot, and the step it runs alone, B8) and its
+    envelope, with the deployment's run bounds."""
     return RunInput(
         tenant_id=str(request.tenant_id),
         run_id=str(request.id),
@@ -400,7 +401,21 @@ def run_input(request: RunRequest, version_id: uuid.UUID, envelope: Any, setting
         mode=request.mode,
         max_run_duration_s=settings.max_run_duration_days * 86_400,
         cel_schedule_to_start_s=settings.cel_schedule_to_start_s,
+        target_step_id=str(request.target_step_id) if request.target_step_id else None,
     )
+
+
+async def frozen(s: AsyncSession, request: RunRequest) -> WorkflowVersion | DraftSnapshot:
+    """What a request was frozen on: its version, or a draft simulation's snapshot (B8; the simulation design §6.4),
+    which carries the same fields under the same names."""
+    found = (
+        await s.get(WorkflowVersion, request.workflow_version_id)
+        if request.workflow_version_id is not None
+        else await s.get(DraftSnapshot, request.draft_snapshot_id)
+    )
+    if found is None:
+        raise RuntimeError("A request frozen on a version or snapshot that isn't there.")
+    return found
 
 
 async def _slot_free(s: AsyncSession, tenant_id: uuid.UUID, platform: PlatformSettings) -> bool:

@@ -192,3 +192,21 @@ async def test_activating_refuses_a_version_naming_a_deleted_connection(
         ).scalar_one()
     with pytest.raises(workflow_ops.NotActivatableError):
         await activate(api_sessionmaker, ctx, child, old)
+
+
+@pytest.mark.usefixtures("development_deployment")
+async def test_a_connection_only_a_queued_draft_simulation_names_can_be_deleted(
+    owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    """B8 (the simulation design §6.5): a simulation opens no connection, so a draft simulation never holds one in
+    use."""
+    from tests.apps.test_admission import current
+    from tests.apps.test_admission_drafts import simulate
+
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    cid = await connection(owner_sessionmaker, ctx.tenant_id)
+    wf = await create(api_sessionmaker, ctx, graph(str(cid)))
+    await current(dispatch_sessionmaker)
+    assert (await simulate(api_sessionmaker, ctx, wf, api_settings)).request.status == "queued"
+    await _delete(api_sessionmaker, ctx, cid)  # no version names it, enabled or queued

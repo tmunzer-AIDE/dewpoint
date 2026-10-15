@@ -22,15 +22,21 @@ from tests.engine.cel.gate_replay_workflow import CelCorpus, outcomes
 from tests.engine.cel.test_gate_semantics import CASES
 
 BACKEND = Path(__file__).parents[3]
+# A replay that passes leaves with os._exit, skipping interpreter shutdown: temporalio's bridge can still be dropping
+# Python objects on a tokio thread while 3.12 finalizes, which kills the process with SIGSEGV (about 1 run in 500 on
+# Linux). A replay that fails raises before that line, so its traceback and exit status are unchanged.
 REPLAY = textwrap.dedent(
     """
-    import asyncio, sys
+    import asyncio, os, sys
     from temporalio.client import WorkflowHistory
     from temporalio.worker import Replayer
     from tests.engine.cel.gate_replay_workflow import CelCorpus
 
     history = WorkflowHistory.from_json("gate4", open(sys.argv[1]).read())
     asyncio.run(Replayer(workflows=[CelCorpus]).replay_workflow(history))
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
     """
 )
 M = {f"k{i:02d}": i for i in reversed(range(24))}  # built in reverse: the runtime's order is its own
@@ -69,11 +75,12 @@ async def recorded(path: Path, items: list[list[Any]]) -> Path:
 
 
 def replays(history: Path) -> list[str]:
-    """What each replay reported on stderr, in 5 fresh processes with different hash seeds: "" when it passed."""
+    """What each replay reported on stderr, in 5 fresh processes with different hash seeds: "" when it passed. With
+    faulthandler on, a native crash reports its threads' stacks rather than a bare exit status."""
     out = []
     for seed in range(5):
         done = subprocess.run(
-            [sys.executable, "-c", REPLAY, str(history)],
+            [sys.executable, "-X", "faulthandler", "-c", REPLAY, str(history)],
             cwd=BACKEND,
             env={**os.environ, "PYTHONHASHSEED": str(seed * 7919 + 1)},
             capture_output=True,

@@ -607,3 +607,136 @@ class StartFormOut(_Answer):
     version_id: str
     fields: list[StartFieldOut]
     csv: CsvFormOut | None
+
+
+class SimulationOut(_Answer):
+    """A draft simulation's request (B8; the simulation design §6.3): frozen on its draft snapshot, at the revision it
+    was admitted at, with the step it runs alone (S2) and what admission reported without refusing. Never its input."""
+
+    id: str
+    workflow_id: str
+    version_id: None
+    draft_snapshot_id: str
+    draft_revision: int
+    target_step_id: str | None
+    mode: Literal["simulate"]
+    source: str
+    status: Literal["queued", "starting", "started", "cancelled", "refused", "dead"]
+    reason: str | None
+    queued_at: str | None
+    ended_at: str | None
+    admission_checks: list[DiagnosticOut]
+
+
+class DraftSnapshotOut(_Answer):
+    """A draft simulation's snapshot whole (B8; the simulation design §6.5): what B4a's version read is for a version,
+    its graph verbatim as frozen (documented as a Graph), and how each of its expressions runs."""
+
+    id: str
+    workflow_id: str
+    draft_revision: int
+    created_at: str
+    graph_hash: str
+    version_hash: str
+    cel_profile: str
+    engine_abi: int
+    node_refs: list[str]
+    graph: dict[str, Any]
+    expressions: list[ExpressionOut]
+
+
+class SimulationRunOut(_Answer):
+    """A draft simulation's run, once dispatch wrote it (B8): its own state."""
+
+    status: Literal["running", "succeeded", "failed", "cancelled", "deadline_exceeded"]
+    queued_at: str | None
+    started_at: str | None
+    ended_at: str | None
+    error: dict[str, Any] | None  # {code, message}
+    iterations: int
+
+
+class SimulationStateOut(_Answer):
+    """A draft simulation where it is (B8; the simulation design §6.6): its request, its run once there is one,
+    whether a cancel was requested, and what it ran with, read back from its own request, redacted (`[redacted]` in
+    place of what its envelope holds as claims), never recomputed from the draft as it is now: its `input`, or a step
+    test's `seeds` (S2)."""
+
+    request: SimulationOut
+    run: SimulationRunOut | None
+    cancel_requested: bool
+    read_back: Literal["kept", "absent", "unreadable"]  # unreadable: there, but it doesn't open (never shown as absent)
+    input: dict[str, Any] | None
+    seeds: dict[str, Any] | None
+
+
+class StepSummaryOut(_Answer):
+    """A step of the draft a simulation ran (B8; the simulation design §6.6): its instances' final attempts counted by
+    status and by the port they took, a single instance's final attempt, and where its data came from (§7.4)."""
+
+    step_id: str
+    key: str
+    type: str
+    origin: Literal[
+        "evaluated", "evaluated_not_waited", "fixture_not_sent", "skipped", "not_started", "cancelled", "didnt_run",
+        "not_recorded", "not_reached_yet",
+    ]  # fmt: skip
+    instances: int
+    statuses: dict[str, int]
+    ports: dict[str, int]
+    final: dict[str, Any] | None  # the run API's step: a single instance's final attempt
+
+
+class SimulationStepsOut(_Answer):
+    """A draft simulation's steps in run order (§6.6), and what the values a person gave were (§7.4): the workflow's
+    input, or a step test's seeds. A step test lists its target alone: the other steps are outside the test."""
+
+    given: Literal["input", "seeded"]
+    steps: list[StepSummaryOut]
+
+
+class StepInstancesOut(_Answer):
+    """A step's instances in a draft simulation, one per iteration, each its final attempt (the run API's step), in
+    iteration order (§6.6): a page of them, and their total."""
+
+    total: int
+    items: list[dict[str, Any]]
+
+
+class DraftStartFormOut(_Answer):
+    """The draft's input as a form, at its revision (B8; the simulation design §7.1): `start-form`'s fields and CSV
+    declaration, for a draft that may never have been published. A draft declaring a CSV can't be simulated whole."""
+
+    workflow_id: str
+    draft_revision: int
+    fields: list[StartFieldOut]
+    csv: CsvFormOut | None
+
+
+class SeedPrefillOut(_Answer):
+    """A seed's value from its step's own sample (D-s2), or why the person types it."""
+
+    state: Literal["prefilled", "typed"]
+    value: Any  # the sample's, when prefilled (null may be one)
+    reason: Literal["sensitive", "not_step_output", "no_sample", "not_faithful", "not_in_sample", "doesnt_fit"] | None
+
+
+class SeedEntryOut(_Answer):
+    """One value the step reads (§5.2): its pointer, the JSON types it may have (none listed: any value), whether it's
+    required (else it may be absent), whether null is taken, and whether it's sensitive (typed and masked)."""
+
+    pointer: str
+    types: list[str]
+    required: bool
+    nullable: bool
+    sensitive: bool
+    prefill: SeedPrefillOut
+
+
+class SeedContractOut(_Answer):
+    """A step's seed contract at the draft's revision (§5.2, §6.6), or why the step can't run alone."""
+
+    draft_revision: int
+    step_id: str
+    refused: str | None
+    entries: list[SeedEntryOut]

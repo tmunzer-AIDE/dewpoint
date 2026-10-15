@@ -1288,6 +1288,152 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/simulations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Mine
+         * @description The caller's own latest draft simulations of the workflow, newest first (§6.6): what they started, labelled
+         *     with their revision, never proof of what a submission was (the editor recovers by its own request's key).
+         */
+        get: operations["mine_api_v1_t__tenant_id__workflows__workflow_id__draft_simulations_get"];
+        put?: never;
+        /** Simulate */
+        post: operations["simulate_api_v1_t__tenant_id__workflows__workflow_id__draft_simulations_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/simulations/{request_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * State
+         * @description A draft simulation where it is (§6.6), and what it ran with, read back redacted from its own request.
+         */
+        get: operations["state_api_v1_t__tenant_id__workflows__workflow_id__draft_simulations__request_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/simulations/{request_id}/steps": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Simulation Steps
+         * @description A draft simulation's steps in run order, summarized (§6.6): the tags the editor shows come from here, never
+         *     from a partial page of instances.
+         */
+        get: operations["simulation_steps_api_v1_t__tenant_id__workflows__workflow_id__draft_simulations__request_id__steps_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/simulations/{request_id}/steps/{step_id}/instances": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Step Instances
+         * @description A step's instances in a draft simulation, one per iteration (its final attempt), in iteration order, paged
+         *     from `offset`; with `within`, only that iteration's (itself and every iteration nested in it).
+         */
+        get: operations["step_instances_api_v1_t__tenant_id__workflows__workflow_id__draft_simulations__request_id__steps__step_id__instances_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/snapshots/{snapshot_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Snapshot
+         * @description A draft run's snapshot (B8; the simulation design §6.5), as B4a's read shows a version.
+         */
+        get: operations["snapshot_api_v1_t__tenant_id__workflows__workflow_id__draft_snapshots__snapshot_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/start-form": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Draft Start Form
+         * @description The draft's input at `revision`, as a form (§7.1): `start-form`'s, which reads only the active version.
+         */
+        get: operations["draft_start_form_api_v1_t__tenant_id__workflows__workflow_id__draft_start_form_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/steps/{step_id}/seeds": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Seed Contract
+         * @description A step's seed contract at `revision` (§5.2, §6.6), the draft validated first as admission validates it (422
+         *     `invalid`, its blocking problems: an invalid draft's contract would miss reads), each entry prefilled from its
+         *     step's own sample where D-s2 allows (run data: `run.view`), else typed, saying why.
+         */
+        get: operations["seed_contract_api_v1_t__tenant_id__workflows__workflow_id__draft_steps__step_id__seeds_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/t/{tenant_id}/workflows/{workflow_id}/export": {
         parameters: {
             query?: never;
@@ -2017,6 +2163,48 @@ export interface components {
             graph_hash: string | null;
             /** Unpublished Changes */
             unpublished_changes: boolean;
+        };
+        /**
+         * DraftSnapshotOut
+         * @description A draft simulation's snapshot whole (B8; the simulation design §6.5): what B4a's version read is for a version,
+         *     its graph verbatim as frozen (documented as a Graph), and how each of its expressions runs.
+         */
+        DraftSnapshotOut: {
+            /** Cel Profile */
+            cel_profile: string;
+            /** Created At */
+            created_at: string;
+            /** Draft Revision */
+            draft_revision: number;
+            /** Engine Abi */
+            engine_abi: number;
+            /** Expressions */
+            expressions: components["schemas"]["ExpressionOut"][];
+            graph: components["schemas"]["Graph"];
+            /** Graph Hash */
+            graph_hash: string;
+            /** Id */
+            id: string;
+            /** Node Refs */
+            node_refs: string[];
+            /** Version Hash */
+            version_hash: string;
+            /** Workflow Id */
+            workflow_id: string;
+        };
+        /**
+         * DraftStartFormOut
+         * @description The draft's input as a form, at its revision (B8; the simulation design §7.1): `start-form`'s fields and CSV
+         *     declaration, for a draft that may never have been published. A draft declaring a CSV can't be simulated whole.
+         */
+        DraftStartFormOut: {
+            csv: components["schemas"]["CsvFormOut"] | null;
+            /** Draft Revision */
+            draft_revision: number;
+            /** Fields */
+            fields: components["schemas"]["StartFieldOut"][];
+            /** Workflow Id */
+            workflow_id: string;
         };
         /** Edge */
         Edge: {
@@ -2938,6 +3126,53 @@ export interface components {
             /** Secret */
             secret: string;
         };
+        /**
+         * SeedContractOut
+         * @description A step's seed contract at the draft's revision (§5.2, §6.6), or why the step can't run alone.
+         */
+        SeedContractOut: {
+            /** Draft Revision */
+            draft_revision: number;
+            /** Entries */
+            entries: components["schemas"]["SeedEntryOut"][];
+            /** Refused */
+            refused: string | null;
+            /** Step Id */
+            step_id: string;
+        };
+        /**
+         * SeedEntryOut
+         * @description One value the step reads (§5.2): its pointer, the JSON types it may have (none listed: any value), whether it's
+         *     required (else it may be absent), whether null is taken, and whether it's sensitive (typed and masked).
+         */
+        SeedEntryOut: {
+            /** Nullable */
+            nullable: boolean;
+            /** Pointer */
+            pointer: string;
+            prefill: components["schemas"]["SeedPrefillOut"];
+            /** Required */
+            required: boolean;
+            /** Sensitive */
+            sensitive: boolean;
+            /** Types */
+            types: string[];
+        };
+        /**
+         * SeedPrefillOut
+         * @description A seed's value from its step's own sample (D-s2), or why the person types it.
+         */
+        SeedPrefillOut: {
+            /** Reason */
+            reason: ("sensitive" | "not_step_output" | "no_sample" | "not_faithful" | "not_in_sample" | "doesnt_fit") | null;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "prefilled" | "typed";
+            /** Value */
+            value: unknown;
+        };
         /** SessionOut */
         SessionOut: {
             /** Auth Methods */
@@ -2959,6 +3194,116 @@ export interface components {
             id: string;
             /** Is Platform Admin */
             is_platform_admin: boolean;
+        };
+        /** SimulateIn */
+        SimulateIn: {
+            /** Input */
+            input?: {
+                [key: string]: unknown;
+            };
+            target?: components["schemas"]["TargetIn"] | null;
+        };
+        /**
+         * SimulationOut
+         * @description A draft simulation's request (B8; the simulation design §6.3): frozen on its draft snapshot, at the revision it
+         *     was admitted at, with the step it runs alone (S2) and what admission reported without refusing. Never its input.
+         */
+        SimulationOut: {
+            /** Admission Checks */
+            admission_checks: components["schemas"]["DiagnosticOut"][];
+            /** Draft Revision */
+            draft_revision: number;
+            /** Draft Snapshot Id */
+            draft_snapshot_id: string;
+            /** Ended At */
+            ended_at: string | null;
+            /** Id */
+            id: string;
+            /**
+             * Mode
+             * @constant
+             */
+            mode: "simulate";
+            /** Queued At */
+            queued_at: string | null;
+            /** Reason */
+            reason: string | null;
+            /** Source */
+            source: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "queued" | "starting" | "started" | "cancelled" | "refused" | "dead";
+            /** Target Step Id */
+            target_step_id: string | null;
+            /** Version Id */
+            version_id: null;
+            /** Workflow Id */
+            workflow_id: string;
+        };
+        /**
+         * SimulationRunOut
+         * @description A draft simulation's run, once dispatch wrote it (B8): its own state.
+         */
+        SimulationRunOut: {
+            /** Ended At */
+            ended_at: string | null;
+            /** Error */
+            error: {
+                [key: string]: unknown;
+            } | null;
+            /** Iterations */
+            iterations: number;
+            /** Queued At */
+            queued_at: string | null;
+            /** Started At */
+            started_at: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "running" | "succeeded" | "failed" | "cancelled" | "deadline_exceeded";
+        };
+        /**
+         * SimulationStateOut
+         * @description A draft simulation where it is (B8; the simulation design §6.6): its request, its run once there is one,
+         *     whether a cancel was requested, and what it ran with, read back from its own request, redacted (`[redacted]` in
+         *     place of what its envelope holds as claims), never recomputed from the draft as it is now: its `input`, or a step
+         *     test's `seeds` (S2).
+         */
+        SimulationStateOut: {
+            /** Cancel Requested */
+            cancel_requested: boolean;
+            /** Input */
+            input: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Read Back
+             * @enum {string}
+             */
+            read_back: "kept" | "absent" | "unreadable";
+            request: components["schemas"]["SimulationOut"];
+            run: components["schemas"]["SimulationRunOut"] | null;
+            /** Seeds */
+            seeds: {
+                [key: string]: unknown;
+            } | null;
+        };
+        /**
+         * SimulationStepsOut
+         * @description A draft simulation's steps in run order (§6.6), and what the values a person gave were (§7.4): the workflow's
+         *     input, or a step test's seeds. A step test lists its target alone: the other steps are outside the test.
+         */
+        SimulationStepsOut: {
+            /**
+             * Given
+             * @enum {string}
+             */
+            given: "input" | "seeded";
+            /** Steps */
+            steps: components["schemas"]["StepSummaryOut"][];
         };
         /**
          * StartFieldOut
@@ -3028,6 +3373,51 @@ export interface components {
              */
             state: "mfa_pending" | "enroll_required" | "active";
         };
+        /**
+         * StepInstancesOut
+         * @description A step's instances in a draft simulation, one per iteration, each its final attempt (the run API's step), in
+         *     iteration order (§6.6): a page of them, and their total.
+         */
+        StepInstancesOut: {
+            /** Items */
+            items: {
+                [key: string]: unknown;
+            }[];
+            /** Total */
+            total: number;
+        };
+        /**
+         * StepSummaryOut
+         * @description A step of the draft a simulation ran (B8; the simulation design §6.6): its instances' final attempts counted by
+         *     status and by the port they took, a single instance's final attempt, and where its data came from (§7.4).
+         */
+        StepSummaryOut: {
+            /** Final */
+            final: {
+                [key: string]: unknown;
+            } | null;
+            /** Instances */
+            instances: number;
+            /** Key */
+            key: string;
+            /**
+             * Origin
+             * @enum {string}
+             */
+            origin: "evaluated" | "evaluated_not_waited" | "fixture_not_sent" | "skipped" | "not_started" | "cancelled" | "didnt_run" | "not_recorded" | "not_reached_yet";
+            /** Ports */
+            ports: {
+                [key: string]: number;
+            };
+            /** Statuses */
+            statuses: {
+                [key: string]: number;
+            };
+            /** Step Id */
+            step_id: string;
+            /** Type */
+            type: string;
+        };
         /** TaintOut */
         TaintOut: {
             /** Declassified */
@@ -3041,6 +3431,23 @@ export interface components {
             field: string;
             /** Node */
             node: string | null;
+        };
+        /**
+         * TargetIn
+         * @description A step to run alone (S2) and the values it reads, given or absent by pointer (the simulation design §5.2).
+         */
+        TargetIn: {
+            /** Absent */
+            absent?: string[];
+            /**
+             * Step Id
+             * Format: uuid
+             */
+            step_id: string;
+            /** Values */
+            values?: {
+                [key: string]: unknown;
+            };
         };
         /**
          * TemporalResponse
@@ -6200,6 +6607,285 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ScopeOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    mine_api_v1_t__tenant_id__workflows__workflow_id__draft_simulations_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                workflow_id: string;
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimulationOut"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    simulate_api_v1_t__tenant_id__workflows__workflow_id__draft_simulations_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "If-Match"?: string | null;
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                workflow_id: string;
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SimulateIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimulationOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    state_api_v1_t__tenant_id__workflows__workflow_id__draft_simulations__request_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workflow_id: string;
+                request_id: string;
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimulationStateOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    simulation_steps_api_v1_t__tenant_id__workflows__workflow_id__draft_simulations__request_id__steps_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workflow_id: string;
+                request_id: string;
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimulationStepsOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    step_instances_api_v1_t__tenant_id__workflows__workflow_id__draft_simulations__request_id__steps__step_id__instances_get: {
+        parameters: {
+            query?: {
+                within?: string | null;
+                offset?: number;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                workflow_id: string;
+                request_id: string;
+                step_id: string;
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StepInstancesOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    snapshot_api_v1_t__tenant_id__workflows__workflow_id__draft_snapshots__snapshot_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workflow_id: string;
+                snapshot_id: string;
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DraftSnapshotOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    draft_start_form_api_v1_t__tenant_id__workflows__workflow_id__draft_start_form_get: {
+        parameters: {
+            query: {
+                revision: number;
+            };
+            header?: never;
+            path: {
+                workflow_id: string;
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DraftStartFormOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    seed_contract_api_v1_t__tenant_id__workflows__workflow_id__draft_steps__step_id__seeds_get: {
+        parameters: {
+            query: {
+                revision: number;
+            };
+            header?: never;
+            path: {
+                workflow_id: string;
+                step_id: string;
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SeedContractOut"];
                 };
             };
             /** @description Validation Error */

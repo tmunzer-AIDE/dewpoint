@@ -90,6 +90,7 @@ async def newest(
         .join(root, (root.id == Run.root_run_id) & (root.tenant_id == Run.tenant_id))
         .where(Run.tenant_id == tenant_id, Run.workflow_id == workflow_id)
         .where(Run.status != "running", Run.ended_at.is_not(None), kept(root.ended_at, at))
+        .where(root.draft_snapshot_id.is_(None))  # a draft simulation's tree is never a sample (B8; design §6.5)
         .order_by(Run.ended_at.desc(), Run.id.desc())
         .limit(SCAN_RUNS)
         .cte("candidates")

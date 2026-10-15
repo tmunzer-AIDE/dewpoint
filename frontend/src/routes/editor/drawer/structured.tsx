@@ -6,7 +6,7 @@
 import { useId, useRef } from "react";
 import { Button } from "../../../components/Button";
 import { controlClass } from "../../../components/Field";
-import { freePort } from "../../../lib/config";
+import { freePort, rootOf } from "../../../lib/config";
 import { emptyOf, entryOf, isObject, itemOf, pointerOf, propertiesOf, type FieldSpec, type Widget } from "../../../lib/schemaForm";
 import type { GraphNode } from "../../../lib/workflows";
 import { segment, useDrawer } from "./context";
@@ -34,10 +34,24 @@ function newItem(item: FieldSpec, node: GraphNode): unknown {
 
 const asList = (v: unknown): unknown[] => (Array.isArray(v) ? [...(v as unknown[])] : []);
 
+// A list's lineage as a key (config.ts's rootOf): a move, a removal, an addition, a JSON edit or an undo to another list
+// starts a new one; an edit in place keeps it. Its items' fields start afresh with a new one, so what a field shows of itself
+// (as JSON, "Required", its mode) never passes to the item that takes its place (#73).
+const lineages = new WeakMap<object, number>();
+let lineageCount = 0;
+function lineageKey(list: unknown): string {
+  if (!Array.isArray(list)) return "none";
+  const root = rootOf(list);
+  let n = lineages.get(root);
+  if (n === undefined) lineages.set(root, (n = ++lineageCount));
+  return String(n);
+}
+
 function ListItems({ spec, value }: { spec: FieldSpec; value: unknown }) {
   const drawer = useDrawer();
   const add = useRef<HTMLButtonElement>(null);
   const items = asList(value);
+  const lineage = lineageKey(value);
   // Each changes the list's shape: the edits typed inside are applied first, or it waits (ruling 18).
   const move = (from: number, to: number) =>
     drawer.restructure(spec.pointer, {
@@ -62,7 +76,7 @@ function ListItems({ spec, value }: { spec: FieldSpec; value: unknown }) {
         const item = itemOf(spec, i);
         return (
           <div key={i} className="flex min-w-0 flex-col gap-2">
-            <FieldView spec={item} />
+            <FieldView key={lineage} spec={item} />
             {drawer.editable && (
               <div className="flex flex-wrap gap-2">
                 <Button size="sm" aria-label={`Move up: ${item.label}`} disabled={i === 0} onClick={() => move(i, i - 1)}>Move up</Button>
@@ -85,14 +99,17 @@ function ListItems({ spec, value }: { spec: FieldSpec; value: unknown }) {
 /** A map entry's name: held while typed, applied on Enter or when focus leaves the name and its Discard; refused when
  * empty, `$value` (ruling 15) or another entry's, said here. Its Discard never renames first (the review of revision
  * 4). */
-function NameField({ map, name }: { map: FieldSpec; name: string }) {
+function NameField({ map, name, onRenamed }: { map: FieldSpec; name: string; onRenamed: (to: string) => void }) {
   const drawer = useDrawer();
   const id = useId();
   const pointer = pointerOf([...map.path, name]);
   const held = drawer.held("name", pointer);
   const why = held?.why ?? null;
   const commit = () => {
-    if (held) drawer.apply("name", pointer);
+    if (!held) return;
+    const to = held.text.trim();
+    if (to === name) return drawer.release("name", pointer); // its own name, spaces aside: nothing to rename
+    if (drawer.apply("name", pointer) === null) onRenamed(to);
   };
   return (
     // One focus region, its Discard before the input as a field's actions are: Tab out of the input leaves it, and
@@ -137,6 +154,15 @@ function MapEntries({ spec, value }: { spec: FieldSpec; value: unknown }) {
   const drawer = useDrawer();
   const add = useRef<HTMLButtonElement>(null);
   const entries = isObject(value) ? Object.entries(value) : [];
+  // Each entry is keyed by an id kept per name: a removal passes nothing to the next entry, and a rename made in its
+  // name carries it, so the entry keeps its view and focus through it (#73).
+  const ids = useRef(new Map<string, number>());
+  const count = useRef(0);
+  const idOf = (name: string): number => {
+    let n = ids.current.get(name);
+    if (n === undefined) ids.current.set(name, (n = ++count.current));
+    return n;
+  };
   const append = () =>
     drawer.restructure(spec.pointer, {
       path: spec.path,
@@ -150,11 +176,18 @@ function MapEntries({ spec, value }: { spec: FieldSpec; value: unknown }) {
   return (
     <>
       {entries.length === 0 && <p className="text-small text-muted">None yet.</p>}
-      {entries.map(([name], i) => {
+      {entries.map(([name]) => {
         const entry = entryOf(spec, name);
         return (
-          <div key={i} className="flex min-w-0 flex-col gap-2">
-            <NameField map={spec} name={name} />
+          <div key={idOf(name)} className="flex min-w-0 flex-col gap-2">
+            <NameField
+              map={spec} name={name}
+              onRenamed={(to) => {
+                const id = idOf(name);
+                ids.current.delete(name); // moved, never shared: the old name may come back beside the new one
+                ids.current.set(to, id);
+              }}
+            />
             <FieldView spec={entry} />
             {drawer.editable && (
               <Button

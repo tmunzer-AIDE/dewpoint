@@ -26,19 +26,21 @@ async def synced(admin_sessionmaker) -> None:
 
 async def _run(
     owner: Any, seeded: Seeded, *, status: str = "succeeded", ago: int = 0, mode: str = "live",
-    parent: uuid.UUID | None = None,
+    parent: uuid.UUID | None = None, snapshot: uuid.UUID | None = None,
 ) -> uuid.UUID:  # fmt: skip
-    """Another run of `seeded`'s workflow and version, queued `ago` minutes back; a sub-flow's when it has a parent."""
+    """Another run of `seeded`'s workflow and version, queued `ago` minutes back; a sub-flow's when it has a parent; a
+    draft simulation's of `snapshot` when given (B8)."""
     run = uuid.uuid4()
     async with owner() as s, s.begin():
         wf = (await s.execute(text("select workflow_id from runs where id = :r"), {"r": seeded.run})).scalar_one()
         await s.execute(
             text(
-                "insert into runs (id, tenant_id, workflow_id, workflow_version_id, mode, status, queued_at, ended_at, "
-                "kind, parent_run_id) values (:i, :t, :w, :v, :m, :st, :q, :e, :k, :p)"
+                "insert into runs (id, tenant_id, workflow_id, workflow_version_id, draft_snapshot_id, mode, status, "
+                "queued_at, ended_at, kind, parent_run_id) values (:i, :t, :w, :v, :snap, :m, :st, :q, :e, :k, :p)"
             ),
-            {"i": run, "t": seeded.tenant, "w": wf, "v": seeded.version, "m": mode, "st": status,
-             "q": NOW - timedelta(minutes=ago), "e": None if status == "running" else NOW - timedelta(minutes=ago),
+            {"i": run, "t": seeded.tenant, "w": wf, "v": None if snapshot else seeded.version, "snap": snapshot,
+             "m": "simulate" if snapshot else mode, "st": status, "q": NOW - timedelta(minutes=ago),
+             "e": None if status == "running" else NOW - timedelta(minutes=ago),
              "k": "run" if parent is None else "subflow", "p": parent},
         )  # fmt: skip
     return run
@@ -69,6 +71,29 @@ async def _search(api: Any, seeded: Seeded, iteration: str | None = None) -> sam
 
 async def _newest(api: Any, seeded: Seeded, iteration: str | None = None) -> samples.Sample | None:
     return (await _search(api, seeded, iteration)).sample
+
+
+async def test_a_draft_run_and_a_published_child_of_one_are_never_samples(owner_sessionmaker, api_sessionmaker) -> None:
+    """B8 (the simulation design §6.5): by the root's provenance, before the newest runs are taken, so they never fill
+    the places a published run's sample would be found in."""
+    from tests.core.retention.support import snapshot
+
+    seeded = await seed_step(owner_sessionmaker, named=[None])
+    published = await _run(owner_sessionmaker, seeded, ago=10)
+    await _row(owner_sessionmaker, seeded, published, output={"v": "published"})
+    async with owner_sessionmaker() as s:
+        wf = (await s.execute(text("select workflow_id from runs where id = :r"), {"r": seeded.run})).scalar_one()
+    draft = await _run(
+        owner_sessionmaker,
+        seeded,
+        ago=5,
+        snapshot=await snapshot(owner_sessionmaker, {"t": seeded.tenant, "w": wf, "v": seeded.version}),
+    )
+    child = await _run(owner_sessionmaker, seeded, ago=4, parent=draft)  # a published sub-flow inside the simulation
+    for run in (draft, child):
+        await _row(owner_sessionmaker, seeded, run, output={"v": "draft"})
+    found = await _newest(api_sessionmaker, seeded)
+    assert found is not None and (found.run_id, found.output) == (published, {"v": "published"})
 
 
 async def test_takes_the_newest_succeeded_row_of_an_ended_run(owner_sessionmaker, api_sessionmaker) -> None:

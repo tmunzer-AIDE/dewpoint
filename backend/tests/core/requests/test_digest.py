@@ -39,3 +39,19 @@ async def test_a_stored_digest_is_compared_with_its_own_key_version_after_a_rota
     assert version == 2 and fresh != stored
     assert await d.matches(rotated, TENANT, stored, 1, **REQUEST)
     assert not await d.matches(rotated, TENANT, stored, 1, **{**REQUEST, "mode": "simulate"})
+
+
+async def test_a_draft_simulation_digests_its_draft_and_any_other_request_keeps_its_bytes() -> None:
+    """B8 (the simulation design §6.3, step 1): a draft simulation's digest covers its revision, target and seeds; a
+    request that isn't one is digested as before, byte for byte."""
+    keys = FixtureKeys()
+    assert d.canonical(**REQUEST) == (
+        b'{"input":{"pin":"1234","site":"a"},"mode":"live","source":"manual",'
+        b'"workflow_id":"00000000-0000-0000-0000-000000000003"}'
+    )
+    _, plain = await d.digest(keys, TENANT, **REQUEST)
+    _, drafted = await d.digest(keys, TENANT, **REQUEST, draft={"draft_revision": 2})
+    _, later = await d.digest(keys, TENANT, **REQUEST, draft={"draft_revision": 3})
+    assert len({plain, drafted, later}) == 3
+    assert await d.matches(keys, TENANT, drafted, 1, **REQUEST, draft={"draft_revision": 2})
+    assert not await d.matches(keys, TENANT, drafted, 1, **REQUEST)

@@ -4,6 +4,7 @@ slots a tenant's running root runs hold; its limits row; and the current build a
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import (
     DateTime,
@@ -18,7 +19,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from dewpoint.core.models.base import Base
@@ -42,6 +43,11 @@ class RunRequest(Base):
             ["workflow_version_id", "workflow_id", "tenant_id"],
             ["workflow_versions.id", "workflow_versions.workflow_id", "workflow_versions.tenant_id"],
             name="run_requests_version",
+        ),
+        ForeignKeyConstraint(  # or a draft snapshot of it (B8): exactly one of the two, but a refusal may have neither
+            ["draft_snapshot_id", "workflow_id", "tenant_id"],
+            ["draft_snapshots.id", "draft_snapshots.workflow_id", "draft_snapshots.tenant_id"],
+            name="run_requests_draft",
         ),
         ForeignKeyConstraint(
             ["envelope_id", "tenant_id", "id", "envelope_role"],
@@ -77,6 +83,12 @@ class RunRequest(Base):
     checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # the reconciler's last look
     envelope_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     envelope_role: Mapped[str] = mapped_column(String(16), server_default="envelope")  # its envelope key's constant
+    # A draft simulation's (B8; the simulation design §6.1): the snapshot it runs, the step it runs alone (S2), the
+    # draft revision it was admitted at, and the checks admission reported without refusing.
+    draft_snapshot_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    target_step_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    draft_revision: Mapped[int | None] = mapped_column(Integer)
+    admission_checks: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB)
 
 
 class TenantRunLimits(Base):

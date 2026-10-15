@@ -1217,6 +1217,115 @@
         "title": "DraftSavedOut",
         "type": "object"
       },
+      "DraftSnapshotOut": {
+        "additionalProperties": false,
+        "description": "A draft simulation's snapshot whole (B8; the simulation design \u00a76.5): what B4a's version read is for a version,\nits graph verbatim as frozen (documented as a Graph), and how each of its expressions runs.",
+        "properties": {
+          "cel_profile": {
+            "title": "Cel Profile",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "draft_revision": {
+            "title": "Draft Revision",
+            "type": "integer"
+          },
+          "engine_abi": {
+            "title": "Engine Abi",
+            "type": "integer"
+          },
+          "expressions": {
+            "items": {
+              "$ref": "#/components/schemas/ExpressionOut"
+            },
+            "title": "Expressions",
+            "type": "array"
+          },
+          "graph": {
+            "$ref": "#/components/schemas/Graph"
+          },
+          "graph_hash": {
+            "title": "Graph Hash",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "node_refs": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Node Refs",
+            "type": "array"
+          },
+          "version_hash": {
+            "title": "Version Hash",
+            "type": "string"
+          },
+          "workflow_id": {
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "workflow_id",
+          "draft_revision",
+          "created_at",
+          "graph_hash",
+          "version_hash",
+          "cel_profile",
+          "engine_abi",
+          "node_refs",
+          "graph",
+          "expressions"
+        ],
+        "title": "DraftSnapshotOut",
+        "type": "object"
+      },
+      "DraftStartFormOut": {
+        "additionalProperties": false,
+        "description": "The draft's input as a form, at its revision (B8; the simulation design \u00a77.1): `start-form`'s fields and CSV\ndeclaration, for a draft that may never have been published. A draft declaring a CSV can't be simulated whole.",
+        "properties": {
+          "csv": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CsvFormOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "draft_revision": {
+            "title": "Draft Revision",
+            "type": "integer"
+          },
+          "fields": {
+            "items": {
+              "$ref": "#/components/schemas/StartFieldOut"
+            },
+            "title": "Fields",
+            "type": "array"
+          },
+          "workflow_id": {
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workflow_id",
+          "draft_revision",
+          "fields",
+          "csv"
+        ],
+        "title": "DraftStartFormOut",
+        "type": "object"
+      },
       "Edge": {
         "additionalProperties": false,
         "properties": {
@@ -3816,6 +3925,131 @@
         "title": "SecretOut",
         "type": "object"
       },
+      "SeedContractOut": {
+        "additionalProperties": false,
+        "description": "A step's seed contract at the draft's revision (\u00a75.2, \u00a76.6), or why the step can't run alone.",
+        "properties": {
+          "draft_revision": {
+            "title": "Draft Revision",
+            "type": "integer"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/SeedEntryOut"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "refused": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Refused"
+          },
+          "step_id": {
+            "title": "Step Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "draft_revision",
+          "step_id",
+          "refused",
+          "entries"
+        ],
+        "title": "SeedContractOut",
+        "type": "object"
+      },
+      "SeedEntryOut": {
+        "additionalProperties": false,
+        "description": "One value the step reads (\u00a75.2): its pointer, the JSON types it may have (none listed: any value), whether it's\nrequired (else it may be absent), whether null is taken, and whether it's sensitive (typed and masked).",
+        "properties": {
+          "nullable": {
+            "title": "Nullable",
+            "type": "boolean"
+          },
+          "pointer": {
+            "title": "Pointer",
+            "type": "string"
+          },
+          "prefill": {
+            "$ref": "#/components/schemas/SeedPrefillOut"
+          },
+          "required": {
+            "title": "Required",
+            "type": "boolean"
+          },
+          "sensitive": {
+            "title": "Sensitive",
+            "type": "boolean"
+          },
+          "types": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Types",
+            "type": "array"
+          }
+        },
+        "required": [
+          "pointer",
+          "types",
+          "required",
+          "nullable",
+          "sensitive",
+          "prefill"
+        ],
+        "title": "SeedEntryOut",
+        "type": "object"
+      },
+      "SeedPrefillOut": {
+        "additionalProperties": false,
+        "description": "A seed's value from its step's own sample (D-s2), or why the person types it.",
+        "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "sensitive",
+                  "not_step_output",
+                  "no_sample",
+                  "not_faithful",
+                  "not_in_sample",
+                  "doesnt_fit"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "state": {
+            "enum": [
+              "prefilled",
+              "typed"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value"
+          }
+        },
+        "required": [
+          "state",
+          "value",
+          "reason"
+        ],
+        "title": "SeedPrefillOut",
+        "type": "object"
+      },
       "SessionOut": {
         "additionalProperties": false,
         "properties": {
@@ -3874,6 +4108,312 @@
           "is_platform_admin"
         ],
         "title": "SessionUserOut",
+        "type": "object"
+      },
+      "SimulateIn": {
+        "additionalProperties": false,
+        "properties": {
+          "input": {
+            "additionalProperties": true,
+            "title": "Input",
+            "type": "object"
+          },
+          "target": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TargetIn"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "SimulateIn",
+        "type": "object"
+      },
+      "SimulationOut": {
+        "additionalProperties": false,
+        "description": "A draft simulation's request (B8; the simulation design \u00a76.3): frozen on its draft snapshot, at the revision it\nwas admitted at, with the step it runs alone (S2) and what admission reported without refusing. Never its input.",
+        "properties": {
+          "admission_checks": {
+            "items": {
+              "$ref": "#/components/schemas/DiagnosticOut"
+            },
+            "title": "Admission Checks",
+            "type": "array"
+          },
+          "draft_revision": {
+            "title": "Draft Revision",
+            "type": "integer"
+          },
+          "draft_snapshot_id": {
+            "title": "Draft Snapshot Id",
+            "type": "string"
+          },
+          "ended_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "mode": {
+            "const": "simulate",
+            "title": "Mode",
+            "type": "string"
+          },
+          "queued_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queued At"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "starting",
+              "started",
+              "cancelled",
+              "refused",
+              "dead"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "target_step_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Step Id"
+          },
+          "version_id": {
+            "title": "Version Id",
+            "type": "null"
+          },
+          "workflow_id": {
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "workflow_id",
+          "version_id",
+          "draft_snapshot_id",
+          "draft_revision",
+          "target_step_id",
+          "mode",
+          "source",
+          "status",
+          "reason",
+          "queued_at",
+          "ended_at",
+          "admission_checks"
+        ],
+        "title": "SimulationOut",
+        "type": "object"
+      },
+      "SimulationRunOut": {
+        "additionalProperties": false,
+        "description": "A draft simulation's run, once dispatch wrote it (B8): its own state.",
+        "properties": {
+          "ended_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended At"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "iterations": {
+            "title": "Iterations",
+            "type": "integer"
+          },
+          "queued_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queued At"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "status": {
+            "enum": [
+              "running",
+              "succeeded",
+              "failed",
+              "cancelled",
+              "deadline_exceeded"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "queued_at",
+          "started_at",
+          "ended_at",
+          "error",
+          "iterations"
+        ],
+        "title": "SimulationRunOut",
+        "type": "object"
+      },
+      "SimulationStateOut": {
+        "additionalProperties": false,
+        "description": "A draft simulation where it is (B8; the simulation design \u00a76.6): its request, its run once there is one,\nwhether a cancel was requested, and what it ran with, read back from its own request, redacted (`[redacted]` in\nplace of what its envelope holds as claims), never recomputed from the draft as it is now: its `input`, or a step\ntest's `seeds` (S2).",
+        "properties": {
+          "cancel_requested": {
+            "title": "Cancel Requested",
+            "type": "boolean"
+          },
+          "input": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input"
+          },
+          "read_back": {
+            "enum": [
+              "kept",
+              "absent",
+              "unreadable"
+            ],
+            "title": "Read Back",
+            "type": "string"
+          },
+          "request": {
+            "$ref": "#/components/schemas/SimulationOut"
+          },
+          "run": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SimulationRunOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "seeds": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seeds"
+          }
+        },
+        "required": [
+          "request",
+          "run",
+          "cancel_requested",
+          "read_back",
+          "input",
+          "seeds"
+        ],
+        "title": "SimulationStateOut",
+        "type": "object"
+      },
+      "SimulationStepsOut": {
+        "additionalProperties": false,
+        "description": "A draft simulation's steps in run order (\u00a76.6), and what the values a person gave were (\u00a77.4): the workflow's\ninput, or a step test's seeds. A step test lists its target alone: the other steps are outside the test.",
+        "properties": {
+          "given": {
+            "enum": [
+              "input",
+              "seeded"
+            ],
+            "title": "Given",
+            "type": "string"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/StepSummaryOut"
+            },
+            "title": "Steps",
+            "type": "array"
+          }
+        },
+        "required": [
+          "given",
+          "steps"
+        ],
+        "title": "SimulationStepsOut",
         "type": "object"
       },
       "StartFieldOut": {
@@ -4070,6 +4610,105 @@
         "title": "StateOut",
         "type": "object"
       },
+      "StepInstancesOut": {
+        "additionalProperties": false,
+        "description": "A step's instances in a draft simulation, one per iteration, each its final attempt (the run API's step), in\niteration order (\u00a76.6): a page of them, and their total.",
+        "properties": {
+          "items": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total",
+          "items"
+        ],
+        "title": "StepInstancesOut",
+        "type": "object"
+      },
+      "StepSummaryOut": {
+        "additionalProperties": false,
+        "description": "A step of the draft a simulation ran (B8; the simulation design \u00a76.6): its instances' final attempts counted by\nstatus and by the port they took, a single instance's final attempt, and where its data came from (\u00a77.4).",
+        "properties": {
+          "final": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Final"
+          },
+          "instances": {
+            "title": "Instances",
+            "type": "integer"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "origin": {
+            "enum": [
+              "evaluated",
+              "evaluated_not_waited",
+              "fixture_not_sent",
+              "skipped",
+              "not_started",
+              "cancelled",
+              "didnt_run",
+              "not_recorded",
+              "not_reached_yet"
+            ],
+            "title": "Origin",
+            "type": "string"
+          },
+          "ports": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Ports",
+            "type": "object"
+          },
+          "statuses": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Statuses",
+            "type": "object"
+          },
+          "step_id": {
+            "title": "Step Id",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "step_id",
+          "key",
+          "type",
+          "origin",
+          "instances",
+          "statuses",
+          "ports",
+          "final"
+        ],
+        "title": "StepSummaryOut",
+        "type": "object"
+      },
       "TaintOut": {
         "additionalProperties": false,
         "properties": {
@@ -4119,6 +4758,34 @@
           "field"
         ],
         "title": "TaintSiteOut",
+        "type": "object"
+      },
+      "TargetIn": {
+        "additionalProperties": false,
+        "description": "A step to run alone (S2) and the values it reads, given or absent by pointer (the simulation design \u00a75.2).",
+        "properties": {
+          "absent": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Absent",
+            "type": "array"
+          },
+          "step_id": {
+            "format": "uuid",
+            "title": "Step Id",
+            "type": "string"
+          },
+          "values": {
+            "additionalProperties": true,
+            "title": "Values",
+            "type": "object"
+          }
+        },
+        "required": [
+          "step_id"
+        ],
+        "title": "TargetIn",
         "type": "object"
       },
       "TemporalResponse": {
@@ -9678,6 +10345,612 @@
         "summary": "Draft Scope",
         "tags": [
           "workflows"
+        ]
+      }
+    },
+    "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/simulations": {
+      "get": {
+        "description": "The caller's own latest draft simulations of the workflow, newest first (\u00a76.6): what they started, labelled\nwith their revision, never proof of what a submission was (the editor recovers by its own request's key).",
+        "operationId": "mine_api_v1_t__tenant_id__workflows__workflow_id__draft_simulations_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SimulationOut"
+                  },
+                  "title": "Response Mine Api V1 T  Tenant Id  Workflows  Workflow Id  Draft Simulations Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Mine",
+        "tags": [
+          "simulations"
+        ]
+      },
+      "post": {
+        "operationId": "simulate_api_v1_t__tenant_id__workflows__workflow_id__draft_simulations_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-Match"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SimulateIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimulationOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Simulate",
+        "tags": [
+          "simulations"
+        ]
+      }
+    },
+    "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/simulations/{request_id}": {
+      "get": {
+        "description": "A draft simulation where it is (\u00a76.6), and what it ran with, read back redacted from its own request.",
+        "operationId": "state_api_v1_t__tenant_id__workflows__workflow_id__draft_simulations__request_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Request Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimulationStateOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "State",
+        "tags": [
+          "simulations"
+        ]
+      }
+    },
+    "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/simulations/{request_id}/steps": {
+      "get": {
+        "description": "A draft simulation's steps in run order, summarized (\u00a76.6): the tags the editor shows come from here, never\nfrom a partial page of instances.",
+        "operationId": "simulation_steps_api_v1_t__tenant_id__workflows__workflow_id__draft_simulations__request_id__steps_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Request Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimulationStepsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Simulation Steps",
+        "tags": [
+          "simulations"
+        ]
+      }
+    },
+    "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/simulations/{request_id}/steps/{step_id}/instances": {
+      "get": {
+        "description": "A step's instances in a draft simulation, one per iteration (its final attempt), in iteration order, paged\nfrom `offset`; with `within`, only that iteration's (itself and every iteration nested in it).",
+        "operationId": "step_instances_api_v1_t__tenant_id__workflows__workflow_id__draft_simulations__request_id__steps__step_id__instances_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Request Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "step_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Step Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "within",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Within"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StepInstancesOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Step Instances",
+        "tags": [
+          "simulations"
+        ]
+      }
+    },
+    "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/snapshots/{snapshot_id}": {
+      "get": {
+        "description": "A draft run's snapshot (B8; the simulation design \u00a76.5), as B4a's read shows a version.",
+        "operationId": "snapshot_api_v1_t__tenant_id__workflows__workflow_id__draft_snapshots__snapshot_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "snapshot_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Snapshot Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DraftSnapshotOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Snapshot",
+        "tags": [
+          "simulations"
+        ]
+      }
+    },
+    "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/start-form": {
+      "get": {
+        "description": "The draft's input at `revision`, as a form (\u00a77.1): `start-form`'s, which reads only the active version.",
+        "operationId": "draft_start_form_api_v1_t__tenant_id__workflows__workflow_id__draft_start_form_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "revision",
+            "required": true,
+            "schema": {
+              "minimum": 1,
+              "title": "Revision",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DraftStartFormOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Draft Start Form",
+        "tags": [
+          "simulations"
+        ]
+      }
+    },
+    "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft/steps/{step_id}/seeds": {
+      "get": {
+        "description": "A step's seed contract at `revision` (\u00a75.2, \u00a76.6), the draft validated first as admission validates it (422\n`invalid`, its blocking problems: an invalid draft's contract would miss reads), each entry prefilled from its\nstep's own sample where D-s2 allows (run data: `run.view`), else typed, saying why.",
+        "operationId": "seed_contract_api_v1_t__tenant_id__workflows__workflow_id__draft_steps__step_id__seeds_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "step_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Step Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "revision",
+            "required": true,
+            "schema": {
+              "minimum": 1,
+              "title": "Revision",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeedContractOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Seed Contract",
+        "tags": [
+          "simulations"
         ]
       }
     },

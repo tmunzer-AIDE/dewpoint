@@ -287,6 +287,11 @@
   ],
   [
    "relation:r",
+   "public.draft_snapshots",
+   "SELECT"
+  ],
+  [
+   "relation:r",
    "public.egress_allowlist",
    "DELETE"
   ],
@@ -1304,6 +1309,16 @@
   ],
   [
    "relation:r",
+   "public.draft_snapshots",
+   "INSERT"
+  ],
+  [
+   "relation:r",
+   "public.draft_snapshots",
+   "SELECT"
+  ],
+  [
+   "relation:r",
    "public.egress_allowlist",
    "SELECT"
   ],
@@ -2238,6 +2253,11 @@
   ],
   [
    "relation:r",
+   "public.draft_snapshots",
+   "SELECT"
+  ],
+  [
+   "relation:r",
    "public.execution_evidence",
    "DELETE"
   ],
@@ -3132,6 +3152,16 @@
   ],
   [
    "relation:r",
+   "public.draft_snapshots",
+   "DELETE"
+  ],
+  [
+   "relation:r",
+   "public.draft_snapshots",
+   "SELECT"
+  ],
+  [
+   "relation:r",
    "public.egress_allowlist",
    "DELETE"
   ],
@@ -3608,6 +3638,11 @@
    "relation:r",
    "public.data_keys",
    "UPDATE"
+  ],
+  [
+   "relation:r",
+   "public.draft_snapshots",
+   "SELECT"
   ],
   [
    "relation:r",
