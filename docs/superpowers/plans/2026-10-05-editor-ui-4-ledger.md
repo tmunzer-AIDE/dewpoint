@@ -2896,3 +2896,21 @@ plan's steps say; every run matched its Expected line:
 After each task: ruff (check and format), mypy (312 to 313 source files) and the import contracts (11 kept): clean.
 Mid-slice rulings: M98 and M99, above; none since. #104's declassify change met no task's tests. Deploy order, as the
 plan says: 0072 first.
+
+### 4d-1b, milestone 2 (2026-10-15)
+
+The owner accepted milestone 1 in their own words: "Milestone 1 accepted, continue". Tasks 5–8, each test-first; every
+run matched its Expected line:
+- Task 5, 4cfa48cf, admitting a draft simulation: red, 10 failed and 91 passed (no `admit_draft`, `DraftInvalidError`,
+  `SeedsRefusedError`; `digest()` without `draft`); green, 101 passed, every existing admission, input and publish test
+  among them.
+- Task 6, 2fdf55d8, `POST …/draft/simulations`: red, 9 failed and 103 passed (404s, no schema path); green, 112 passed.
+- Task 7, 36818704, dispatch, the reconciler and the worker on a snapshot, and the single step's guard: red, 4 failed
+  and 774 passed (no draft request started or begun; the single step continued as new and never ended); green, 778
+  passed (about 3 minutes).
+- Task 8, d53c354b, re-runs, retirement and connections: red, 2 failed and 64 passed (a draft run's re-run answered
+  410, a normal retirement missed the queued simulation); the connection pin passed at once, as planned; green, 66
+  passed.
+
+After each task: ruff (check and format), mypy (313 to 314 source files) and the import contracts (11 kept): clean.
+No mid-slice ruling. Draft simulations run from here.
