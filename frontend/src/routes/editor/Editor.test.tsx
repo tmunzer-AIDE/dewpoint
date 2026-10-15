@@ -2151,3 +2151,88 @@ describe("the Triggers panel (4c-3b)", () => {
     expect(within(panel).getByRole("button", { name: "Show as JSON" })).toBeTruthy();
   });
 });
+
+// Simulate workflow (4d-1c; the simulation design §7.1; the Main, Preflight and ReadOnly boards).
+describe("Simulate workflow", () => {
+  const SIM = `${BASE}/draft/simulations`;
+  const simRequest = (status: string) => ({
+    id: "r1", workflow_id: "w1", version_id: null, draft_snapshot_id: "s1", draft_revision: 2, target_step_id: null,
+    mode: "simulate", source: "manual", status, reason: null, queued_at: "2026-10-15T10:42:05Z", ended_at: null,
+    admission_checks: [],
+  });  // prettier-ignore
+  const simState = (status: string) => ({ request: simRequest(status), run: null, cancel_requested: false, read_back: "kept", input: {}, seeds: null });
+  beforeEach(() => {
+    answers.set(`GET ${SIM}`, () => json([]));
+    answers.set(`GET ${BASE}/draft/start-form`, () =>
+      json({ workflow_id: "w1", draft_revision: 2, csv: null, fields: [{ name: "site", title: "Site", type: "string", required: false, sensitive: false }] }));
+    answers.set("GET /api/v1/trigger-types", () => json([]));
+  });
+
+  it("sits just before Publish, and sends the draft as saved, once, with its own key and revision", async () => {
+    answers.set(`POST ${SIM}`, () => json(simRequest("queued"), 202));
+    answers.set(`GET ${SIM}/r1`, () => json(simState("queued")));
+    await show();
+    await addTransform();
+    const simulate = await screen.findByRole("button", { name: "◌ Simulate workflow" });
+    expect(simulate.nextElementSibling?.textContent).toBe("Publish v1");
+    await userEvent.click(simulate);
+    const dialog = await screen.findByRole("dialog", { name: "Simulate workflow" });
+    expect(within(dialog).getByText("Nightly · draft revision 2")).toBeTruthy(); // the save came first
+    await userEvent.type(await within(dialog).findByLabelText("Site"), "HQ");
+    await userEvent.click(within(dialog).getByRole("button", { name: "◌ Simulate" }));
+    await vi.waitFor(() => expect(sent.some((r) => r.method === "POST" && r.path === SIM)).toBe(true));
+    const post = sent.findIndex((r) => r.method === "POST" && r.path === SIM);
+    expect(sent.findIndex((r) => r.method === "PUT")).toBeLessThan(post);
+    expect(sent[post]!.headers.get("If-Match")).toBe("2");
+    expect(sent[post]!.headers.get("Idempotency-Key")).toMatch(/^[0-9a-f-]{36}$/);
+    expect(sent[post]!.body).toEqual({ input: { site: "HQ" } });
+    // One at a time, from this editor (the Main board): until it ends, Simulate waits, saying why.
+    expect(await screen.findByText("Your simulation hasn't ended. Simulate again once it has.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "◌ Simulate workflow" }).hasAttribute("disabled")).toBe(true);
+  });
+
+  it("asks Publish's own question about edits not applied, worded for simulating", async () => {
+    await unappliedDuration();
+    await userEvent.click(screen.getByRole("button", { name: "◌ Simulate workflow" }));
+    const ask = screen.getByRole("dialog", { name: "Edits not applied" });
+    await userEvent.click(within(ask).getByRole("button", { name: "Discard and simulate" }));
+    expect(await screen.findByRole("dialog", { name: "Simulate workflow" })).toBeTruthy();
+  });
+
+  it("sends nothing when the save fails, and says so", async () => {
+    answers.set(`PUT ${BASE}/draft`, () => json({ error: "http_error" }, 500));
+    await show();
+    await addTransform();
+    await screen.findByText("Not saved", {}, { timeout: 3000 });
+    await userEvent.click(screen.getByRole("button", { name: "◌ Simulate workflow" }));
+    expect(await screen.findByText("Not simulated: your latest edits aren't saved. Retry the save, then simulate.")).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "Simulate workflow" })).toBeNull();
+    expect(sent.some((r) => r.method === "POST" && r.path === SIM)).toBe(false);
+  });
+
+  it("waits while the draft was changed elsewhere", async () => {
+    answers.set(`PUT ${BASE}/draft`, () => json({ error: "draft_conflict", draft_revision: 5 }, 409));
+    await show();
+    await addTransform();
+    expect((await screen.findByRole("alert", {}, { timeout: 3000 })).textContent).toContain("changed elsewhere");
+    expect(screen.getByRole("button", { name: "◌ Simulate workflow" }).hasAttribute("disabled")).toBe(true);
+  });
+
+  it("isn't offered to a viewer, nor on a version's view (the ReadOnly board)", async () => {
+    role = "viewer";
+    await show();
+    expect(screen.queryByRole("button", { name: "◌ Simulate workflow" })).toBeNull();
+  });
+
+  it("goes while a version is viewed, and comes back with the draft", async () => {
+    answers.set(`GET ${BASE}/versions`, () => json([version(1, true)]));
+    answers.set(`GET ${BASE}/versions/v1`, () => json(detail(1, "one")));
+    await show();
+    await userEvent.click(screen.getByRole("button", { name: "Versions" }));
+    await userEvent.click(await screen.findByRole("button", { name: "View version 1" }));
+    await screen.findByText("Viewing version 1, read only. The draft is unchanged.");
+    expect(screen.queryByRole("button", { name: "◌ Simulate workflow" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Back to the draft" }));
+    expect(await screen.findByRole("button", { name: "◌ Simulate workflow" })).toBeTruthy();
+  });
+});

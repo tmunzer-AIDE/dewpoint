@@ -21,6 +21,7 @@ import { begin, record, redo, undo, type History } from "../../lib/history";
 import { CARD, layout } from "../../lib/layout";
 import { guardLeaving } from "../../lib/leaving";
 import type { Path } from "../../lib/schemaForm";
+import { freeze } from "../../lib/simulations";
 import { useDocumentTitle } from "../../lib/title";
 import { schedulesQuery, startSummary, workflowBindingsQuery } from "../../lib/triggers";
 import {
@@ -42,6 +43,8 @@ import { addsOf, item, type ItemAction } from "./items";
 import { DeclassifyPanel } from "./DeclassifyPanel";
 import { ProblemsPanel, type PublishProblems } from "./ProblemsPanel";
 import { SaveState } from "./SaveState";
+import { SimulateDialog } from "./simulation/SimulateDialog";
+import { useSimulation } from "./simulation/useSimulation";
 import { type Problems } from "./StepCard";
 import { StepPicker, type PickMode } from "./StepPicker";
 import { READ_ONLY, type PanelActions } from "./triggers/context";
@@ -365,9 +368,10 @@ function Editor({
   const publishButton = useRef<HTMLButtonElement>(null);
   const unappliedButton = useRef<HTMLButtonElement>(null);
   const declassifyButton = useRef<HTMLButtonElement>(null);
+  const simulateButton = useRef<HTMLButtonElement>(null);
   const jumps = useRef(0); // each "Go to" a field, so the same one twice still focuses it
   const [landing, setLanding] = useState<{
-    on: "problems" | "versions" | "publish" | "problems-panel" | "versions-panel" | "unapplied" | "unapplied-panel" | "declassify" | "declassify-panel" | "triggers-panel";
+    on: "problems" | "versions" | "publish" | "problems-panel" | "versions-panel" | "unapplied" | "unapplied-panel" | "declassify" | "declassify-panel" | "triggers-panel" | "simulate";
     n: number;
   } | null>(null);
   const land = (on: NonNullable<typeof landing>["on"]) => setLanding((l) => ({ on, n: (l?.n ?? 0) + 1 }));
@@ -387,6 +391,7 @@ function Editor({
         declassify: () => usable(declassifyButton.current) ?? usable(versionsButton.current),
         "declassify-panel": () => document.getElementById("declassify-title") ?? usable(declassifyButton.current),
         "triggers-panel": () => document.getElementById("triggers-title"),
+        simulate: () => usable(simulateButton.current) ?? usable(versionsButton.current),
       }[landing.on]();
       target?.focus();
     });
@@ -465,6 +470,11 @@ function Editor({
   const [notice, setNotice] = useState<Notice | null>(null);
   const viewAsked = useRef(0); // the newest version view asked for
   const publisher = canPublish(role) && sync.status !== "conflict";
+  // Simulating the draft (4d-1c, §7.1): editors and up, who hold workflow.edit and run.start; never on a version's view.
+  const simulation = useSimulation(tenantId, workflow.id);
+  const simulator = canEdit(role) && viewing === null;
+  const [simulateAt, setSimulateAt] = useState<{ revision: number; doc: GraphDoc } | null>(null); // the input, asked
+  const [saving, setSaving] = useState(false); // the save Simulate waits for
   // When editing stops (a conflict, an exit, a publication), what only editing offers stops with it: an open dialog
   // closes, placing ends (a click on a read-only canvas places nothing) and says so. Focus held by what's gone (the
   // dialog, a "+", Auto layout, Add step, a panel's buttons) goes to what's drawn: a panel's heading when it was in
@@ -884,6 +894,26 @@ function Editor({
     return left;
   }
 
+  /** Simulate workflow's preflight, Publish's own (§7.1): with the edits not applied settled, the save is flushed, and
+   * the input is asked for at the revision that save made, never an older one. A failed save sends nothing. */
+  async function simulate() {
+    setSaving(true);
+    setNotice({ tone: "info", text: "Saving before the simulation…" });
+    try {
+      const revision = await saver.current!.flush();
+      setNotice(null);
+      setSimulateAt({ revision, doc: draftNow() });
+    } catch (e) {
+      // A conflict has its own banner.
+      setNotice(e instanceof ConflictError ? null : {
+        tone: "danger", text: "Not simulated: your latest edits aren't saved. Retry the save, then simulate.",
+        action: { label: "Retry", run: () => saver.current?.retry() },
+      });  // prettier-ignore
+    } finally {
+      setSaving(false);
+    }
+  }
+
   /** `then`, once every unapplied edit is in the draft; when one can't be, the person decides first (ruling 18). */
   function whenSettled(action: string, then: () => void) {
     const left = settleAll();
@@ -1162,6 +1192,19 @@ function Editor({
           Versions
         </Button>
         <Button size="md" onClick={() => void exportFile()}>Export</Button>
+        {simulator && (
+          <Button
+            ref={simulateButton}
+            variant="simulate"
+            size="md"
+            aria-haspopup="dialog"
+            aria-describedby={simulation.busy ? "simulate-busy" : undefined}
+            disabled={sync.status === "conflict" || simulation.busy || saving || busy !== null}
+            onClick={() => whenSettled("simulate", () => void simulate())}
+          >
+            ◌ Simulate workflow
+          </Button>
+        )}
         {publisher && viewing === null && (
           <Button
             ref={publishButton}
@@ -1176,6 +1219,11 @@ function Editor({
           </Button>
         )}
       </Toolbar>
+      {simulator && simulation.busy && (
+        <p id="simulate-busy" className="flex flex-wrap items-center gap-3 border-b border-line bg-surface-2 px-5 py-2.5 text-small">
+          <span className="grow">Your simulation hasn&apos;t ended. Simulate again once it has.</span>
+        </p>
+      )}
       {viewing && (
         <div className="flex flex-wrap items-center gap-3 border-b border-line bg-surface-2 px-5 py-2.5 text-small">
           <span className="grow">Viewing version {viewing.number}, read only. The draft is unchanged.</span>
@@ -1405,6 +1453,24 @@ function Editor({
           onPick={onPick}
           onConnect={picker.kind === "after" && picker.from ? () => setConnecting(picker.from) : undefined}
           onClose={() => setPicker(null)}
+        />
+      )}
+      {simulateAt && (
+        <SimulateDialog
+          tenantId={tenantId}
+          workflowId={workflow.id}
+          name={workflow.name}
+          revision={simulateAt.revision}
+          doc={simulateAt.doc}
+          onSimulate={(input) => {
+            setSimulateAt(null);
+            void simulation.start(freeze(simulateAt.revision, { input }));
+            land("simulate");
+          }}
+          onClose={() => {
+            setSimulateAt(null);
+            land("simulate");
+          }}
         />
       )}
       {connecting && (
