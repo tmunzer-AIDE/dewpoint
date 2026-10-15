@@ -13,9 +13,12 @@ from typing import Any
 from dewpoint.core.crypto.keys import KeySource
 
 
-def canonical(*, source: str, workflow_id: uuid.UUID, mode: str, input: Any) -> bytes:
-    """Sorted keys, no whitespace, UTF-8, no NaN: equal requests always give equal bytes."""
+def canonical(*, source: str, workflow_id: uuid.UUID, mode: str, input: Any, draft: Any = None) -> bytes:
+    """Sorted keys, no whitespace, UTF-8, no NaN: equal requests always give equal bytes. A draft simulation's `draft`
+    (B8) is there only when given, so every other request's bytes stay what they were."""
     value = {"source": source, "workflow_id": str(workflow_id), "mode": mode, "input": input}
+    if draft is not None:
+        value["draft"] = draft
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
 
 
@@ -27,21 +30,22 @@ async def digest(
     workflow_id: uuid.UUID,
     mode: str,
     input: Any,
+    draft: Any = None,
     version: int | None = None,
 ) -> tuple[int, bytes]:
     """The request's digest with the tenant's key of `version` (its active one when None), and that version."""
     found, key = await keys.digest_key(tenant_id, version)
-    message = canonical(source=source, workflow_id=workflow_id, mode=mode, input=input)
+    message = canonical(source=source, workflow_id=workflow_id, mode=mode, input=input, draft=draft)
     return found, hmac.new(key, message, hashlib.sha256).digest()
 
 
 async def matches(
     keys: KeySource, tenant_id: str, stored: bytes, version: int, *, source: str, workflow_id: uuid.UUID, mode: str,
-    input: Any,
+    input: Any, draft: Any = None,
 ) -> bool:  # fmt: skip
     """Whether a request is the one `stored` was computed for, with the key version it was computed with."""
     _, fresh = await digest(keys, tenant_id, source=source, workflow_id=workflow_id, mode=mode, input=input,
-                            version=version)  # fmt: skip
+                            draft=draft, version=version)  # fmt: skip
     return hmac.compare_digest(fresh, stored)
 
 

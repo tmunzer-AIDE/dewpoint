@@ -57,6 +57,7 @@ class Checked:
     diagnostics: list[Diagnostic]
     pins: dict[uuid.UUID, WorkflowVersion]  # pinned workflow id -> its active version
     result: ValidationResult | None
+    context: ValidationContext | None = None  # what it was validated in: a step's seed contract reads it again
 
 
 async def validation_context(
@@ -86,7 +87,7 @@ async def check_draft(s: AsyncSession, tenant_id: uuid.UUID, draft: Any, setting
         return Checked(None, list(e.diagnostics), {}, None)
     ctx, pins = await validation_context(s, tenant_id, graph, settings)
     result = await asyncio.to_thread(validate, graph, ctx)  # CPU-bound: keep the event loop serving others
-    return Checked(graph, list(result.diagnostics), pins, result)
+    return Checked(graph, list(result.diagnostics), pins, result, ctx)
 
 
 async def draft_scope(
