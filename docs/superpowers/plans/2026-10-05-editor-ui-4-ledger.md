@@ -2987,3 +2987,37 @@ digest: "Out of range float values are not JSON compliant"), then 4 passed (NaN,
 input under a used and a new key and in a seed). Then the API suite, admission's, the inputs', the digest's, publish's
 and the tick codec's tests: 699 passed; ruff, mypy and the import contracts clean; the API's schema unchanged
 (`check:api` passes). The whole backend suite wasn't run again.
+
+### 4d-1b merged; the 4d-1c plan accepted (2026-10-15, in chat)
+
+The owner merged 4d-1b as #107 (squash 44bc2f52), CI green ("green and merged").
+`docs/superpowers/plans/2026-10-15-editor-ui-4d1c-simulation.md`, revision 1 (7afc5317): one plan for the whole of the
+spec's §7, with milestone pauses (the owner, 2026-10-15: "One plan"). The owner, in their own words: "Accept all
+rulings; inline; commit the plan"; branch `feat/editor-4d1c` from origin/main 6bd2ed51 (#109 since the dry run's
+44bc2f52: backend tests only), the offline package restore approved. The plan's rulings 1–19 join this ledger as
+191–209; the plan says each one's why and its cost. Mid-slice rulings start at M102. The frontend only: no backend
+change, no migration, no ABI change; the API's schema is 4d-1b's.
+
+191. **Accepted. A loop's progress is its items, never "N of M iterations ended"** (plan ruling 1): D-a4 keeps no
+     per-iteration status.
+192. **Accepted. "attempt N of M" on the canvas only past the first** (plan ruling 2); the Test tab always says it.
+193. **Accepted. The panel's step rows carry the canvas's tags** (plan ruling 3), not the ResultPanel board's wording.
+194. **Accepted. A loop's iterations are paged once it ended, for a loop with one instance** (plan ruling 4).
+195. **Accepted. The draft a simulation ran is read when its result is stale** (plan ruling 5), once.
+196. **Accepted. "Changed since" compares a step's own definition** (plan ruling 6), never its position or edges.
+197. **Accepted. "Before your edits" shows once the result has ended** (plan ruling 7).
+198. **Accepted. The input used lists what the request stored** (plan ruling 8), never "left out" fields.
+199. **Accepted. A coded 503 is a refusal, never a lost answer; "Try again" sends the same request** (plan ruling 9).
+200. **Accepted. A draft changed elsewhere refuses a simulation as it refuses a save** (plan ruling 10).
+201. **Accepted. A step that can't run alone says so in the server's words** (plan ruling 11).
+202. **Accepted. Simulate step keeps the drawer open; its result is in the Test tab** (plan ruling 12).
+203. **Accepted. A seed is text when its types are text, else JSON; an empty value is not given** (plan ruling 13).
+204. **Accepted. A seed's title is its schema's; its tags are in its name; the prefill names its step** (plan ruling 14).
+205. **Accepted. Values are shown as the request stored them, JSON for anything but text** (plan ruling 15).
+206. **Accepted. A branch's result says its port, not its condition's text** (plan ruling 16).
+207. **Accepted. The step's line in the latest simulation has one format; its picker lists the first 50** (plan ruling 17).
+208. **Accepted. The editor's chunk passes Vite's 500 kB warning, with no split** (plan ruling 18).
+209. **Accepted. The browser checks the boards' settled states; the transient ones are unit-tested** (plan ruling 19).
+
+M102. **Task 1's entry records the plan accepted**, not proposed as the plan's text has it: the owner accepted every
+ruling before execution began, as for 4d-1b.
