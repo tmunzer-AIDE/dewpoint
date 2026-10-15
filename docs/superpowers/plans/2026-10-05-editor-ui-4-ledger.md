@@ -2914,3 +2914,55 @@ run matched its Expected line:
 
 After each task: ruff (check and format), mypy (313 to 314 source files) and the import contracts (11 kept): clean.
 No mid-slice ruling. Draft simulations run from here.
+
+### 4d-1b, milestone 3 and the final checkpoint (2026-10-15)
+
+The owner accepted milestone 2 in their own words: "Milestone 2 accepted, continue". Tasks 9–14, each test-first;
+every run matched its Expected line:
+- Task 9, 26935909, samples and the workflow list leave draft runs out: red, 3 failed and 25 passed; green, 28.
+- Task 10, ca0347e9, the run API's draft fields and a snapshot's graph: red, 3 failed and 123 passed; green, 126.
+- Task 11, e771da80, the person's simulations, a simulation's state, the read-back: red, 6 failed and 74 passed;
+  green, 80.
+- Task 12, 7d129ba7, the per-step summary and a step's instances: red, 6 failed, 76 passed and 1 error; green, 98, no
+  warning.
+- Task 13, a184c0d7, the draft's start form and the seed contract with its prefills: red, 9 failed, 77 passed and 1
+  error; green, 120.
+- Task 14, 886adc80, the role matrix, the docs, the API's schema and the client's types: the matrix passed at once (a
+  pin, as planned), 6 passed; the schema only added (7 paths, 13 schemas); `check:api` and the type check passed; the
+  API suite whole, 551 passed.
+
+Mid-slice rulings:
+M100. **Test runs set `UV_FROZEN=1 UV_NO_SYNC=1`**: the tests' own fixture runs `uv run alembic upgrade head` without
+      `--frozen`, and uv revalidated the CEL wheel's GitHub URL while GitHub timed out (4 setup errors in Task 14's
+      first run). With the lock as installed and no network, the run matched.
+M101. **The tick codec's test leaves a draft simulation's refusals out**: it lists every refusal code admission
+      defines, and met `target_invalid` (Task 5) and `csv_not_simulated` (below), which no task's tests ran. A tick
+      admits its schedule's active version, never a draft, so the allowlist stays as narrow as it was.
+
+The final review: a fresh reviewer (Fable), read-only, on 4c729417..886adc80: no critical or important finding, ten
+minor ones, "Ready to merge: Yes". The owner, in their own words: "Run the suite; fix minors 1–3 first". Each fix was
+reproduced by a test that failed first:
+- a draft whose input takes a CSV, simulated whole: 422 `csv_not_simulated`, rows given or not; a step of it still
+  runs;
+- 404 for the simulations of a workflow the tenant doesn't have, and for the seeds of a step the draft doesn't hold;
+- the state's read-back says `read_back`: `kept`, `absent`, or `unreadable` (stored but it doesn't open), never
+  showing an unreadable input as absent, while the rest of the state still answers.
+Deferred (minor): the seeds read takes the lifecycle's blocking shared locks; the seed contract analyses the draft
+again; instance paging sorts every iteration of a step per page; 0072's downgrade message could say what to do; the
+summary's step entries are untyped; lifecycle deprecations are deduplicated by code; reconcile.py:192's precedence.
+A NaN or Infinity in a request body fails as a server error on `POST …/runs` too: separate work, flagged apart.
+
+Checks, on 886adc80 with the fixes (not yet committed):
+- ruff (check and format), mypy (316 source files) and the import contracts (11 kept): clean.
+- The CEL gates' tests, serial in a process of their own: 594 passed, 10 skipped.
+- The backend suite without them, 8 workers, once: 6362 passed, 131 skipped, **3 failed**, in 54 minutes. It was not
+  re-run whole. One was real: the tick codec's test (M101); its file, after the fix: 25 passed. The other two, re-run
+  alone afterwards, passed: a golden history's replay (under load, Temporal's deadlock detector: the workflow "didn't
+  yield within 2 second(s)") and an online migration's test (its database connection closed mid-operation). That
+  points to load in the parallel run; it doesn't prove it.
+- The frontend's `check:api`, lint, type check, tests (72 files, 1003 tests) and build on 886adc80; after the fixes,
+  the regenerated types, `check:api` and the type check again.
+- Local CodeQL (CLI 2.27.2, python-queries 1.8.12): no finding, on 886adc80 and on the fixed tree.
+
+The deploy order, as the plan says: migration 0072 first, then this build's API, dispatcher and worker. Push and a
+pull request wait for the owner's word.
