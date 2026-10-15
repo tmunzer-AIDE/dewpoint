@@ -41,6 +41,8 @@ NOT_FOUND = {admission.UPLOAD_NOT_FOUND}  # whoever's it is: an upload is its ow
 GONE = {admission.UPLOAD_EXPIRED}
 INPUT_NOT_RETAINED = "input_not_retained"
 REQUEST_NOT_RETAINED = "request_not_retained"  # an exact retry's request, past its retention cutoff
+DRAFT_RUN = "draft_run"
+DRAFT_RUN_MESSAGE = "This run simulated a draft: simulate the draft again."
 
 
 class CsvIn(BaseModel):
@@ -257,6 +259,8 @@ async def rerun(
     named = old if old is not None else run
     if named is None:
         raise HTTPException(404, detail={"error": "not_found"})
+    if await _of_a_draft(db, old, run):  # B8 (the simulation design §6.5): never run again, on a version or otherwise
+        raise HTTPException(409, detail={"error": DRAFT_RUN, "messages": [DRAFT_RUN_MESSAGE]})
     workflow_id, mode = named.workflow_id, given.mode or named.mode
     again = admission.Rerun(request_id, given.input, given.csv.start() if given.csv is not None else None)
     try:
@@ -284,6 +288,16 @@ async def rerun(
     taken(slot)  # its original's input, a CSV's rows perhaps, read only in a slot (the fresh M3 review's I5)
     start = StartIn(input=await original_input(db, keys, ctx.tenant_id, old), mode=mode)
     return request_body(await admit(db, keys, ctx, workflow_id, "rerun", start, key, rerun=again))
+
+
+async def _of_a_draft(db: AsyncSession, old: RunRequest | None, run: Run | None) -> bool:
+    """Whether the request, or the run (a sub-run's tree's root), simulated a draft."""
+    if old is not None:
+        return old.draft_snapshot_id is not None
+    if run is None:
+        return False
+    root = run if run.root_run_id == run.id else await db.get(Run, run.root_run_id)
+    return root is not None and root.draft_snapshot_id is not None
 
 
 async def original_input(db: AsyncSession, keys: KeySource, tenant_id: uuid.UUID, old: RunRequest) -> dict[str, Any]:

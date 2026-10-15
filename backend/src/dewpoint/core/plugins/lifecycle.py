@@ -12,7 +12,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from typing import Literal
 
-from sqlalchemy import any_, func, literal, select, text, tuple_, update
+from sqlalchemy import any_, func, literal, select, text, tuple_, union_all, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
 
@@ -20,7 +20,7 @@ from dewpoint.core.audit.service import record
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.models.plugins import CelProfile, NodeTypeVersion
 from dewpoint.core.models.requests import RunRequest
-from dewpoint.core.models.workflows import Workflow, WorkflowVersion
+from dewpoint.core.models.workflows import DraftSnapshot, Workflow, WorkflowVersion
 from dewpoint.core.plugins.registry import split_ref
 
 Kind = Literal["node", "cel"]
@@ -133,8 +133,9 @@ class AffectedVersion:
 
 @dataclass(frozen=True)
 class QueuedRef:
-    """A run request that hasn't started, frozen on a version whose closure uses the entry: a `queued` one, which a
-    forced retirement cancels, or a `starting` one, which may still reach Temporal and is left to start or come back."""
+    """A run request that hasn't started, frozen on a version whose closure uses the entry (or a draft simulation's
+    snapshot, B8: `version_id` is then the snapshot's): a `queued` one, which a forced retirement cancels, or a
+    `starting` one, which may still reach Temporal and is left to start or come back."""
 
     tenant_id: uuid.UUID
     request_id: uuid.UUID
@@ -162,8 +163,10 @@ class ReferencedError(RuntimeError):
         self.preview = preview
 
 
-def _closure(entry: Entry) -> InstrumentedAttribute[list[str]]:
-    return WorkflowVersion.closure_node_refs if entry.kind == "node" else WorkflowVersion.closure_cel_profiles
+def _closure(
+    entry: Entry, frozen: type[WorkflowVersion | DraftSnapshot] = WorkflowVersion
+) -> InstrumentedAttribute[list[str]]:
+    return frozen.closure_node_refs if entry.kind == "node" else frozen.closure_cel_profiles
 
 
 async def _preview(s: AsyncSession, entry: Entry, state: str) -> RetirePreview:
@@ -190,11 +193,24 @@ async def _preview(s: AsyncSession, entry: Entry, state: str) -> RetirePreview:
         .order_by(Workflow.tenant_id, Workflow.name, WorkflowVersion.number)
     )
     versions = tuple(AffectedVersion(*row) for row in affected)
-    unstarted = await s.execute(
-        select(RunRequest.tenant_id, RunRequest.id, RunRequest.workflow_id, WorkflowVersion.id, RunRequest.status)
+    pending = RunRequest.status.in_(("queued", "starting"))
+    on_versions = (
+        select(RunRequest.tenant_id, RunRequest.id.label("request_id"), RunRequest.workflow_id,
+               WorkflowVersion.id.label("frozen_id"), RunRequest.status, RunRequest.queued_at)
         .join(WorkflowVersion, WorkflowVersion.id == RunRequest.workflow_version_id)
-        .where(uses, RunRequest.status.in_(("queued", "starting")))
-        .order_by(RunRequest.tenant_id, RunRequest.queued_at, RunRequest.id)
+        .where(uses, pending)
+    )  # fmt: skip
+    on_drafts = (  # a draft simulation's (B8): its closure is its snapshot's
+        select(RunRequest.tenant_id, RunRequest.id, RunRequest.workflow_id, DraftSnapshot.id, RunRequest.status,
+               RunRequest.queued_at)
+        .join(DraftSnapshot, DraftSnapshot.id == RunRequest.draft_snapshot_id)
+        .where(literal(entry.key) == any_(_closure(entry, DraftSnapshot)), pending)
+    )  # fmt: skip
+    both = union_all(on_versions, on_drafts).subquery()
+    unstarted = await s.execute(
+        select(both.c.tenant_id, both.c.request_id, both.c.workflow_id, both.c.frozen_id, both.c.status).order_by(
+            both.c.tenant_id, both.c.queued_at, both.c.request_id
+        )
     )
     queued = tuple(QueuedRef(*row) for row in unstarted)
     return RetirePreview(entry=entry, state=state, active_refs=refs, affected=versions, queued=queued)

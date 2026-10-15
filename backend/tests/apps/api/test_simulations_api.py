@@ -106,3 +106,24 @@ async def test_a_draft_that_cant_run_seeds_and_targets_are_refused_in_the_server
     looped = await create(api_sessionmaker, ctx, LOOP_GRAPH, name="looped")
     loop = await client.post(url(ctx, looped), json={"target": {"step_id": str(nid("l"))}}, headers=headers("k5"))
     assert (loop.status_code, loop.json()["error"]) == (422, "target_invalid")
+
+
+async def test_re_running_a_draft_run_or_a_published_child_of_one_is_refused(
+    keyed_app, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    """Spec §6.5: a draft run is never run again, on the published version or otherwise: simulate the draft again."""
+    from sqlalchemy import text
+
+    from tests.apps.test_admission import published
+    from tests.core.retention.support import RECENT, snapshot, tree
+
+    ctx, wf = await published(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings)
+    async with owner_sessionmaker() as s:
+        active = (await s.execute(text("select active_version_id from workflows where id = :w"), {"w": wf})).scalar()
+    rows = {"t": ctx.tenant_id, "w": wf, "v": active, "u": ctx.user.id}
+    ran = await tree(owner_sessionmaker, rows, RECENT, snapshot=await snapshot(owner_sessionmaker, rows))
+    client = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "operator")
+    for n, run_id in enumerate((ran["root"], ran["sub"])):
+        answer = await client.post(f"/api/v1/t/{ctx.tenant_id}/runs/{run_id}/rerun", json={},
+                                   headers={"Idempotency-Key": f"r{n}"})  # fmt: skip
+        assert (answer.status_code, answer.json()["error"]) == (409, "draft_run")
