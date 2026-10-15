@@ -2879,3 +2879,20 @@ M98. **Task 1 says "accepted"**: the owner accepted every ruling before Task 1 r
 M99. **The branch starts at 4c729417**, the owner's word: main gained #104 (the declassify entries) after the plan's
      a914a799. The plan's 26 diff blocks apply on it unchanged (checked before the branch was made).
 
+
+### 4d-1b, milestone 1 (2026-10-15)
+
+Tasks 1–4 on `feat/editor-4d1b` (from origin/main 4c729417, the plan merged in a5422657), each test-first, as the
+plan's steps say; every run matched its Expected line:
+- Task 1, 0a34f682: the 0072 slot, rulings 175–190 accepted, the spec's §2 (4d-1a at ABI 9) and §6.6 (rulings 183 and
+  187).
+- Task 2, 09d03478, migration 0072: red, 6 failed and 18 passed (no revision `0072`, the chain's head `0071`, the fence
+  without `draft_snapshots`); green, 24 passed, the privilege reference regenerated.
+- Task 3, 8e519a57, a draft frozen as its version would be: red at collection (`drafts` not importable), 20 passed;
+  green, 26 passed, publish's tests and the snapshots' row-level security among them.
+- Task 4, 350b8054, retention and erasure of snapshots: the new tests red, 3 failed; green with retention and erasure
+  whole, 165 passed (about 4 minutes).
+
+After each task: ruff (check and format), mypy (312 to 313 source files) and the import contracts (11 kept): clean.
+Mid-slice rulings: M98 and M99, above; none since. #104's declassify change met no task's tests. Deploy order, as the
+plan says: 0072 first.
