@@ -11,15 +11,13 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { useId, useState, type FormEvent, type ReactNode } from "react";
 import { Button } from "../../../components/Button";
 import { Field, Select, TextArea } from "../../../components/Field";
+import { InputControl, fieldKey, fieldsShow, fromFields, listed, shownOf, startValues, wholeOf } from "../startInput";
 import { announce } from "../../../lib/announce";
 import { ApiError } from "../../../lib/client";
 import { CATCHUP, TIMING_WORDS, blankWhen, intervalWords, timingOf, whenOf, zones, type Preset, type When } from "../../../lib/timing";
-import { parseJson } from "../../../lib/config";
 import { asGraph } from "../../../lib/graph";
 import { inputOf } from "../../../lib/input";
-import { createSchedule, scheduleTitle, updateSchedule, versionQuery, type Schedule, type StartField, type StartForm } from "../../../lib/triggers";
-import { isObject } from "../../../lib/schemaForm";
-import { parseNumber } from "../../../lib/unapplied";
+import { createSchedule, scheduleTitle, updateSchedule, versionQuery, type Schedule, type StartForm } from "../../../lib/triggers";
 import { useTriggers } from "./context";
 
 const PRESETS: { value: Preset; label: string }[] = [
@@ -38,138 +36,6 @@ function fieldOfProblem(field: string, preset: Preset): keyof When | "zone" | "c
   if (field === "every_s") return "every";
   if (field === "offset_s") return preset === "hours" ? "first" : "past";
   return preset === "custom" ? "cron" : preset === "daily" || preset === "weekdays" ? "time" : "when";
-}
-
-/** How a field of the input is entered: one of its values, as its type says, or JSON for what the simple controls can't
- * hold (a list, an object, several types or none), each value's type kept (the review of revision 1). */
-type Entry = "choice" | "yesno" | "whole" | "number" | "text" | "json";
-
-function entryOf(f: StartField): Entry {
-  if (Array.isArray(f.enum) && !f.enum_masked) return "choice";
-  const type: unknown = f.type;
-  return type === "boolean" ? "yesno" : type === "integer" ? "whole" : type === "number" ? "number" : type === "string" ? "text" : "json";
-}
-
-const JSON_HINT = 'As JSON, like ["ap-1"] or {"site": "HQ"}; text in quotes.';
-
-const nameOf = (f: StartField) => f.title ?? f.name;
-
-/** What's typed for one field of the input, as the input holds it: nothing given is left out. A choice's option is its
- * value as JSON, so a number stays a number; JSON a parse would change (a number too large, a whole one past 2^53) is
- * refused, as the draft's is. */
-function valueOf(f: StartField, typed: string | undefined): { value: unknown } | { problem: string } {
-  if (typed === undefined || typed === "") return { value: undefined };
-  const entry = entryOf(f);
-  if (entry === "choice") return { value: JSON.parse(typed) as unknown };
-  if (entry === "yesno") return { value: typed === "true" };
-  if (entry === "whole" || entry === "number") {
-    const parsed = parseNumber(typed, entry === "whole");
-    return "problem" in parsed ? parsed : { value: parsed.value };
-  }
-  if (entry === "text") return { value: typed };
-  return parseJson(typed);
-}
-
-/** A value as its field's control shows it, or null where that control can't show it as it is: a line break, which a
- * one-line control drops, or text that doesn't read back as the value (an empty text is "not given"). The reviews of
- * revisions 4 and 5. */
-function shownOf(f: StartField, v: unknown): string | null {
-  const shown = textOf(f, v);
-  if (shown === null || /[\r\n]/.test(shown)) return null;
-  const read = valueOf(f, shown);
-  return "value" in read && JSON.stringify(read.value) === JSON.stringify(v) ? shown : null;
-}
-
-/** A value as its field's control would hold it, before it's read back. */
-function textOf(f: StartField, v: unknown): string | null {
-  switch (entryOf(f)) {
-    case "choice":
-      return (f.enum ?? []).some((x) => JSON.stringify(x) === JSON.stringify(v)) ? JSON.stringify(v) : null;
-    case "yesno":
-      return typeof v === "boolean" ? String(v) : null;
-    case "whole":
-      return typeof v === "number" && Number.isInteger(v) ? String(v) : null;
-    case "number":
-      return typeof v === "number" ? String(v) : null;
-    case "text":
-      return typeof v === "string" ? v : null;
-    case "json":
-      return JSON.stringify(v);
-  }
-}
-
-/** Where a field's problem is kept among the form's: apart from its own (`when`, `input`…), whatever the field's name. */
-const fieldKey = (name: string) => `field:${name}`;
-
-/** The fields' values as one input, each by its name as a key of its own (a field may be named `__proto__`), or each
- * field's problem; `required` holds a required field to being given. */
-function fromFields(form: StartForm, values: ReadonlyMap<string, string>, required: boolean): { input: Record<string, unknown> } | { problems: Record<string, string> } {
-  const entries: [string, unknown][] = [];
-  const problems: [string, string][] = [];
-  for (const f of form.fields) {
-    const read = valueOf(f, values.get(f.name));
-    if ("problem" in read) problems.push([fieldKey(f.name), read.problem]);
-    else if (read.value !== undefined) entries.push([f.name, read.value]);
-    else if (required && f.required) problems.push([fieldKey(f.name), `${nameOf(f)} is required.`]);
-  }
-  return problems.length > 0 ? { problems: Object.fromEntries(problems) } : { input: Object.fromEntries(entries) };
-}
-
-const listed = (items: string[]) => (items.length < 2 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)!}`);
-
-/** One field of the published version's form: never prefilled with what a sensitive field hides. */
-function InputControl({ f, value, error, onChange }: { f: StartField; value: string | undefined; error?: string; onChange: (v: string) => void }) {
-  const label = `${nameOf(f)}${f.required ? " (required)" : ""}`;
-  const entry = entryOf(f);
-  const hint = entry === "json" ? [f.description, JSON_HINT].filter(Boolean).join(" ") : (f.description ?? undefined);
-  if (entry === "yesno") {
-    return (
-      <Select label={label} hint={hint} error={error} value={value === undefined ? "" : String(value)} onChange={(e) => onChange(e.target.value)}>
-        <option value="">Not given</option>
-        <option value="true">Yes</option>
-        <option value="false">No</option>
-      </Select>
-    );
-  }
-  if (entry === "choice") {
-    return (
-      <Select label={label} hint={hint} error={error} value={value ?? ""} onChange={(e) => onChange(e.target.value)}>
-        <option value="">Not given</option>
-        {(f.enum ?? []).map((v) => <option key={JSON.stringify(v)} value={JSON.stringify(v)}>{typeof v === "string" ? v : JSON.stringify(v)}</option>)}
-      </Select>
-    );  // prettier-ignore
-  }
-  if (entry === "json" && !f.sensitive) {
-    return <TextArea label={label} hint={hint} error={error} value={value ?? ""} rows={3} spellCheck={false} onChange={(e) => onChange(e.target.value)} />;
-  }
-  return (
-    <Field
-      label={label} hint={hint} error={error} type={f.sensitive ? "password" : "text"} autoComplete="off" spellCheck={entry === "json" ? false : undefined}
-      inputMode={entry === "whole" || entry === "number" ? "decimal" : undefined} value={value ?? ""}
-      onChange={(e) => onChange(e.target.value)}
-    />
-  );  // prettier-ignore
-}
-
-/** The published version's form, with the values it starts from: a default its control shows, where one isn't hidden. */
-const startValues = (form: StartForm): ReadonlyMap<string, string> =>
-  new Map(form.fields.flatMap((f) => {
-    const shown = f.sensitive || f.default === undefined || f.default === null ? null : shownOf(f, f.default);
-    return shown === null ? [] : [[f.name, shown] as const];
-  }));  // prettier-ignore
-
-/** What a start form's fields show of an input (apps/forms.py reads its root's properties and required): any other
- * keyword at its root (allOf, $ref, if, …) holds rules no field shows, and the input is then entered whole, as JSON. */
-const SHOWN = new Set(["type", "properties", "required", "title", "description", "additionalProperties", "$schema", "$defs", "$comment", "examples"]);
-const fieldsShow = (schema: Record<string, unknown>) => Object.keys(schema).every((k) => SHOWN.has(k) || k.startsWith("x-"));
-
-/** The whole input typed as JSON: an object, its keys as parsed, or why it isn't one (JSON a parse would change, as a
- * field's); nothing typed is an empty input. */
-function wholeOf(text: string): { value: Record<string, unknown> } | { problem: string } {
-  const read = parseJson(text);
-  if ("problem" in read) return read;
-  if (read.value === undefined) return { value: {} };
-  return isObject(read.value) ? { value: read.value } : { problem: 'An object, like {"site": "HQ"}.' };
 }
 
 /** Whether two "When"s say the same, field for field. */
