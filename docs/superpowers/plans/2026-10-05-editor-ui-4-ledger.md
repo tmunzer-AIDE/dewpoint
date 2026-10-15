@@ -3037,3 +3037,18 @@ written; each task's tests failed, then passed, as its steps say; after each, th
   file 1 failed and 153 passed; green: 167 passed.
 
 Mid-slice rulings: M102 only. Nothing pushed.
+
+### 4d-1c, milestone 2 (2026-10-15)
+
+The owner, in chat: "Milestone 1 accepted, continue". Tasks 6–8, every diff applied as written; each task's tests
+failed, then passed, as its steps say; after each, the type check and ESLint were silent.
+- Task 6, 27375d2e: the result on the canvas (tags beside each step, the bar, Hide and Show). Red: the three new files
+  couldn't import their modules, the editor's file 1 failed and 161 passed; green: 173 passed.
+- Task 7, 1ac2c735: the result in the panel (the checks, the steps in run order, a loop's iterations, the input used).
+  Red: the three new files couldn't import their modules, 1 failed and 155 passed; green: 171 passed.
+- Task 8, a5b2d7f2: "Before your edits" against the draft the simulation ran, and refusals in the server's words; a
+  coded 503 is a refusal. Red: the two new files couldn't import their modules, 10 failed and 208 passed; green: 231
+  passed.
+
+At the milestone, the editor's, the guards', `lib`'s and the components' tests together: 902 passed (76 files).
+Mid-slice rulings: none in this milestone. Nothing pushed.
