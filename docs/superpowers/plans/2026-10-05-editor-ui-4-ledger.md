@@ -36,7 +36,7 @@ cover local work only: anything outward-facing (push, PR, issues) is confirmed i
 | 0048–0065 | 2b-4b's work (#90, merged 2026-10-12, chained 0044 → 0047 → 0045 → 0070 → 0048 → … → 0065). B4b and B8, reserved at 0048 and 0049 on 2026-10-08, moved to 0071 and 0072 (the owner, 2026-10-11) |
 | 0070 | 4c-3a: `webhook_endpoints.trigger_key`, an endpoint's sender (the owner; it was 0054 until 2026-10-11, which 2b-4b's work also names) |
 | 0071 | B4b: `skipped` and `not_started` projection statuses and `run_steps.effect_preview` (the owner, 2026-10-08; the slot, 2026-10-11); 4d-1a, chained after 0065 |
-| 0072 | B8: draft and single-step simulation (the owner, 2026-10-08; the slot, 2026-10-11) |
+| 0072 | B8: `draft_snapshots`, and the requests' and runs' draft columns (the owner, 2026-10-08; the slot, 2026-10-11); 4d-1b, chained after 0071 |
 
 - One Alembic chain: before merging, the first unmerged migration's `down_revision` is reconciled with the actual head.
 - Deployed migrations are never rewritten; 0035–0042 are never altered.
@@ -2836,3 +2836,46 @@ suite, with 3 failed, 6119 passed and 131 skipped.
 cd1a44a1 holds both (test-only; the owner: "Commit and push it; keep asking for Auto-fix pushes"). CI's second run, on
 cd1a44a1: every job passed (the backend in 23 min), as did CodeQL. Main has since gained #102 (a CEL compile fix: no
 ABI, migration or runtime change), which merges cleanly.
+
+### 4d-1b plan accepted (2026-10-15, in chat)
+
+`docs/superpowers/plans/2026-10-14-editor-ui-4d1b-backend.md`, revision 1 (d12b9144): one plan for the whole of the
+spec's §6, with milestone pauses (the owner, 2026-10-14: "One plan"). The owner, in their own words: "I accept rulings
+9, 12, 13 and 15; inline", then "Accept the rest; commit the plan, branch from 4c729417; installs OK". The plan's
+rulings 1–16 join this ledger as 175–190; the plan says each one's why and its cost. Rulings 183 and 187 add to the
+spec's §6.6, amended in the same commit. It carries 4d-1a's deferred minors that are 4d-1b's: the seeds read validates
+the draft first (186), the operations doc's codes (Task 14), and ruling 164's guard (189).
+
+175. **Accepted. A draft simulation's source is `manual`** (plan ruling 1), as the spec's §6.3 has it.
+176. **Accepted. The worker loads a version, then a snapshot, by the same id** (plan ruling 2): no new field in the
+     run's input, so no ABI change.
+177. **Accepted. A snapshot's closure is its pins' alone** (plan ruling 3); its own engine ABI is checked beside its
+     pins'.
+178. **Accepted. What a simulation reports without blocking** (plan ruling 4): `lifecycle.deprecated`, connections
+     and pickers, as `admission_checks`; the rest blocks, `declassify.forbidden` in a simulation's words.
+179. **Accepted. "At a revision" means the current one** (plan ruling 5): another answers 409 `draft_conflict`.
+180. **Accepted. The seeds envelope is claimed with each entry's own schema**, never checked against it there (plan
+     ruling 6): `seeds.check` has.
+181. **Accepted. The idempotency digest grows only for drafts** (plan ruling 7).
+182. **Accepted. Snapshot reuse against the sweep** (plan ruling 8): the snapshot's advisory lock, shared by
+     admission, tried exclusively by the sweep, whose DELETE checks again; its deletions uncounted.
+183. **Accepted. The data-origin tags are sent as codes** (plan ruling 9); the UI words them. Spec §6.6.
+184. **Accepted. A step's instances are paged by offset, in iteration order by number** (plan ruling 10), `within`
+     one iteration; a step test's summary lists its target alone.
+185. **Accepted. The person's simulations list is theirs alone** (plan ruling 11).
+186. **Accepted. The seeds read validates the draft first, as admission does** (plan ruling 12); a step that can't run
+     alone answers `refused`.
+187. **Accepted. D-s2's prefill is computed by the server, in the seeds read** (plan ruling 13), which then needs
+     `run.view` too. Spec §6.6.
+188. **Accepted. The draft's start form needs what simulating needs** (plan ruling 14), in `start-form`'s shape with
+     `draft_revision`.
+189. **Accepted. A single step never continues as new** (plan ruling 15): 4d-1a's ruling 164 gets its guard.
+190. **Accepted. A new partial index, `runs_workflow_last_published`** (plan ruling 16), for the workflow list's last
+     runs without draft runs.
+
+Mid-slice rulings:
+M98. **Task 1 says "accepted"**: the owner accepted every ruling before Task 1 ran, so this section and its commit say
+     so, not "proposed" as the plan's text has it.
+M99. **The branch starts at 4c729417**, the owner's word: main gained #104 (the declassify entries) after the plan's
+     a914a799. The plan's 26 diff blocks apply on it unchanged (checked before the branch was made).
+
