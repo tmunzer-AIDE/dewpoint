@@ -3069,3 +3069,16 @@ failed, then passed, as its steps say; after each, the type check and ESLint wer
 
 At the milestone, the editor's, the guards', `lib`'s and the components' tests together: 940 passed (79 files).
 Mid-slice rulings: none in this milestone. Nothing pushed.
+
+### 4d-1c, milestone 4 and the final checkpoint (2026-10-15)
+
+The owner, in chat: "Milestone 3 accepted, continue; leave the e2e to CI".
+- Task 13, 652e9566: the e2e specs (`e2e/simulation.spec.ts`, three specs, and its fixture; the workflows project runs
+  it). The type check and ESLint silent; `playwright test --list` finds the three. Not run locally, on the owner's
+  word: CI's e2e job runs them on the PR.
+- Task 14, the checks on 652e9566, as the plan's Expected says: the whole frontend suite, 1175 passed (90 files);
+  ESLint silent; the build done (the editor's chunk 502.21 kB, 158.01 kB gzipped, ruling 208; the entry's 632.45 kB as
+  on main); `check:api` passes; local CodeQL (javascript-typescript, CLI 2.27.2, javascript-queries 2.4.7, CI's
+  filter): no finding.
+
+Mid-slice rulings over the slice: M102 only. The final review follows. Nothing pushed.
