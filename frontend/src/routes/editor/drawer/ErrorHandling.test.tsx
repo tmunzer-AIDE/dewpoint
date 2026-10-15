@@ -3,9 +3,11 @@ import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { StepOptions } from "../../../lib/config";
+import { fieldsOf } from "../../../lib/schemaForm";
 import type { GraphNode } from "../../../lib/workflows";
-import { DELAY } from "../../../test/nodeTypes";
+import { DELAY, typeWith } from "../../../test/nodeTypes";
 import { ErrorHandling, chipText } from "./ErrorHandling";
+import { FieldView } from "./FieldView";
 import { fakeApi, showFields } from "./harness";
 
 beforeEach(() => {
@@ -42,6 +44,15 @@ it("holds attempts and a timeout the graph's format refuses, writing neither", a
   expect(held().map((u) => [u.kind, u.text])).toEqual([["limit", "25"], ["limit", "0"]]);
 });
 
+it("holds attempts typed in another notation than decimal, never writing them (#73)", async () => {
+  const { node: step, held } = showFields(DELAY, {}, <ErrorHandling />);
+  await userEvent.click(screen.getByLabelText("Attempts"));
+  await userEvent.paste("0x10");
+  expect(screen.getByText("A whole number from 1 to 20.")).toBeTruthy();
+  expect(step()).not.toHaveProperty("options");
+  expect(held().map((u) => [u.kind, u.text])).toEqual([["limit", "0x10"]]);
+});
+
 it("keeps a limit a refused write turned away, with its reason", async () => {
   const { node: step, held, refuse } = showFields(DELAY, {}, <ErrorHandling />);
   refuse("Not written: the draft can't be changed now.");
@@ -58,4 +69,45 @@ it("keeps focus at a limit after its Discard (the final review)", async () => {
   await userEvent.type(attempts(), "25"); // "25" held: past 20
   await userEvent.click(screen.getByRole("button", { name: "Discard the edit to Attempts" }));
   await vi.waitFor(() => expect(document.activeElement).toBe(attempts()));
+});
+
+/** A type whose config has a list named `options`: its pointer is /options, where a limit's held edit used to be (#73). */
+const OPTIONED = typeWith({ type: "object", properties: { options: { title: "Options", type: "array", items: { type: "string" } } } });
+const withOptions = (
+  <>
+    <ErrorHandling />
+    {fieldsOf(OPTIONED).map((f) => <FieldView key={f.pointer} spec={f} />)}
+  </>
+);
+const heldLimit = (held: () => { kind: string; text: string; why: string | null }[]) => held().map((u) => [u.kind, u.text, u.why]);
+
+it("keeps a held limit through a Clear of a config field named options (#73)", async () => {
+  const { config, held } = showFields(OPTIONED, { config: { options: ["a"] } }, withOptions);
+  await userEvent.type(screen.getByLabelText("Attempts"), "25");
+  await userEvent.click(screen.getByRole("button", { name: "Clear Options" }));
+  expect(config()).toEqual({});
+  expect(heldLimit(held)).toEqual([["limit", "25", "A whole number from 1 to 20."]]);
+  expect(screen.getByLabelText<HTMLInputElement>("Attempts").value).toBe("25");
+});
+
+it("adds, moves and removes in a config list named options around a held limit, which stays held (#73)", async () => {
+  const { config, held } = showFields(OPTIONED, { config: { options: ["a", "b"] } }, withOptions);
+  await userEvent.type(screen.getByLabelText("Attempts"), "25");
+  await userEvent.click(screen.getByRole("button", { name: "Add to Options" }));
+  expect((config().options as unknown[]).length).toBe(3);
+  await userEvent.click(screen.getByRole("button", { name: "Move down: Options, item 1" }));
+  expect((config().options as unknown[]).slice(0, 2)).toEqual(["b", "a"]);
+  await userEvent.click(screen.getByRole("button", { name: "Remove: Options, item 1" }));
+  expect((config().options as unknown[]).slice(0, 1)).toEqual(["a"]);
+  expect(heldLimit(held)).toEqual([["limit", "25", "A whole number from 1 to 20."]]);
+});
+
+it("shows a limit's own value once its held text goes elsewhere, never text only Number() reads as it (the review)", async () => {
+  const { replace, dropHeld } = showFields(DELAY, { options: { max_attempts: 5 } }, <ErrorHandling />);
+  const attempts = () => screen.getByLabelText<HTMLInputElement>("Attempts");
+  await userEvent.tripleClick(attempts());
+  await userEvent.paste("0x10"); // held: not a decimal number
+  replace({}, { max_attempts: 16 }); // an undo elsewhere: 16, which "0x10" doesn't mean
+  dropHeld();
+  expect(attempts().value).toBe("16");
 });
