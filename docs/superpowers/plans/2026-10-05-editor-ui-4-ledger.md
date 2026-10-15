@@ -3021,3 +3021,19 @@ change, no migration, no ABI change; the API's schema is 4d-1b's.
 
 M102. **Task 1's entry records the plan accepted**, not proposed as the plan's text has it: the owner accepted every
 ruling before execution began, as for 4d-1b.
+
+### 4d-1c, milestone 1 (2026-10-15)
+
+Tasks 1–5 on `feat/editor-4d1c` (from origin/main 6bd2ed51, the plan merged in bcb571e0). Every diff applied as
+written; each task's tests failed, then passed, as its steps say; after each, the type check and ESLint were silent.
+- Task 1, 573834dc: the plan accepted, rulings 191–209 (M102).
+- Task 2, 30c44bcc: the API layer and `useSimulation`. Red: neither test file could import its module; green: 15
+  passed (the hidden tab's test among them).
+- Task 3, 89cff8fa: the input dialog, `skeletonOf`, the start form's fields moved to `startInput.tsx`. Red: the two new
+  files couldn't import their modules, the field's and the triggers' 72 tests passed; green: 83 passed.
+- Task 4, fa95ffd1: "◌ Simulate workflow" beside Publish, with Publish's preflight. Red: 5 failed, 148 passed (the
+  viewer's test passes at once: it pins an absence); green: 153 passed.
+- Task 5, 9d18f1d6: the Simulation panel's lifecycle. Red: its two files couldn't import their modules, the editor's
+  file 1 failed and 153 passed; green: 167 passed.
+
+Mid-slice rulings: M102 only. Nothing pushed.
