@@ -1334,6 +1334,7 @@ function Editor({
           endedAt={simulation.state.run?.ended_at ?? simulation.state.request.ended_at}
           notWaited={(simulation.steps?.steps ?? []).some((s) => s.origin === "evaluated_not_waited")}
           stale={stale}
+          target={simulation.state.request.target_step_id ? (findNode(doc, simulation.state.request.target_step_id)?.key ?? simulation.steps?.steps[0]?.key ?? "the step") : null}
           hidden={!resultShown}
           onHide={() => setHiddenFor(simulationId)}
           onShow={() => setHiddenFor(null)}
@@ -1410,7 +1411,7 @@ function Editor({
                   onSave={() => new Promise((resolve) => whenSettled("simulate", () => void saveFirst().then(resolve)))}
                   onStart={(frozen) => void simulation.start(frozen)}
                   onSimulateWorkflow={() => whenSettled("simulate", () => void simulate())}
-                  onGoTo={(id) => focus(item.node(id))} onShowProblems={() => setSide({ kind: "problems" })}
+                  onGoTo={(id) => focus(item.node(id))} onShowProblems={() => setSide({ kind: "problems" })} attemptsOf={attemptsOf}
                 />
               ) : undefined
             }

@@ -41,7 +41,7 @@ function show(over: Partial<Parameters<typeof TestTab>[0]> = {}) {
   const props = {
     tenantId: "t1", workflowId: "w1", node: NOTIFY, doc: DOC, types: new Map<string, NodeType>(), revision: 14, session: idle(),
     blocked: false, onSave: vi.fn(() => Promise.resolve(14)), onStart: vi.fn(), onSimulateWorkflow: vi.fn(), onGoTo: vi.fn(),
-    onShowProblems: vi.fn(), ...over,
+    onShowProblems: vi.fn(), attemptsOf: () => 3, ...over,
   };  // prettier-ignore
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
@@ -191,6 +191,15 @@ describe("the values a step test sends (§7.6; the TestTab and TestOther boards)
     expect(description(await screen.findByLabelText("api_token required sensitive text"))).toContain("A value is required here.");
     expect(screen.getByText("Not simulated")).toBeTruthy();
     expect(screen.getByText("/vars/gone: Nothing reads this.")).toBeTruthy();
+  });
+
+  it("shows its own result once sent, below the values", async () => {
+    const request = { id: "r1", workflow_id: "w1", draft_snapshot_id: "s1", draft_revision: 14, target_step_id: "id-notify", mode: "simulate" as const,
+      source: "manual", status: "queued" as const, reason: null, queued_at: "2026-10-15T10:42:05Z", ended_at: null, admission_checks: [] };  // prettier-ignore
+    const state = { request, run: null, cancel_requested: false, read_back: "kept" as const, input: null, seeds: {} };
+    show({ session: { ...idle(), local: { kind: "admitted", frozen: null, request, latest: false }, state, phase: "queued", busy: true } });
+    const result = await screen.findByRole("region", { name: "Result · notify" });
+    expect(within(result).getByText("Waiting for a free run slot.")).toBeTruthy();
   });
 
   it("waits while Simulate waits", async () => {

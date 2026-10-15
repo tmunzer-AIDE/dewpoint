@@ -8,12 +8,8 @@ import { Button } from "../../../components/Button";
 import { ENDED } from "../../../lib/simulations";
 import { SIDE } from "../side";
 import { SimulatedChip, StatusChip } from "./chips";
-import { clock, duration, endedWhat, runId, stepsEnded } from "./lifecycle";
+import { clock, duration, endedWhat, lineOf, runId } from "./lifecycle";
 import type { SimulationSession } from "./useSimulation";
-
-const LOST =
-  "It isn't known whether the simulation started: its answer was lost. Checking sends the same request again: while the " +
-  "first request is still kept, it can't start a second time.";
 
 export function SimulationPanel({ session, onSimulateAgain, onClose, children }: {
   session: SimulationSession; onSimulateAgain?: () => void; onClose: () => void; children?: ReactNode;
@@ -27,18 +23,7 @@ export function SimulationPanel({ session, onSimulateAgain, onClose, children }:
   const run = state?.run ?? null;
   const said = (iso: string | null) => (iso ? clock(iso) : "a moment ago");
 
-  let line: string | null = null; // where it is, in a sentence
-  if (local.kind === "submitting") line = "Sending the simulation…";
-  else if (local.kind === "unknown") line = LOST;
-  else if (local.kind === "admitted" && state === null) line = "Reading the simulation…";
-  else if (phase === "queued") line = "Waiting for a free run slot.";
-  else if (phase === "starting") line = "Its run is being started.";
-  else if (phase === "running") {
-    const { ended: done, of } = stepsEnded(steps);
-    line = session.steps ? `${done} of ${of} steps ended.` : "Running.";
-  } else if (phase === "cancel_requested") line = "Cancel requested. It's shown as cancelled once the server confirms it.";
-  else if (phase === "dead") line = "The simulation couldn't be started. Nothing ran.";
-  else if (phase === "refused") line = request?.reason ?? "The simulation was refused.";
+  const line = lineOf(session); // where it is, in a sentence
 
   // Which run it is, and when it started or how it ended (§7.5).
   const facts =

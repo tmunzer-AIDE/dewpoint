@@ -2190,6 +2190,21 @@ describe("Simulate step", () => {
     expect(screen.getByRole("complementary", { name: "transform" })).toBeTruthy(); // the drawer stays: its result comes in the tab
   });
 
+  it("shows a step test's result on the canvas as the step alone (§7.3; the TestResult board)", async () => {
+    const request = { id: "r1", workflow_id: "w1", version_id: null, draft_snapshot_id: "s1", draft_revision: 1, target_step_id: "id-transform", mode: "simulate", source: "manual", status: "started", reason: null, queued_at: "2026-10-15T10:42:05Z", ended_at: null, admission_checks: [] };
+    const run = { status: "succeeded", queued_at: null, started_at: "2026-10-15T10:42:05Z", ended_at: "2026-10-15T10:42:06Z", error: null, iterations: 0 };
+    answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: draftWith("transform", "after") }));
+    answers.set(`GET ${BASE}/draft/simulations`, () => json([request]));
+    answers.set(`GET ${BASE}/draft/simulations/r1`, () => json({ request, run, cancel_requested: false, read_back: "kept", input: null, seeds: {} }));
+    answers.set(`GET ${BASE}/draft/simulations/r1/steps`, () => json({ given: "seeded", steps: [
+      { step_id: "id-transform", key: "transform", type: "flow.transform@1", origin: "evaluated", instances: 1, statuses: { succeeded: 1 }, ports: {}, final: { attempt: 1, status: "succeeded" } },
+    ] }));  // prettier-ignore
+    await show();
+    await vi.waitFor(() => expect(steps().dataset.simulated).toBe(JSON.stringify([["id-transform", ["succeeded", "evaluated"]]])));
+    expect(steps().dataset.startTags).toBe(""); // the input wasn't given: the step's values were
+    expect(screen.getByText("Step test: transform.").parentElement?.textContent).toBe("Step test: transform. Only this step ran. Nothing was sent.");
+  });
+
   it("isn't offered to a viewer", async () => {
     role = "viewer";
     await show();

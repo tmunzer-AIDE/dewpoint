@@ -13,8 +13,10 @@ import { STALE, staleWords, type Stale } from "./stale";
 
 const BAR = "flex flex-wrap items-center gap-3 border-b border-line bg-surface-2 px-5 py-2.5 text-small";
 
-export function ResultBar({ phase, revision, endedAt, notWaited, stale, hidden, onHide, onShow, onPanel, onCancel }: {
-  phase: Phase; revision: number; endedAt: string | null; notWaited: boolean; stale: Stale | null; hidden: boolean;
+export function ResultBar({ phase, revision, endedAt, notWaited, stale, target, hidden, onHide, onShow, onPanel, onCancel }: {
+  phase: Phase; revision: number; endedAt: string | null; notWaited: boolean; stale: Stale | null;
+  target: string | null; // a step test's step, by its key: it ran alone
+  hidden: boolean;
   onHide: () => void; onShow: () => void; onPanel: () => void; onCancel: () => void;
 }) {  // prettier-ignore
   if (!ENDED.has(phase)) {
@@ -37,7 +39,11 @@ export function ResultBar({ phase, revision, endedAt, notWaited, stale, hidden, 
   return (
     <div className="border-b border-line bg-surface px-5 py-2.5">
       <SimBanner role="status">
-        <p><strong>Simulated.</strong> Nothing was sent. Results don&apos;t prove the live call will succeed.</p>
+        {target ? (
+          <p><strong>{`Step test: ${target}.`}</strong> Only this step ran. Nothing was sent.</p>
+        ) : (
+          <p><strong>Simulated.</strong> Nothing was sent. Results don&apos;t prove the live call will succeed.</p>
+        )}
         {notWaited && <p>Flow delays and wait-until weren&apos;t waited; the simulation clock wasn&apos;t advanced.</p>}
         {stale && (
           <p className={STALE}>

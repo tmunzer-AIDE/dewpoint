@@ -39,10 +39,13 @@ const ORIGIN_KIND: Record<Origin, SimTagKind> = {
   not_reached_yet: "absent",
 };
 
+/** Where a step's data came from, as its tag. */
+export const originTag = (origin: Origin): SimTag => ({ text: ORIGIN[origin], kind: ORIGIN_KIND[origin] });
+
 const ORDER = ["succeeded", "failed", "cancelled", "skipped", "not_started", "running"];
 const said = (status: string) => status.replace("_", " ");
 const statusKind = (status: string): SimTagKind => (status === "succeeded" ? "ok" : status === "failed" ? "fail" : "status");
-const field = (v: unknown, key: string): unknown => (typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>)[key] : undefined);
+export const field = (v: unknown, key: string): unknown => (typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>)[key] : undefined);
 
 export const words = (tags: SimTag[]) => tags.map((t) => t.text);
 

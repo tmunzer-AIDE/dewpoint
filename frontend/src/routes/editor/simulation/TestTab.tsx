@@ -9,11 +9,12 @@ import { useState } from "react";
 import { Button } from "../../../components/Button";
 import { ApiError } from "../../../lib/client";
 import { sameId } from "../../../lib/graph";
-import { freeze, seedContractQuery, type Frozen } from "../../../lib/simulations";
+import { freeze, seedContractQuery, type Frozen, type StepSummary } from "../../../lib/simulations";
 import type { GraphDoc, GraphNode, NodeType } from "../../../lib/workflows";
 import { Refusal } from "./Refusal";
 import { SeedField } from "./SeedField";
 import { collect, initialOf, titleOf, type SeedInput } from "./seeds";
+import { StepResult } from "./StepResult";
 import type { SimulationSession } from "./useSimulation";
 
 export interface TestTabProps {
@@ -30,13 +31,14 @@ export interface TestTabProps {
   onSimulateWorkflow: () => void;
   onGoTo: (stepId: string) => void;
   onShowProblems: () => void;
+  attemptsOf: (s: StepSummary) => number | null;
 }
 
 const missingWords = (n: number) => `Not simulated: ${n} ${n === 1 ? "value is" : "values are"} missing.`;
 const unreadWords = (n: number) => `Not simulated: ${n} ${n === 1 ? "value isn't" : "values aren't"} valid JSON.`;
 
 export function TestTab(props: TestTabProps) {
-  const { tenantId, workflowId, node, doc, types, revision, session, blocked, onSave, onStart, onSimulateWorkflow, onGoTo, onShowProblems } = props;
+  const { tenantId, workflowId, node, doc, types, revision, session, blocked, onSave, onStart, onSimulateWorkflow, onGoTo, onShowProblems, attemptsOf } = props;
   // The contract at the saved revision; while a newer one is read, the older stays shown (it's never sent with it).
   const contract = useQuery({ ...seedContractQuery(tenantId, workflowId, node.id, revision), placeholderData: keepPreviousData });
   const [inputs, setInputs] = useState<Record<string, SeedInput>>({});
@@ -71,6 +73,10 @@ export function TestTab(props: TestTabProps) {
   }
   // The values the server refused for this step's test, on their fields; one with no field, above them.
   const local = session.local;
+  // This step's own test: sent, or read since.
+  const sending = local.kind === "submitting" || local.kind === "unknown" ? local.frozen.body.target?.step_id : undefined;
+  const tested = session.state?.request.target_step_id ?? sending;
+  const mine = typeof tested === "string" && sameId(tested, node.id);
   const refused = local.kind === "refused" && local.frozen.body.target && sameId(local.frozen.body.target.step_id, node.id) ? local.error : null;
   const seedProblems = refused && Array.isArray((refused.body as { problems?: unknown } | null)?.problems)
     ? ((refused.body as { problems: { pointer: string; message: string }[] }).problems)
@@ -140,6 +146,7 @@ export function TestTab(props: TestTabProps) {
         <Button variant="simulate" size="md" disabled={blocked} onClick={() => void simulate()}>◌ Simulate step</Button>
         <p className="text-small text-muted">{`Each value is checked against what ${node.key} reads.`}</p>
       </div>
+      {mine && <StepResult session={session} stepKey={node.key} attemptsOf={attemptsOf} />}
     </>
   );
 }

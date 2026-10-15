@@ -5,11 +5,12 @@
 // request stored it (§6.6's read-back: never recomputed from today's draft). A result from before the person's edits
 // says so, and marks each step changed since or no longer in the draft; a failed step says its code and message, and
 // that nothing was sent; a refusal is shown in the server's words (§7.7; the Stale and Refusals boards).
-import { useId, useState, type ReactNode } from "react";
+import { useState } from "react";
 import { Button } from "../../../components/Button";
 import { findNode, idKey } from "../../../lib/graph";
 import { ENDED, type StepSummary } from "../../../lib/simulations";
 import type { GraphDoc } from "../../../lib/workflows";
+import { Failure } from "./Failure";
 import { bodyOf } from "./loopBody";
 import { Iterations } from "./Iterations";
 import { tagsOf } from "./results";
@@ -17,28 +18,13 @@ import { SimBanner } from "./SimBanner";
 import { Refusal } from "./Refusal";
 import { InlineTags } from "./SimTags";
 import { STALE, staleWords, type Changes, type Stale } from "./stale";
+import { Section, UsedValues } from "./UsedValues";
 import type { SimulationSession } from "./useSimulation";
 
-const REDACTED = "[redacted]"; // the server's marker for a sensitive value (engine/runtime/projection.py)
-
-function Section({ title, children }: { title: string; children: ReactNode }) {
-  const id = useId();
-  return (
-    <section aria-labelledby={id} className="flex flex-col gap-1.5">
-      <h3 id={id} className="text-small font-semibold">{title}</h3>
-      {children}
-    </section>
-  );
-}
-
-const shown = (v: unknown): string => (v === REDACTED ? "redacted" : typeof v === "string" ? v : JSON.stringify(v));
 const iterationKey = (final: StepSummary["final"]): string => {
   const key = final?.iteration_key;
   return typeof key === "string" ? key : "";
 };
-const field = (v: unknown, key: string): unknown => (typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>)[key] : undefined);
-/** A step's attempts, said against its retries when it used them all. */
-const attempts = (n: number, max: number | null) => (n === 1 ? "1 attempt." : n === max ? `${n} attempts, the configured retries.` : `${n} attempts.`);
 
 export function SimulationResult({ tenantId, workflowId, session, doc, ran, stale, changes, attemptsOf, onGoTo, onShowProblems, onOpen }: {
   tenantId: string; workflowId: string; session: SimulationSession;
@@ -61,6 +47,8 @@ export function SimulationResult({ tenantId, workflowId, session, doc, ran, stal
     findNode(doc, id) ? <Button size="sm" aria-label={`Go to ${key}`} onClick={() => onGoTo(id)}>Go to</Button> : null;
 
   const graph = ran ?? doc;
+  const target = request.target_step_id; // a step test's step
+  const targetKey = target ? (findNode(doc, target)?.key ?? all[0]?.key ?? "the step") : null;
   return (
     <>
       {ended && stale && (
@@ -70,7 +58,11 @@ export function SimulationResult({ tenantId, workflowId, session, doc, ran, stal
       )}
       {ended && began && (
         <SimBanner>
-          <p><strong>Simulated.</strong> Nothing was sent. Results don&apos;t prove the live call will succeed.</p>
+          {targetKey ? (
+            <p><strong>{`Step test: ${targetKey}.`}</strong> Only this step ran. Nothing was sent.</p>
+          ) : (
+            <p><strong>Simulated.</strong> Nothing was sent. Results don&apos;t prove the live call will succeed.</p>
+          )}
           {all.some((s) => s.origin === "evaluated_not_waited") && (
             <p>Flow delays and wait-until weren&apos;t waited; the simulation clock wasn&apos;t advanced.</p>
           )}
@@ -100,10 +92,6 @@ export function SimulationResult({ tenantId, workflowId, session, doc, ran, stal
               const loop = s.type.startsWith("flow.loop@") && s.instances === 1 && findNode(graph, s.step_id) !== undefined;
               const body = loop && ended ? bodyOf(graph, s.step_id) : [];
               const expanded = open === s.step_id && body.length > 0;
-              const error = s.instances === 1 && field(s.final, "status") === "failed" ? field(s.final, "error") : undefined;
-              const code = field(error, "code");
-              const message = field(error, "message");
-              const attempt = field(s.final, "attempt");
               return (
                 <li key={s.step_id} className="flex flex-wrap items-center gap-1.5 border-t border-line py-1.5 first:border-t-0">
                   <span data-key className="font-mono">{s.key}</span>
@@ -117,12 +105,7 @@ export function SimulationResult({ tenantId, workflowId, session, doc, ran, stal
                     </Button>
                   )}
                   {goTo(s.step_id, s.key)}
-                  {typeof code === "string" && (
-                    <p className="basis-full text-muted">
-                      <span className="font-mono text-ink">{code}</span>
-                      {` ${typeof message === "string" ? message : ""} ${attempts(typeof attempt === "number" ? attempt : 1, attemptsOf(s))} Nothing was sent.`}
-                    </p>
-                  )}
+                  {s.instances === 1 && <Failure final={s.final} max={attemptsOf(s)} />}
                   {expanded && (
                     <div className="basis-full ps-3">
                       <Iterations
@@ -137,27 +120,7 @@ export function SimulationResult({ tenantId, workflowId, session, doc, ran, stal
           </ul>
         </Section>
       )}
-      {request.target_step_id === null && (
-        <Section title="Input used">
-          {state.read_back === "absent" ? (
-            <p className="text-small text-muted">The input used isn&apos;t kept any more.</p>
-          ) : state.read_back === "unreadable" ? (
-            <p className="text-small text-muted">The input used couldn&apos;t be read back.</p>
-          ) : (
-            <>
-              <p className="text-small text-muted">As this simulation&apos;s request stored it, sensitive values redacted.</p>
-              <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-small">
-                {Object.entries(state.input ?? {}).map(([k, v]) => (
-                  <div key={k} className="contents">
-                    <dt className="font-mono text-muted">{k}</dt>
-                    <dd className="break-words">{shown(v)}</dd>
-                  </div>
-                ))}
-              </dl>
-            </>
-          )}
-        </Section>
-      )}
+      <UsedValues state={state} />
     </>
   );
 }

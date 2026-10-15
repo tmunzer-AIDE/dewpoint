@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ResultBar } from "./ResultBar";
 
 const props = (over: Partial<Parameters<typeof ResultBar>[0]> = {}) => ({
-  phase: "succeeded" as const, revision: 14, endedAt: "2026-10-15T10:42:19Z", notWaited: false, hidden: false, stale: null,
+  phase: "succeeded" as const, revision: 14, endedAt: "2026-10-15T10:42:19Z", notWaited: false, hidden: false, stale: null, target: null,
   onHide: vi.fn(), onShow: vi.fn(), onPanel: vi.fn(), onCancel: vi.fn(), ...over,
 });  // prettier-ignore
 
@@ -35,6 +35,12 @@ describe("the canvas's bar for a simulation (§7.3; the ResultCanvas and Running
     const note = screen.getByText("Before your edits:").parentElement!;
     expect(note.textContent).toBe("Before your edits: this result is for revision 14; the draft is at revision 16.");
     expect(note.className).toMatch(/border-warn-line/);
+  });
+
+  it("says a step test ran the step alone (§7.3; the TestResult board)", () => {
+    render(<ResultBar {...props({ target: "notify" })} />);
+    expect(screen.getByText("Step test: notify.").parentElement?.textContent).toBe("Step test: notify. Only this step ran. Nothing was sent.");
+    expect(screen.queryByText("Simulated.")).toBeNull();
   });
 
   it("once hidden, is one bar that brings the result back", async () => {

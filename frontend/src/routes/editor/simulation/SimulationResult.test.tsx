@@ -166,6 +166,14 @@ describe("a result before the person's edits, and what failed (§7.7; the Stale 
     expect(screen.getByText("Production runs are off in this deployment.")).toBeTruthy();
   });
 
+  it("for a step test, says it ran the step alone, and shows the values used, not an input", () => {
+    const s = session({ request: { target_step_id: "id-get_site" }, state: { input: null, seeds: { "/vars/region": "emea" } }, steps: [step("get_site")] });
+    show(s);
+    expect(screen.getByText("Step test: get_site.").parentElement?.textContent).toBe("Step test: get_site. Only this step ran. Nothing was sent.");
+    expect(screen.queryByRole("region", { name: "Input used" })).toBeNull();
+    expect(within(section("Values used")).getByText("emea")).toBeTruthy();
+  });
+
   it("pages a loop's iterations over the draft it ran, whatever the draft is now", async () => {
     show(session(), { doc: { ...DOC, edges: [] }, ran: DOC });
     await userEvent.click(screen.getByRole("button", { name: "Iterations of each_ap" }));

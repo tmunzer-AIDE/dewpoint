@@ -3,6 +3,7 @@
 // boards): its status, how long it ran, which run it is, how far it got, and how it ended, naming the step that
 // decided it, from the server's per-step summary in run order.
 import type { Phase, StepSummary } from "../../../lib/simulations";
+import type { SimulationSession } from "./useSimulation";
 
 export const STATUS: Record<Phase, string> = {
   queued: "Queued",
@@ -56,4 +57,26 @@ export function endedWhat(phase: Phase, steps: StepSummary[]): string {
     return during ? `the run passed its deadline, during ${during.key}` : "the run passed its deadline";
   }
   return STATUS[phase].toLowerCase();
+}
+
+const LOST =
+  "It isn't known whether the simulation started: its answer was lost. Checking sends the same request again: while the " +
+  "first request is still kept, it can't start a second time.";
+
+/** Where a simulation is, in a sentence (§7.2; the Lifecycle and Running boards); null once its status says it all. */
+export function lineOf(session: SimulationSession): string | null {
+  const { local, state, phase } = session;
+  if (local.kind === "submitting") return "Sending the simulation…";
+  if (local.kind === "unknown") return LOST;
+  if (local.kind === "admitted" && state === null) return "Reading the simulation…";
+  if (phase === "queued") return "Waiting for a free run slot.";
+  if (phase === "starting") return "Its run is being started.";
+  if (phase === "running") {
+    const { ended, of } = stepsEnded(session.steps?.steps ?? []);
+    return session.steps ? `${ended} of ${of} steps ended.` : "Running.";
+  }
+  if (phase === "cancel_requested") return "Cancel requested. It's shown as cancelled once the server confirms it.";
+  if (phase === "dead") return "The simulation couldn't be started. Nothing ran.";
+  if (phase === "refused") return state?.request.reason ?? "The simulation was refused.";
+  return null;
 }
