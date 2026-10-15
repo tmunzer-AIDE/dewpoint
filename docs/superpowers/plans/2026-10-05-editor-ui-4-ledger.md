@@ -2966,3 +2966,14 @@ Checks, on 886adc80 with the fixes (not yet committed):
 
 The deploy order, as the plan says: migration 0072 first, then this build's API, dispatcher and worker. Push and a
 pull request wait for the owner's word.
+
+### 4d-1b, main merged and the non-finite guard (2026-10-15)
+
+The owner's go ("go") to commit the fixes and the final checkpoint (40ec281f, 87f96d33), merge origin/main and add #106's
+guard. Main gained #106 (f443c002: an input holding NaN or an infinity is refused 422 `input_invalid`, not a 500),
+merged in d7a26cba without a conflict. 8bfecbf2: `admit_draft` checks `holds_non_finite` on the input
+and the seeds' values beside its depth check, before the key is read. Its test, red first (each number reached the
+digest: "Out of range float values are not JSON compliant"), then 4 passed (NaN, Infinity, -Infinity, 1e400, in the
+input under a used and a new key and in a seed). Then the API suite, admission's, the inputs', the digest's, publish's
+and the tick codec's tests: 699 passed; ruff, mypy and the import contracts clean; the API's schema unchanged
+(`check:api` passes). The whole backend suite wasn't run again.
