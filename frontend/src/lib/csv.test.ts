@@ -81,6 +81,8 @@ describe("columns", () => {
     expect(bytesOf("6")).toBeNull();
     expect(bytesOf("0")).toBeNull();
     expect(bytesOf("x")).toBeNull();
+    expect(bytesOf(" .5 ")).toBe(524_288);
+    for (const t of ["0x2", "0b1", "0o3", "1_0", "Infinity"]) expect([t, bytesOf(t)]).toEqual([t, null]); // decimal only (#73)
     expect(mbOf(5 * 1024 * 1024)).toBe("5");
     expect(mbOf(524_288)).toBe("0.5");
   });

@@ -62,6 +62,10 @@ export function referenceText(value: unknown): string {
 /** A reference with no default: the same path reads the same value as a formula. */
 export const isPlainRef = (value: unknown): boolean => kindOf(value) === "ref" && !("default" in bodyOf(value));
 
+/** A number as a person types it: decimal only, with an optional sign, fraction and exponent (`12`, `-3`, `.5`, `1e3`).
+ * Number() also reads `0x10`, `0b11` and `0o7`, which no field means (#73). */
+export const DECIMAL = /^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$/; // one way to split the digits: linear (the review)
+
 /** The first number in a value JSON.parse may have changed: one that isn't finite (`1e400`), or a whole number past
  * 2^53, whatever its notation (`9007199254740993`, `…993.0`, `…993e0` all round). Null when there's none. */
 function changedNumber(value: unknown): "infinite" | "rounded" | null {
