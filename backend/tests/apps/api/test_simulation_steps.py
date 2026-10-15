@@ -160,3 +160,23 @@ async def test_another_workflows_simulation_or_a_step_outside_the_draft_is_not_f
     viewer = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "viewer")
     for path in (steps(ctx, other, run_id), steps(ctx, wf, run_id, "nowhere"), steps(ctx, other, run_id, "x")):
         assert (await viewer.get(path)).status_code == 404, path
+
+
+async def test_every_role_reads_a_simulation_and_another_tenants_member_never_does(
+    keyed_app, looped, owner_sessionmaker, api_settings
+) -> None:
+    """D-b3: a draft run is run data, `run.view` (every role); its snapshot, `workflow.view`."""
+    from tests.apps.api.helpers import session_client
+
+    ctx, wf, run_id = looped
+    await ran_loop(owner_sessionmaker, ctx, run_id)
+    async with owner_sessionmaker() as s:
+        snapshot = (await s.execute(text("select draft_snapshot_id from runs where id = :i"), {"i": run_id})).scalar()
+    base = f"/api/v1/t/{ctx.tenant_id}/workflows/{wf}/draft"
+    reads = [f"{base}/simulations", f"{base}/simulations/{run_id}", steps(ctx, wf, run_id),
+             steps(ctx, wf, run_id, "x"), f"{base}/snapshots/{snapshot}"]  # fmt: skip
+    for role in ("viewer", "operator", "editor", "admin"):
+        client = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, role)
+        assert [(await client.get(path)).status_code for path in reads] == [200] * 5, role
+    outsider, _ = await session_client(keyed_app, owner_sessionmaker, api_settings, "owner")  # another tenant's owner
+    assert [(await outsider.get(path)).status_code for path in reads] == [404] * 5
