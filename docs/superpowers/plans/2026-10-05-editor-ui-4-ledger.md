@@ -3114,3 +3114,51 @@ the previous result hidden after a refusal until a reload; an ended simulation r
 regions for the bar and the panel's line; "Edit as JSON" toggled off drops JSON edits; refusal words for `key_unusable`
 and `forbidden`; `onSave`'s promise left pending after "Go back to them"; the Test tab's result blinking out between
 admission and the first read.
+
+### 4e-1: the design accepted; the 4e-1a plan accepted (2026-10-16)
+
+The owner started 4e ("Start the 4e plan") after 4d-1c merged (#111, c5b63da5) and its minors were filed (#112).
+Their answers, in chat:
+- shape: "Read first, then start". 4e-1 is the Runs page, a run's page and cancel; 4e-2 is the run form with CSV
+  mapping and the re-run dialog;
+- the list shows a failed run's error; draft simulations appear only through the Mode filter; runs are named by
+  their first 8 characters; "Ran out of time" everywhere;
+- a run's page is laid out like the editor; Cancel asks first for live runs only; times are in the person's own zone.
+
+D8 was signed off ("D8 signed off; write the 4e-1 spec") at the Design canvas "4e-1 Runs Mockups", version 9.
+`docs/superpowers/specs/2026-10-15-editor-4e1-runs-design.md` (5fc7b5a1) was accepted ("Yes to all four; commit the
+spec"):
+- migration slot 0073 for `rerun_of` and `trigger_id`;
+- the starter's email shown to every run viewer;
+- the run detail loses `steps` and `children`;
+- "sent" on reads too.
+
+`docs/superpowers/plans/2026-10-15-editor-ui-4e1a-runs-backend.md`, revision 1, was accepted. Its rulings 1–20 join
+this ledger as 210–229. Mid-slice rulings start at M103. Backend and generated client only: no screen change, no ABI
+change.
+
+210. **Accepted. No index in 0073** (plan ruling 1): the filters shrink the list's sort; they add no scan.
+211. **Accepted. `trigger_id` is an explicit admission argument** (plan ruling 2).
+212. **Accepted. `started_by` names a person for `manual`, `rerun` and pre-2b-2 runs only** (plan ruling 3).
+213. **Accepted. A refused or dead request shows its reason code, not messages** (plan ruling 4; amends the design
+     §5.4).
+214. **Accepted. The status filter takes one value; `waiting` and `didnt_start` group two** (plan ruling 5).
+215. **Accepted. `draft=exclude` is the list's default** (plan ruling 6).
+216. **Accepted. A run's step reads have models of their own; the draft routes keep theirs** (plan ruling 7).
+217. **Accepted. A live origin: `may_have_been_sent` first, `sent` for plugin steps, else none** (plan ruling 8).
+218. **Accepted. `OUTCOMES_ABI = 9` is a constant; tests patch it** (plan ruling 9).
+219. **Accepted. The step reads come before the bounded detail** (plan ruling 10).
+220. **Accepted. `service.children` and `service.run_steps` stay** (plan ruling 11).
+221. **Accepted. The attempts read is bounded at 20** (plan ruling 12).
+222. **Accepted. A request that hasn't started has steps that haven't run** (plan ruling 13).
+223. **Accepted. `read_back` moves to `runs.py`; `absent` means no envelope kept** (plan ruling 14; amends the design
+     §4.3's wording).
+224. **Accepted. Cancel is typed; start and re-run wait for 4e-2** (plan ruling 15).
+225. **Accepted. The detail keeps `parent_run_id` beside `parent`** (plan ruling 16).
+226. **Accepted. 0073's downgrade drops the columns** (plan ruling 17).
+227. **Accepted. `LastRun.id` defaults to None** (plan ruling 18).
+228. **Accepted. The client is regenerated as CI checks it** (plan ruling 19).
+229. **Accepted. The summary's cost is pinned by statements** (plan ruling 20).
+
+M103. **The heading dates the owner's acceptance, 2026-10-16** ("Accept all rulings; inline; commit the plan"),
+      not the plan's 2026-10-15.
