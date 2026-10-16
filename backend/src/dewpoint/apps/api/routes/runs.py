@@ -12,7 +12,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps import step_summary
-from dewpoint.apps.api.responses import RunAttemptsOut, RunInstancesOut, RunItemOut, RunOut, RunStepsOut
+from dewpoint.apps.api.responses import (
+    RunAttemptsOut,
+    RunInputOut,
+    RunInstancesOut,
+    RunItemOut,
+    RunOut,
+    RunStepsOut,
+)
 from dewpoint.apps.api.routes.run_requests import get_keys, key_unusable
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.claims import service as claims
@@ -23,6 +30,8 @@ from dewpoint.core.models.requests import RunRequest
 from dewpoint.core.models.runs import Run, RunStep
 from dewpoint.core.retention import cutoff as retention
 from dewpoint.core.runs import service
+from dewpoint.engine.handles import ClaimRef
+from dewpoint.engine.runtime.projection import REDACTED
 
 router = APIRouter(prefix="/api/v1", tags=["runs"])
 # The list's status filter (the runs design §4.2): `waiting` is queued or starting; `didnt_start`, refused or dead
@@ -311,3 +320,61 @@ async def step_attempts(
     rows = await step_summary.attempts(db, run.id, step_id, iteration)
     started = await step_summary.children(db, run.id, [(step_id, iteration)])
     return {"items": [_step(r, started.get((r.step_id, r.iteration_key))) for r in rows]}
+
+
+async def read_back(db: AsyncSession, keys: KeySource, ctx: TenantContext, r: RunRequest) -> tuple[str, Any]:
+    """The request's own envelope (B8; the runs design §4.3), each claim in it `[redacted]` (a sensitive value, or one
+    claimed by its size): the input or seeds it was admitted with, never recomputed. `kept` with it; `absent` when the
+    request has none; `unreadable` when it's there but doesn't open under its tenant or isn't JSON: never read as
+    absent."""
+    try:
+        envelope = await claims.read_envelope(db, ClaimCipher(keys), ctx.tenant_id, request_id=r.id)
+    except claims.EnvelopeUnreadableError:
+        return "unreadable", None
+    except claims.EnvelopeUnavailableError:
+        return "absent", None
+    except Exception as e:
+        raise key_unusable(e) from None
+    return "kept", _redacted(envelope)
+
+
+def _redacted(value: Any) -> Any:
+    if ClaimRef.of(value) is not None:
+        return REDACTED
+    if isinstance(value, dict):
+        return {k: _redacted(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redacted(v) for v in value]
+    return value
+
+
+CSV_ROWS = ("rows", "row_count")  # what a CSV start's envelope adds to its input (admission)
+
+
+@router.get("/t/{tenant_id}/runs/{run_id}/input", response_model=RunInputOut)
+async def run_input(
+    run_id: uuid.UUID,
+    ctx: TenantContext = Depends(require(P.RUN_VIEW)),
+    db: AsyncSession = Depends(get_db, scope="function"),
+    keys: KeySource = Depends(get_keys),
+) -> dict[str, object]:
+    """What a run was admitted with, read back from its request's own envelope, redacted, never recomputed (the runs
+    design §4.3): a step test's seeds, or the workflow's input, a CSV start's rows left to its CSV record. A tenant's
+    key gone (an erasure) reads as `unreadable`, never an error."""
+    await _ran(db, ctx, run_id)
+    request = await db.get(RunRequest, run_id)
+    if request is None:  # a run from before 2b-2 had no request
+        return {"read_back": "absent", "input": None, "seeds": None}
+    try:
+        kept, used = await read_back(db, keys, ctx, request)
+    except HTTPException as e:
+        if e.status_code != 503:
+            raise
+        return {"read_back": "unreadable", "input": None, "seeds": None}
+    if kept != "kept" or not isinstance(used, dict):
+        return {"read_back": kept, "input": None, "seeds": None}
+    if request.target_step_id is not None:
+        return {"read_back": kept, "input": None, "seeds": used}
+    if await claims.read_csv_record(db, ClaimCipher(keys), ctx.tenant_id, request_id=request.id) is not None:
+        used = {k: v for k, v in used.items() if k not in CSV_ROWS}
+    return {"read_back": kept, "input": used, "seeds": None}
