@@ -66,6 +66,22 @@ async def test_a_csv_starts_input_leaves_its_rows_to_its_csv_record(
     assert found == {"read_back": "kept", "input": {"token": "[redacted]", "site": "a"}, "seeds": None}
 
 
+async def test_a_rerun_of_a_csv_start_leaves_its_rows_out_too(
+    keyed_app, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    """The final review's I1: a re-run with no new input is admitted on its original's input rebuilt, a CSV start's
+    rows with it, and writes no CSV record of its own; its rows are still never read back here."""
+    ctx, wf = await published(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, GRAPH)
+    await current(dispatch_sessionmaker)
+    upload = await staged(api_sessionmaker, ctx, wf)
+    first = (await admit(api_sessionmaker, ctx, wf, csv=start(upload))).request
+    operator = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "operator")
+    again = await operator.post(f"/api/v1/t/{ctx.tenant_id}/runs/{first.id}/rerun", headers={"Idempotency-Key": "r1"})
+    assert again.status_code == 202, again.text
+    found = await read(keyed_app, owner_sessionmaker, api_settings, ctx, uuid.UUID(again.json()["id"]))
+    assert found == {"read_back": "kept", "input": {"token": "[redacted]", "site": "a"}, "seeds": None}
+
+
 async def test_a_refusal_that_froze_nothing_kept_no_input(keyed_app, ready, owner_sessionmaker, api_sessionmaker,
                                                           api_settings) -> None:  # fmt: skip
     ctx, wf = ready

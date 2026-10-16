@@ -3208,3 +3208,21 @@ The owner, in chat: "Milestone 2 accepted, continue".
   - the whole backend suite: not run locally, on the owner's word ("Leave it to CI"); CI runs it on the PR.
 
 Mid-slice rulings over the slice: M103 only. The final review follows. Nothing pushed.
+
+### 4e-1a, the final review (2026-10-16)
+
+A fresh reviewer (Fable) on dd1cb01b..2205f086: no critical finding, 1 important, 3 minor; "With fixes". Every Review
+Focus case pinned by a test it saw pass (74 targeted tests, read-only). Fixed test-first, red then green:
+- I1, a re-run of a CSV start read its rows back on `/input`: a re-run with no new input is admitted on its original's
+  input rebuilt, rows included, and writes no CSV record, while the strip keyed on that record. It now keys on the
+  envelope's own `rows` and `row_count`, which only a CSV upload supplies, and the extra decryption is gone.
+  `test_a_rerun_of_a_csv_start_leaves_its_rows_out_too`. What a CSV re-run's page shows of its rows is 4e-2's (the
+  re-run dialog).
+
+After the fix: the read-back's tests 7 passed; the API, admission, summary, core runs, worker, trigger and matching
+tests with 0073's, 743 passed; ruff, `ruff format --check` and mypy silent; the client regenerated (the route's
+description), `check:api` and the type check passing; local CodeQL, no finding.
+
+Deferred minors (a follow-up issue, as for earlier slices): `get_run` reads a whole graph for its engine ABI while the
+page polls it; a request that never started on a pre-ABI-9 version says "not recorded" where ruling 222 says "didn't
+run"; `run_input` learns "unreadable" by catching the read-back's 503.

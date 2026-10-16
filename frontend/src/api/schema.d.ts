@@ -984,8 +984,8 @@ export interface paths {
         /**
          * Run Input
          * @description What a run was admitted with, read back from its request's own envelope, redacted, never recomputed (the runs
-         *     design §4.3): a step test's seeds, or the workflow's input, a CSV start's rows left to its CSV record. A tenant's
-         *     key gone (an erasure) reads as `unreadable`, never an error.
+         *     design §4.3): a step test's seeds, or the workflow's input, a CSV start's rows (or a re-run's of one) left out. A
+         *     tenant's key gone (an erasure) reads as `unreadable`, never an error.
          */
         get: operations["run_input_api_v1_t__tenant_id__runs__run_id__input_get"];
         put?: never;

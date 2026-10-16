@@ -348,7 +348,9 @@ def _redacted(value: Any) -> Any:
     return value
 
 
-CSV_ROWS = ("rows", "row_count")  # what a CSV start's envelope adds to its input (admission)
+# What a CSV start's envelope adds to its input, and a re-run's rebuilt from one: only a CSV upload supplies them
+# (admission's RESERVED)
+CSV_ROWS = ("rows", "row_count")
 
 
 @router.get("/t/{tenant_id}/runs/{run_id}/input", response_model=RunInputOut)
@@ -359,8 +361,8 @@ async def run_input(
     keys: KeySource = Depends(get_keys),
 ) -> dict[str, object]:
     """What a run was admitted with, read back from its request's own envelope, redacted, never recomputed (the runs
-    design §4.3): a step test's seeds, or the workflow's input, a CSV start's rows left to its CSV record. A tenant's
-    key gone (an erasure) reads as `unreadable`, never an error."""
+    design §4.3): a step test's seeds, or the workflow's input, a CSV start's rows (or a re-run's of one) left out. A
+    tenant's key gone (an erasure) reads as `unreadable`, never an error."""
     await _ran(db, ctx, run_id)
     request = await db.get(RunRequest, run_id)
     if request is None:  # a run from before 2b-2 had no request
@@ -375,6 +377,4 @@ async def run_input(
         return {"read_back": kept, "input": None, "seeds": None}
     if request.target_step_id is not None:
         return {"read_back": kept, "input": None, "seeds": used}
-    if await claims.read_csv_record(db, ClaimCipher(keys), ctx.tenant_id, request_id=request.id) is not None:
-        used = {k: v for k, v in used.items() if k not in CSV_ROWS}
-    return {"read_back": kept, "input": used, "seeds": None}
+    return {"read_back": kept, "input": {k: v for k, v in used.items() if k not in CSV_ROWS}, "seeds": None}
