@@ -165,6 +165,7 @@ class DiagnosticOut(_Answer):
 
 
 class LastRunOut(_Answer):
+    id: str  # its page's (editor 4e-1; the runs design §4.5)
     status: Literal["running", "succeeded", "failed", "cancelled", "deadline_exceeded"]
     at: str  # when it ended, else started, else was queued
 
@@ -740,3 +741,206 @@ class SeedContractOut(_Answer):
     step_id: str
     refused: str | None
     entries: list[SeedEntryOut]
+
+
+RunStatus = Literal[
+    "queued", "starting", "running", "succeeded", "failed", "cancelled", "deadline_exceeded", "refused", "dead"
+]
+Source = Literal["manual", "rerun", "schedule", "webhook", "dev"]
+
+
+class RunErrorOut(_Answer):
+    code: str
+    message: str | None
+
+
+class RunRequestStateOut(_Answer):
+    """A run's request where it is (engine 2b spec §7.3): started, or why it isn't."""
+
+    status: Literal["queued", "starting", "started", "cancelled", "refused", "dead"]
+    source: Source
+    reason: str | None
+
+
+class ScheduleTimingOut(_Answer):
+    """A schedule's timing as it is now, which the UI words as the Triggers panel does (4c-3b)."""
+
+    cron: str | None
+    every_s: int | None
+    offset_s: int
+    time_zone: str
+
+
+class RunTriggerOut(_Answer):
+    """Where a run's request came from (editor 4e-1; the runs design §4.2): its source, and the schedule or webhook
+    endpoint, or the run a re-run repeats. Null where the request predates migration 0073, or the schedule or endpoint
+    was deleted."""
+
+    source: Source
+    schedule: ScheduleTimingOut | None
+    endpoint: str | None  # the webhook endpoint's name
+    rerun_of: str | None
+
+
+class RunItemOut(_Answer):
+    """An item of the runs list (engine 2b spec §7.7; editor 4e-1, B10): a top-level run, or a request that hasn't
+    started, as its request. `status` is the run's once its request started, else the request's."""
+
+    id: str
+    workflow_id: str
+    workflow_name: str | None
+    version_id: str | None
+    draft_snapshot_id: str | None  # a draft simulation's (B8): no version
+    target_step_id: str | None
+    mode: Literal["live", "simulate"]
+    status: RunStatus
+    queued_at: str | None
+    started_at: str | None
+    ended_at: str | None
+    error: RunErrorOut | None
+    iterations: int
+    kind: str
+    parent_run_id: str | None
+    request: RunRequestStateOut | None  # null for a run from before 2b-2, which had no request
+    started_by: str | None  # the email of the person who asked: by hand, or a re-run
+    cancel_requested_at: str | None
+    trigger: RunTriggerOut | None
+
+
+class RunStepOut(_Answer):
+    """One attempt of a step instance (engine spec §8; B4b): where it ran (its iteration), how it ended, its previews
+    (redacted and cut as the projection stores them: `[redacted]`, `[truncated]`), its error, its side effect's outcome,
+    a control step's port or assignments, and the sub-run it started, when it did."""
+
+    step_id: str
+    key: str
+    iteration_key: str
+    attempt: int
+    status: Literal["running", "succeeded", "failed", "cancelled", "skipped", "not_started"]
+    started_at: str | None
+    ended_at: str | None
+    input: Any
+    output: Any
+    error: RunErrorOut | None
+    outcome: Literal["applied", "simulated", "outcome_unknown"] | None
+    cel_mode: str | None
+    effect: Any
+    child_run_id: str | None = None
+
+
+class RunStepSummaryOut(_Answer):
+    """A step of the graph a run ran (the runs design §4.4): its instances' final attempts counted by status and by the
+    port they took, a single instance's final attempt, and where its data came from: in a live run, `sent` or
+    `may_have_been_sent` for a plugin step's request, null when there's nothing to say."""
+
+    step_id: str
+    key: str
+    type: str
+    origin: Literal[
+        "sent", "may_have_been_sent", "evaluated", "evaluated_not_waited", "fixture_not_sent", "skipped",
+        "not_started", "cancelled", "didnt_run", "not_recorded", "not_reached_yet",
+    ] | None  # fmt: skip
+    instances: int
+    statuses: dict[str, int]
+    ports: dict[str, int]
+    final: RunStepOut | None
+
+
+class RunStepsOut(_Answer):
+    """A run's steps in run order (§4.4), and what the values a person gave were: the workflow's input, or a step
+    test's seeds. A step test lists its target alone."""
+
+    given: Literal["input", "seeded"]
+    steps: list[RunStepSummaryOut]
+
+
+class RunInstancesOut(_Answer):
+    """A step's instances in a run, one per iteration, each its final attempt, in iteration order: a page, and their
+    total."""
+
+    total: int
+    items: list[RunStepOut]
+
+
+class RunAttemptsOut(_Answer):
+    """One step instance's attempts, first to last."""
+
+    items: list[RunStepOut]
+
+
+class CsvSkippedOut(_Answer):
+    row: int  # the record's number: 1 is the first after the header
+    code: str  # the first rule it broke
+
+
+class CsvErrorOut(_Answer):
+    row: int
+    column: str | None  # the declared column's name; null for the record as a whole
+    code: str
+
+
+class CsvRecordOut(_Answer):
+    """A CSV start's file as admission read it (engine 2b spec §8.1): the mapping from declared columns to its headers,
+    the rows run, every skipped row, and the first errors in detail with their count."""
+
+    mapping: dict[str, str]
+    headers: list[str]
+    row_count: int
+    skipped: list[CsvSkippedOut]
+    errors: list[CsvErrorOut]
+    error_count: int
+
+
+class RunParentOut(_Answer):
+    """The run a sub-run's step started it from (its sub-flow or failure handler)."""
+
+    run_id: str
+    step_id: str | None
+    iteration_key: str | None
+
+
+class RunOut(RunItemOut):
+    """A run, or a request that hasn't started, as itself (editor 4e-1; the runs design §4.3, §4.5): the list item's
+    facts, the draft revision a draft simulation ran, whether every step instance's end is recorded (its graph's engine
+    ABI is B4b's or later), the run that started a sub-run, and a CSV start's file. Its steps are read apart, summarized
+    and paged (§4.4)."""
+
+    draft_revision: int | None
+    outcomes_recorded: bool
+    parent: RunParentOut | None
+    csv: CsvRecordOut | None
+
+
+class RequestOut(_Answer):
+    """A run's request as the API shows it (engine 2b spec §7.2): its state and its frozen version, never its input."""
+
+    id: str
+    workflow_id: str
+    version_id: str | None
+    draft_snapshot_id: str | None
+    target_step_id: str | None
+    mode: Literal["live", "simulate"]
+    source: Source
+    status: Literal["queued", "starting", "started", "cancelled", "refused", "dead"]
+    reason: str | None
+    queued_at: str | None
+    ended_at: str | None
+
+
+class CancelOut(_Answer):
+    """A cancel (engine 2b spec §7.4): `cancelled` (200), the request hadn't started; `requested` (202), recorded for
+    the dispatcher to apply."""
+
+    cancel: Literal["cancelled", "requested"]
+    request: RequestOut
+
+
+class RunInputOut(_Answer):
+    """What a run was admitted with, read back from its request's own envelope, redacted (the runs design §4.3): its
+    `input`, or a step test's `seeds`. `absent`: the request kept none (a refusal admission never froze, or a run from
+    before 2b-2); `unreadable`: there, but it doesn't open (a broken ciphertext, or the tenant's key gone during an
+    erasure). A CSV start's rows are its CSV record's, never repeated here."""
+
+    read_back: Literal["kept", "absent", "unreadable"]
+    input: dict[str, Any] | None
+    seeds: dict[str, Any] | None

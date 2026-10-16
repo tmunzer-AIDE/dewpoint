@@ -92,8 +92,24 @@ async def test_a_run_a_sub_run_or_a_request_past_its_cutoff_isnt_found(aged, key
     viewer = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "viewer")
     answer = await viewer.get(url(ctx, f"/runs/{aged[name]}"))
     assert answer.status_code == (200 if found else 404), answer.text
-    if name == "recent_run":  # its sub-runs come with it
-        assert [c["id"] for c in answer.json()["children"]] == [str(aged["recent_sub"])]
+    if name == "recent_sub":  # it names the run it was started from
+        assert answer.json()["parent"]["run_id"] == str(aged["recent_run"])
+
+
+@pytest.mark.parametrize(("name", "found"), [("old_run", False), ("recent_run", True)])
+async def test_a_runs_step_reads_and_its_input_keep_its_cutoff(aged, keyed_app, owner_sessionmaker, api_settings,
+                                                                name: str, found: bool) -> None:  # fmt: skip
+    """The runs design §4.6: past the cutoff, a run's step reads and its input read back aren't found either."""
+    ctx = aged["ctx"]
+    async with owner_sessionmaker() as s:
+        step = (await s.execute(text("select v.graph->'nodes'->0->>'id' from workflow_versions v "
+                                     "join workflows w on w.active_version_id = v.id where w.id = :w"),
+                                {"w": aged["wf"]})).scalar()  # fmt: skip
+    viewer = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "viewer")
+    run = aged[name]
+    for path in (f"/runs/{run}/steps", f"/runs/{run}/steps/{step}/instances", f"/runs/{run}/steps/{step}/attempts",
+                 f"/runs/{run}/input"):  # fmt: skip
+        assert (await viewer.get(url(ctx, path))).status_code == (200 if found else 404), path
 
 
 async def test_a_tenants_retention_applies_to_reads_at_once(aged, keyed_app, owner_sessionmaker,

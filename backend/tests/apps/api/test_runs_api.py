@@ -98,7 +98,7 @@ async def test_a_request_that_never_started_is_shown_as_its_request_never_as_its
     viewer, items = await listed(app, owner_sessionmaker, api_settings, ctx)  # its pre-created row is `running`
     assert [(i["id"], i["status"], i["started_at"]) for i in items] == [(str(request.id), "queued", None)]
     detail = (await viewer.get(f"/api/v1/t/{ctx.tenant_id}/runs/{request.id}")).json()
-    assert (detail["status"], detail["steps"], detail["children"]) == ("queued", [], [])
+    assert (detail["status"], detail["started_at"], "steps" in detail) == ("queued", None, False)
     async with owner_sessionmaker() as s, s.begin():  # its backoff over
         await s.execute(text("update run_requests set next_attempt_at = now() where id = :i"), {"i": request.id})
     starting = await begin(dispatch_sessionmaker, request, api_settings)

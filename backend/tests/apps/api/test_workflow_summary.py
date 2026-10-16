@@ -91,7 +91,7 @@ async def test_the_list_says_how_each_workflows_runs_went(app, owner_sessionmake
         wid, vid = await published(c, tid)
         root = await add_run(owner_sessionmaker, tid, wid, vid, status="succeeded", hours_ago=30)  # out of the 24 h
         await add_run(owner_sessionmaker, tid, wid, vid, status="succeeded", hours_ago=2)
-        await add_run(owner_sessionmaker, tid, wid, vid, status="failed", hours_ago=0.5)  # the last live root run
+        failed = await add_run(owner_sessionmaker, tid, wid, vid, status="failed", hours_ago=0.5)  # the last live
         await add_run(owner_sessionmaker, tid, wid, vid, status="succeeded", mode="simulate", hours_ago=0.2)
         await add_run(owner_sessionmaker, tid, wid, vid, status="running", hours_ago=0.1, parent=root)  # a sub-run
         quiet, _ = await published(c, tid)
@@ -99,6 +99,7 @@ async def test_the_list_says_how_each_workflows_runs_went(app, owner_sessionmake
     busy = rows[wid]
     assert busy["draft_graph_hash"] == graph_hash(parse_graph(GRAPH))
     assert busy["last_run"]["status"] == "failed" and busy["last_simulation"]["status"] == "succeeded"
+    assert busy["last_run"]["id"] == str(failed)  # its page's link (editor 4e-1; the runs design §4.5)
     assert busy["runs_24h"] == {"live": 2, "simulate": 1}
     assert busy["needs_attention"] == ["last_run_failed"]  # the later successful simulation doesn't clear it
     assert busy["unpublished_changes"] is False

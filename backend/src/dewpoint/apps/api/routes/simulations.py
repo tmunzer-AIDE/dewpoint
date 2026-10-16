@@ -32,12 +32,10 @@ from dewpoint.apps.api.routes.run_requests import (
     not_past_cutoff,
     request_body,
 )
-from dewpoint.apps.api.routes.runs import _step
+from dewpoint.apps.api.routes.runs import _step, read_back
 from dewpoint.apps.api.routes.workflows import _get, _revision
 from dewpoint.apps.forms import csv_form, form_fields
 from dewpoint.core.authz.permissions import P
-from dewpoint.core.claims import service as claims
-from dewpoint.core.claims.cipher import ClaimCipher
 from dewpoint.core.config import Settings
 from dewpoint.core.crypto.keys import KeySource
 from dewpoint.core.http import TenantContext, get_db, get_settings_dep, require
@@ -48,8 +46,6 @@ from dewpoint.core.retention import cutoff as retention
 from dewpoint.core.workflows.service import DraftConflictError
 from dewpoint.engine.graph import seeds
 from dewpoint.engine.graph.model import GraphFormatError, parse_graph
-from dewpoint.engine.handles import ClaimRef
-from dewpoint.engine.runtime.projection import REDACTED
 
 router = APIRouter(prefix="/api/v1", tags=["simulations"])
 
@@ -231,31 +227,6 @@ async def simulation_of(
     if r is None or not await retention.request_kept(db, await retention.cutoff(db, ctx.tenant_id), r):
         raise HTTPException(404, detail={"error": "not_found"})
     return r
-
-
-async def read_back(db: AsyncSession, keys: KeySource, ctx: TenantContext, r: RunRequest) -> tuple[str, Any]:
-    """The request's own envelope, each claim in it `[redacted]` (a sensitive value, or one claimed by its size): the
-    input or seeds it was admitted with, never recomputed. `kept` with it; `absent` when the request has none;
-    `unreadable` when it's there but doesn't open under its tenant or isn't JSON: never read as absent."""
-    try:
-        envelope = await claims.read_envelope(db, ClaimCipher(keys), ctx.tenant_id, request_id=r.id)
-    except claims.EnvelopeUnreadableError:
-        return "unreadable", None
-    except claims.EnvelopeUnavailableError:
-        return "absent", None
-    except Exception as e:
-        raise key_unusable(e) from None
-    return "kept", _redacted(envelope)
-
-
-def _redacted(value: Any) -> Any:
-    if ClaimRef.of(value) is not None:
-        return REDACTED
-    if isinstance(value, dict):
-        return {k: _redacted(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_redacted(v) for v in value]
-    return value
 
 
 @router.get("/t/{tenant_id}/workflows/{workflow_id}/draft/simulations/{request_id}/steps",

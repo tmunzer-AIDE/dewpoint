@@ -89,6 +89,10 @@ class RunRequest(Base):
     target_step_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     draft_revision: Mapped[int | None] = mapped_column(Integer)
     admission_checks: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB)
+    # Where it came from, in plain ids (editor 4e-1; the runs design §4.3): the run a re-run repeats, and the schedule
+    # or webhook endpoint it came from. Null on every request before migration 0073.
+    rerun_of: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    trigger_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
 
 
 class TenantRunLimits(Base):

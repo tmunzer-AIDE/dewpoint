@@ -371,6 +371,29 @@
         "title": "BoundaryIn",
         "type": "object"
       },
+      "CancelOut": {
+        "additionalProperties": false,
+        "description": "A cancel (engine 2b spec \u00a77.4): `cancelled` (200), the request hadn't started; `requested` (202), recorded for\nthe dispatcher to apply.",
+        "properties": {
+          "cancel": {
+            "enum": [
+              "cancelled",
+              "requested"
+            ],
+            "title": "Cancel",
+            "type": "string"
+          },
+          "request": {
+            "$ref": "#/components/schemas/RequestOut"
+          }
+        },
+        "required": [
+          "cancel",
+          "request"
+        ],
+        "title": "CancelOut",
+        "type": "object"
+      },
       "CapacityIn": {
         "description": "The values to change, each `null` to unset it, or `unset` for all three; and how the starts were measured.",
         "properties": {
@@ -944,6 +967,37 @@
         "title": "CsvColumnFormOut",
         "type": "object"
       },
+      "CsvErrorOut": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "column": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Column"
+          },
+          "row": {
+            "title": "Row",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "row",
+          "column",
+          "code"
+        ],
+        "title": "CsvErrorOut",
+        "type": "object"
+      },
       "CsvFormOut": {
         "additionalProperties": false,
         "properties": {
@@ -1005,6 +1059,58 @@
         "title": "CsvIn",
         "type": "object"
       },
+      "CsvRecordOut": {
+        "additionalProperties": false,
+        "description": "A CSV start's file as admission read it (engine 2b spec \u00a78.1): the mapping from declared columns to its headers,\nthe rows run, every skipped row, and the first errors in detail with their count.",
+        "properties": {
+          "error_count": {
+            "title": "Error Count",
+            "type": "integer"
+          },
+          "errors": {
+            "items": {
+              "$ref": "#/components/schemas/CsvErrorOut"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "headers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Headers",
+            "type": "array"
+          },
+          "mapping": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Mapping",
+            "type": "object"
+          },
+          "row_count": {
+            "title": "Row Count",
+            "type": "integer"
+          },
+          "skipped": {
+            "items": {
+              "$ref": "#/components/schemas/CsvSkippedOut"
+            },
+            "title": "Skipped",
+            "type": "array"
+          }
+        },
+        "required": [
+          "mapping",
+          "headers",
+          "row_count",
+          "skipped",
+          "errors",
+          "error_count"
+        ],
+        "title": "CsvRecordOut",
+        "type": "object"
+      },
       "CsvSettings": {
         "additionalProperties": false,
         "properties": {
@@ -1036,6 +1142,25 @@
           "columns"
         ],
         "title": "CsvSettings",
+        "type": "object"
+      },
+      "CsvSkippedOut": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "row": {
+            "title": "Row",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "row",
+          "code"
+        ],
+        "title": "CsvSkippedOut",
         "type": "object"
       },
       "DeclassifiedOut": {
@@ -2298,6 +2423,10 @@
             "title": "At",
             "type": "string"
           },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
           "status": {
             "enum": [
               "running",
@@ -2311,6 +2440,7 @@
           }
         },
         "required": [
+          "id",
           "status",
           "at"
         ],
@@ -2970,6 +3100,132 @@
         "title": "ReleaseManyIn",
         "type": "object"
       },
+      "RequestOut": {
+        "additionalProperties": false,
+        "description": "A run's request as the API shows it (engine 2b spec \u00a77.2): its state and its frozen version, never its input.",
+        "properties": {
+          "draft_snapshot_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Draft Snapshot Id"
+          },
+          "ended_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "live",
+              "simulate"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "queued_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queued At"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "source": {
+            "enum": [
+              "manual",
+              "rerun",
+              "schedule",
+              "webhook",
+              "dev"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "starting",
+              "started",
+              "cancelled",
+              "refused",
+              "dead"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "target_step_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Step Id"
+          },
+          "version_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version Id"
+          },
+          "workflow_id": {
+            "title": "Workflow Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "workflow_id",
+          "version_id",
+          "draft_snapshot_id",
+          "target_step_id",
+          "mode",
+          "source",
+          "status",
+          "reason",
+          "queued_at",
+          "ended_at"
+        ],
+        "title": "RequestOut",
+        "type": "object"
+      },
       "RerunIn": {
         "additionalProperties": false,
         "properties": {
@@ -3087,6 +3343,24 @@
         "title": "RoleChange",
         "type": "object"
       },
+      "RunAttemptsOut": {
+        "additionalProperties": false,
+        "description": "One step instance's attempts, first to last.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/RunStepOut"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "RunAttemptsOut",
+        "type": "object"
+      },
       "RunCountOut": {
         "additionalProperties": false,
         "properties": {
@@ -3104,6 +3378,938 @@
           "simulate"
         ],
         "title": "RunCountOut",
+        "type": "object"
+      },
+      "RunErrorOut": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "RunErrorOut",
+        "type": "object"
+      },
+      "RunInputOut": {
+        "additionalProperties": false,
+        "description": "What a run was admitted with, read back from its request's own envelope, redacted (the runs design \u00a74.3): its\n`input`, or a step test's `seeds`. `absent`: the request kept none (a refusal admission never froze, or a run from\nbefore 2b-2); `unreadable`: there, but it doesn't open (a broken ciphertext, or the tenant's key gone during an\nerasure). A CSV start's rows are its CSV record's, never repeated here.",
+        "properties": {
+          "input": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input"
+          },
+          "read_back": {
+            "enum": [
+              "kept",
+              "absent",
+              "unreadable"
+            ],
+            "title": "Read Back",
+            "type": "string"
+          },
+          "seeds": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seeds"
+          }
+        },
+        "required": [
+          "read_back",
+          "input",
+          "seeds"
+        ],
+        "title": "RunInputOut",
+        "type": "object"
+      },
+      "RunInstancesOut": {
+        "additionalProperties": false,
+        "description": "A step's instances in a run, one per iteration, each its final attempt, in iteration order: a page, and their\ntotal.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/RunStepOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total",
+          "items"
+        ],
+        "title": "RunInstancesOut",
+        "type": "object"
+      },
+      "RunItemOut": {
+        "additionalProperties": false,
+        "description": "An item of the runs list (engine 2b spec \u00a77.7; editor 4e-1, B10): a top-level run, or a request that hasn't\nstarted, as its request. `status` is the run's once its request started, else the request's.",
+        "properties": {
+          "cancel_requested_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cancel Requested At"
+          },
+          "draft_snapshot_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Draft Snapshot Id"
+          },
+          "ended_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended At"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunErrorOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "iterations": {
+            "title": "Iterations",
+            "type": "integer"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "live",
+              "simulate"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "parent_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Run Id"
+          },
+          "queued_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queued At"
+          },
+          "request": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunRequestStateOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "started_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started By"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "starting",
+              "running",
+              "succeeded",
+              "failed",
+              "cancelled",
+              "deadline_exceeded",
+              "refused",
+              "dead"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "target_step_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Step Id"
+          },
+          "trigger": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunTriggerOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "version_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version Id"
+          },
+          "workflow_id": {
+            "title": "Workflow Id",
+            "type": "string"
+          },
+          "workflow_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Name"
+          }
+        },
+        "required": [
+          "id",
+          "workflow_id",
+          "workflow_name",
+          "version_id",
+          "draft_snapshot_id",
+          "target_step_id",
+          "mode",
+          "status",
+          "queued_at",
+          "started_at",
+          "ended_at",
+          "error",
+          "iterations",
+          "kind",
+          "parent_run_id",
+          "request",
+          "started_by",
+          "cancel_requested_at",
+          "trigger"
+        ],
+        "title": "RunItemOut",
+        "type": "object"
+      },
+      "RunOut": {
+        "additionalProperties": false,
+        "description": "A run, or a request that hasn't started, as itself (editor 4e-1; the runs design \u00a74.3, \u00a74.5): the list item's\nfacts, the draft revision a draft simulation ran, whether every step instance's end is recorded (its graph's engine\nABI is B4b's or later), the run that started a sub-run, and a CSV start's file. Its steps are read apart, summarized\nand paged (\u00a74.4).",
+        "properties": {
+          "cancel_requested_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cancel Requested At"
+          },
+          "csv": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CsvRecordOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "draft_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Draft Revision"
+          },
+          "draft_snapshot_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Draft Snapshot Id"
+          },
+          "ended_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended At"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunErrorOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "iterations": {
+            "title": "Iterations",
+            "type": "integer"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "live",
+              "simulate"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "outcomes_recorded": {
+            "title": "Outcomes Recorded",
+            "type": "boolean"
+          },
+          "parent": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunParentOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "parent_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Run Id"
+          },
+          "queued_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queued At"
+          },
+          "request": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunRequestStateOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "started_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started By"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "starting",
+              "running",
+              "succeeded",
+              "failed",
+              "cancelled",
+              "deadline_exceeded",
+              "refused",
+              "dead"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "target_step_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Step Id"
+          },
+          "trigger": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunTriggerOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "version_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version Id"
+          },
+          "workflow_id": {
+            "title": "Workflow Id",
+            "type": "string"
+          },
+          "workflow_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Name"
+          }
+        },
+        "required": [
+          "id",
+          "workflow_id",
+          "workflow_name",
+          "version_id",
+          "draft_snapshot_id",
+          "target_step_id",
+          "mode",
+          "status",
+          "queued_at",
+          "started_at",
+          "ended_at",
+          "error",
+          "iterations",
+          "kind",
+          "parent_run_id",
+          "request",
+          "started_by",
+          "cancel_requested_at",
+          "trigger",
+          "draft_revision",
+          "outcomes_recorded",
+          "parent",
+          "csv"
+        ],
+        "title": "RunOut",
+        "type": "object"
+      },
+      "RunParentOut": {
+        "additionalProperties": false,
+        "description": "The run a sub-run's step started it from (its sub-flow or failure handler).",
+        "properties": {
+          "iteration_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Iteration Key"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "step_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Step Id"
+          }
+        },
+        "required": [
+          "run_id",
+          "step_id",
+          "iteration_key"
+        ],
+        "title": "RunParentOut",
+        "type": "object"
+      },
+      "RunRequestStateOut": {
+        "additionalProperties": false,
+        "description": "A run's request where it is (engine 2b spec \u00a77.3): started, or why it isn't.",
+        "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "source": {
+            "enum": [
+              "manual",
+              "rerun",
+              "schedule",
+              "webhook",
+              "dev"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "starting",
+              "started",
+              "cancelled",
+              "refused",
+              "dead"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "source",
+          "reason"
+        ],
+        "title": "RunRequestStateOut",
+        "type": "object"
+      },
+      "RunStepOut": {
+        "additionalProperties": false,
+        "description": "One attempt of a step instance (engine spec \u00a78; B4b): where it ran (its iteration), how it ended, its previews\n(redacted and cut as the projection stores them: `[redacted]`, `[truncated]`), its error, its side effect's outcome,\na control step's port or assignments, and the sub-run it started, when it did.",
+        "properties": {
+          "attempt": {
+            "title": "Attempt",
+            "type": "integer"
+          },
+          "cel_mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cel Mode"
+          },
+          "child_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Child Run Id"
+          },
+          "effect": {
+            "title": "Effect"
+          },
+          "ended_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended At"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunErrorOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "input": {
+            "title": "Input"
+          },
+          "iteration_key": {
+            "title": "Iteration Key",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "enum": [
+                  "applied",
+                  "simulated",
+                  "outcome_unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
+          "output": {
+            "title": "Output"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "status": {
+            "enum": [
+              "running",
+              "succeeded",
+              "failed",
+              "cancelled",
+              "skipped",
+              "not_started"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "step_id": {
+            "title": "Step Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "step_id",
+          "key",
+          "iteration_key",
+          "attempt",
+          "status",
+          "started_at",
+          "ended_at",
+          "input",
+          "output",
+          "error",
+          "outcome",
+          "cel_mode",
+          "effect"
+        ],
+        "title": "RunStepOut",
+        "type": "object"
+      },
+      "RunStepSummaryOut": {
+        "additionalProperties": false,
+        "description": "A step of the graph a run ran (the runs design \u00a74.4): its instances' final attempts counted by status and by the\nport they took, a single instance's final attempt, and where its data came from: in a live run, `sent` or\n`may_have_been_sent` for a plugin step's request, null when there's nothing to say.",
+        "properties": {
+          "final": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunStepOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "instances": {
+            "title": "Instances",
+            "type": "integer"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "origin": {
+            "anyOf": [
+              {
+                "enum": [
+                  "sent",
+                  "may_have_been_sent",
+                  "evaluated",
+                  "evaluated_not_waited",
+                  "fixture_not_sent",
+                  "skipped",
+                  "not_started",
+                  "cancelled",
+                  "didnt_run",
+                  "not_recorded",
+                  "not_reached_yet"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Origin"
+          },
+          "ports": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Ports",
+            "type": "object"
+          },
+          "statuses": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Statuses",
+            "type": "object"
+          },
+          "step_id": {
+            "title": "Step Id",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "step_id",
+          "key",
+          "type",
+          "origin",
+          "instances",
+          "statuses",
+          "ports",
+          "final"
+        ],
+        "title": "RunStepSummaryOut",
+        "type": "object"
+      },
+      "RunStepsOut": {
+        "additionalProperties": false,
+        "description": "A run's steps in run order (\u00a74.4), and what the values a person gave were: the workflow's input, or a step\ntest's seeds. A step test lists its target alone.",
+        "properties": {
+          "given": {
+            "enum": [
+              "input",
+              "seeded"
+            ],
+            "title": "Given",
+            "type": "string"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/RunStepSummaryOut"
+            },
+            "title": "Steps",
+            "type": "array"
+          }
+        },
+        "required": [
+          "given",
+          "steps"
+        ],
+        "title": "RunStepsOut",
+        "type": "object"
+      },
+      "RunTriggerOut": {
+        "additionalProperties": false,
+        "description": "Where a run's request came from (editor 4e-1; the runs design \u00a74.2): its source, and the schedule or webhook\nendpoint, or the run a re-run repeats. Null where the request predates migration 0073, or the schedule or endpoint\nwas deleted.",
+        "properties": {
+          "endpoint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Endpoint"
+          },
+          "rerun_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rerun Of"
+          },
+          "schedule": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScheduleTimingOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source": {
+            "enum": [
+              "manual",
+              "rerun",
+              "schedule",
+              "webhook",
+              "dev"
+            ],
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "schedule",
+          "endpoint",
+          "rerun_of"
+        ],
+        "title": "RunTriggerOut",
         "type": "object"
       },
       "SampleConnectionOut": {
@@ -3684,6 +4890,50 @@
           }
         },
         "title": "SchedulePatch",
+        "type": "object"
+      },
+      "ScheduleTimingOut": {
+        "additionalProperties": false,
+        "description": "A schedule's timing as it is now, which the UI words as the Triggers panel does (4c-3b).",
+        "properties": {
+          "cron": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cron"
+          },
+          "every_s": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Every S"
+          },
+          "offset_s": {
+            "title": "Offset S",
+            "type": "integer"
+          },
+          "time_zone": {
+            "title": "Time Zone",
+            "type": "string"
+          }
+        },
+        "required": [
+          "cron",
+          "every_s",
+          "offset_s",
+          "time_zone"
+        ],
+        "title": "ScheduleTimingOut",
         "type": "object"
       },
       "SchedulesOut": {
@@ -8527,7 +9777,7 @@
     },
     "/api/v1/t/{tenant_id}/runs": {
       "get": {
-        "description": "Requests and runs, newest first by `(queued_at, id)`. The next page: `before` and `before_id`, the last item's\n`queued_at` and `id`, always together: items can be queued in the same instant, so the time alone would skip\nsome.",
+        "description": "Requests and runs, newest first by `(queued_at, id)`. The next page: `before` and `before_id`, the last item's\n`queued_at` and `id`, always together: items can be queued in the same instant, so the time alone would skip\nsome. Filtered (the runs design \u00a74.2) by workflow, status (`waiting`: queued or starting; `didnt_start`: refused\nor dead), mode, draft simulations (left out unless `draft` is `only` or `include`), source, and `since`.",
         "operationId": "list_runs_api_v1_t__tenant_id__runs_get",
         "parameters": [
           {
@@ -8555,6 +9805,106 @@
                 }
               ],
               "title": "Workflow Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "waiting",
+                    "running",
+                    "succeeded",
+                    "failed",
+                    "deadline_exceeded",
+                    "cancelled",
+                    "didnt_start"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "live",
+                    "simulate"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Mode"
+            }
+          },
+          {
+            "in": "query",
+            "name": "draft",
+            "required": false,
+            "schema": {
+              "default": "exclude",
+              "enum": [
+                "exclude",
+                "only",
+                "include"
+              ],
+              "title": "Draft",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "source",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "manual",
+                    "rerun",
+                    "schedule",
+                    "webhook",
+                    "dev"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Source"
+            }
+          },
+          {
+            "in": "query",
+            "name": "since",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Since"
             }
           },
           {
@@ -8610,8 +9960,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "additionalProperties": true,
-                    "type": "object"
+                    "$ref": "#/components/schemas/RunItemOut"
                   },
                   "title": "Response List Runs Api V1 T  Tenant Id  Runs Get",
                   "type": "array"
@@ -8668,9 +10017,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Cancel Run Api V1 T  Tenant Id  Runs  Request Id  Cancel Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/CancelOut"
                 }
               }
             },
@@ -8784,7 +10131,7 @@
     },
     "/api/v1/t/{tenant_id}/runs/{run_id}": {
       "get": {
-        "description": "A run with its steps and sub-runs, or a request that hasn't started as itself; with its CSV record (engine 2b\nspec \u00a78.1), when it took a CSV: the mapping, the file's headers, the row count and the skipped rows. A run whose\ntree, or a request that, passed the retention cutoff isn't found (\u00a710.1).",
+        "description": "A run, or a request that hasn't started as itself (the runs design \u00a74.3): what the list says of it, the draft\nrevision a draft simulation ran, whether its graph records every step instance's end, the run a sub-run's step\nstarted it from, and its CSV record (engine 2b spec \u00a78.1) when it took a CSV. Its steps are read apart (\u00a74.4). A run\nwhose tree, or a request that, passed the retention cutoff isn't found (\u00a710.1).",
         "operationId": "get_run_api_v1_t__tenant_id__runs__run_id__get",
         "parameters": [
           {
@@ -8813,9 +10160,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Run Api V1 T  Tenant Id  Runs  Run Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/RunOut"
                 }
               }
             },
@@ -8833,6 +10178,291 @@
           }
         },
         "summary": "Get Run",
+        "tags": [
+          "runs"
+        ]
+      }
+    },
+    "/api/v1/t/{tenant_id}/runs/{run_id}/input": {
+      "get": {
+        "description": "What a run was admitted with, read back from its request's own envelope, redacted, never recomputed (the runs\ndesign \u00a74.3): a step test's seeds, or the workflow's input, a CSV start's rows (or a re-run's of one) left out. A\ntenant's key gone (an erasure) reads as `unreadable`, never an error.",
+        "operationId": "run_input_api_v1_t__tenant_id__runs__run_id__input_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunInputOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Run Input",
+        "tags": [
+          "runs"
+        ]
+      }
+    },
+    "/api/v1/t/{tenant_id}/runs/{run_id}/steps": {
+      "get": {
+        "description": "A run's steps in run order, summarized (the runs design \u00a74.4): the tags the UI shows come from here, never from\na partial page of instances. A request that hasn't started has steps that haven't run.",
+        "operationId": "run_steps_api_v1_t__tenant_id__runs__run_id__steps_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunStepsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Run Steps",
+        "tags": [
+          "runs"
+        ]
+      }
+    },
+    "/api/v1/t/{tenant_id}/runs/{run_id}/steps/{step_id}/attempts": {
+      "get": {
+        "description": "One step instance's attempts, first to last: `iteration` is its iteration key (empty outside a loop).",
+        "operationId": "step_attempts_api_v1_t__tenant_id__runs__run_id__steps__step_id__attempts_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "step_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Step Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "iteration",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Iteration",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunAttemptsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Step Attempts",
+        "tags": [
+          "runs"
+        ]
+      }
+    },
+    "/api/v1/t/{tenant_id}/runs/{run_id}/steps/{step_id}/instances": {
+      "get": {
+        "description": "A step's instances in a run, one per iteration (its final attempt), in iteration order, paged from `offset`;\nwith `within`, only that iteration's (itself and every iteration nested in it). Each names the sub-run it\nstarted.",
+        "operationId": "step_instances_api_v1_t__tenant_id__runs__run_id__steps__step_id__instances_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "step_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Step Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "within",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Within"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunInstancesOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Step Instances",
         "tags": [
           "runs"
         ]

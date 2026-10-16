@@ -31,9 +31,9 @@ ATTENTION_STATUSES = ("failed", "deadline_exceeded")
 # and the probe and the work-unit test observed the ordered scan on every workload they tried; it's what the planner
 # chose there, not a guarantee for every future plan.
 LAST_RUNS = text(
-    "select w.id as workflow_id, m.mode, r.status, r.at"
+    "select w.id as workflow_id, m.mode, r.id, r.status, r.at"
     " from unnest(cast(:ids as uuid[])) as w(id) cross join (values ('live'), ('simulate')) as m(mode)"
-    " cross join lateral (select mode, status, coalesce(ended_at, started_at, queued_at) as at from runs"
+    " cross join lateral (select id, mode, status, coalesce(ended_at, started_at, queued_at) as at from runs"
     " where tenant_id = :tenant and kind = 'run' and draft_snapshot_id is null and workflow_id = w.id"
     " and mode >= m.mode"
     " order by mode, queued_at desc, id desc limit 1) as r where r.mode = m.mode"
@@ -68,6 +68,7 @@ TRIGGERS = text(
 class LastRun:
     status: str
     at: datetime  # when it ended, else started, else was queued
+    id: uuid.UUID | None = None  # its page's (editor 4e-1)
 
 
 @dataclass(frozen=True)
@@ -87,7 +88,7 @@ async def run_stats(
     if not ids:
         return {}
     params = {"tenant": tenant_id, "ids": ids}
-    last = {(r.workflow_id, r.mode): LastRun(r.status, r.at) for r in await s.execute(LAST_RUNS, params)}
+    last = {(r.workflow_id, r.mode): LastRun(r.status, r.at, r.id) for r in await s.execute(LAST_RUNS, params)}
     counts = {r.workflow_id: (int(r.live), int(r.simulated)) for r in await s.execute(COUNTS_24H, params)}
     return {
         wid: RunStats(

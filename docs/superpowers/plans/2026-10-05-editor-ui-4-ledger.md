@@ -3114,3 +3114,115 @@ the previous result hidden after a refusal until a reload; an ended simulation r
 regions for the bar and the panel's line; "Edit as JSON" toggled off drops JSON edits; refusal words for `key_unusable`
 and `forbidden`; `onSave`'s promise left pending after "Go back to them"; the Test tab's result blinking out between
 admission and the first read.
+
+### 4e-1: the design accepted; the 4e-1a plan accepted (2026-10-16)
+
+The owner started 4e ("Start the 4e plan") after 4d-1c merged (#111, c5b63da5) and its minors were filed (#112).
+Their answers, in chat:
+- shape: "Read first, then start". 4e-1 is the Runs page, a run's page and cancel; 4e-2 is the run form with CSV
+  mapping and the re-run dialog;
+- the list shows a failed run's error; draft simulations appear only through the Mode filter; runs are named by
+  their first 8 characters; "Ran out of time" everywhere;
+- a run's page is laid out like the editor; Cancel asks first for live runs only; times are in the person's own zone.
+
+D8 was signed off ("D8 signed off; write the 4e-1 spec") at the Design canvas "4e-1 Runs Mockups", version 9.
+`docs/superpowers/specs/2026-10-15-editor-4e1-runs-design.md` (5fc7b5a1) was accepted ("Yes to all four; commit the
+spec"):
+- migration slot 0073 for `rerun_of` and `trigger_id`;
+- the starter's email shown to every run viewer;
+- the run detail loses `steps` and `children`;
+- "sent" on reads too.
+
+`docs/superpowers/plans/2026-10-15-editor-ui-4e1a-runs-backend.md`, revision 1, was accepted. Its rulings 1–20 join
+this ledger as 210–229. Mid-slice rulings start at M103. Backend and generated client only: no screen change, no ABI
+change.
+
+210. **Accepted. No index in 0073** (plan ruling 1): the filters shrink the list's sort; they add no scan.
+211. **Accepted. `trigger_id` is an explicit admission argument** (plan ruling 2).
+212. **Accepted. `started_by` names a person for `manual`, `rerun` and pre-2b-2 runs only** (plan ruling 3).
+213. **Accepted. A refused or dead request shows its reason code, not messages** (plan ruling 4; amends the design
+     §5.4).
+214. **Accepted. The status filter takes one value; `waiting` and `didnt_start` group two** (plan ruling 5).
+215. **Accepted. `draft=exclude` is the list's default** (plan ruling 6).
+216. **Accepted. A run's step reads have models of their own; the draft routes keep theirs** (plan ruling 7).
+217. **Accepted. A live origin: `may_have_been_sent` first, `sent` for plugin steps, else none** (plan ruling 8).
+218. **Accepted. `OUTCOMES_ABI = 9` is a constant; tests patch it** (plan ruling 9).
+219. **Accepted. The step reads come before the bounded detail** (plan ruling 10).
+220. **Accepted. `service.children` and `service.run_steps` stay** (plan ruling 11).
+221. **Accepted. The attempts read is bounded at 20** (plan ruling 12).
+222. **Accepted. A request that hasn't started has steps that haven't run** (plan ruling 13).
+223. **Accepted. `read_back` moves to `runs.py`; `absent` means no envelope kept** (plan ruling 14; amends the design
+     §4.3's wording).
+224. **Accepted. Cancel is typed; start and re-run wait for 4e-2** (plan ruling 15).
+225. **Accepted. The detail keeps `parent_run_id` beside `parent`** (plan ruling 16).
+226. **Accepted. 0073's downgrade drops the columns** (plan ruling 17).
+227. **Accepted. `LastRun.id` defaults to None** (plan ruling 18).
+228. **Accepted. The client is regenerated as CI checks it** (plan ruling 19).
+229. **Accepted. The summary's cost is pinned by statements** (plan ruling 20).
+
+M103. **The heading dates the owner's acceptance, 2026-10-16** ("Accept all rulings; inline; commit the plan"),
+      not the plan's 2026-10-15.
+
+### 4e-1a, milestone 1 (2026-10-16)
+
+Tasks 1–3 on `feat/editor-4e1a` (from origin/main dd1cb01b, the plan merged in 667c37cd; backend tests on a borrowed
+venv of the same `uv.lock`, the frontend's packages restored offline). Every diff applied as the plan's text has it;
+each task's tests failed, then passed, as its steps say; after each, ruff, `ruff format --check` and mypy were silent.
+- Task 1, 4d9e2d5c: the 4e-1 design and this plan accepted, rulings 210–229 (M103).
+- Task 2, 486a91b3: migration 0073 and admission writing `rerun_of` and `trigger_id`. Red: 7 failed, 22 passed
+  (0073 unknown to alembic; `column "rerun_of" does not exist`); green: 29 passed.
+- Task 3, 26ba1e33: the list's filters and labels (B10). Red: 7 failed, 21 passed (the status filter ignored, the
+  unknown values answered 200, no `workflow_name`, a draft simulation listed by default); green: 28 passed. A first
+  green run had 22 setup errors, none a test's: the fixture's online migrations gave way to their budget while the
+  machine's load stood at 98 (another session's suite). Run again with 2 workers, it passed whole.
+
+Mid-slice rulings: M103 only. Nothing pushed.
+
+### 4e-1a, milestone 2 (2026-10-16)
+
+The owner, in chat: "Milestone 1 accepted, continue". Tasks 4–6, every diff applied as the plan's text has it; each
+task's tests failed, then passed, as its steps say; after each, ruff, `ruff format --check` and mypy were silent.
+- Task 4, 42835e02: a run's steps for every run (the summary with a live run's origins and `not_recorded`, paged
+  instances naming their sub-runs, one instance's attempts). Red: 19 failed, 23 passed (`origin()` took no `live` or
+  `recorded`, no `OUTCOMES_ABI`, the three routes 404); green: 42 passed.
+- Task 5, 17fcbb24: a run as itself, bounded (labels, `draft_revision`, `outcomes_recorded`, `parent`, a typed CSV
+  record; no `steps` or `children`), cancel typed. Red: 6 failed, 46 passed (the new fields missing, `steps` still
+  there); green: 52 passed.
+- Task 6, f0da00f1: a run's input read back, redacted (`read_back` moved to `runs.py`). Red: 6 failed, 28 passed
+  (`/input` 404); green: 34 passed.
+
+Mid-slice rulings: none in this milestone. Nothing pushed.
+
+### 4e-1a, milestone 3 and the final checkpoint (2026-10-16)
+
+The owner, in chat: "Milestone 2 accepted, continue".
+- Task 7, 5689144a: the Workflows list's last run names its run. Red: 1 failed, 25 passed (`KeyError: 'id'`);
+  green: 26 passed.
+- Task 8, ceb20738: the client regenerated (`dewpoint api openapi`, `pnpm gen:api`; `check:api` passes) and "Reading
+  runs" in `docs/operations/runs.md`. The checks, on this tree:
+  - the frontend: the type check and ESLint silent; its suite 1184 passed (90 files), unchanged;
+  - the backend: ruff, `ruff format --check` and mypy silent; `lint-imports`, 11 contracts kept;
+  - the privilege reference, `test_online.py` and 0073's tests: 50 passed;
+  - the API, admission, summary and core runs tests: 708 passed;
+  - local CodeQL (python, CLI 2.27.2, python-queries 1.8.12, CI's filter): no finding;
+  - the whole backend suite: not run locally, on the owner's word ("Leave it to CI"); CI runs it on the PR.
+
+Mid-slice rulings over the slice: M103 only. The final review follows. Nothing pushed.
+
+### 4e-1a, the final review (2026-10-16)
+
+A fresh reviewer (Fable) on dd1cb01b..2205f086: no critical finding, 1 important, 3 minor; "With fixes". Every Review
+Focus case pinned by a test it saw pass (74 targeted tests, read-only). Fixed test-first, red then green:
+- I1, a re-run of a CSV start read its rows back on `/input`: a re-run with no new input is admitted on its original's
+  input rebuilt, rows included, and writes no CSV record, while the strip keyed on that record. It now keys on the
+  envelope's own `rows` and `row_count`, which only a CSV upload supplies, and the extra decryption is gone.
+  `test_a_rerun_of_a_csv_start_leaves_its_rows_out_too`. What a CSV re-run's page shows of its rows is 4e-2's (the
+  re-run dialog).
+
+After the fix: the read-back's tests 7 passed; the API, admission, summary, core runs, worker, trigger and matching
+tests with 0073's, 743 passed; ruff, `ruff format --check` and mypy silent; the client regenerated (the route's
+description), `check:api` and the type check passing; local CodeQL, no finding.
+
+Deferred minors (a follow-up issue, as for earlier slices): `get_run` reads a whole graph for its engine ABI while the
+page polls it; a request that never started on a pre-ABI-9 version says "not recorded" where ruling 222 says "didn't
+run"; `run_input` learns "unreadable" by catching the read-back's 503.

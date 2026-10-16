@@ -522,15 +522,43 @@ or replace (422). Nothing is recorded. Nothing kept can hold one, and a webhook 
 ## Reading runs
 
 `GET /api/v1/t/{tenant}/runs` lists requests and top-level runs together, newest first by `(queued_at, id)`
-(`workflow_id`, `before`, `before_id` and `limit` filter and page them). A request's `queued_at` is when it was
-admitted; its run shares its id and `queued_at`; a run from before 2b-2 has its `started_at`. **The order changed in
-2b-2:** it was by start time, and the next page's cursor is now the last item's `queued_at` with its `id`, given
-together (else 422 `invalid_cursor`). Each item's `request` holds its `status`, `source` and `reason` (none for a run
-from before 2b-2). A request that hasn't started is shown as itself — `queued`, `starting`, `cancelled`, `refused` or
-`dead` — never as the row an attempt pre-created. `GET /api/v1/t/{tenant}/runs/{run_id}` returns one run with its
-steps (one row per step, loop iteration and attempt) and its `children`: the sub-runs it started (a request that hasn't
-started has neither). The `iteration_key` is the loop step's key and the item's index,
-like `each_ap:3`, or `outer:1/inner:4` when nested. Both need the `run.view` permission.
+(`before`, `before_id` and `limit` page them). A request's `queued_at` is when it was admitted; its run shares its id
+and `queued_at`; a run from before 2b-2 has its `started_at`. **The order changed in 2b-2:** it was by start time, and
+the next page's cursor is now the last item's `queued_at` with its `id`, given together (else 422 `invalid_cursor`).
+Each item's `request` holds its `status`, `source` and `reason` (none for a run from before 2b-2). A request that hasn't
+started is shown as itself — `queued`, `starting`, `cancelled`, `refused` or `dead` — never as the row an attempt
+pre-created. Both reads need the `run.view` permission.
+
+The list is filtered (editor 4e-1) by:
+
+| Parameter | Values |
+|---|---|
+| `workflow_id` | a workflow |
+| `status` | `waiting` (queued or starting), `running`, `succeeded`, `failed`, `deadline_exceeded`, `cancelled`, `didnt_start` (refused or dead): a run's status, or an unstarted request's |
+| `mode` | `live` or `simulate` |
+| `draft` | `exclude` (the default: draft simulations left out), `only`, `include` |
+| `source` | `manual`, `rerun`, `schedule`, `webhook`, `dev` |
+| `since` | items queued at or after this time |
+
+Each item also names its workflow (`workflow_name`); the email of the person who asked (`started_by`: by hand or a
+re-run, else null); a requested cancel (`cancel_requested_at`); and where it came from (`trigger`: its `source`, the
+schedule's timing, the webhook endpoint's name, or the run a re-run repeats, `rerun_of`). A request admitted before
+migration 0073 has no schedule, endpoint or re-run link; a deleted schedule's is null too.
+
+`GET /api/v1/t/{tenant}/runs/{run_id}` returns one run, or a request that hasn't started, as itself: what the list says
+of it, the `draft_revision` a draft simulation ran, `outcomes_recorded` (false when its graph's engine ABI predates 9,
+B4b: a step without a row after its end is "not recorded"), `parent` for a sub-run (the run, step and iteration that
+started it), and a CSV start's `csv` record. **It no longer returns `steps` or `children` (editor 4e-1):** a run's steps
+are read apart, summarized and paged, so a run of many iterations is read in bounded pieces:
+
+| Route (under `/api/v1/t/{tenant}/runs/{run_id}`) | Returns |
+|---|---|
+| `GET /steps` | a summary per step of the graph it ran, in run order: its instances' final attempts counted by status and by port, a single instance's final attempt, and its origin. A live run's plugin step says `sent` (its request went out, reads included) or `may_have_been_sent` (an attempt whose answer was lost); a control step's, or one that sent nothing, has none. A simulated run's are the simulation's (above). `given`: `input`, or `seeded` for a step test |
+| `GET /steps/{step}/instances` | a step's instances, one per iteration (its final attempt), by iteration number, with their `total` (`offset`; `limit`, 1 to 100; `within`, one iteration and those nested in it); each names the sub-run it started (`child_run_id`) |
+| `GET /steps/{step}/attempts?iteration=KEY` | one instance's attempts, first to last (at most 20, a retry policy's most); `iteration` empty outside a loop |
+| `GET /input` | what it was admitted with, read back from its request's envelope, redacted (`[redacted]` where it held a claim): its `input`, or a step test's `seeds`; a CSV start's rows are its `csv` record's. `read_back`: `kept`, `absent` (a refusal that froze nothing, or a run from before 2b-2), `unreadable` (it doesn't open, or the tenant's key is gone during an erasure) |
+
+The `iteration_key` is the loop step's key and the item's index, like `each_ap:3`, or `outer:1/inner:4` when nested.
 
 Every run has a `kind`. A sub-flow's run (`subflow`) and a failure handler's (`failure_handler`) are runs of their
 own, with their own steps, and point at the run that started them (`parent_run_id`, and for a sub-flow the step and

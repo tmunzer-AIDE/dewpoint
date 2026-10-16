@@ -148,7 +148,7 @@ async def admit_tick(
             )  # fmt: skip
             refused = await admission.record_refused(
                 s, keys, tenant_id=tenant_id, workflow_id=schedule.workflow_id, source="schedule", mode=schedule.mode,
-                idempotency_key=key, reason=reason, messages=[said], details=named,
+                idempotency_key=key, reason=reason, messages=[said], details=named, trigger_id=schedule_id,
             )  # fmt: skip
             return _outcome(refused)
         late = await _database_now(s) - _parsed(key.split(":", 2)[2])
@@ -157,7 +157,7 @@ async def admit_tick(
             expired = await admission.record_refused(
                 s, keys, tenant_id=tenant_id, workflow_id=schedule.workflow_id, source="schedule", mode=schedule.mode,
                 idempotency_key=key, reason=SCHEDULE_CATCHUP_EXPIRED,
-                messages=["The tick is past its schedule's catch-up window."], details=named,
+                messages=["The tick is past its schedule's catch-up window."], details=named, trigger_id=schedule_id,
             )  # fmt: skip
             if new and expired.reason == SCHEDULE_CATCHUP_EXPIRED:  # the caller alerts once its transaction commits
                 s.info.setdefault(EXPIRED, []).append({"schedule_id": str(schedule_id),
@@ -167,7 +167,7 @@ async def admit_tick(
         given = json.loads(await cipher.open(str(tenant_id), str(schedule_id), schedule.input))
         admitted = await admission.admit_request(
             s, keys, tenant_id=tenant_id, workflow_id=schedule.workflow_id, source="schedule", actor_id=None,
-            mode=schedule.mode, idempotency_key=key, input=given, details=named,
+            mode=schedule.mode, idempotency_key=key, input=given, details=named, trigger_id=schedule_id,
         )  # fmt: skip
     except admission.IdempotencyConflictError:
         return "recorded"

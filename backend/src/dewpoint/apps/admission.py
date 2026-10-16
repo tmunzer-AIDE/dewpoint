@@ -246,10 +246,12 @@ async def admit_request(
     rerun: Rerun | None = None,
     csv: CsvStart | None = None,
     details: dict[str, object] | None = None,
+    trigger_id: uuid.UUID | None = None,
 ) -> Admitted:
     """The request under `idempotency_key`: an exact retry's, or a new one, frozen. A re-run's digest covers its
-    `rerun` identity in place of `input`, and a CSV start's its `csv` beside it. Raises IdempotencyConflictError,
-    WorkflowNotFoundError, or, for an interactive source, AdmissionRefusedError."""
+    `rerun` identity in place of `input`, and a CSV start's its `csv` beside it. `trigger_id` is the schedule or webhook
+    endpoint a durable source's request came from. Raises IdempotencyConflictError, WorkflowNotFoundError, or, for an
+    interactive source, AdmissionRefusedError."""
     if source not in INTERACTIVE + DURABLE or mode not in (LIVE, SIMULATE):
         raise ValueError(f"no such source or mode: {source}, {mode}")
     if csv is not None and source not in ("manual", "rerun"):
@@ -286,10 +288,11 @@ async def admit_request(
         if source in INTERACTIVE:
             raise AdmissionRefusedError(refused.reason, refused.messages) from None
         return await _insert(s, keys, tenant_id, request_id, actor_id, idempotency_key, digested, None, None, refused,
-                             rerun, extra=details)  # fmt: skip
+                             rerun, extra=details, trigger_id=trigger_id)  # fmt: skip
     await _before_insert()
     admitted = await _insert(s, keys, tenant_id, request_id, actor_id, idempotency_key, digested, frozen.version_id,
-                             frozen.envelope_id, rerun=rerun, extra={**frozen.details, **(details or {})})  # fmt: skip
+                             frozen.envelope_id, rerun=rerun, extra={**frozen.details, **(details or {})},
+                             trigger_id=trigger_id)  # fmt: skip
     if admitted.new:
         await savepoint.commit()
     else:
@@ -345,10 +348,11 @@ async def admit_draft(
 async def record_refused(
     s: AsyncSession, keys: KeySource, *, tenant_id: uuid.UUID, workflow_id: uuid.UUID, source: str, mode: str,
     idempotency_key: str, reason: str, messages: list[str], details: dict[str, object] | None = None,
+    trigger_id: uuid.UUID | None = None,
 ) -> RunRequest:  # fmt: skip
     """A durable source's refusal decided before admission, a paused or deleted schedule's tick (§8.2): a `refused`
     request under its key, frozen like any, never lost; an exact retry finds it. Raises IdempotencyConflictError when
-    the key holds another request."""
+    the key holds another request. `trigger_id` is the schedule or webhook endpoint it came from."""
     if source not in DURABLE:
         raise ValueError(f"only a durable source's refusal is recorded: {source}")
     await tenant_scope(s, tenant_id)
@@ -358,7 +362,7 @@ async def record_refused(
         return (await _retry(keys, tenant_id, existing, fields)).request
     refused = _Refused(reason, messages)
     inserted = await _insert(s, keys, tenant_id, uuid.uuid4(), None, idempotency_key, fields, None, None, refused,
-                             extra=details)  # fmt: skip
+                             extra=details, trigger_id=trigger_id)  # fmt: skip
     return inserted.request
 
 
@@ -656,9 +660,11 @@ async def _insert(
     rerun: Rerun | None = None,
     extra: dict[str, object] | None = None,
     draft: _DraftFrozen | None = None,
+    trigger_id: uuid.UUID | None = None,
 ) -> Admitted:
     """The request row, queued or refused, and its audit entry; `new` False when another transaction won the key. A
-    draft simulation's (`draft`) is frozen on its snapshot."""
+    draft simulation's (`draft`) is frozen on its snapshot. The row names where it came from (the runs design §4.3):
+    the run a re-run repeats, and the schedule or endpoint of a durable source's."""
     key_version, digest = await digests.digest(keys, str(tenant_id), **fields)  # the tenant's active key (§7.2)
     status = "refused" if refused else "queued"
     row = {
@@ -676,6 +682,8 @@ async def _insert(
         "reason": refused.reason if refused else None,
         "ended_at": func.now() if refused else None,
         "envelope_id": envelope_id,
+        "rerun_of": rerun.of if rerun is not None else None,
+        "trigger_id": trigger_id,
     }
     if draft is not None:
         row |= {"draft_snapshot_id": draft.snapshot_id, "target_step_id": draft.target,

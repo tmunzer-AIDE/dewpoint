@@ -131,6 +131,23 @@ async def test_a_refused_admission_is_a_request_too(dev, owner_sessionmaker, ing
     assert (await event_state(owner_sessionmaker, event_id))["request_count"] == 1
 
 
+@pytest.mark.parametrize("enabled", [True, False], ids=["admitted", "refused"])
+async def test_an_events_request_names_the_endpoint_it_came_through(
+    dev, owner_sessionmaker, ingress_sessionmaker, dispatch_sessionmaker, enabled: bool
+) -> None:
+    """The runs design §4.3: the request's `trigger_id` is its endpoint, admitted or refused."""
+    await bind(owner_sessionmaker, dev)
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text("update workflows set enabled = :e where id = :w"), {"e": enabled, "w": dev.workflow_id})
+    [event_id] = await send(ingress_sessionmaker, dev, ALARM)
+    assert await matched(dispatch_sessionmaker, dev, event_id) == "matched"
+    async with owner_sessionmaker() as s:
+        found = await s.execute(text("select status, rerun_of, trigger_id from run_requests "
+                                     "where idempotency_key like :k"), {"k": f"evt:{event_id}:%"})  # fmt: skip
+        row = found.one()
+    assert (row.status, row.rerun_of, row.trigger_id) == ("queued" if enabled else "refused", None, dev.endpoint_id)
+
+
 async def test_with_the_gate_off_nothing_is_matched(ready, owner_sessionmaker, dispatch_sessionmaker) -> None:
     async with owner_sessionmaker() as s, s.begin():  # a production deployment, its runs off by default (the gate)
         await record_environment(s, environment=PRODUCTION, namespace="default")

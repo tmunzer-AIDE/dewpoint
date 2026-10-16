@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps import admission, cancels
-from dewpoint.apps.api.responses import StartFormOut
+from dewpoint.apps.api.responses import CancelOut, StartFormOut
 from dewpoint.apps.csv_slots import CsvBusyError, Slot
 from dewpoint.apps.forms import csv_form, form_fields
 from dewpoint.apps.inputs import INPUT_INVALID, TOO_DEEP
@@ -210,7 +210,7 @@ async def start_form(
     }
 
 
-@router.post("/t/{tenant_id}/runs/{request_id}/cancel")
+@router.post("/t/{tenant_id}/runs/{request_id}/cancel", response_model=CancelOut)
 async def cancel_run(
     request_id: uuid.UUID,
     response: Response,

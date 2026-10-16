@@ -155,6 +155,9 @@ async def test_a_signed_webhook_becomes_a_run_end_to_end_with_the_keyrings_real_
                     break
             run = await until_ended(editor, f"{base}/runs/{request_id}")
         audited = (await editor.get(f"{base}/runs/{request_id}")).json()
+        steps = (await editor.get(f"{base}/runs/{request_id}/steps")).json()["steps"]  # as a run's page reads them
+        seen = [(await editor.get(f"{base}/runs/{request_id}/steps/{s['step_id']}/instances",
+                                  params={"limit": 100})).json()["items"] for s in steps]  # fmt: skip
     await ingress.state.engine.dispose()
     assert (run["status"], run["request"]["source"], run["request"]["reason"]) == ("succeeded", "webhook", None)
     # The canary was in the data: the request's input, decrypted with the real keys, is the event.
@@ -167,8 +170,7 @@ async def test_a_signed_webhook_becomes_a_run_end_to_end_with_the_keyrings_real_
     assert not [c for c in secrets if c in rows]
     assert not [c for c in secrets for entry in logs if c in str(entry)]
     assert not [c for c in secrets if c in json.dumps(audited)]
-    steps = audited["steps"]
-    assert steps and CANARY not in str(steps)
+    assert steps and any(seen) and CANARY not in str(seen)
 
 
 async def owner_rows(owner: Any, endpoint_id: str) -> list[uuid.UUID]:
