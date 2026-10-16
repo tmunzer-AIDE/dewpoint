@@ -3162,3 +3162,18 @@ change.
 
 M103. **The heading dates the owner's acceptance, 2026-10-16** ("Accept all rulings; inline; commit the plan"),
       not the plan's 2026-10-15.
+
+### 4e-1a, milestone 1 (2026-10-16)
+
+Tasks 1–3 on `feat/editor-4e1a` (from origin/main dd1cb01b, the plan merged in 667c37cd; backend tests on a borrowed
+venv of the same `uv.lock`, the frontend's packages restored offline). Every diff applied as the plan's text has it;
+each task's tests failed, then passed, as its steps say; after each, ruff, `ruff format --check` and mypy were silent.
+- Task 1, 4d9e2d5c: the 4e-1 design and this plan accepted, rulings 210–229 (M103).
+- Task 2, 486a91b3: migration 0073 and admission writing `rerun_of` and `trigger_id`. Red: 7 failed, 22 passed
+  (0073 unknown to alembic; `column "rerun_of" does not exist`); green: 29 passed.
+- Task 3, 26ba1e33: the list's filters and labels (B10). Red: 7 failed, 21 passed (the status filter ignored, the
+  unknown values answered 200, no `workflow_name`, a draft simulation listed by default); green: 28 passed. A first
+  green run had 22 setup errors, none a test's: the fixture's online migrations gave way to their budget while the
+  machine's load stood at 98 (another session's suite). Run again with 2 workers, it passed whole.
+
+Mid-slice rulings: M103 only. Nothing pushed.
