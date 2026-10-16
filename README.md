@@ -57,9 +57,9 @@ Settings, how a run ends, and this build's limits:
 
 The `audit-anchor` service writes signed chain heads every 15 minutes. **In production, anchors must live off this
 host** (object storage with object lock, or your SIEM): an anchor file next to the database proves little.
-The `audit-anchor` container exits nonzero if an anchor run fails, and its healthcheck (`dewpoint audit freshness
---max-age-minutes 30`) turns it `unhealthy` when audit rows older than 30 minutes have no anchor. Alert on both:
-a stopped or unhealthy anchor job means new audit entries are not being protected.
+The `audit-anchor` container exits nonzero if an anchor run fails (and 0 when it's stopped), and its healthcheck
+(`dewpoint audit freshness --max-age-minutes 30`) turns it `unhealthy` when audit rows older than 30 minutes have no
+anchor. Alert on both: a stopped or unhealthy anchor job means new audit entries are not being protected.
 
 The healthcheck measures anchors **recorded in the database**; it is a liveness check, not an integrity check. It
 does not notice if the external anchor file or sink is deleted, unwritable or unreachable. In production, also

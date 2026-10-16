@@ -2,10 +2,12 @@
 import asyncio
 import base64
 import os
+import signal
 import uuid
 
 from typer.testing import CliRunner
 
+from dewpoint.apps import stopping
 from dewpoint.apps.cli.main import app
 from dewpoint.core.audit.service import record
 from dewpoint.core.config import get_settings
@@ -63,6 +65,61 @@ def test_anchor_then_verify_as_auditor(pg_url, _test_users, tmp_path, monkeypatc
 
     _env(monkeypatch, auditor)  # misconfigured: no key / path
     assert runner.invoke(app, ["audit", "anchor"]).exit_code == 2
+    assert runner.invoke(app, ["audit", "anchor", "--every", "900"]).exit_code == 2  # its settings, at its first run
+
+
+def test_the_anchor_job_anchors_each_interval_until_sigterm_then_exits_0(
+    pg_url, _test_users, tmp_path, monkeypatch
+) -> None:
+    """Compose's audit-anchor: each run is the one-shot's (the second finds the head anchored); Compose's SIGTERM,
+    during a wait, ends it at once with exit 0, and what it wrote verifies."""
+    asyncio.run(_seed(_url_for(pg_url, "dewpoint_api")))
+    _env(monkeypatch, _url_for(pg_url, "dewpoint_auditor"), **_signing(tmp_path))
+    waits: list[float] = []
+
+    async def pause(requested: asyncio.Event, seconds: float) -> None:
+        waits.append(seconds)
+        if len(waits) == 2:
+            os.kill(os.getpid(), signal.SIGTERM)  # Compose's stop, during the second wait
+            await asyncio.wait_for(requested.wait(), 10)
+
+    monkeypatch.setattr(stopping, "pause", pause)
+    result = CliRunner().invoke(app, ["audit", "anchor", "--every", "900"])
+    assert result.exit_code == 0, result.output  # leave(0)
+    assert waits == [900, 900]
+    assert [line for line in result.output.splitlines() if line.startswith("anchored")] == [
+        "anchored 1 scope head(s)", "anchored 0 scope head(s)"]  # fmt: skip
+    assert CliRunner().invoke(app, ["audit", "verify"]).exit_code == 0
+
+
+def test_a_stop_during_an_anchor_run_lets_it_record_its_anchors(pg_url, _test_users, tmp_path, monkeypatch) -> None:
+    """SIGTERM while a run writes: the run ends, its anchors recorded (fresh), and no other begins. The real wait, an
+    hour long, ends at once; bounded, so a regression fails in 10 s instead of hanging."""
+    import dewpoint.apps.cli.main as cli
+
+    asyncio.run(_seed(_url_for(pg_url, "dewpoint_api")))
+    _env(monkeypatch, _url_for(pg_url, "dewpoint_auditor"), **_signing(tmp_path))
+    real_anchor, real_pause = cli.anchor_all, stopping.pause
+
+    async def signalled(s, sink):  # type: ignore[no-untyped-def]
+        os.kill(os.getpid(), signal.SIGTERM)
+        return await real_anchor(s, sink)
+
+    async def bounded(requested: asyncio.Event, seconds: float) -> None:
+        await asyncio.wait_for(real_pause(requested, seconds), 10)
+
+    monkeypatch.setattr(cli, "anchor_all", signalled)
+    monkeypatch.setattr(stopping, "pause", bounded)
+    result = CliRunner().invoke(app, ["audit", "anchor", "--every", "3600"])
+    assert result.exit_code == 0 and result.output.count("anchored 1 scope head(s)") == 1, result.output
+    assert CliRunner().invoke(app, ["audit", "freshness", "--max-age-minutes", "0"]).exit_code == 0
+
+
+def test_a_failed_run_ends_the_anchor_job_with_exit_1(tmp_path, monkeypatch) -> None:
+    """Nothing listens there: the first run fails, and the job ends rather than retry (restart: "no")."""
+    _env(monkeypatch, "postgresql+asyncpg://dewpoint_auditor_login:x@127.0.0.1:1/dewpoint", **_signing(tmp_path))
+    result = CliRunner().invoke(app, ["audit", "anchor", "--every", "900"])
+    assert result.exit_code == 1 and "anchored" not in result.output
 
 
 async def _deployment(url: str, environment: str) -> None:

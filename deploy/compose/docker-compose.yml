@@ -105,14 +105,16 @@ services:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/ready').status==200 else 1)"]
       interval: 5s
       retries: 20
+    restart: unless-stopped  # an API that ends comes back: web reaches it again within nginx's 10 s re-resolution
 
   audit-anchor:
     <<: *app
     # Anchors belong OFF this host in production (object lock / SIEM). This volume is for evaluation only.
-    # set -e: a failed anchor run ends the container with a nonzero exit (visible in `docker compose ps -a`),
-    # instead of looping silently without producing anchors.
-    command: ["sh", "-c", "set -e; while true; do dewpoint audit anchor; sleep 900; done"]
+    # A failed anchor run ends the container with a nonzero exit (visible in `docker compose ps -a`): it never retries,
+    # so a job that stopped anchoring can't look alive. SIGTERM: the run in hand ends, then it exits 0.
+    command: ["dewpoint", "audit", "anchor", "--every", "900"]
     restart: "no"
+    stop_grace_period: 10s  # longer than a healthy run; one cut later is written again by the next start
     # Unhealthy when audit rows older than 30 minutes have no anchor (job stuck, failing, or anchors stale).
     # Alert on this in your monitoring as well.
     healthcheck:

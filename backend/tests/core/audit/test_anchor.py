@@ -134,6 +134,28 @@ async def test_anchor_freshness_flags_unanchored_rows(tmp_path, api_sessionmaker
         assert len(await anchor_freshness(s, timedelta(0))) == 1
 
 
+async def test_a_run_cut_before_its_commit_is_written_again_and_still_verifies(
+    tmp_path, api_sessionmaker, auditor_sessionmaker
+) -> None:
+    """Compose's SIGKILL at the end of the anchor job's grace can cut a run after the file's write and before its
+    transaction commits: the database records nothing, so the next run signs the same head again. The file then holds
+    two signed lines for it, and verification accepts both (the S3 sink refuses the second: test_s3_anchors)."""
+    key = Ed25519PrivateKey.generate()
+    sink = FileAnchorSink(tmp_path / "anchors.jsonl", key)
+    async with api_sessionmaker() as s, s.begin():
+        await record(s, tenant_id=None, actor_id=None, action="auth.login")
+    async with auditor_sessionmaker() as s:  # the cut: written to the file, never committed
+        assert await anchor_all(s, sink) == 1
+        await s.rollback()
+    async with auditor_sessionmaker() as s, s.begin():
+        assert await anchor_all(s, sink) == 1  # the same head, signed again
+    first, second = sink.entries()
+    assert (first["scope"], first["seq"]) == (second["scope"], second["seq"]) == ("platform", first["seq"])
+    async with auditor_sessionmaker() as s:
+        assert await verify_anchors(s, sink.entries(), key.public_key(), max_lag=timedelta(0)) == []
+        assert await anchor_freshness(s, timedelta(0)) == []
+
+
 async def test_an_anchor_signs_no_row_its_synchronous_standby_lacks(
     tmp_path, pg_url, owner_sessionmaker, auditor_sessionmaker
 ) -> None:  # fmt: skip

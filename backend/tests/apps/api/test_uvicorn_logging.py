@@ -148,3 +148,14 @@ async def test_a_failed_shutdown_is_logged_by_its_type_only_and_still_reported(
     [failure] = [record for record in structlog_lines if record["event"] == "lifespan_failed"]
     assert (failure["phase"], failure["error_type"]) == ("shutdown", "RuntimeError")
     assert failure["where"][-1].startswith("test_uvicorn_logging.py:_raises:")
+    assert "api_stopped" not in [record["event"] for record in structlog_lines]  # its shutdown failed
+
+
+async def test_a_stopped_api_says_so_once_its_shutdown_ran_to_its_end() -> None:
+    """CI's stop proof reads `api_stopped` (the owner's ruling P2): uvicorn's shutdown ran the lifespan through the
+    engine's dispose."""
+    made: list[FastAPI] = []
+    with rendered() as lines, stdlib_restored():
+        async with serving(uvicorn.Config(_factory(made, lambda app: None), factory=True)):
+            pass
+    assert [record["event"] for record in records(lines()) if record["event"] == "api_stopped"] == ["api_stopped"]

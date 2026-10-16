@@ -8,6 +8,7 @@ import socket
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -339,6 +340,42 @@ def test_a_stopping_worker_outlasts_its_shutdown_grace() -> None:
     assert grace.endswith("s") and int(grace[:-1]) > attempts + CALL_TIMEOUT_S
 
 
+def test_the_anchor_job_stops_on_sigterm_and_a_failed_run_ends_it_visibly() -> None:
+    """The owner's rulings A1, A5: the anchor job is `dewpoint audit anchor --every`, a process that stops itself on
+    SIGTERM (no shell at PID 1 dropping it); a failed run ends the container, never restarted, so a job that stopped
+    anchoring shows in `docker compose ps -a`."""
+    anchor = service("audit-anchor")
+    assert anchor["command"] == ["dewpoint", "audit", "anchor", "--every", "900"]
+    assert anchor["restart"] == "no" and "init" not in anchor
+
+
+def test_the_anchor_jobs_health_outlasts_a_run_cut_by_a_stop() -> None:
+    """Its healthcheck's freshness window is at least twice its cadence: a run cut or skipped by a stop or a restart
+    never turns it unhealthy, a job that stopped anchoring does."""
+    anchor = service("audit-anchor")
+    every = int(anchor["command"][anchor["command"].index("--every") + 1])
+    test = anchor["healthcheck"]["test"]
+    assert test[:4] == ["CMD", "dewpoint", "audit", "freshness"]
+    assert int(test[test.index("--max-age-minutes") + 1]) * 60 >= 2 * every
+
+
+def test_an_api_that_exits_is_restarted() -> None:
+    """The owner's ruling P1: an API that ends on its own (a crash, its settings refused at startup) comes back, as
+    ingress does; a stop of Compose's own is never restarted. uvicorn is its PID 1, no init before it: its re-raised
+    SIGTERM after a graceful shutdown is then dropped, and it exits 0, which CI's stop proof checks."""
+    assert service("api")["restart"] == "unless-stopped" and "init" not in service("api")
+
+
+def test_web_reaches_a_restarted_api_through_dockers_dns() -> None:
+    """`web` waits for a healthy API only when it starts; after that, nginx re-resolves `api` every 10 s, so an API
+    restarted or recreated with another address is reached again without restarting `web`."""
+    assert service("web")["depends_on"] == {"api": {"condition": "service_healthy"}}
+    conf = NGINX.read_text()
+    assert "resolver 127.0.0.11 valid=10s ipv6=off;" in conf and "set $api http://api:8000;" in conf
+    api = conf[conf.index("location /api/") :].split("}", 1)[0]
+    assert "proxy_pass $api;" in api
+
+
 def test_the_app_image_reports_a_native_crash_with_its_threads_stacks() -> None:
     """The owner's ruling O1: a native crash (temporalio's bridge, say) prints each thread's stack, files, functions and
     lines, never a value, instead of a bare 139."""
@@ -347,21 +384,27 @@ def test_the_app_image_reports_a_native_crash_with_its_threads_stacks() -> None:
     assert "PYTHONFAULTHANDLER=1" in env.split()
 
 
-STOP_PROOF = "The worker, dispatcher and retention stop on SIGTERM (the owner's ruling V1)"
+STOP_PROOF = "The long-running services stop on SIGTERM (the owner's rulings V1, V2)"
 
 
-def _stop_proof(tmp_path: Path, exits: dict[str, int], stopped: set[str]) -> subprocess.CompletedProcess[str]:
+def _event(name: str) -> str:
+    """A service's stop line names it as its log events are named: `audit-anchor`'s is `audit_anchor_stopped`."""
+    return name.replace("-", "_")
+
+
+def _stop_proof(tmp_path: Path, exits: dict[str, int], stopped: set[str],
+                event: Callable[[str], str] = _event) -> subprocess.CompletedProcess[str]:  # fmt: skip
     """The CI step's script, run as GitHub runs it (`bash -eo pipefail`) against a stand-in `docker`: each service's
-    exit code, and its log's stop line where `stopped` names it."""
+    exit code, and its log's stop line (`event(name)_stopped`) where `stopped` names it."""
     run = {step.get("name", ""): step for step in yaml.safe_load(CI.read_text())["jobs"]["e2e"]["steps"]}[STOP_PROOF]
     docker = tmp_path / "docker"
     docker.write_text("\n".join([
         "#!/bin/bash",
         'case "$*" in',
-        "  'compose stop worker dispatcher retention') ;;",
+        f"  'compose stop {' '.join(SERVICES)}') ;;",
         "  'compose ps --all --quiet '*) echo \"id-${@: -1}\" ;;",
         *(f"  'inspect --format {{{{.State.ExitCode}}}} id-{name}') echo {code} ;;" for name, code in exits.items()),
-        *(f"  'compose logs --no-color {name}') echo '{name}-1  | {{\"event\": \"{name}_stopped\", \"level\": "
+        *(f"  'compose logs --no-color {name}') echo '{name}-1  | {{\"event\": \"{event(name)}_stopped\", \"level\": "
           f"\"info\"}}' ;;" for name in stopped),
         "  'compose logs --no-color '*) echo 'some-1  | {\"event\": \"stop_requested\"}' ;;",
         '  *) echo "unexpected: docker $*" >&2; exit 2 ;;',
@@ -373,23 +416,27 @@ def _stop_proof(tmp_path: Path, exits: dict[str, int], stopped: set[str]) -> sub
                           capture_output=True, text=True, timeout=30)  # fmt: skip
 
 
-SERVICES = ("worker", "dispatcher", "retention")
+SERVICES = ("worker", "dispatcher", "retention", "audit-anchor", "api")
+ALL_EXIT_0 = {name: 0 for name in SERVICES}
 
 
 @pytest.mark.parametrize(
-    ("exits", "stopped", "passes"),
+    ("exits", "stopped", "event", "passes"),
     [
-        ({name: 0 for name in SERVICES}, set(SERVICES), True),
-        ({**{name: 0 for name in SERVICES}, "worker": 137}, set(SERVICES), False),  # SIGKILLed at its grace
-        ({name: 0 for name in SERVICES}, {"worker", "retention"}, False),  # exit 0, but not its own stop
+        (ALL_EXIT_0, set(SERVICES), _event, True),
+        ({**ALL_EXIT_0, "worker": 137}, set(SERVICES), _event, False),  # SIGKILLed at its grace
+        (ALL_EXIT_0, {"worker", "retention", "audit-anchor", "api"}, _event, False),  # exit 0, but not its own stop
+        ({**ALL_EXIT_0, "audit-anchor": 1}, set(SERVICES) - {"audit-anchor"}, _event, False),  # an anchor run failed
+        (ALL_EXIT_0, set(SERVICES) - {"api"}, _event, False),  # the API's shutdown didn't run to its end
+        (ALL_EXIT_0, set(SERVICES), lambda name: name, False),  # `audit-anchor_stopped`: no process logs that
     ],
 )
 def test_cis_stop_proof_passes_only_when_each_service_stopped_itself(
-    tmp_path: Path, exits: dict[str, int], stopped: set[str], passes: bool
+    tmp_path: Path, exits: dict[str, int], stopped: set[str], event: Callable[[str], str], passes: bool
 ) -> None:
-    """Exit 0 is what only a stop of its own gives (Compose's SIGKILL is 137), with its `<service>_stopped` line: no
-    clock, so a slow runner can't fail it."""
-    proof = _stop_proof(tmp_path, exits, stopped)
+    """Exit 0 is what only a stop of its own gives (Compose's SIGKILL is 137, a failed anchor run's 1), with its
+    `<service>_stopped` line: no clock, so a slow runner can't fail it."""
+    proof = _stop_proof(tmp_path, exits, stopped, event)
     assert (proof.returncode == 0) is passes, proof.stderr
     assert "unexpected: docker" not in proof.stderr
 

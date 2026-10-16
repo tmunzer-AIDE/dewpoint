@@ -198,12 +198,16 @@ def _anchor_path() -> Path:
 
 
 @audit.command("anchor")
-def audit_anchor() -> None:
+def audit_anchor(
+    every: int | None = typer.Option(None, "--every", min=1, help="Run again every this many seconds, until stopped"),
+) -> None:
     """Write current chain heads to the external anchor sink (DEWPOINT_AUDIT_S3_BUCKET's, else the file). Run as a
-    dewpoint_auditor login, off the database host, e.g. every 15 min."""
-    sink = _sink()
+    dewpoint_auditor login, off the database host, e.g. every 15 min. With --every, it runs again every that many
+    seconds (Compose's audit-anchor): SIGTERM or SIGINT stops it once the run in hand ends, exit 0 (apps/stopping.py);
+    a run that fails ends it, exit 1 (2 for its settings), never retried."""
 
-    async def _run() -> int:
+    async def once() -> int:  # each run's sink and engine its own, as each one-shot's
+        sink = _sink()
         engine = make_engine(get_settings().database_url)
         try:
             async with make_sessionmaker(engine)() as s, s.begin():
@@ -211,7 +215,17 @@ def audit_anchor() -> None:
         finally:
             await engine.dispose()
 
-    typer.echo(f"anchored {asyncio.run(_run())} scope head(s)")
+    def anchored(count: int) -> None:
+        typer.echo(f"anchored {count} scope head(s)")
+
+    if every is None:
+        anchored(asyncio.run(once()))
+        return
+    from dewpoint.apps import audit_anchor as job
+
+    asyncio.run(stopping.stoppable(lambda requested: job.run(once, every=every, stop_requested=requested,
+                                                             anchored=anchored)))  # fmt: skip
+    stopping.leave(0)  # as the other long-running commands leave (apps/stopping.py)
 
 
 @audit.command("prune")
