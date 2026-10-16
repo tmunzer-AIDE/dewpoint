@@ -11,12 +11,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
 
-from sqlalchemy import delete, func, literal, null, or_, select, text, tuple_, union_all, update
+from sqlalchemy import and_, delete, func, literal, null, or_, select, text, tuple_, union_all, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dewpoint.core.models.identity import User
+from dewpoint.core.models.ingress import WebhookEndpoint
 from dewpoint.core.models.requests import RunRequest
 from dewpoint.core.models.runs import ExecutionEvidence, Run, RunStep
+from dewpoint.core.models.schedules import Schedule
+from dewpoint.core.models.workflows import Workflow
 from dewpoint.core.retention.cutoff import Cutoff, kept
 
 MESSAGE_LIMIT = 500
@@ -390,6 +394,31 @@ class Listed:
     request_status: str | None
     source: str | None
     reason: str | None
+    # Who and where from (editor 4e-1; the runs design §4.2): the workflow's name, the email of the person who asked,
+    # whether a cancel was requested, the run a re-run repeats, and the schedule (its timing) or webhook endpoint (its
+    # name) it came from, null when it was deleted or the request predates migration 0073.
+    workflow_name: str | None = None
+    started_by: str | None = None
+    cancel_requested_at: datetime | None = None
+    rerun_of: uuid.UUID | None = None
+    schedule_cron: str | None = None
+    schedule_every_s: int | None = None
+    schedule_offset_s: int | None = None
+    schedule_time_zone: str | None = None
+    endpoint_name: str | None = None
+
+
+# The list's status filter (the runs design §4.2): one value, over a run's status or an unstarted request's
+STATUSES: dict[str, tuple[str, ...]] = {
+    "waiting": ("queued", "starting"),
+    "running": ("running",),
+    "succeeded": ("succeeded",),
+    "failed": ("failed",),
+    "deadline_exceeded": ("deadline_exceeded",),
+    "cancelled": ("cancelled",),
+    "didnt_start": ("refused", "dead"),
+}
+DRAFTS = ("exclude", "only", "include")
 
 
 async def list_items(
@@ -397,18 +426,29 @@ async def list_items(
     *,
     kept_after: Cutoff,
     workflow_id: uuid.UUID | None = None,
+    status: str | None = None,
+    mode: str | None = None,
+    draft: str = "exclude",
+    source: str | None = None,
+    since: datetime | None = None,
     before: tuple[datetime, uuid.UUID] | None = None,
     limit: int = 50,
 ) -> list[Listed]:
     """Requests and runs together, newest first by `(queued_at, id)`; the next page starts after the last item of this
     one. A request's pre-created row is never shown until its request has started (§7.3): the request is. Nothing past
-    the retention cutoff `kept_after` is (§10.1): every run listed is a root, so its own end is its tree's."""
+    the retention cutoff `kept_after` is (§10.1): every run listed is a root, so its own end is its tree's.
+
+    Filtered (the runs design §4.2) by workflow, by `status` (a key of `STATUSES`), `mode`, draft simulations (`draft`:
+    left out, alone, or with the rest), `source`, and `since` (queued at or after). The page is read first, then
+    labelled: who asked, the workflow's name, the schedule or endpoint, in one join over the page."""
     runs = (
         select(
             Run.id, Run.workflow_id, Run.workflow_version_id.label("version_id"), Run.draft_snapshot_id,
             Run.target_step_id, Run.mode, Run.status, Run.queued_at,
             Run.started_at, Run.ended_at, Run.error_code, Run.error_message, Run.iterations, Run.kind,
             RunRequest.status.label("request_status"), RunRequest.source, RunRequest.reason,
+            func.coalesce(RunRequest.actor_id, Run.started_by).label("actor_id"), RunRequest.cancel_requested_at,
+            RunRequest.rerun_of, RunRequest.trigger_id,
         )
         .outerjoin(RunRequest, RunRequest.id == Run.id)
         .where(Run.parent_run_id.is_(None), or_(RunRequest.id.is_(None), RunRequest.status == "started"),
@@ -420,6 +460,7 @@ async def list_items(
         RunRequest.status, RunRequest.queued_at, null().label("started_at"), RunRequest.ended_at,
         null().label("error_code"), null().label("error_message"), literal(0).label("iterations"),
         literal("run").label("kind"), RunRequest.status.label("request_status"), RunRequest.source, RunRequest.reason,
+        RunRequest.actor_id, RunRequest.cancel_requested_at, RunRequest.rerun_of, RunRequest.trigger_id,
     ).where(RunRequest.status != "started", kept(RunRequest.ended_at, kept_after))  # fmt: skip
     if workflow_id is not None:
         runs, requests = (
@@ -430,7 +471,34 @@ async def list_items(
     q = select(both).order_by(both.c.queued_at.desc(), both.c.id.desc()).limit(limit)
     if before is not None:
         q = q.where(tuple_(both.c.queued_at, both.c.id) < tuple_(*before))
-    return [Listed(**row._mapping) for row in await s.execute(q)]
+    if status is not None:
+        q = q.where(both.c.status.in_(STATUSES[status]))
+    if mode is not None:
+        q = q.where(both.c.mode == mode)
+    if draft != "include":
+        q = q.where(both.c.draft_snapshot_id.is_(None) if draft == "exclude" else both.c.draft_snapshot_id.is_not(None))
+    if source is not None:
+        q = q.where(both.c.source == source)
+    if since is not None:
+        q = q.where(both.c.queued_at >= since)
+    page = q.subquery()
+    labelled = (
+        select(
+            *(c for c in page.c if c.name not in ("actor_id", "trigger_id")),
+            Workflow.name.label("workflow_name"), User.email.label("started_by"),
+            Schedule.cron.label("schedule_cron"), Schedule.every_s.label("schedule_every_s"),
+            Schedule.offset_s.label("schedule_offset_s"), Schedule.time_zone.label("schedule_time_zone"),
+            WebhookEndpoint.name.label("endpoint_name"),
+        )
+        .outerjoin(Workflow, Workflow.id == page.c.workflow_id)
+        .outerjoin(User, and_(User.id == page.c.actor_id,  # a person asked: by hand, a re-run, or a run before 2b-2
+                              or_(page.c.source.is_(None), page.c.source.in_(("manual", "rerun")))))
+        .outerjoin(Schedule, and_(page.c.source == "schedule", Schedule.id == page.c.trigger_id,
+                                  Schedule.deleted_at.is_(None)))
+        .outerjoin(WebhookEndpoint, and_(page.c.source == "webhook", WebhookEndpoint.id == page.c.trigger_id))
+        .order_by(page.c.queued_at.desc(), page.c.id.desc())
+    )  # fmt: skip
+    return [Listed(**row._mapping) for row in await s.execute(labelled)]
 
 
 async def children(s: AsyncSession, run_id: uuid.UUID) -> list[Run]:

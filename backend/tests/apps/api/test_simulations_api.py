@@ -143,7 +143,8 @@ async def test_the_runs_api_shows_a_draft_runs_snapshot_target_and_each_steps_ef
     request = (await simulate(api_sessionmaker, ctx, wf, api_settings, target=nid("b"),
                               values={"/steps/a/output/value": 5})).request  # fmt: skip
     viewer = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "viewer")
-    shown = {k: v for k, v in (await viewer.get(f"/api/v1/t/{ctx.tenant_id}/runs")).json()[0].items()
+    listed = await viewer.get(f"/api/v1/t/{ctx.tenant_id}/runs", params={"draft": "only"})  # left out by default
+    shown = {k: v for k, v in listed.json()[0].items()
              if k in ("id", "version_id", "draft_snapshot_id", "target_step_id")}  # fmt: skip
     assert shown == {"id": str(request.id), "version_id": None, "draft_snapshot_id": str(request.draft_snapshot_id),
                      "target_step_id": str(nid("b"))}  # fmt: skip

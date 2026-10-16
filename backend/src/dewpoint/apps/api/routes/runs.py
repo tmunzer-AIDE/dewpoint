@@ -6,10 +6,12 @@ A request that hasn't started is shown as its request, never as the row an attem
 
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dewpoint.apps.api.responses import RunItemOut
 from dewpoint.apps.api.routes.run_requests import get_keys, key_unusable
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.claims import service as claims
@@ -22,6 +24,8 @@ from dewpoint.core.retention import cutoff as retention
 from dewpoint.core.runs import service
 
 router = APIRouter(prefix="/api/v1", tags=["runs"])
+# The list's status filter (the runs design §4.2): `waiting` is queued or starting; `didnt_start`, refused or dead
+ListedStatus = Literal["waiting", "running", "succeeded", "failed", "deadline_exceeded", "cancelled", "didnt_start"]
 
 
 def _when(value: datetime | None) -> str | None:
@@ -53,7 +57,22 @@ def _item(i: service.Listed) -> dict[str, object]:
         "kind": i.kind,
         "parent_run_id": None,
         "request": {"status": i.request_status, "source": i.source, "reason": i.reason} if i.request_status else None,
+        "workflow_name": i.workflow_name,
+        "started_by": i.started_by,
+        "cancel_requested_at": _when(i.cancel_requested_at),
+        "trigger": _trigger(i),
     }
+
+
+def _trigger(i: service.Listed) -> dict[str, object] | None:
+    """Where the request came from (the runs design §4.2): null for a run from before 2b-2, which had no request."""
+    if i.source is None:
+        return None
+    timing = None
+    if i.schedule_time_zone is not None:  # the schedule, as it is now; a deleted one's left out
+        timing = {"cron": i.schedule_cron, "every_s": i.schedule_every_s, "offset_s": i.schedule_offset_s,
+                  "time_zone": i.schedule_time_zone}  # fmt: skip
+    return {"source": i.source, "schedule": timing, "endpoint": i.endpoint_name, "rerun_of": _id(i.rerun_of)}
 
 
 def _unstarted(r: RunRequest) -> dict[str, object]:
@@ -122,9 +141,14 @@ def _step(r: RunStep) -> dict[str, object]:
     }
 
 
-@router.get("/t/{tenant_id}/runs")
+@router.get("/t/{tenant_id}/runs", response_model=list[RunItemOut])
 async def list_runs(
     workflow_id: uuid.UUID | None = None,
+    status: ListedStatus | None = None,
+    mode: Literal["live", "simulate"] | None = None,
+    draft: Literal["exclude", "only", "include"] = "exclude",
+    source: Literal["manual", "rerun", "schedule", "webhook", "dev"] | None = None,
+    since: datetime | None = None,
     before: datetime | None = None,
     before_id: uuid.UUID | None = None,
     limit: int = Query(50, ge=1, le=200),
@@ -133,12 +157,14 @@ async def list_runs(
 ) -> list[dict[str, object]]:
     """Requests and runs, newest first by `(queued_at, id)`. The next page: `before` and `before_id`, the last item's
     `queued_at` and `id`, always together: items can be queued in the same instant, so the time alone would skip
-    some."""
+    some. Filtered (the runs design §4.2) by workflow, status (`waiting`: queued or starting; `didnt_start`: refused
+    or dead), mode, draft simulations (left out unless `draft` is `only` or `include`), source, and `since`."""
     if (before is None) != (before_id is None):
         raise HTTPException(422, detail={"error": "invalid_cursor", "message": "Give before and before_id together."})
     cursor = (before, before_id) if before is not None and before_id is not None else None
     at = await retention.cutoff(db, ctx.tenant_id)
-    items = await service.list_items(db, kept_after=at, workflow_id=workflow_id, before=cursor, limit=limit)
+    items = await service.list_items(db, kept_after=at, workflow_id=workflow_id, status=status, mode=mode,
+                                     draft=draft, source=source, since=since, before=cursor, limit=limit)  # fmt: skip
     return [_item(i) for i in items]
 
 

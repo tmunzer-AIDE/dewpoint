@@ -740,3 +740,67 @@ class SeedContractOut(_Answer):
     step_id: str
     refused: str | None
     entries: list[SeedEntryOut]
+
+
+RunStatus = Literal[
+    "queued", "starting", "running", "succeeded", "failed", "cancelled", "deadline_exceeded", "refused", "dead"
+]
+Source = Literal["manual", "rerun", "schedule", "webhook", "dev"]
+
+
+class RunErrorOut(_Answer):
+    code: str
+    message: str | None
+
+
+class RunRequestStateOut(_Answer):
+    """A run's request where it is (engine 2b spec §7.3): started, or why it isn't."""
+
+    status: Literal["queued", "starting", "started", "cancelled", "refused", "dead"]
+    source: Source
+    reason: str | None
+
+
+class ScheduleTimingOut(_Answer):
+    """A schedule's timing as it is now, which the UI words as the Triggers panel does (4c-3b)."""
+
+    cron: str | None
+    every_s: int | None
+    offset_s: int
+    time_zone: str
+
+
+class RunTriggerOut(_Answer):
+    """Where a run's request came from (editor 4e-1; the runs design §4.2): its source, and the schedule or webhook
+    endpoint, or the run a re-run repeats. Null where the request predates migration 0073, or the schedule or endpoint
+    was deleted."""
+
+    source: Source
+    schedule: ScheduleTimingOut | None
+    endpoint: str | None  # the webhook endpoint's name
+    rerun_of: str | None
+
+
+class RunItemOut(_Answer):
+    """An item of the runs list (engine 2b spec §7.7; editor 4e-1, B10): a top-level run, or a request that hasn't
+    started, as its request. `status` is the run's once its request started, else the request's."""
+
+    id: str
+    workflow_id: str
+    workflow_name: str | None
+    version_id: str | None
+    draft_snapshot_id: str | None  # a draft simulation's (B8): no version
+    target_step_id: str | None
+    mode: Literal["live", "simulate"]
+    status: RunStatus
+    queued_at: str | None
+    started_at: str | None
+    ended_at: str | None
+    error: RunErrorOut | None
+    iterations: int
+    kind: str
+    parent_run_id: str | None
+    request: RunRequestStateOut | None  # null for a run from before 2b-2, which had no request
+    started_by: str | None  # the email of the person who asked: by hand, or a re-run
+    cancel_requested_at: str | None
+    trigger: RunTriggerOut | None
