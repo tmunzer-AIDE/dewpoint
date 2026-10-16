@@ -3177,3 +3177,18 @@ each task's tests failed, then passed, as its steps say; after each, ruff, `ruff
   machine's load stood at 98 (another session's suite). Run again with 2 workers, it passed whole.
 
 Mid-slice rulings: M103 only. Nothing pushed.
+
+### 4e-1a, milestone 2 (2026-10-16)
+
+The owner, in chat: "Milestone 1 accepted, continue". Tasks 4–6, every diff applied as the plan's text has it; each
+task's tests failed, then passed, as its steps say; after each, ruff, `ruff format --check` and mypy were silent.
+- Task 4, 42835e02: a run's steps for every run (the summary with a live run's origins and `not_recorded`, paged
+  instances naming their sub-runs, one instance's attempts). Red: 19 failed, 23 passed (`origin()` took no `live` or
+  `recorded`, no `OUTCOMES_ABI`, the three routes 404); green: 42 passed.
+- Task 5, 17fcbb24: a run as itself, bounded (labels, `draft_revision`, `outcomes_recorded`, `parent`, a typed CSV
+  record; no `steps` or `children`), cancel typed. Red: 6 failed, 46 passed (the new fields missing, `steps` still
+  there); green: 52 passed.
+- Task 6, f0da00f1: a run's input read back, redacted (`read_back` moved to `runs.py`). Red: 6 failed, 28 passed
+  (`/input` 404); green: 34 passed.
+
+Mid-slice rulings: none in this milestone. Nothing pushed.
