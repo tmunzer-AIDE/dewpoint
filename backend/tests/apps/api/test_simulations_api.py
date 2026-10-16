@@ -160,7 +160,8 @@ async def test_the_runs_api_shows_a_draft_runs_snapshot_target_and_each_steps_ef
     assert (run["version_id"], run["draft_snapshot_id"], run["target_step_id"]) == (
         None, str(request.draft_snapshot_id), str(nid("b")),
     )  # fmt: skip
-    assert [(step["key"], step["effect"]) for step in run["steps"]] == [("b", {"port": "true"})]
+    summary = (await viewer.get(f"/api/v1/t/{ctx.tenant_id}/runs/{request.id}/steps")).json()
+    assert [(step["key"], step["final"]["effect"]) for step in summary["steps"]] == [("b", {"port": "true"})]
 
 
 async def test_a_draft_snapshot_is_read_with_its_graph(

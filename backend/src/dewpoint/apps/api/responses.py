@@ -865,3 +865,70 @@ class RunAttemptsOut(_Answer):
     """One step instance's attempts, first to last."""
 
     items: list[RunStepOut]
+
+
+class CsvSkippedOut(_Answer):
+    row: int  # the record's number: 1 is the first after the header
+    code: str  # the first rule it broke
+
+
+class CsvErrorOut(_Answer):
+    row: int
+    column: str | None  # the declared column's name; null for the record as a whole
+    code: str
+
+
+class CsvRecordOut(_Answer):
+    """A CSV start's file as admission read it (engine 2b spec §8.1): the mapping from declared columns to its headers,
+    the rows run, every skipped row, and the first errors in detail with their count."""
+
+    mapping: dict[str, str]
+    headers: list[str]
+    row_count: int
+    skipped: list[CsvSkippedOut]
+    errors: list[CsvErrorOut]
+    error_count: int
+
+
+class RunParentOut(_Answer):
+    """The run a sub-run's step started it from (its sub-flow or failure handler)."""
+
+    run_id: str
+    step_id: str | None
+    iteration_key: str | None
+
+
+class RunOut(RunItemOut):
+    """A run, or a request that hasn't started, as itself (editor 4e-1; the runs design §4.3, §4.5): the list item's
+    facts, the draft revision a draft simulation ran, whether every step instance's end is recorded (its graph's engine
+    ABI is B4b's or later), the run that started a sub-run, and a CSV start's file. Its steps are read apart, summarized
+    and paged (§4.4)."""
+
+    draft_revision: int | None
+    outcomes_recorded: bool
+    parent: RunParentOut | None
+    csv: CsvRecordOut | None
+
+
+class RequestOut(_Answer):
+    """A run's request as the API shows it (engine 2b spec §7.2): its state and its frozen version, never its input."""
+
+    id: str
+    workflow_id: str
+    version_id: str | None
+    draft_snapshot_id: str | None
+    target_step_id: str | None
+    mode: Literal["live", "simulate"]
+    source: Source
+    status: Literal["queued", "starting", "started", "cancelled", "refused", "dead"]
+    reason: str | None
+    queued_at: str | None
+    ended_at: str | None
+
+
+class CancelOut(_Answer):
+    """A cancel (engine 2b spec §7.4): `cancelled` (200), the request hadn't started; `requested` (202), recorded for
+    the dispatcher to apply."""
+
+    cancel: Literal["cancelled", "requested"]
+    request: RequestOut

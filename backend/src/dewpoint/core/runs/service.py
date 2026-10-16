@@ -516,6 +516,42 @@ async def run_steps(s: AsyncSession, run_id: uuid.UUID) -> list[RunStep]:
     return list((await s.execute(q)).scalars())
 
 
+@dataclass(frozen=True)
+class Labels:
+    """What a run's page names besides the run (the runs design §4.3), as the list labels its items."""
+
+    workflow_name: str | None
+    started_by: str | None
+    schedule_cron: str | None
+    schedule_every_s: int | None
+    schedule_offset_s: int | None
+    schedule_time_zone: str | None
+    endpoint_name: str | None
+
+
+async def labels(
+    s: AsyncSession, *, workflow_id: uuid.UUID, actor_id: uuid.UUID | None, source: str | None,
+    trigger_id: uuid.UUID | None,
+) -> Labels:  # fmt: skip
+    """The workflow's name; the email of the person who asked, by hand or for a re-run (or before 2b-2, no source); the
+    schedule's timing, or the webhook endpoint's name, when it's still there."""
+    asked = actor_id if source in (None, "manual", "rerun") else None
+    q = select(
+        select(Workflow.name).where(Workflow.id == workflow_id).scalar_subquery(),
+        select(User.email).where(User.id == asked).scalar_subquery(),
+    )
+    workflow_name, started_by = (await s.execute(q)).one()
+    cron = every_s = offset_s = time_zone = endpoint_name = None
+    if source == "schedule" and trigger_id is not None:
+        found = await s.execute(select(Schedule.cron, Schedule.every_s, Schedule.offset_s, Schedule.time_zone)
+                                .where(Schedule.id == trigger_id, Schedule.deleted_at.is_(None)))  # fmt: skip
+        if (timing := found.one_or_none()) is not None:
+            cron, every_s, offset_s, time_zone = timing
+    if source == "webhook" and trigger_id is not None:
+        endpoint_name = (await s.execute(select(WebhookEndpoint.name).where(WebhookEndpoint.id == trigger_id))).scalar()
+    return Labels(workflow_name, started_by, cron, every_s, offset_s, time_zone, endpoint_name)
+
+
 async def graph_of(
     s: AsyncSession, version_id: uuid.UUID | None, snapshot_id: uuid.UUID | None
 ) -> tuple[dict[str, Any] | None, int | None]:

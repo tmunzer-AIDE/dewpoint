@@ -92,8 +92,8 @@ async def test_a_run_a_sub_run_or_a_request_past_its_cutoff_isnt_found(aged, key
     viewer = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "viewer")
     answer = await viewer.get(url(ctx, f"/runs/{aged[name]}"))
     assert answer.status_code == (200 if found else 404), answer.text
-    if name == "recent_run":  # its sub-runs come with it
-        assert [c["id"] for c in answer.json()["children"]] == [str(aged["recent_sub"])]
+    if name == "recent_sub":  # it names the run it was started from
+        assert answer.json()["parent"]["run_id"] == str(aged["recent_run"])
 
 
 async def test_a_tenants_retention_applies_to_reads_at_once(aged, keyed_app, owner_sessionmaker,

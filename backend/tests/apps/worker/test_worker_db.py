@@ -68,8 +68,7 @@ async def test_a_run_is_projected_and_readable_through_the_api(
     viewer, _ = await member_client(app, owner_sessionmaker, api_settings, ctx.tenant_id, "viewer")
     listed = (await viewer.get(f"/api/v1/t/{ctx.tenant_id}/runs")).json()
     assert [(r["id"], r["status"], r["iterations"]) for r in listed] == [(str(run_id), "succeeded", 2)]
-    detail = (await viewer.get(f"/api/v1/t/{ctx.tenant_id}/runs/{run_id}")).json()
-    steps = {(s["key"], s["iteration_key"]): s for s in detail["steps"]}
+    steps = await instances(viewer, ctx.tenant_id, run_id)
     assert steps[("a", "")]["output"] == {"value": 2} and steps[("a", "")]["cel_mode"] == "local"
     assert steps[("a", "")]["outcome"] == "applied"
     assert {k for k in steps if k[0] == "x"} == {("x", "l:0"), ("x", "l:1")}
@@ -85,6 +84,17 @@ async def test_a_run_is_projected_and_readable_through_the_api(
     assert (await stranger.get(f"/api/v1/t/{other.tenant_id}/runs")).json() == []
     assert (await stranger.get(f"/api/v1/t/{other.tenant_id}/runs/{run_id}")).status_code == 404
     assert (await viewer.get(f"/api/v1/t/{ctx.tenant_id}/runs/{uuid.uuid4()}")).status_code == 404
+
+
+async def instances(client: Any, tenant_id: uuid.UUID, run_id: Any) -> dict[tuple[str, str], dict[str, Any]]:
+    """A run's step instances, each its final attempt, by key and iteration, as a run's page reads them (the runs
+    design §4.4): the summary, then each step's instances."""
+    base = f"/api/v1/t/{tenant_id}/runs/{run_id}/steps"
+    found: dict[tuple[str, str], dict[str, Any]] = {}
+    for step in (await client.get(base)).json()["steps"]:
+        for item in (await client.get(f"{base}/{step['step_id']}/instances", params={"limit": 100})).json()["items"]:
+            found[(item["key"], item["iteration_key"])] = item
+    return found
 
 
 async def test_a_row_the_database_refuses_never_holds_up_the_others_or_the_run(
@@ -215,18 +225,16 @@ async def test_a_sub_flow_is_projected_as_a_run_of_its_own(
     viewer, _ = await member_client(app, owner_sessionmaker, api_settings, ctx.tenant_id, "viewer")
     listed = (await viewer.get(f"/api/v1/t/{ctx.tenant_id}/runs")).json()
     assert [r["id"] for r in listed] == [str(run_id)]  # the sub-run isn't listed on its own
-    detail = (await viewer.get(f"/api/v1/t/{ctx.tenant_id}/runs/{run_id}")).json()
-    [child] = detail["children"]
     step = next(n["id"] for n in g.nodes if n["key"] == "r")
-    assert (child["kind"], child["parent_run_id"], child["parent_step_id"], child["status"]) == (
+    [started] = (await viewer.get(f"/api/v1/t/{ctx.tenant_id}/runs/{run_id}/steps/{step}/instances")).json()["items"]
+    child = (await viewer.get(f"/api/v1/t/{ctx.tenant_id}/runs/{started['child_run_id']}")).json()
+    assert (child["kind"], child["parent"], child["status"]) == (
         "subflow",
-        str(run_id),
-        step,
+        {"run_id": str(run_id), "step_id": step, "iteration_key": ""},
         "succeeded",
     )
     assert child["workflow_id"] == str(sub_id)
-    sub_detail = (await viewer.get(f"/api/v1/t/{ctx.tenant_id}/runs/{child['id']}")).json()
-    assert [s["key"] for s in sub_detail["steps"]] == ["t"] and sub_detail["parent_run_id"] == str(run_id)
+    assert list(await instances(viewer, ctx.tenant_id, child["id"])) == [("t", "")]
 
 
 async def test_the_worker_loads_a_versions_pinned_cap_and_depth(

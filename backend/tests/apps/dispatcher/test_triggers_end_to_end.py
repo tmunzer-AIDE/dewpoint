@@ -165,9 +165,11 @@ async def test_a_csv_start_and_a_schedules_tick_end_to_end_with_the_keyrings_rea
     rows = await plain_rows(owner_sessionmaker)
     assert not [c for c in CANARIES if c in rows]
     assert not [c for c in CANARIES for entry in logs if c in str(entry)]
-    for run in (csv_run, tick_run):
-        steps = (await editor.get(f"{base}/runs/{run['id']}")).json()["steps"]
-        assert steps and not [c for c in (CELL, FIXED) if c in str(steps)]
+    for run in (csv_run, tick_run):  # every step's instances, as a run's page reads them (the runs design §4.4)
+        steps = (await editor.get(f"{base}/runs/{run['id']}/steps")).json()["steps"]
+        seen = [(await editor.get(f"{base}/runs/{run['id']}/steps/{s['step_id']}/instances",
+                                  params={"limit": 100})).json()["items"] for s in steps]  # fmt: skip
+        assert steps and any(seen) and not [c for c in (CELL, FIXED) if c in str(seen)]
 
 
 async def decrypted_input(dispatch: Any, keys: Any, tenant_id: uuid.UUID, request_id: str) -> Any:

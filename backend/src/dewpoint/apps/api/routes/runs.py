@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Runs, read-only (spec §8; engine 2b spec §7.7): requests and top-level runs listed together, and one with its steps
-and the sub-runs it started (its sub-flows and failure handler). The UI reads this projection, never Temporal history.
+"""Runs, read-only (spec §8; engine 2b spec §7.7; editor 4e-1): requests and top-level runs listed together, filtered,
+and one as itself, its steps read apart (summarized and paged). The UI reads this projection, never Temporal history.
 A request that hasn't started is shown as its request, never as the row an attempt pre-created. Starting a run is
 `run_requests`'s."""
 
@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps import step_summary
-from dewpoint.apps.api.responses import RunAttemptsOut, RunInstancesOut, RunItemOut, RunStepsOut
+from dewpoint.apps.api.responses import RunAttemptsOut, RunInstancesOut, RunItemOut, RunOut, RunStepsOut
 from dewpoint.apps.api.routes.run_requests import get_keys, key_unusable
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.claims import service as claims
@@ -61,19 +61,21 @@ def _item(i: service.Listed) -> dict[str, object]:
         "workflow_name": i.workflow_name,
         "started_by": i.started_by,
         "cancel_requested_at": _when(i.cancel_requested_at),
-        "trigger": _trigger(i),
+        "trigger": _trigger(i.source, i.rerun_of, i),
     }
 
 
-def _trigger(i: service.Listed) -> dict[str, object] | None:
+def _trigger(
+    source: str | None, rerun_of: uuid.UUID | None, named: service.Listed | service.Labels
+) -> dict[str, object] | None:
     """Where the request came from (the runs design §4.2): null for a run from before 2b-2, which had no request."""
-    if i.source is None:
+    if source is None:
         return None
     timing = None
-    if i.schedule_time_zone is not None:  # the schedule, as it is now; a deleted one's left out
-        timing = {"cron": i.schedule_cron, "every_s": i.schedule_every_s, "offset_s": i.schedule_offset_s,
-                  "time_zone": i.schedule_time_zone}  # fmt: skip
-    return {"source": i.source, "schedule": timing, "endpoint": i.endpoint_name, "rerun_of": _id(i.rerun_of)}
+    if named.schedule_time_zone is not None:  # the schedule, as it is now; a deleted one's left out
+        timing = {"cron": named.schedule_cron, "every_s": named.schedule_every_s, "offset_s": named.schedule_offset_s,
+                  "time_zone": named.schedule_time_zone}  # fmt: skip
+    return {"source": source, "schedule": timing, "endpoint": named.endpoint_name, "rerun_of": _id(rerun_of)}
 
 
 def _unstarted(r: RunRequest) -> dict[str, object]:
@@ -113,14 +115,6 @@ def _run(r: Run) -> dict[str, object]:
         "iterations": r.iterations,
         "kind": r.kind,
         "parent_run_id": str(r.parent_run_id) if r.parent_run_id else None,
-    }
-
-
-def _child(r: Run) -> dict[str, object]:
-    return {
-        **_run(r),
-        "parent_step_id": str(r.parent_step_id) if r.parent_step_id else None,
-        "parent_iteration_key": r.parent_iteration_key,
     }
 
 
@@ -171,16 +165,17 @@ async def list_runs(
     return [_item(i) for i in items]
 
 
-@router.get("/t/{tenant_id}/runs/{run_id}")
+@router.get("/t/{tenant_id}/runs/{run_id}", response_model=RunOut)
 async def get_run(
     run_id: uuid.UUID,
     ctx: TenantContext = Depends(require(P.RUN_VIEW)),
     db: AsyncSession = Depends(get_db, scope="function"),
     keys: KeySource = Depends(get_keys),
 ) -> dict[str, object]:
-    """A run with its steps and sub-runs, or a request that hasn't started as itself; with its CSV record (engine 2b
-    spec §8.1), when it took a CSV: the mapping, the file's headers, the row count and the skipped rows. A run whose
-    tree, or a request that, passed the retention cutoff isn't found (§10.1)."""
+    """A run, or a request that hasn't started as itself (the runs design §4.3): what the list says of it, the draft
+    revision a draft simulation ran, whether its graph records every step instance's end, the run a sub-run's step
+    started it from, and its CSV record (engine 2b spec §8.1) when it took a CSV. Its steps are read apart (§4.4). A run
+    whose tree, or a request that, passed the retention cutoff isn't found (§10.1)."""
     at = await retention.cutoff(db, ctx.tenant_id)
     request = await db.get(RunRequest, run_id)  # row-level security: the caller's tenant's only
     if request is not None and not await retention.request_kept(db, at, request):
@@ -191,16 +186,32 @@ async def get_run(
             csv = await claims.read_csv_record(db, ClaimCipher(keys), ctx.tenant_id, request_id=request.id)
         except Exception as e:
             raise key_unusable(e) from None
+    parent = None
+    of: Run | RunRequest
     if request is not None and request.status != "started":
-        return {**_unstarted(request), "steps": [], "children": [], "csv": csv}
-    run = await service.get_run(db, run_id)
-    if run is None or run.tenant_id != ctx.tenant_id or not await retention.run_kept(db, at, run):
-        raise HTTPException(404, detail={"error": "not_found"})
+        base, of, actor = _unstarted(request), request, request.actor_id
+    else:
+        run = await service.get_run(db, run_id)
+        if run is None or run.tenant_id != ctx.tenant_id or not await retention.run_kept(db, at, run):
+            raise HTTPException(404, detail={"error": "not_found"})
+        base, of = {**_run(run), "request": _request(request)}, run
+        actor = run.started_by if request is None else request.actor_id  # before 2b-2, a run had no request
+        if run.parent_run_id is not None:
+            parent = {"run_id": str(run.parent_run_id), "step_id": _id(run.parent_step_id),
+                      "iteration_key": run.parent_iteration_key}  # fmt: skip
+    source = request.source if request is not None else None
+    named = await service.labels(db, workflow_id=of.workflow_id, actor_id=actor, source=source,
+                                 trigger_id=request.trigger_id if request is not None else None)  # fmt: skip
+    _, abi = await service.graph_of(db, of.workflow_version_id, of.draft_snapshot_id)
     return {
-        **_run(run),
-        "request": _request(request),
-        "steps": [_step(r) for r in await service.run_steps(db, run.id)],
-        "children": [_child(c) for c in await service.children(db, run.id)],
+        **base,
+        "workflow_name": named.workflow_name,
+        "started_by": named.started_by,
+        "cancel_requested_at": _when(request.cancel_requested_at) if request is not None else None,
+        "trigger": _trigger(source, request.rerun_of if request is not None else None, named),
+        "draft_revision": request.draft_revision if request is not None else None,
+        "outcomes_recorded": abi is None or abi >= step_summary.OUTCOMES_ABI,
+        "parent": parent,
         "csv": csv,
     }
 
