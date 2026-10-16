@@ -47,6 +47,10 @@ signs each scope's newest entry with `DEWPOINT_AUDIT_SIGNING_KEY_B64` (an Ed2551
 between the write and the database's record of it is refused as already there, so no second version appears. The
 signing key and the put-only credentials live on that host and nowhere else.
 
+`dewpoint audit anchor --every 900` runs it again every 900 seconds in one process (Compose's `audit-anchor`): SIGTERM
+or SIGINT stops it once the run in hand ends (exit 0), and a run that fails ends it (exit 1), never retried, so a job
+that stopped anchoring can't look alive.
+
 ## Verifying
 
 ```bash

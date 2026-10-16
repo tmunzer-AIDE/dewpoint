@@ -461,8 +461,8 @@ operators: two workers, two API processes, a dispatcher, an ingress process and 
 ## Docker Compose (evaluation)
 
 Compose runs Temporal's dev server (the `temporal` service: its state in SQLite on the `temporal-data` volume, its Web
-UI at <http://127.0.0.1:8233>), one `worker` and one `dispatcher`, which Compose restarts unless it's stopped.
-Production uses a Temporal cluster instead.
+UI at <http://127.0.0.1:8233>), one `worker` and one `dispatcher`, which Compose restarts unless it's stopped, as it
+does the API, retention and ingress. Production uses a Temporal cluster instead.
 
 The dispatcher also runs schedules' ticks: its own Temporal worker, on the task queue `dewpoint-admission`, outside the
 engine's Worker Deployment and unversioned, admits each firing as the dispatch login; its leader keeps the Temporal
@@ -471,8 +471,8 @@ data, which the shipped image holds (CI schedules a run in `Europe/Paris` throug
 Dewpoint schedule in Temporal's UI: the dispatcher only tells its own updates apart, by the `dewpoint generation <n>`
 note it writes.
 
-**Stopping.** `docker compose stop`, `restart` and a recreate by `up` send SIGTERM, and the worker, the dispatcher and
-retention each stop at their own safe point, then exit 0:
+**Stopping.** `docker compose stop`, `restart` and a recreate by `up` send SIGTERM, and the worker, the dispatcher,
+retention, the anchor job and the API each stop at their own safe point, then exit 0:
 
 - the worker stops polling, lets running attempts and evaluations finish within `DEWPOINT_WORKER_SHUTDOWN_GRACE_S`
   and plugin calls in flight within their 10 seconds; Compose waits 45 seconds;
@@ -480,9 +480,12 @@ retention each stop at their own safe point, then exit 0:
   and hands its lead over; Compose waits 15 seconds, which a healthy cycle never comes near, and cuts a cycle that
   Temporal's slowness stretched past them: its items are resumed or settled by the next dispatcher, as after a crash;
 - retention ends the step in hand; Compose waits 10 seconds, and a sweep or an erasure pass still running then is
-  cut, and resumes when it starts again.
+  cut, and resumes when it starts again;
+- the anchor job (`audit-anchor`) ends the anchor run in hand; Compose waits 10 seconds, and a run cut then is written
+  again by the next start, never twice to S3;
+- the API finishes the requests in flight, uvicorn's own stop.
 
-Each leaves without the interpreter's own shutdown, where temporalio's bridge can crash. A second SIGTERM or SIGINT
+All but the API leave without the interpreter's own shutdown, where temporalio's bridge can crash. A second SIGTERM or SIGINT
 ends a process at once (exit 143 or 130). In `docker compose ps -a`, exit 0 is a process that stopped itself; 137 is
 Compose's SIGKILL at the end of its wait. A native crash prints each thread's stack (`PYTHONFAULTHANDLER`, set in the
 image) to the service's log.

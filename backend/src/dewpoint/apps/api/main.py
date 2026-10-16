@@ -2,6 +2,7 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import structlog
 from fastapi import FastAPI
 
 from dewpoint.apps.api.errors import install_error_handlers
@@ -18,6 +19,8 @@ from dewpoint.core.crypto.keys import KeyringKeys
 from dewpoint.core.db import make_engine, make_sessionmaker
 from dewpoint.engine.graph.csv import MAX_BYTES as CSV_MAX_BYTES
 
+log = structlog.get_logger("dewpoint.api")
+
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     logs.configure()  # uvicorn's factory: the API's process starts here
@@ -27,6 +30,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
         await app.state.engine.dispose()
+        log.info("api_stopped")  # its shutdown ran to its end: Compose's stop proof reads it (ci.yml)
 
     app = FastAPI(title=TITLE, docs_url=None, redoc_url=None, openapi_url=OPENAPI_URL, lifespan=lifespan)
     app.state.settings = settings
