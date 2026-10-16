@@ -4,16 +4,22 @@
 // said so), what started it, when, how long it ran and its error. A request that never started gives its reason's code
 // and words. Below 640 px the rows become a list, each run's facts on its lines (§5.6; the Narrow boards). Its filters
 // live in its address (§5.1); an empty list says what was asked, never that no run ever ran when the window hides them.
-import { useQuery } from "@tanstack/react-query";
+// The first page is read again every 5 s while the page is visible; older pages, loaded on, aren't; each run is listed
+// once (`listed`). A refresh that fails keeps the list and says since when; a change is said once, through the shell's
+// live region (§5.6).
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "../../components/Button";
 import { ModeChip, RunStatusChip } from "../../components/RunChips";
 import { Table, Td, Th } from "../../components/Table";
 import { When } from "../../components/When";
+import { announce } from "../../lib/announce";
 import { useNarrow } from "../../lib/media";
-import { isEnded, runsQuery, searchOf, type RunFilters, type RunItem } from "../../lib/runs";
+import { PAGE, cursorOf, isEnded, listed, runsQuery, searchOf, type RunFilters, type RunItem } from "../../lib/runs";
 import { duration, reasonWords, runId } from "../../lib/runStatus";
 import { useDocumentTitle } from "../../lib/title";
+import { timeOf } from "../../lib/when";
 import { Filters } from "./Filters";
 import { triggerOf } from "./trigger";
 
@@ -24,6 +30,11 @@ const WINDOW: Record<NonNullable<RunFilters["started"]>, string> = {
   "30d": "in the last 30 days",
   all: "",
 };
+
+const EVERY = 5000; // the first page is read again this often (§5.2)
+
+/** Every run read so far, the latest read of each: the first page's reads and the older pages'. */
+const remember = (seen: Map<string, RunItem>, runs: RunItem[]) => new Map([...seen, ...runs.map((r): [string, RunItem] => [r.id, r])]);
 
 /** When it started, else when it was queued. */
 const startOf = (r: RunItem) => r.started_at ?? r.queued_at;
@@ -147,17 +158,57 @@ function Empty({ filters, onChange }: { filters: RunFilters; onChange: (next: Ru
 export function RunsPage({ tenantId, filters }: { tenantId: string; filters: RunFilters }) {
   useDocumentTitle("Runs");
   const navigate = useNavigate();
-  const first = useQuery(runsQuery(tenantId, filters));
+  const qc = useQueryClient();
+  const first = useQuery({ ...runsQuery(tenantId, filters), refetchInterval: EVERY });
   const narrow = useNarrow();
-  const runs = first.data ?? [];
+  // What was read under these filters: begun again when they change (React's "adjusting state when a prop changes").
+  const asked = JSON.stringify(searchOf(filters));
+  const [read, setRead] = useState({ asked, seen: new Map<string, RunItem>(), older: "idle" as "idle" | "reading" | "failed" | "end" });
+  if (read.asked !== asked) setRead({ asked, seen: new Map(), older: "idle" });
+  useEffect(() => {
+    if (first.data) setRead((r) => ({ ...r, seen: remember(r.seen, first.data) }));
+  }, [first.data]);
+  // A change is said once: an answer equal to the last keeps its reference (structural sharing), so says nothing.
+  const said = useRef(first.data);
+  useEffect(() => {
+    if (said.current !== undefined && first.data !== said.current) announce("Updated");
+    said.current = first.data;
+  }, [first.data]);
+  useEffect(() => {
+    if (first.isRefetchError) announce("The runs couldn't be refreshed.");
+  }, [first.isRefetchError]);
+  const runs = first.data ? listed(first.data, [...read.seen.values()]) : [];
+  const cursor = cursorOf(runs);
+  const more = first.data?.length === PAGE && read.older !== "end" && cursor !== null;
+  async function loadMore() {
+    if (cursor === null) return;
+    setRead((r) => ({ ...r, older: "reading" }));
+    try {
+      const page = await qc.query(runsQuery(tenantId, filters, cursor)); // read once: an older page isn't read again
+      setRead((r) => (r.asked === asked ? { ...r, seen: remember(r.seen, page), older: page.length < PAGE ? "end" : "idle" } : r));
+    } catch {
+      setRead((r) => (r.asked === asked ? { ...r, older: "failed" } : r));
+    }
+  }
   const setFilters = (next: RunFilters) => void navigate({ to: "/t/$tenantId/runs", params: { tenantId }, search: searchOf(next) });
+  const started = filters.started ?? "24h";
   return (
     <section className="flex flex-col gap-4 p-6">
-      <h1 className="text-h1 font-semibold">Runs</h1>
+      <div className="flex flex-wrap items-baseline justify-between gap-3">
+        <h1 className="text-h1 font-semibold">Runs</h1>
+        {first.isRefetchError ? (
+          <p className="flex flex-wrap items-center gap-2 text-small text-muted">
+            {`Couldn't be refreshed · as of ${timeOf(first.dataUpdatedAt)}`}
+            <Button size="sm" onClick={() => void first.refetch()}>Try again</Button>
+          </p>
+        ) : (
+          <p className="text-small text-muted">Updates every 5 s</p>
+        )}
+      </div>
       <Filters tenantId={tenantId} filters={filters} onChange={setFilters} />
       {first.isPending ? (
         <p role="status" className="text-body text-muted">Reading the runs…</p>
-      ) : first.isError ? (
+      ) : first.isLoadingError ? (
         <p className="flex flex-wrap items-center gap-3">
           <span role="alert" className="text-body text-danger">The runs couldn&apos;t be read.</span>
           <Button size="sm" onClick={() => void first.refetch()}>Try again</Button>
@@ -168,6 +219,18 @@ export function RunsPage({ tenantId, filters }: { tenantId: string; filters: Run
         <RunList tenantId={tenantId} runs={runs} />
       ) : (
         <RunTable tenantId={tenantId} runs={runs} />
+      )}
+      {read.older === "end" ? (
+        <p className="text-small text-muted">{started === "all" ? "No older runs are kept." : `No older runs ${WINDOW[started]}.`}</p>
+      ) : (
+        more && (
+          <div className="flex flex-wrap items-center gap-3">
+            <Button size="md" disabled={read.older === "reading"} onClick={() => void loadMore()}>Load more</Button>
+            <span className="text-small text-muted">
+              {read.older === "failed" ? "Older runs couldn't be read. Try again." : "The 50 most recent first. New runs appear at the top as they're found."}
+            </span>
+          </div>
+        )
       )}
     </section>
   );

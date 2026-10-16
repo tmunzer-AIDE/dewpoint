@@ -15,5 +15,8 @@ export function when(iso: string, now: number = Date.now()): string {
   return `${day} ${TIME.format(t)}`;
 }
 
+/** The time of day an instant (in ms) was, to the second: "10:02:07". */
+export const timeOf = (ms: number) => TIME.format(new Date(ms));
+
 /** "Friday 16 October 2026 at 10:02:09 CEST": the full date, the time and the zone. */
 export const whenFull = (iso: string) => FULL.format(new Date(iso));

@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, focusManager } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter, useSearch } from "@tanstack/react-router";
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, expect, it, vi } from "vitest";
-import { validateRunsSearch, type RunItem } from "../../lib/runs";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { onAnnounce } from "../../lib/announce";
+import { PAGE, validateRunsSearch, type RunItem } from "../../lib/runs";
 import { item } from "../../test/runs";
 import { RunsPage } from "./RunsPage";
 
@@ -58,6 +59,7 @@ beforeEach(() => {
     return Promise.resolve(answers.shift()?.() ?? new Response(JSON.stringify(BOARD)));
   });
 });
+afterEach(() => vi.restoreAllMocks());
 
 function Runs() {
   return <RunsPage tenantId="t1" filters={useSearch({ strict: false })} />;
@@ -239,4 +241,106 @@ it("says no run started in the last 24 hours, never that none ran, and offers ev
   expect(await screen.findByText("No runs in the last 24 hours.")).toBeTruthy();
   await userEvent.click(screen.getByRole("button", { name: "Show all kept" }));
   await vi.waitFor(() => expect(search(router)).toEqual({ started: "all" }));
+});
+
+const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
+const shownIds = () => within(screen.getByRole("region", { name: "Runs" })).getAllByRole("link").map((l) => l.textContent);
+
+describe("reading the list again (§5.2)", () => {
+  // Timers the test moves on, and real time besides, so the page's own waits still pass.
+  beforeEach(() => void vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "clearTimeout", "clearInterval"], shouldAdvanceTime: true }));
+  afterEach(() => void vi.useRealTimers());
+
+  it("reads the first page again every 5 s, saying so by the title, new runs at the top, and says it was updated (§5.6)", async () => {
+    const said: string[] = [];
+    const stop = onAnnounce((m) => said.push(m));
+    show();
+    await screen.findByRole("link", { name: "a14b2e9c" });
+    expect(screen.getByText("Updates every 5 s")).toBeTruthy();
+    const reads = sent.length;
+    answers.push(() => json(BOARD)); // the same: nothing to say
+    await act(() => vi.advanceTimersByTimeAsync(5000));
+    expect(sent.length).toBe(reads + 1);
+    answers.push(() => json([item("b7d0c3e1-0010", local(10, 2, 15), { status: "queued", started_at: null }), ...BOARD]));
+    await act(() => vi.advanceTimersByTimeAsync(5000));
+    await vi.waitFor(() => expect(shownIds().slice(0, 2)).toEqual(["b7d0c3e1", "a14b2e9c"]));
+    expect(said).toEqual(["Updated"]);
+    stop();
+  });
+
+  it("isn't read again while the tab is hidden, and is at once when it's shown", async () => {
+    show();
+    await screen.findByRole("link", { name: "a14b2e9c" });
+    const reads = sent.length;
+    try {
+      act(() => focusManager.setFocused(false));
+      await act(() => vi.advanceTimersByTimeAsync(12_000));
+      expect(sent.length).toBe(reads);
+      act(() => focusManager.setFocused(true));
+      await vi.waitFor(() => expect(sent.length).toBeGreaterThan(reads));
+    } finally {
+      focusManager.setFocused(undefined);
+    }
+  });
+
+  it("keeps the list when a refresh fails, says as of when, and tries again (the ListStates board)", async () => {
+    const said: string[] = [];
+    const stop = onAnnounce((m) => said.push(m));
+    show();
+    await screen.findByRole("link", { name: "a14b2e9c" });
+    answers.push(() => json({ error: "internal_error" }, 500));
+    await act(() => vi.advanceTimersByTimeAsync(5000));
+    expect(await screen.findByText("Couldn't be refreshed · as of 10:02:19")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "a14b2e9c" })).toBeTruthy();
+    expect(said).toEqual(["The runs couldn't be refreshed."]);
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("Updates every 5 s")).toBeTruthy();
+    stop();
+  });
+});
+
+/** `n` runs from minute `from` down, a minute apart, newest first. */
+const runsFrom = (from: number, n: number) => Array.from({ length: n }, (_, i) => item(`run${String(from - i).padStart(4, "0")}x-0`, new Date(NOW - (NOW % 60_000) - (1000 - from + i) * 60_000).toISOString()));
+
+it("loads older runs on from the last listed, never reading them again, each once, until none older is kept (§5.2)", async () => {
+  const first = runsFrom(1000, PAGE);
+  const second = [first.at(-1)!, ...runsFrom(1000 - PAGE, PAGE - 1)]; // the boundary's run read again: listed once
+  const third = runsFrom(1000 - 2 * PAGE + 1, 3);
+  answers.push(() => json(first));
+  show("/t/t1/runs?started=7d");
+  await screen.findByRole("link", { name: "run1000x" });
+  expect(screen.getByText("The 50 most recent first. New runs appear at the top as they're found.")).toBeTruthy();
+  answers.push(() => json(second));
+  await userEvent.click(screen.getByRole("button", { name: "Load more" }));
+  await screen.findByRole("link", { name: `run${String(1000 - 2 * PAGE + 2).padStart(4, "0")}x` });
+  expect(Object.fromEntries(sent.at(-1)!.searchParams)).toMatchObject({ before: first.at(-1)!.queued_at, before_id: first.at(-1)!.id });
+  expect(shownIds()).toHaveLength(2 * PAGE - 1);
+  expect(new Set(shownIds()).size).toBe(2 * PAGE - 1);
+  answers.push(() => json(third));
+  await userEvent.click(screen.getByRole("button", { name: "Load more" }));
+  expect(await screen.findByText("No older runs in the last 7 days.")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
+  expect(shownIds()).toHaveLength(2 * PAGE + 2);
+});
+
+it("says no older run is kept at all once every run kept is listed", async () => {
+  answers.push(() => json(runsFrom(1000, PAGE)), () => json([]));
+  show("/t/t1/runs?started=all");
+  await screen.findByRole("link", { name: "run1000x" });
+  await userEvent.click(screen.getByRole("button", { name: "Load more" }));
+  expect(await screen.findByText("No older runs are kept.")).toBeTruthy();
+});
+
+it("starts the list afresh when a filter changes after older runs were loaded", async () => {
+  const newer = runsFrom(2000, PAGE).map((r) => ({ ...r, status: "failed" as const }));
+  answers.push(() => json(runsFrom(1000, PAGE)), () => json(runsFrom(1000 - PAGE, 3)), () => json(newer));
+  const router = show();
+  await screen.findByRole("link", { name: "run1000x" });
+  await userEvent.click(screen.getByRole("button", { name: "Load more" }));
+  expect(await screen.findByText("No older runs in the last 24 hours.")).toBeTruthy();
+  await act(() => router.navigate({ to: "/t/$tenantId/runs", params: { tenantId: "t1" }, search: { status: "failed" } }));
+  await screen.findByRole("link", { name: "run2000x" });
+  expect(shownIds()).toHaveLength(PAGE); // none of the earlier filters' runs below them
+  expect(screen.queryByText("No older runs in the last 24 hours.")).toBeNull();
+  expect(screen.getByRole("button", { name: "Load more" })).toBeTruthy();
 });
