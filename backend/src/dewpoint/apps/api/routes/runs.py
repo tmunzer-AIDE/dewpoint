@@ -6,12 +6,13 @@ A request that hasn't started is shown as its request, never as the row an attem
 
 import uuid
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from dewpoint.apps.api.responses import RunItemOut
+from dewpoint.apps import step_summary
+from dewpoint.apps.api.responses import RunAttemptsOut, RunInstancesOut, RunItemOut, RunStepsOut
 from dewpoint.apps.api.routes.run_requests import get_keys, key_unusable
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.claims import service as claims
@@ -123,7 +124,8 @@ def _child(r: Run) -> dict[str, object]:
     }
 
 
-def _step(r: RunStep) -> dict[str, object]:
+def _step(r: RunStep, child: uuid.UUID | None = None) -> dict[str, object]:
+    """One attempt of a step instance, and the sub-run it started (the runs design §4.4)."""
     return {
         "step_id": str(r.step_id),
         "key": r.node_key,
@@ -138,6 +140,7 @@ def _step(r: RunStep) -> dict[str, object]:
         "outcome": r.outcome,
         "cel_mode": r.cel_mode,
         "effect": r.effect_preview,  # a control step's port or assignments (4d-1a), masked as its previews are
+        "child_run_id": _id(child),
     }
 
 
@@ -200,3 +203,100 @@ async def get_run(
         "children": [_child(c) for c in await service.children(db, run.id)],
         "csv": csv,
     }
+
+
+async def _ran(db: AsyncSession, ctx: TenantContext, run_id: uuid.UUID) -> tuple[Run | None, Run | RunRequest]:
+    """A run within retention, or a request that hasn't started (no run yet); and the one of them that says what it
+    runs. Else 404."""
+    at = await retention.cutoff(db, ctx.tenant_id)
+    request = await db.get(RunRequest, run_id)  # row-level security: the caller's tenant's only
+    if request is not None and not await retention.request_kept(db, at, request):
+        raise HTTPException(404, detail={"error": "not_found"})
+    if request is not None and request.status != "started":
+        return None, request
+    run = await service.get_run(db, run_id)
+    if run is None or run.tenant_id != ctx.tenant_id or not await retention.run_kept(db, at, run):
+        raise HTTPException(404, detail={"error": "not_found"})
+    return run, run
+
+
+async def _nodes(db: AsyncSession, of: Run | RunRequest) -> tuple[list[dict[str, Any]], bool]:
+    """The steps a run ran (its graph's, or a step test's target alone), and whether its graph's engine records every
+    step instance's end (B4b)."""
+    graph, abi = await service.graph_of(db, of.workflow_version_id, of.draft_snapshot_id)
+    nodes: list[dict[str, Any]] = [] if graph is None else graph["nodes"]
+    target = of.target_step_id
+    recorded = abi is None or abi >= step_summary.OUTCOMES_ABI
+    return [n for n in nodes if target is None or n["id"] == str(target)], recorded
+
+
+@router.get("/t/{tenant_id}/runs/{run_id}/steps", response_model=RunStepsOut)
+async def run_steps(
+    run_id: uuid.UUID,
+    ctx: TenantContext = Depends(require(P.RUN_VIEW)),
+    db: AsyncSession = Depends(get_db, scope="function"),
+) -> dict[str, object]:
+    """A run's steps in run order, summarized (the runs design §4.4): the tags the UI shows come from here, never from
+    a partial page of instances. A request that hasn't started has steps that haven't run."""
+    run, of = await _ran(db, ctx, run_id)
+    nodes, recorded = await _nodes(db, of)
+    ended = run.status != "running" if run is not None else of.ended_at is not None
+    summarized = await step_summary.summarize(
+        db, None if run is None else run.id, nodes, ended=ended, error_code=None if run is None else run.error_code,
+        live=of.mode == "live", recorded=recorded,
+    )  # fmt: skip
+    singles = [(x.step_id, x.final.iteration_key) for x in summarized if x.final is not None]
+    started = await step_summary.children(db, run.id, singles) if run is not None else {}
+    return {
+        "given": "input" if of.target_step_id is None else "seeded",
+        "steps": [
+            {"step_id": str(x.step_id), "key": x.key, "type": x.type, "origin": x.origin, "instances": x.instances,
+             "statuses": x.statuses, "ports": x.ports,
+             "final": None if x.final is None else _step(x.final, started.get((x.step_id, x.final.iteration_key)))}
+            for x in summarized
+        ],
+    }  # fmt: skip
+
+
+@router.get("/t/{tenant_id}/runs/{run_id}/steps/{step_id}/instances", response_model=RunInstancesOut)
+async def step_instances(
+    run_id: uuid.UUID,
+    step_id: uuid.UUID,
+    within: str | None = None,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+    ctx: TenantContext = Depends(require(P.RUN_VIEW)),
+    db: AsyncSession = Depends(get_db, scope="function"),
+) -> dict[str, object]:
+    """A step's instances in a run, one per iteration (its final attempt), in iteration order, paged from `offset`;
+    with `within`, only that iteration's (itself and every iteration nested in it). Each names the sub-run it
+    started."""
+    run, of = await _ran(db, ctx, run_id)
+    nodes, _ = await _nodes(db, of)
+    if str(step_id) not in {n["id"] for n in nodes}:
+        raise HTTPException(404, detail={"error": "not_found"})
+    if run is None:
+        return {"total": 0, "items": []}
+    total, rows = await step_summary.instances(db, run.id, step_id, within=within, offset=offset, limit=limit)
+    started = await step_summary.children(db, run.id, [(r.step_id, r.iteration_key) for r in rows])
+    return {"total": total, "items": [_step(r, started.get((r.step_id, r.iteration_key))) for r in rows]}
+
+
+@router.get("/t/{tenant_id}/runs/{run_id}/steps/{step_id}/attempts", response_model=RunAttemptsOut)
+async def step_attempts(
+    run_id: uuid.UUID,
+    step_id: uuid.UUID,
+    iteration: str = "",
+    ctx: TenantContext = Depends(require(P.RUN_VIEW)),
+    db: AsyncSession = Depends(get_db, scope="function"),
+) -> dict[str, object]:
+    """One step instance's attempts, first to last: `iteration` is its iteration key (empty outside a loop)."""
+    run, of = await _ran(db, ctx, run_id)
+    nodes, _ = await _nodes(db, of)
+    if str(step_id) not in {n["id"] for n in nodes}:
+        raise HTTPException(404, detail={"error": "not_found"})
+    if run is None:
+        return {"items": []}
+    rows = await step_summary.attempts(db, run.id, step_id, iteration)
+    started = await step_summary.children(db, run.id, [(step_id, iteration)])
+    return {"items": [_step(r, started.get((r.step_id, r.iteration_key))) for r in rows]}

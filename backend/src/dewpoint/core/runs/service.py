@@ -20,7 +20,7 @@ from dewpoint.core.models.ingress import WebhookEndpoint
 from dewpoint.core.models.requests import RunRequest
 from dewpoint.core.models.runs import ExecutionEvidence, Run, RunStep
 from dewpoint.core.models.schedules import Schedule
-from dewpoint.core.models.workflows import Workflow
+from dewpoint.core.models.workflows import DraftSnapshot, Workflow, WorkflowVersion
 from dewpoint.core.retention.cutoff import Cutoff, kept
 
 MESSAGE_LIMIT = 500
@@ -514,3 +514,20 @@ async def run_steps(s: AsyncSession, run_id: uuid.UUID) -> list[RunStep]:
         .order_by(RunStep.started_at.nulls_last(), RunStep.iteration_key, RunStep.step_id, RunStep.attempt)
     )
     return list((await s.execute(q)).scalars())
+
+
+async def graph_of(
+    s: AsyncSession, version_id: uuid.UUID | None, snapshot_id: uuid.UUID | None
+) -> tuple[dict[str, Any] | None, int | None]:
+    """The graph a run ran and its engine ABI: its version's, or its draft snapshot's; none for a refusal that froze
+    neither."""
+    if version_id is not None:
+        found = await s.execute(select(WorkflowVersion.graph, WorkflowVersion.engine_abi)
+                                .where(WorkflowVersion.id == version_id))  # fmt: skip
+    elif snapshot_id is not None:
+        found = await s.execute(select(DraftSnapshot.graph, DraftSnapshot.engine_abi)
+                                .where(DraftSnapshot.id == snapshot_id))  # fmt: skip
+    else:
+        return None, None
+    row = found.one_or_none()
+    return (None, None) if row is None else (row[0], row[1])

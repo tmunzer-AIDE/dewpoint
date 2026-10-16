@@ -34,3 +34,28 @@ def test_a_steps_origin_comes_from_its_instances_or_from_where_the_run_is(
     type_ref: str, statuses: dict[str, int], ended: bool, error_code: str | None, expected: str
 ) -> None:
     assert origin(type_ref, statuses, ended=ended, error_code=error_code) == expected
+
+
+@pytest.mark.parametrize(
+    ("type_ref", "statuses", "outcomes", "expected"),
+    [
+        (ECHO, {"succeeded": 1}, {"applied": 1}, "sent"),  # a live run (the runs design §4.4): its request was sent
+        (ECHO, {"succeeded": 1, "failed": 2}, {"applied": 1}, "sent"),
+        (ECHO, {"failed": 1}, {}, None),  # it sent nothing, or the service refused it: nothing to say
+        (ECHO, {"succeeded": 1, "cancelled": 1}, {"applied": 1, "outcome_unknown": 1}, "may_have_been_sent"),
+        (ECHO, {"cancelled": 1}, {"outcome_unknown": 1}, "may_have_been_sent"),  # whatever became of it
+        (IF, {"succeeded": 3}, {}, None),  # a control step's: nothing to say
+        (DELAY, {"succeeded": 1}, {}, None),  # waited, live
+        (ECHO, {"skipped": 3}, {}, "skipped"),
+        (ECHO, {}, {}, "didnt_run"),
+    ],
+)
+def test_a_live_steps_origin_says_what_was_sent(
+    type_ref: str, statuses: dict[str, int], outcomes: dict[str, int], expected: str | None
+) -> None:
+    assert origin(type_ref, statuses, outcomes, live=True, ended=True, error_code=None) == expected
+
+
+def test_a_step_without_a_row_is_not_recorded_when_its_graph_predates_b4b() -> None:
+    assert origin(ECHO, {}, ended=True, error_code=None, recorded=False) == "not_recorded"
+    assert origin(ECHO, {}, ended=False, error_code=None, recorded=False) == "not_reached_yet"

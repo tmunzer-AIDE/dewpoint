@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""A draft simulation's steps, summarized on the server (B8; the simulation design §6.6, §7.4): per step of the graph it
-ran, its instances' final attempts counted by status and by the port they took, a single instance's final attempt, and
-where its data came from; and a step's instances, one per iteration, paged in their iterations' own order. The general
-run detail stays unpaged until 4e (§9)."""
+"""A run's steps, summarized on the server (B8; the simulation design §6.6, §7.4; the runs design §4.4): per step of the
+graph it ran, its instances' final attempts counted by status, by the port they took and by their outcome, a single
+instance's final attempt, and where its data came from; a step's instances, one per iteration, paged in their
+iterations' own order; and one instance's attempts. Draft simulations and every other run, live or simulated."""
 
 import uuid
 from collections.abc import Mapping, Sequence
@@ -10,27 +10,41 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import ColumnExpressionArgument, Integer, Select, cast, func, or_, select
+from sqlalchemy import ColumnExpressionArgument, Integer, Select, cast, func, or_, select, tuple_
 from sqlalchemy.dialects.postgresql import ARRAY, distinct_on
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql.elements import ColumnElement
 
-from dewpoint.core.models.runs import RunStep
+from dewpoint.core.models.runs import Run, RunStep
 from dewpoint.core.runs.service import HISTORY_LOST
 from dewpoint.engine.registry.control import CONTROL_TYPES, DELAY, WAIT_UNTIL
 from dewpoint.engine.runtime.execution import INTERNAL_ERROR, TERMINATED
 
 # D-a5: a run that ended outside the workflow (a bug, a termination, a lost history) never recorded what it would have
 NOT_RECORDED = frozenset({INTERNAL_ERROR, TERMINATED, HISTORY_LOST})
+# B4b (4d-1a): from this engine ABI on, every step instance's end is recorded; before it, a step without a row after
+# its run's end is "not recorded" (the runs design §4.4)
+OUTCOMES_ABI = 9
+ATTEMPTS = 20  # a retry policy's most attempts (the graph model's `max_attempts`): one instance's, all of them
 
 
-def origin(type_ref: str, statuses: Mapping[str, int], *, ended: bool, error_code: str | None) -> str:
-    """Where a step's data came from (§7.4), from its instances' final attempts: one that began and wasn't stopped
-    says what made it (a timer that wasn't waited, an evaluation, or a plugin's fixture: nothing was sent); else the
-    instances say why none did. With none, where the run is: not reached yet while it runs; after its end, not
-    recorded in D-a5's cases, else it didn't run."""
+def origin(
+    type_ref: str, statuses: Mapping[str, int], outcomes: Mapping[str, int] | None = None, *, live: bool = False,
+    ended: bool, error_code: str | None, recorded: bool = True,
+) -> str | None:  # fmt: skip
+    """Where a step's data came from (§7.4), from its instances' final attempts. In a live run (the runs design §4.4):
+    a plugin's request that may have been sent, whatever became of it, or one that was sent; nothing to say of a
+    control step's, or of one that sent nothing. Else, one that began and wasn't stopped says what made it (a timer
+    that wasn't waited, an evaluation, or a plugin's fixture: nothing was sent); else the instances say why none did.
+    With none, where the run is: not reached yet while it runs; after its end, not recorded in D-a5's cases or when its
+    graph's engine predates B4b (`recorded` False), else it didn't run."""
+    outcomes = outcomes or {}
+    if live and outcomes.get("outcome_unknown"):
+        return "may_have_been_sent"
     if any(statuses.get(status) for status in ("succeeded", "failed", "running")):
+        if live:
+            return "sent" if outcomes.get("applied") and type_ref not in CONTROL_TYPES else None
         if type_ref in (DELAY, WAIT_UNTIL):
             return "evaluated_not_waited"
         return "evaluated" if type_ref in CONTROL_TYPES else "fixture_not_sent"
@@ -39,7 +53,7 @@ def origin(type_ref: str, statuses: Mapping[str, int], *, ended: bool, error_cod
             return status
     if not ended:
         return "not_reached_yet"
-    return "not_recorded" if error_code in NOT_RECORDED else "didnt_run"
+    return "not_recorded" if error_code in NOT_RECORDED or not recorded else "didnt_run"
 
 
 @dataclass
@@ -49,9 +63,10 @@ class Summarized:
     step_id: uuid.UUID
     key: str
     type: str
-    origin: str
+    origin: str | None
     statuses: dict[str, int] = field(default_factory=dict)  # its instances, by their final attempt's status
     ports: dict[str, int] = field(default_factory=dict)  # and by the port it took (an `if`'s, a `switch`'s)
+    outcomes: dict[str, int] = field(default_factory=dict)  # and by their outcome, where they have one
     final: RunStep | None = None  # a single instance's final attempt
     first_at: datetime | None = None  # when it first began, or ended without beginning: its place in run order
 
@@ -72,22 +87,26 @@ def _finals(run_id: uuid.UUID) -> Select[Any]:
 
 async def summarize(
     s: AsyncSession, run_id: uuid.UUID | None, nodes: Sequence[Mapping[str, Any]], *, ended: bool,
-    error_code: str | None,
+    error_code: str | None, live: bool = False, recorded: bool = True,
 ) -> list[Summarized]:  # fmt: skip
-    """The steps `nodes` (the snapshot's, or a step test's target) of the run `run_id` (None: not written yet), in run
-    order: the steps that began or ended by when they first did, then the others in the graph's order."""
+    """The steps `nodes` (the graph's, or a step test's target) of the run `run_id` (None: not written yet), in run
+    order: the steps that began or ended by when they first did, then the others in the graph's order. `live` and
+    `recorded` (its graph's engine records every end) are the run's, for each step's origin."""
     found = {uuid.UUID(n["id"]): Summarized(uuid.UUID(n["id"]), n["key"], n["type"], "") for n in nodes}
     if run_id is not None:
         final = _finals(run_id).subquery()
         port = final.c.effect_preview["port"].astext
         counts = await s.execute(
-            select(final.c.step_id, final.c.status, port, func.count()).group_by(final.c.step_id, final.c.status, port)
-        )
-        for step_id, status, taken, n in counts:
+            select(final.c.step_id, final.c.status, port, final.c.outcome, func.count())
+            .group_by(final.c.step_id, final.c.status, port, final.c.outcome)
+        )  # fmt: skip
+        for step_id, status, taken, outcome, n in counts:
             if (step := found.get(step_id)) is not None:
                 step.statuses[status] = step.statuses.get(status, 0) + n
                 if taken is not None:
                     step.ports[taken] = step.ports.get(taken, 0) + n
+                if outcome is not None:
+                    step.outcomes[outcome] = step.outcomes.get(outcome, 0) + n
         firsts = await s.execute(
             select(RunStep.step_id, func.min(func.coalesce(RunStep.started_at, RunStep.ended_at)))
             .where(RunStep.run_id == run_id)
@@ -102,7 +121,8 @@ async def summarize(
             for row in rows.scalars():
                 found[row.step_id].final = row
     for step in found.values():
-        step.origin = origin(step.type, step.statuses, ended=ended, error_code=error_code)
+        step.origin = origin(step.type, step.statuses, step.outcomes, live=live, ended=ended, error_code=error_code,
+                             recorded=recorded)  # fmt: skip
     order = {step_id: n for n, step_id in enumerate(found)}
     return sorted(found.values(), key=lambda x: (x.first_at is None, x.first_at or datetime.min, order[x.step_id]))
 
@@ -130,3 +150,31 @@ async def instances(
         select(one).order_by(_numbered(one.iteration_key), one.iteration_key).offset(offset).limit(limit)
     )
     return total, list(page.scalars())
+
+
+async def attempts(s: AsyncSession, run_id: uuid.UUID, step_id: uuid.UUID, iteration_key: str) -> list[RunStep]:
+    """One instance's attempts, first to last: at most a retry policy's most."""
+    q = (
+        select(RunStep)
+        .where(RunStep.run_id == run_id, RunStep.step_id == step_id, RunStep.iteration_key == iteration_key)
+        .order_by(RunStep.attempt)
+        .limit(ATTEMPTS)
+    )
+    return list((await s.execute(q)).scalars())
+
+
+async def children(
+    s: AsyncSession, run_id: uuid.UUID, instances: Sequence[tuple[uuid.UUID, str]]
+) -> dict[tuple[uuid.UUID, str], uuid.UUID]:
+    """The sub-runs some of a run's step instances started (a sub-flow's, a failure handler's), by `(step_id,
+    iteration_key)`: only those asked for, so a page's or a few single steps', never every one of a loop's."""
+    if not instances:
+        return {}
+    q = select(Run.parent_step_id, Run.parent_iteration_key, Run.id).where(
+        Run.parent_run_id == run_id, tuple_(Run.parent_step_id, Run.parent_iteration_key).in_(list(instances))
+    )
+    found: dict[tuple[uuid.UUID, str], uuid.UUID] = {}
+    for step_id, key, child in await s.execute(q):
+        if step_id is not None and key is not None:  # always: the query matched both
+            found[(step_id, key)] = child
+    return found

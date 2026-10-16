@@ -804,3 +804,64 @@ class RunItemOut(_Answer):
     started_by: str | None  # the email of the person who asked: by hand, or a re-run
     cancel_requested_at: str | None
     trigger: RunTriggerOut | None
+
+
+class RunStepOut(_Answer):
+    """One attempt of a step instance (engine spec §8; B4b): where it ran (its iteration), how it ended, its previews
+    (redacted and cut as the projection stores them: `[redacted]`, `[truncated]`), its error, its side effect's outcome,
+    a control step's port or assignments, and the sub-run it started, when it did."""
+
+    step_id: str
+    key: str
+    iteration_key: str
+    attempt: int
+    status: Literal["running", "succeeded", "failed", "cancelled", "skipped", "not_started"]
+    started_at: str | None
+    ended_at: str | None
+    input: Any
+    output: Any
+    error: RunErrorOut | None
+    outcome: Literal["applied", "simulated", "outcome_unknown"] | None
+    cel_mode: str | None
+    effect: Any
+    child_run_id: str | None = None
+
+
+class RunStepSummaryOut(_Answer):
+    """A step of the graph a run ran (the runs design §4.4): its instances' final attempts counted by status and by the
+    port they took, a single instance's final attempt, and where its data came from: in a live run, `sent` or
+    `may_have_been_sent` for a plugin step's request, null when there's nothing to say."""
+
+    step_id: str
+    key: str
+    type: str
+    origin: Literal[
+        "sent", "may_have_been_sent", "evaluated", "evaluated_not_waited", "fixture_not_sent", "skipped",
+        "not_started", "cancelled", "didnt_run", "not_recorded", "not_reached_yet",
+    ] | None  # fmt: skip
+    instances: int
+    statuses: dict[str, int]
+    ports: dict[str, int]
+    final: RunStepOut | None
+
+
+class RunStepsOut(_Answer):
+    """A run's steps in run order (§4.4), and what the values a person gave were: the workflow's input, or a step
+    test's seeds. A step test lists its target alone."""
+
+    given: Literal["input", "seeded"]
+    steps: list[RunStepSummaryOut]
+
+
+class RunInstancesOut(_Answer):
+    """A step's instances in a run, one per iteration, each its final attempt, in iteration order: a page, and their
+    total."""
+
+    total: int
+    items: list[RunStepOut]
+
+
+class RunAttemptsOut(_Answer):
+    """One step instance's attempts, first to last."""
+
+    items: list[RunStepOut]
