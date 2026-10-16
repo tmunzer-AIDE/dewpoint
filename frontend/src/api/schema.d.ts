@@ -891,7 +891,8 @@ export interface paths {
          * List Runs
          * @description Requests and runs, newest first by `(queued_at, id)`. The next page: `before` and `before_id`, the last item's
          *     `queued_at` and `id`, always together: items can be queued in the same instant, so the time alone would skip
-         *     some.
+         *     some. Filtered (the runs design §4.2) by workflow, status (`waiting`: queued or starting; `didnt_start`: refused
+         *     or dead), mode, draft simulations (left out unless `draft` is `only` or `include`), source, and `since`.
          */
         get: operations["list_runs_api_v1_t__tenant_id__runs_get"];
         put?: never;
@@ -959,11 +960,97 @@ export interface paths {
         };
         /**
          * Get Run
-         * @description A run with its steps and sub-runs, or a request that hasn't started as itself; with its CSV record (engine 2b
-         *     spec §8.1), when it took a CSV: the mapping, the file's headers, the row count and the skipped rows. A run whose
-         *     tree, or a request that, passed the retention cutoff isn't found (§10.1).
+         * @description A run, or a request that hasn't started as itself (the runs design §4.3): what the list says of it, the draft
+         *     revision a draft simulation ran, whether its graph records every step instance's end, the run a sub-run's step
+         *     started it from, and its CSV record (engine 2b spec §8.1) when it took a CSV. Its steps are read apart (§4.4). A run
+         *     whose tree, or a request that, passed the retention cutoff isn't found (§10.1).
          */
         get: operations["get_run_api_v1_t__tenant_id__runs__run_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/t/{tenant_id}/runs/{run_id}/input": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Run Input
+         * @description What a run was admitted with, read back from its request's own envelope, redacted, never recomputed (the runs
+         *     design §4.3): a step test's seeds, or the workflow's input, a CSV start's rows left to its CSV record. A tenant's
+         *     key gone (an erasure) reads as `unreadable`, never an error.
+         */
+        get: operations["run_input_api_v1_t__tenant_id__runs__run_id__input_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/t/{tenant_id}/runs/{run_id}/steps": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Run Steps
+         * @description A run's steps in run order, summarized (the runs design §4.4): the tags the UI shows come from here, never from
+         *     a partial page of instances. A request that hasn't started has steps that haven't run.
+         */
+        get: operations["run_steps_api_v1_t__tenant_id__runs__run_id__steps_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/t/{tenant_id}/runs/{run_id}/steps/{step_id}/attempts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Step Attempts
+         * @description One step instance's attempts, first to last: `iteration` is its iteration key (empty outside a loop).
+         */
+        get: operations["step_attempts_api_v1_t__tenant_id__runs__run_id__steps__step_id__attempts_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/t/{tenant_id}/runs/{run_id}/steps/{step_id}/instances": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Step Instances
+         * @description A step's instances in a run, one per iteration (its final attempt), in iteration order, paged from `offset`;
+         *     with `within`, only that iteration's (itself and every iteration nested in it). Each names the sub-run it
+         *     started.
+         */
+        get: operations["step_instances_api_v1_t__tenant_id__runs__run_id__steps__step_id__instances_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1840,6 +1927,19 @@ export interface components {
             server_build: string;
         };
         /**
+         * CancelOut
+         * @description A cancel (engine 2b spec §7.4): `cancelled` (200), the request hadn't started; `requested` (202), recorded for
+         *     the dispatcher to apply.
+         */
+        CancelOut: {
+            /**
+             * Cancel
+             * @enum {string}
+             */
+            cancel: "cancelled" | "requested";
+            request: components["schemas"]["RequestOut"];
+        };
+        /**
          * CapacityIn
          * @description The values to change, each `null` to unset it, or `unset` for all three; and how the starts were measured.
          */
@@ -2056,6 +2156,15 @@ export interface components {
             /** Values */
             values?: string[] | null;
         };
+        /** CsvErrorOut */
+        CsvErrorOut: {
+            /** Code */
+            code: string;
+            /** Column */
+            column: string | null;
+            /** Row */
+            row: number;
+        };
         /** CsvFormOut */
         CsvFormOut: {
             /** Columns */
@@ -2086,6 +2195,27 @@ export interface components {
              */
             upload_id: string;
         };
+        /**
+         * CsvRecordOut
+         * @description A CSV start's file as admission read it (engine 2b spec §8.1): the mapping from declared columns to its headers,
+         *     the rows run, every skipped row, and the first errors in detail with their count.
+         */
+        CsvRecordOut: {
+            /** Error Count */
+            error_count: number;
+            /** Errors */
+            errors: components["schemas"]["CsvErrorOut"][];
+            /** Headers */
+            headers: string[];
+            /** Mapping */
+            mapping: {
+                [key: string]: string;
+            };
+            /** Row Count */
+            row_count: number;
+            /** Skipped */
+            skipped: components["schemas"]["CsvSkippedOut"][];
+        };
         /** CsvSettings */
         CsvSettings: {
             /** Columns */
@@ -2100,6 +2230,13 @@ export interface components {
              * @default 10000
              */
             max_rows?: number;
+        };
+        /** CsvSkippedOut */
+        CsvSkippedOut: {
+            /** Code */
+            code: string;
+            /** Row */
+            row: number;
         };
         /** DeclassifiedOut */
         DeclassifiedOut: {
@@ -2543,6 +2680,8 @@ export interface components {
         LastRunOut: {
             /** At */
             at: string;
+            /** Id */
+            id: string;
             /**
              * Status
              * @enum {string}
@@ -2801,6 +2940,43 @@ export interface components {
             /** Max */
             max: number;
         };
+        /**
+         * RequestOut
+         * @description A run's request as the API shows it (engine 2b spec §7.2): its state and its frozen version, never its input.
+         */
+        RequestOut: {
+            /** Draft Snapshot Id */
+            draft_snapshot_id: string | null;
+            /** Ended At */
+            ended_at: string | null;
+            /** Id */
+            id: string;
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "live" | "simulate";
+            /** Queued At */
+            queued_at: string | null;
+            /** Reason */
+            reason: string | null;
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "manual" | "rerun" | "schedule" | "webhook" | "dev";
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "queued" | "starting" | "started" | "cancelled" | "refused" | "dead";
+            /** Target Step Id */
+            target_step_id: string | null;
+            /** Version Id */
+            version_id: string | null;
+            /** Workflow Id */
+            workflow_id: string;
+        };
         /** RerunIn */
         RerunIn: {
             csv?: components["schemas"]["CsvIn"] | null;
@@ -2837,12 +3013,291 @@ export interface components {
              */
             role: "owner" | "admin" | "editor" | "operator" | "viewer";
         };
+        /**
+         * RunAttemptsOut
+         * @description One step instance's attempts, first to last.
+         */
+        RunAttemptsOut: {
+            /** Items */
+            items: components["schemas"]["RunStepOut"][];
+        };
         /** RunCountOut */
         RunCountOut: {
             /** Live */
             live: number;
             /** Simulate */
             simulate: number;
+        };
+        /** RunErrorOut */
+        RunErrorOut: {
+            /** Code */
+            code: string;
+            /** Message */
+            message: string | null;
+        };
+        /**
+         * RunInputOut
+         * @description What a run was admitted with, read back from its request's own envelope, redacted (the runs design §4.3): its
+         *     `input`, or a step test's `seeds`. `absent`: the request kept none (a refusal admission never froze, or a run from
+         *     before 2b-2); `unreadable`: there, but it doesn't open (a broken ciphertext, or the tenant's key gone during an
+         *     erasure). A CSV start's rows are its CSV record's, never repeated here.
+         */
+        RunInputOut: {
+            /** Input */
+            input: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Read Back
+             * @enum {string}
+             */
+            read_back: "kept" | "absent" | "unreadable";
+            /** Seeds */
+            seeds: {
+                [key: string]: unknown;
+            } | null;
+        };
+        /**
+         * RunInstancesOut
+         * @description A step's instances in a run, one per iteration, each its final attempt, in iteration order: a page, and their
+         *     total.
+         */
+        RunInstancesOut: {
+            /** Items */
+            items: components["schemas"]["RunStepOut"][];
+            /** Total */
+            total: number;
+        };
+        /**
+         * RunItemOut
+         * @description An item of the runs list (engine 2b spec §7.7; editor 4e-1, B10): a top-level run, or a request that hasn't
+         *     started, as its request. `status` is the run's once its request started, else the request's.
+         */
+        RunItemOut: {
+            /** Cancel Requested At */
+            cancel_requested_at: string | null;
+            /** Draft Snapshot Id */
+            draft_snapshot_id: string | null;
+            /** Ended At */
+            ended_at: string | null;
+            error: components["schemas"]["RunErrorOut"] | null;
+            /** Id */
+            id: string;
+            /** Iterations */
+            iterations: number;
+            /** Kind */
+            kind: string;
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "live" | "simulate";
+            /** Parent Run Id */
+            parent_run_id: string | null;
+            /** Queued At */
+            queued_at: string | null;
+            request: components["schemas"]["RunRequestStateOut"] | null;
+            /** Started At */
+            started_at: string | null;
+            /** Started By */
+            started_by: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "queued" | "starting" | "running" | "succeeded" | "failed" | "cancelled" | "deadline_exceeded" | "refused" | "dead";
+            /** Target Step Id */
+            target_step_id: string | null;
+            trigger: components["schemas"]["RunTriggerOut"] | null;
+            /** Version Id */
+            version_id: string | null;
+            /** Workflow Id */
+            workflow_id: string;
+            /** Workflow Name */
+            workflow_name: string | null;
+        };
+        /**
+         * RunOut
+         * @description A run, or a request that hasn't started, as itself (editor 4e-1; the runs design §4.3, §4.5): the list item's
+         *     facts, the draft revision a draft simulation ran, whether every step instance's end is recorded (its graph's engine
+         *     ABI is B4b's or later), the run that started a sub-run, and a CSV start's file. Its steps are read apart, summarized
+         *     and paged (§4.4).
+         */
+        RunOut: {
+            /** Cancel Requested At */
+            cancel_requested_at: string | null;
+            csv: components["schemas"]["CsvRecordOut"] | null;
+            /** Draft Revision */
+            draft_revision: number | null;
+            /** Draft Snapshot Id */
+            draft_snapshot_id: string | null;
+            /** Ended At */
+            ended_at: string | null;
+            error: components["schemas"]["RunErrorOut"] | null;
+            /** Id */
+            id: string;
+            /** Iterations */
+            iterations: number;
+            /** Kind */
+            kind: string;
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "live" | "simulate";
+            /** Outcomes Recorded */
+            outcomes_recorded: boolean;
+            parent: components["schemas"]["RunParentOut"] | null;
+            /** Parent Run Id */
+            parent_run_id: string | null;
+            /** Queued At */
+            queued_at: string | null;
+            request: components["schemas"]["RunRequestStateOut"] | null;
+            /** Started At */
+            started_at: string | null;
+            /** Started By */
+            started_by: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "queued" | "starting" | "running" | "succeeded" | "failed" | "cancelled" | "deadline_exceeded" | "refused" | "dead";
+            /** Target Step Id */
+            target_step_id: string | null;
+            trigger: components["schemas"]["RunTriggerOut"] | null;
+            /** Version Id */
+            version_id: string | null;
+            /** Workflow Id */
+            workflow_id: string;
+            /** Workflow Name */
+            workflow_name: string | null;
+        };
+        /**
+         * RunParentOut
+         * @description The run a sub-run's step started it from (its sub-flow or failure handler).
+         */
+        RunParentOut: {
+            /** Iteration Key */
+            iteration_key: string | null;
+            /** Run Id */
+            run_id: string;
+            /** Step Id */
+            step_id: string | null;
+        };
+        /**
+         * RunRequestStateOut
+         * @description A run's request where it is (engine 2b spec §7.3): started, or why it isn't.
+         */
+        RunRequestStateOut: {
+            /** Reason */
+            reason: string | null;
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "manual" | "rerun" | "schedule" | "webhook" | "dev";
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "queued" | "starting" | "started" | "cancelled" | "refused" | "dead";
+        };
+        /**
+         * RunStepOut
+         * @description One attempt of a step instance (engine spec §8; B4b): where it ran (its iteration), how it ended, its previews
+         *     (redacted and cut as the projection stores them: `[redacted]`, `[truncated]`), its error, its side effect's outcome,
+         *     a control step's port or assignments, and the sub-run it started, when it did.
+         */
+        RunStepOut: {
+            /** Attempt */
+            attempt: number;
+            /** Cel Mode */
+            cel_mode: string | null;
+            /** Child Run Id */
+            child_run_id?: string | null;
+            /** Effect */
+            effect: unknown;
+            /** Ended At */
+            ended_at: string | null;
+            error: components["schemas"]["RunErrorOut"] | null;
+            /** Input */
+            input: unknown;
+            /** Iteration Key */
+            iteration_key: string;
+            /** Key */
+            key: string;
+            /** Outcome */
+            outcome: ("applied" | "simulated" | "outcome_unknown") | null;
+            /** Output */
+            output: unknown;
+            /** Started At */
+            started_at: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "running" | "succeeded" | "failed" | "cancelled" | "skipped" | "not_started";
+            /** Step Id */
+            step_id: string;
+        };
+        /**
+         * RunStepSummaryOut
+         * @description A step of the graph a run ran (the runs design §4.4): its instances' final attempts counted by status and by the
+         *     port they took, a single instance's final attempt, and where its data came from: in a live run, `sent` or
+         *     `may_have_been_sent` for a plugin step's request, null when there's nothing to say.
+         */
+        RunStepSummaryOut: {
+            final: components["schemas"]["RunStepOut"] | null;
+            /** Instances */
+            instances: number;
+            /** Key */
+            key: string;
+            /** Origin */
+            origin: ("sent" | "may_have_been_sent" | "evaluated" | "evaluated_not_waited" | "fixture_not_sent" | "skipped" | "not_started" | "cancelled" | "didnt_run" | "not_recorded" | "not_reached_yet") | null;
+            /** Ports */
+            ports: {
+                [key: string]: number;
+            };
+            /** Statuses */
+            statuses: {
+                [key: string]: number;
+            };
+            /** Step Id */
+            step_id: string;
+            /** Type */
+            type: string;
+        };
+        /**
+         * RunStepsOut
+         * @description A run's steps in run order (§4.4), and what the values a person gave were: the workflow's input, or a step
+         *     test's seeds. A step test lists its target alone.
+         */
+        RunStepsOut: {
+            /**
+             * Given
+             * @enum {string}
+             */
+            given: "input" | "seeded";
+            /** Steps */
+            steps: components["schemas"]["RunStepSummaryOut"][];
+        };
+        /**
+         * RunTriggerOut
+         * @description Where a run's request came from (editor 4e-1; the runs design §4.2): its source, and the schedule or webhook
+         *     endpoint, or the run a re-run repeats. Null where the request predates migration 0073, or the schedule or endpoint
+         *     was deleted.
+         */
+        RunTriggerOut: {
+            /** Endpoint */
+            endpoint: string | null;
+            /** Rerun Of */
+            rerun_of: string | null;
+            schedule: components["schemas"]["ScheduleTimingOut"] | null;
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "manual" | "rerun" | "schedule" | "webhook" | "dev";
         };
         /** SampleConnectionOut */
         SampleConnectionOut: {
@@ -3056,6 +3511,20 @@ export interface components {
             offset_s?: number | null;
             /** Time Zone */
             time_zone?: string | null;
+        };
+        /**
+         * ScheduleTimingOut
+         * @description A schedule's timing as it is now, which the UI words as the Triggers panel does (4c-3b).
+         */
+        ScheduleTimingOut: {
+            /** Cron */
+            cron: string | null;
+            /** Every S */
+            every_s: number | null;
+            /** Offset S */
+            offset_s: number;
+            /** Time Zone */
+            time_zone: string;
         };
         /** SchedulesOut */
         SchedulesOut: {
@@ -5622,6 +6091,11 @@ export interface operations {
         parameters: {
             query?: {
                 workflow_id?: string | null;
+                status?: ("waiting" | "running" | "succeeded" | "failed" | "deadline_exceeded" | "cancelled" | "didnt_start") | null;
+                mode?: ("live" | "simulate") | null;
+                draft?: "exclude" | "only" | "include";
+                source?: ("manual" | "rerun" | "schedule" | "webhook" | "dev") | null;
+                since?: string | null;
                 before?: string | null;
                 before_id?: string | null;
                 limit?: number;
@@ -5640,9 +6114,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    }[];
+                    "application/json": components["schemas"]["RunItemOut"][];
                 };
             };
             /** @description Validation Error */
@@ -5674,9 +6146,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["CancelOut"];
                 };
             };
             /** @description Validation Error */
@@ -5748,9 +6218,143 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["RunOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    run_input_api_v1_t__tenant_id__runs__run_id__input_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunInputOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    run_steps_api_v1_t__tenant_id__runs__run_id__steps_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunStepsOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    step_attempts_api_v1_t__tenant_id__runs__run_id__steps__step_id__attempts_get: {
+        parameters: {
+            query?: {
+                iteration?: string;
+            };
+            header?: never;
+            path: {
+                run_id: string;
+                step_id: string;
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunAttemptsOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    step_instances_api_v1_t__tenant_id__runs__run_id__steps__step_id__instances_get: {
+        parameters: {
+            query?: {
+                within?: string | null;
+                offset?: number;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                run_id: string;
+                step_id: string;
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunInstancesOut"];
                 };
             };
             /** @description Validation Error */
