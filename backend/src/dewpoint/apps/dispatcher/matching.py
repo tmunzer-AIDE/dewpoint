@@ -314,6 +314,7 @@ async def _match(
             s, keys, tenant_id=tenant_id, workflow_id=binding.workflow_id, source=SOURCE, actor_id=None, mode=LIVE,
             idempotency_key=f"evt:{event.id}:{binding.workflow_id}", input=payload,
             details={"endpoint_id": str(endpoint_id), "event_id": str(event.id), "binding_id": str(binding.id)},
+            trigger_id=endpoint_id,
         )  # fmt: skip
         admitted += 1
         queued += request.new and request.request.status == "queued"
