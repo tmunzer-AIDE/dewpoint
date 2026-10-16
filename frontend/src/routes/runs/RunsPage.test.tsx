@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
+import { RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter, useSearch } from "@tanstack/react-router";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
-import type { RunFilters, RunItem } from "../../lib/runs";
+import { validateRunsSearch, type RunItem } from "../../lib/runs";
 import { item } from "../../test/runs";
 import { RunsPage } from "./RunsPage";
 
@@ -42,6 +42,8 @@ const BOARD: RunItem[] = [
   }),
 ];  // prettier-ignore
 
+const WORKFLOWS = [{ id: "w1", name: "AP offline triage" }, { id: "w2", name: "Bulk AP rename" }];
+
 let answers: (() => Response)[];
 let sent: URL[];
 
@@ -51,15 +53,22 @@ beforeEach(() => {
   vi.spyOn(Date, "now").mockReturnValue(NOW);
   vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
     const url = new URL((input as Request).url);
+    if (url.pathname === "/api/v1/t/t1/workflows") return Promise.resolve(new Response(JSON.stringify(WORKFLOWS)));
     sent.push(url);
     return Promise.resolve(answers.shift()?.() ?? new Response(JSON.stringify(BOARD)));
   });
 });
 
-function show(filters: RunFilters = {}) {
-  const root = createRootRoute({ component: () => <RunsPage tenantId="t1" filters={filters} /> });
+function Runs() {
+  return <RunsPage tenantId="t1" filters={useSearch({ strict: false })} />;
+}
+
+/** The Runs page at `path`, its filters in the address as the app's route keeps them. */
+function show(path = "/t/t1/runs") {
+  const root = createRootRoute();
+  const runs = createRoute({ getParentRoute: () => root, path: "/t/$tenantId/runs", validateSearch: validateRunsSearch, component: Runs });
   const run = createRoute({ getParentRoute: () => root, path: "/t/$tenantId/runs/$runId" });
-  const router = createRouter({ routeTree: root.addChildren([run]), history: createMemoryHistory({ initialEntries: ["/"] }) });
+  const router = createRouter({ routeTree: root.addChildren([runs, run]), history: createMemoryHistory({ initialEntries: [path] }) });
   render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <RouterProvider router={router} />
@@ -101,14 +110,14 @@ it("says a draft simulation is one, and a run whose code it doesn't know by its 
     item("7c1e9a40-0001", local(10, 0, 0), { mode: "simulate", draft_snapshot_id: "s1" }),
     item("1e8a3f27-0002", local(9, 0, 0), { status: "refused", started_at: null, request: { status: "refused", source: "manual", reason: "a_code_from_later" } }),
   ])));  // prettier-ignore
-  show({ mode: "drafts" });
+  show("/t/t1/runs?mode=drafts");
   await screen.findByRole("link", { name: "7c1e9a40" });
   expect(cells("7c1e9a40")[2]).toBe("SucceededDraft simulation");
   expect(cells("1e8a3f27")[6]).toBe("a_code_from_laterNothing ran.");
 });
 
 it("asks for the runs its filters choose", async () => {
-  show({ status: "failed", workflow: "w1", started: "all" });
+  show("/t/t1/runs?status=failed&workflow=w1&started=all");
   await screen.findByRole("link", { name: "a14b2e9c" });
   expect(Object.fromEntries(sent[0]!.searchParams)).toEqual({ status: "failed", workflow_id: "w1", draft: "exclude", limit: "50" });
 });
@@ -120,11 +129,14 @@ it("opens a run's page from its name", async () => {
 });
 
 it("says it's reading the runs, then that none ran yet (the ListStates board)", async () => {
-  let answer!: (r: Response) => void;
-  vi.mocked(globalThis.fetch).mockImplementationOnce(() => new Promise((resolve) => (answer = resolve)));
-  show();
+  let open!: () => void;
+  const held = new Promise<void>((resolve) => (open = resolve));
+  const answer = vi.mocked(globalThis.fetch).getMockImplementation()!;
+  vi.mocked(globalThis.fetch).mockImplementation((input) => held.then(() => answer(input)));
+  answers.push(() => new Response("[]"));
+  show("/t/t1/runs?started=all");
   expect((await screen.findByText("Reading the runs…")).getAttribute("role")).toBe("status");
-  answer(new Response("[]"));
+  open();
   expect(await screen.findByText("No runs yet. A run starts by hand from a workflow, on a schedule, or from a webhook.")).toBeTruthy();
 });
 
@@ -147,4 +159,84 @@ it("lists the runs as a list below 640 px, each one's facts on its lines (§5.6;
   expect(runs[1]!.textContent).toBe("9f3c2a71RunningAP offline triageWebhook, Mist events · today 10:02:07 · 12 s");
   expect(runs[2]!.textContent).toBe("4a2b17e0FailedAP offline triageWebhook, Mist events · today 09:41:12 · 38 schannel_not_foundThe channel wasn't found.");
   expect(runs[4]!.textContent).toBe("77e0b9d2SucceededSimulatedBulk site creationBy hand, nadia@example.com · today 05:47:40 · 29 s");
+});
+
+const filter = (name: string) => screen.getByRole("button", { name });
+const search = (router: ReturnType<typeof show>) => router.state.matches.at(-1)!.search;
+
+it("offers each filter as a menu showing its value, a set one outlined in the accent (§5.2; the ListStates board)", async () => {
+  show("/t/t1/runs?status=failed");
+  await screen.findByRole("link", { name: "a14b2e9c" });
+  const group = screen.getByRole("group", { name: "Filters" });
+  expect(within(group).getAllByRole("button").map((b) => b.textContent)).toEqual([
+    "Workflow · Any ▾", "Status · Failed ▾", "Trigger · Any ▾", "Mode · Live and simulated ▾", "Started · Last 24 hours ▾",
+  ]);  // prettier-ignore
+  expect(filter("Status · Failed").className).toContain("border-accent");
+  expect(filter("Trigger · Any").className).not.toContain("border-accent");
+});
+
+it("filters by one status from its menu, keeping the others, in the address (§5.1, §5.2)", async () => {
+  const router = show("/t/t1/runs?trigger=schedule");
+  await screen.findByRole("link", { name: "a14b2e9c" });
+  await userEvent.click(filter("Status · Any"));
+  const menu = await screen.findByRole("menu");
+  expect(within(menu).getAllByRole("menuitemradio").map((i) => i.textContent)).toEqual([
+    "✓Any", "Waiting: queued or starting", "Running", "Succeeded", "Failed", "Ran out of time", "Cancelled", "Didn't start: couldn't start or refused",
+  ]);  // prettier-ignore
+  await userEvent.click(within(menu).getByRole("menuitemradio", { name: "Didn't start: couldn't start or refused" }));
+  await vi.waitFor(() => expect(search(router)).toEqual({ trigger: "schedule", status: "didnt_start" }));
+  await vi.waitFor(() => expect(sent.at(-1)!.searchParams.get("status")).toBe("didnt_start"));
+  expect(filter("Status · Didn't start").className).toContain("border-accent");
+});
+
+it("says which runs each mode lists, draft simulations only when chosen (§5.2)", async () => {
+  const router = show();
+  await screen.findByRole("link", { name: "a14b2e9c" });
+  await userEvent.click(filter("Mode · Live and simulated"));
+  const menu = await screen.findByRole("menu");
+  expect(within(menu).getAllByRole("menuitemradio").map((i) => i.textContent)).toEqual([
+    "✓Live and simulated", "Live", "Simulated: of a published version", "Draft simulations: made in the editor", "Everything",
+  ]);  // prettier-ignore
+  await userEvent.click(within(menu).getByRole("menuitemradio", { name: "Draft simulations: made in the editor" }));
+  await vi.waitFor(() => expect(search(router)).toEqual({ mode: "drafts" }));
+  expect(sent.at(-1)!.searchParams.get("draft")).toBe("only");
+});
+
+it("goes back to a filter's default, leaving it out of the address", async () => {
+  const router = show("/t/t1/runs?started=7d");
+  await screen.findByRole("link", { name: "a14b2e9c" });
+  await userEvent.click(filter("Started · Last 7 days"));
+  await userEvent.click(await screen.findByRole("menuitemradio", { name: "Last 24 hours" }));
+  await vi.waitFor(() => expect(search(router)).toEqual({}));
+});
+
+it("chooses a workflow from a list it can search (§5.2; the ListStates board)", async () => {
+  const router = show();
+  await screen.findByRole("link", { name: "a14b2e9c" });
+  await userEvent.click(filter("Workflow · Any"));
+  const chooser = await screen.findByRole("dialog", { name: "Choose a workflow" });
+  const find = within(chooser).getByRole("combobox", { name: "Choose a workflow" });
+  expect(find.getAttribute("placeholder")).toBe("Find a workflow");
+  await userEvent.type(find, "bulk");
+  expect(within(chooser).getAllByRole("option").map((o) => o.textContent)).toEqual(["Bulk AP rename"]);
+  await userEvent.click(within(chooser).getByRole("option", { name: "Bulk AP rename" }));
+  await vi.waitFor(() => expect(search(router)).toEqual({ workflow: "w2" }));
+  expect(filter("Workflow · Bulk AP rename").className).toContain("border-accent");
+  expect(screen.queryByRole("dialog")).toBeNull();
+});
+
+it("says when no run matches the filters, and clears them (the ListStates board)", async () => {
+  answers.push(() => new Response("[]"));
+  const router = show("/t/t1/runs?status=failed&trigger=webhook");
+  expect(await screen.findByText("No runs match these filters in the last 24 hours.")).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Clear the filters" }));
+  await vi.waitFor(() => expect(search(router)).toEqual({}));
+});
+
+it("says no run started in the last 24 hours, never that none ran, and offers every run kept", async () => {
+  answers.push(() => new Response("[]"));
+  const router = show();
+  expect(await screen.findByText("No runs in the last 24 hours.")).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Show all kept" }));
+  await vi.waitFor(() => expect(search(router)).toEqual({ started: "all" }));
 });

@@ -2,18 +2,28 @@
 // The Runs page (editor 4e-1; the runs design §5.2; the Main and ListStates boards): a tenant's runs, newest first,
 // each named by its id's first eight characters, a link to its page, with its workflow, its status (and a simulation
 // said so), what started it, when, how long it ran and its error. A request that never started gives its reason's code
-// and words. Below 640 px the rows become a list, each run's facts on its lines (§5.6; the Narrow boards).
+// and words. Below 640 px the rows become a list, each run's facts on its lines (§5.6; the Narrow boards). Its filters
+// live in its address (§5.1); an empty list says what was asked, never that no run ever ran when the window hides them.
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { Button } from "../../components/Button";
 import { ModeChip, RunStatusChip } from "../../components/RunChips";
 import { Table, Td, Th } from "../../components/Table";
 import { When } from "../../components/When";
 import { useNarrow } from "../../lib/media";
-import { isEnded, runsQuery, type RunFilters, type RunItem } from "../../lib/runs";
+import { isEnded, runsQuery, searchOf, type RunFilters, type RunItem } from "../../lib/runs";
 import { duration, reasonWords, runId } from "../../lib/runStatus";
 import { useDocumentTitle } from "../../lib/title";
+import { Filters } from "./Filters";
 import { triggerOf } from "./trigger";
+
+const WINDOW: Record<NonNullable<RunFilters["started"]>, string> = {
+  "1h": "in the last hour",
+  "24h": "in the last 24 hours",
+  "7d": "in the last 7 days",
+  "30d": "in the last 30 days",
+  all: "",
+};
 
 /** When it started, else when it was queued. */
 const startOf = (r: RunItem) => r.started_at ?? r.queued_at;
@@ -111,14 +121,40 @@ function RunList({ tenantId, runs }: { tenantId: string; runs: RunItem[] }) {
   );
 }
 
+/** What an empty list says: no match for the filters set; none in the window; else none yet (the ListStates board). */
+function Empty({ filters, onChange }: { filters: RunFilters; onChange: (next: RunFilters) => void }) {
+  const started = filters.started ?? "24h";
+  const within = WINDOW[started];
+  if (Object.keys(searchOf({ ...filters, started: undefined })).length > 0) {
+    return (
+      <p className="flex flex-wrap items-center gap-3 text-body text-muted">
+        {`No runs match these filters${within ? ` ${within}` : ""}.`}
+        <Button size="sm" onClick={() => onChange({})}>Clear the filters</Button>
+      </p>
+    );
+  }
+  if (started !== "all") {
+    return (
+      <p className="flex flex-wrap items-center gap-3 text-body text-muted">
+        {`No runs ${within}.`}
+        <Button size="sm" onClick={() => onChange({ started: "all" })}>Show all kept</Button>
+      </p>
+    );
+  }
+  return <p className="text-body text-muted">No runs yet. A run starts by hand from a workflow, on a schedule, or from a webhook.</p>;
+}
+
 export function RunsPage({ tenantId, filters }: { tenantId: string; filters: RunFilters }) {
   useDocumentTitle("Runs");
+  const navigate = useNavigate();
   const first = useQuery(runsQuery(tenantId, filters));
   const narrow = useNarrow();
   const runs = first.data ?? [];
+  const setFilters = (next: RunFilters) => void navigate({ to: "/t/$tenantId/runs", params: { tenantId }, search: searchOf(next) });
   return (
     <section className="flex flex-col gap-4 p-6">
       <h1 className="text-h1 font-semibold">Runs</h1>
+      <Filters tenantId={tenantId} filters={filters} onChange={setFilters} />
       {first.isPending ? (
         <p role="status" className="text-body text-muted">Reading the runs…</p>
       ) : first.isError ? (
@@ -127,7 +163,7 @@ export function RunsPage({ tenantId, filters }: { tenantId: string; filters: Run
           <Button size="sm" onClick={() => void first.refetch()}>Try again</Button>
         </p>
       ) : runs.length === 0 ? (
-        <p className="text-body text-muted">No runs yet. A run starts by hand from a workflow, on a schedule, or from a webhook.</p>
+        <Empty filters={filters} onChange={setFilters} />
       ) : narrow ? (
         <RunList tenantId={tenantId} runs={runs} />
       ) : (
