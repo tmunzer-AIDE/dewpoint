@@ -15,6 +15,7 @@ import { Table, Td, Th } from "../components/Table";
 import { announce } from "../lib/announce";
 import { ApiError, client, ok } from "../lib/client";
 import { downloadJson, fileName } from "../lib/download";
+import { RUN_STATUS, type Tone } from "../lib/runStatus";
 import { useDocumentTitle } from "../lib/title";
 import { attentionWords, triggerColumn } from "../lib/triggers";
 import { canEdit, canPublish, notPortable, since, tenantQuery, workflowsQuery, type PortableProblem, type WorkflowRow } from "../lib/workflows";
@@ -30,13 +31,8 @@ const FILTERS: { value: Filter; label: string; keep: (w: WorkflowRow) => boolean
   { value: "attention", label: "Needs attention", keep: (w) => w.needs_attention.length > 0 },
 ];
 
-const STATUS: Record<NonNullable<WorkflowRow["last_run"]>["status"], { text: string; dot: string }> = {
-  running: { text: "Running", dot: "bg-accent" },
-  succeeded: { text: "Succeeded", dot: "bg-ok" },
-  failed: { text: "Failed", dot: "bg-danger" },
-  cancelled: { text: "Cancelled", dot: "bg-line-strong" },
-  deadline_exceeded: { text: "Ran out of time", dot: "bg-danger" },
-};
+// A run's status in every run's words (the runs design §5.5), its dot repeating them.
+const DOT: Record<Tone, string> = { waiting: "bg-line-strong", running: "bg-accent", ok: "bg-ok", danger: "bg-danger", neutral: "bg-line-strong" };
 
 function Version({ w }: { w: WorkflowRow }) {
   if (w.active_version_number === null) return <span className="text-muted">Not published</span>;
@@ -57,13 +53,13 @@ function LastRun({ w }: { w: WorkflowRow }) {
     <span className="flex flex-col gap-0.5 text-small">
       {live ? (
         <span className="inline-flex items-center gap-2">
-          <span aria-hidden="true" className={`size-2 rounded-sm ${STATUS[live.status].dot}`} />
-          {STATUS[live.status].text} · {since(live.at)}
+          <span aria-hidden="true" className={`size-2 rounded-sm ${DOT[RUN_STATUS[live.status].tone]}`} />
+          {RUN_STATUS[live.status].word} · {since(live.at)}
         </span>
       ) : (
         <span className="text-muted">No live runs yet</span>
       )}
-      {simulated && <span className="text-sim">Simulated: {STATUS[simulated.status].text} · {since(simulated.at)}</span>}
+      {simulated && <span className="text-sim">Simulated: {RUN_STATUS[simulated.status].word} · {since(simulated.at)}</span>}
     </span>
   );
 }

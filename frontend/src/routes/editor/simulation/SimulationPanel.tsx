@@ -5,10 +5,11 @@
 // banner, the checks on the server, the steps, the input used) come in below the lifecycle as `children`.
 import { useEffect, useRef, type ReactNode } from "react";
 import { Button } from "../../../components/Button";
+import { duration, runId } from "../../../lib/runStatus";
 import { ENDED } from "../../../lib/simulations";
 import { SIDE } from "../side";
 import { SimulatedChip, StatusChip } from "./chips";
-import { clock, duration, endedWhat, lineOf, runId } from "./lifecycle";
+import { clock, endedWhat, lineOf } from "./lifecycle";
 import type { SimulationSession } from "./useSimulation";
 
 export function SimulationPanel({ session, onSimulateAgain, onClose, children }: {
