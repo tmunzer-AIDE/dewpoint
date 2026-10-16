@@ -3226,3 +3226,47 @@ description), `check:api` and the type check passing; local CodeQL, no finding.
 Deferred minors (a follow-up issue, as for earlier slices): `get_run` reads a whole graph for its engine ABI while the
 page polls it; a request that never started on a pre-ABI-9 version says "not recorded" where ruling 222 says "didn't
 run"; `run_input` learns "unreadable" by catching the read-back's 503.
+
+### 4e-1a merged; the 4e-1b plan accepted (2026-10-16)
+
+The owner merged 4e-1a as #116 (squash cb7425db), CI green ("green and merged"); its three deferred minors are issue
+#117. `docs/superpowers/plans/2026-10-16-editor-ui-4e1b-runs-ui.md`, revision 1 (898c6e96): the UI of the runs design
+§5, one plan with milestone pauses, as 4d-1c's. The owner accepted it ("1. yes 2. inline"): its rulings 1–30 join this
+ledger as 230–259; it runs inline, with pauses after Tasks 6, 11 and 14 and a fresh reviewer at the end. The branch
+`feat/editor-4e1b` starts at `origin/main` cb7425db, the frontend packages restored offline (the owner's choices).
+Mid-slice rulings start at M104. The frontend only: no backend change, no migration, no ABI change; the API is
+4e-1a's.
+
+230. **Accepted. One plan with milestone pauses** (plan ruling 1).
+231. **Accepted. One vocabulary module, `lib/runStatus.ts`; the Simulation panel keeps "Not simulated"** (plan ruling 2).
+232. **Accepted. Why a request didn't start is worded here, from its code** (plan ruling 3; with ruling 213).
+233. **Accepted. The list pages on from its last run's `(queued_at, id)`; `listed` merges the reads** (plan ruling 4).
+234. **Accepted. An empty list says what was asked** (plan ruling 5; departs from the ListStates board's copy).
+235. **Accepted. The Mode menu's items say what they hold** (plan ruling 6).
+236. **Accepted. The Workflow filter is a native modal dialog around cmdk** (plan ruling 7).
+237. **Accepted. Below 640 px the list is a list, in place of the table** (plan ruling 8).
+238. **Accepted. One lazy loader, `LazyPage`** (plan ruling 9).
+239. **Accepted. Times in the person's zone, the full date on hover** (plan ruling 10).
+240. **Accepted. Changes are said through the shell's one live region** (plan ruling 11).
+241. **Accepted. One-off reads use `queryClient.query`** (plan ruling 12).
+242. **Accepted. A trigger's words** (plan ruling 13).
+243. **Accepted. The filters' validation names every filter** (plan ruling 14).
+244. **Accepted. The canvas's keyboard moves into `useCanvasNav`** (plan ruling 15).
+245. **Accepted. 4d-1c's tags serve any run** (plan ruling 16).
+246. **Accepted. The canvas's `simulated` prop becomes `results`** (plan ruling 17).
+247. **Accepted. The banner's tense follows the run** (plan ruling 18).
+248. **Accepted. Reading a run; a read that fails later keeps the page** (plan ruling 19).
+249. **Accepted. Copy id is named by its words** (plan ruling 20).
+250. **Accepted. The editor's chunk: the canvas in a shared chunk; the e2e asset test by meaning** (plan ruling 21).
+251. **Accepted. A step's drawer is the editor's, read only, its Result tab first** (plan ruling 22).
+252. **Accepted. A failed run opens on its first failed step, once** (plan ruling 23).
+253. **Accepted. An instance shows its attempts read's last attempt** (plan ruling 24).
+254. **Accepted. Loops: iterations once ended, shared through `InstancePages`** (plan ruling 25).
+255. **Accepted. Cancel: a live run asks in an alert dialog** (plan ruling 26).
+256. **Accepted. A request that never started shows its graph without tags** (plan ruling 27).
+257. **Accepted. The Start drawer's words** (plan ruling 28).
+258. **Accepted. The Simulation panel's run id links through `runOf`** (plan ruling 29).
+259. **Accepted. The browser specs seed their runs through the API** (plan ruling 30).
+
+M104. **This section records the plan as accepted, its rulings listed**, as 4e-1a's did: the owner accepted it before
+      Task 1, whose text was written to say "proposed".
