@@ -165,6 +165,7 @@ class DiagnosticOut(_Answer):
 
 
 class LastRunOut(_Answer):
+    id: str  # its page's (editor 4e-1; the runs design §4.5)
     status: Literal["running", "succeeded", "failed", "cancelled", "deadline_exceeded"]
     at: str  # when it ended, else started, else was queued
 

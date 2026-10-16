@@ -96,7 +96,7 @@ async def _get(db: AsyncSession, ctx: TenantContext, workflow_id: uuid.UUID, *, 
 
 
 def _last(run: workflow_summary.LastRun | None) -> dict[str, str] | None:
-    return None if run is None else {"status": run.status, "at": run.at.isoformat()}
+    return None if run is None else {"id": str(run.id), "status": run.status, "at": run.at.isoformat()}
 
 
 async def _summaries(db: AsyncSession, tenant_id: uuid.UUID, wfs: list[Workflow]) -> list[dict[str, object]]:
