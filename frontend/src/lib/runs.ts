@@ -37,16 +37,16 @@ export interface RunFilters {
 
 const one = <T extends string>(allowed: readonly T[], v: unknown): T | undefined => (allowed.includes(v as T) ? (v as T) : undefined);
 
-/** The filters an address holds, each value one it allows: a link keeps them (§5.1). */
+/** The filters an address holds, each value one it allows: a link keeps them (§5.1). Every filter is named, a value
+ * it doesn't allow as undefined: the router lays a route's search over the address's own, which would keep it. */
 export function validateRunsSearch(search: Record<string, unknown>): RunFilters {
-  const filters: RunFilters = {
+  return {
     workflow: typeof search.workflow === "string" && search.workflow !== "" ? search.workflow : undefined,
     status: one(STATUSES, search.status),
     trigger: one(TRIGGERS, search.trigger),
     mode: one(MODES, search.mode),
     started: one(STARTED, search.started),
   };
-  return searchOf(filters);
 }
 
 /** The filters as an address writes them: those at their default left out. */

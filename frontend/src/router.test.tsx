@@ -7,6 +7,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import { guardLeaving } from "./lib/leaving";
 import { routeTree } from "./router";
+import { item } from "./test/runs";
 
 const SESSION = {
   auth_methods: ["password", "totp"],
@@ -18,6 +19,9 @@ const TENANTS = [
   { id: "t1", name: "Acme Retail", slug: "acme-retail", role: "owner", require_passkey: false },
   { id: "t2", name: "Acme Lab", slug: "acme-lab", role: "owner", require_passkey: false },
 ];
+const RUN = {
+  ...item("r1", "2026-10-16T09:41:12Z", { status: "failed" }), draft_revision: null, outcomes_recorded: true, parent: null, csv: null,
+};  // prettier-ignore
 const TYPES = [{ key: "mist", label: "Mist", config_schema: {}, secret_fields: ["api_token"], clouds: { global_01: "api.mist.com" } }];
 
 let sent: { method: string; path: string; body: unknown }[];
@@ -49,6 +53,8 @@ beforeEach(() => {
     if (/^GET \/api\/v1\/t\/t[12]\/webhook-endpoints$/.test(key)) return json({ endpoints: [] });
     if (key === "GET /api/v1/trigger-types") return json([]);
     if (key === "GET /api/v1/node-types") return json([]);
+    if (key === "GET /api/v1/t/t1/runs") return json([]);
+    if (key === "GET /api/v1/t/t1/runs/r1") return json(RUN);
     const tenant = TENANTS.find((t) => key === `GET /api/v1/t/${t.id}`);
     if (tenant) return json(tenant);
     return json({ error: "unexpected" }, 500);
@@ -177,4 +183,23 @@ it("opens Settings → Webhook endpoints from its tab (4c-3b)", async () => {
   await userEvent.click(await screen.findByRole("link", { name: "Webhook endpoints" }));
   expect(await screen.findByRole("heading", { name: "Webhook endpoints" })).toBeTruthy();
   expect(router.state.location.pathname).toBe("/t/t1/settings/webhooks");
+});
+
+it("opens the Runs page from the rail (the runs design §5.1)", async () => {
+  const router = showApp("/t/t1/workflows");
+  await userEvent.click(await screen.findByRole("link", { name: "Runs" }));
+  expect(await screen.findByRole("heading", { level: 1, name: "Runs" })).toBeTruthy();
+  expect(router.state.location.pathname).toBe("/t/t1/runs");
+});
+
+it("keeps a link's filters, dropping a value it doesn't know (§5.1)", async () => {
+  const router = showApp("/t/t1/runs?status=failed&mode=bogus");
+  expect(await screen.findByRole("heading", { level: 1, name: "Runs" })).toBeTruthy();
+  expect(router.state.matches.at(-1)!.search).toEqual({ status: "failed" });
+});
+
+it("opens a run's page beside the compact rail, as the editor's (§5.1; the owner's answer 6)", async () => {
+  const router = showApp("/t/t1/runs/r1");
+  expect(await screen.findByRole("heading", { level: 1, name: "AP offline triage" })).toBeTruthy();
+  expect(router.state.matches.some((m) => m.staticData.compactRail === true)).toBe(true);
 });
