@@ -3192,3 +3192,19 @@ task's tests failed, then passed, as its steps say; after each, ruff, `ruff form
   (`/input` 404); green: 34 passed.
 
 Mid-slice rulings: none in this milestone. Nothing pushed.
+
+### 4e-1a, milestone 3 and the final checkpoint (2026-10-16)
+
+The owner, in chat: "Milestone 2 accepted, continue".
+- Task 7, 5689144a: the Workflows list's last run names its run. Red: 1 failed, 25 passed (`KeyError: 'id'`);
+  green: 26 passed.
+- Task 8, ceb20738: the client regenerated (`dewpoint api openapi`, `pnpm gen:api`; `check:api` passes) and "Reading
+  runs" in `docs/operations/runs.md`. The checks, on this tree:
+  - the frontend: the type check and ESLint silent; its suite 1184 passed (90 files), unchanged;
+  - the backend: ruff, `ruff format --check` and mypy silent; `lint-imports`, 11 contracts kept;
+  - the privilege reference, `test_online.py` and 0073's tests: 50 passed;
+  - the API, admission, summary and core runs tests: 708 passed;
+  - local CodeQL (python, CLI 2.27.2, python-queries 1.8.12, CI's filter): no finding;
+  - the whole backend suite: not run locally, on the owner's word ("Leave it to CI"); CI runs it on the PR.
+
+Mid-slice rulings over the slice: M103 only. The final review follows. Nothing pushed.
