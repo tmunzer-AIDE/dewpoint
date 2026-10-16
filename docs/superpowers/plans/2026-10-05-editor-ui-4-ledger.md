@@ -3270,3 +3270,18 @@ Mid-slice rulings start at M104. The frontend only: no backend change, no migrat
 
 M104. **This section records the plan as accepted, its rulings listed**, as 4e-1a's did: the owner accepted it before
       Task 1, whose text was written to say "proposed".
+
+### 4e-1b, milestone 1 (2026-10-16)
+
+Tasks 1–6, inline, each from its diff blocks as the plan writes them, every red and green as its steps say:
+- Task 1, 0329362f: this plan accepted, rulings 230–259 (M104).
+- Task 2, 765b26a7: one status vocabulary. Red: 1 failed, 22 passed (two modules missing; "Deadline exceeded");
+  green: 29 passed.
+- Task 3, 7788c2e7: the runs from the API, `when`. Red: neither module exists; green: 13 passed.
+- Task 4, 693ef615: Runs on the rail, the routes, the list's rows, a run gone. Red: 5 failed, 24 passed; green: 43.
+- Task 5, 019ef08d: the filters. Red: 7 failed, 8 passed; green: 15.
+- Task 6, b209ff05: reading the list. Red: 5 failed, 16 passed (the hidden tab's test passes at once, as planned);
+  green: 21.
+
+After each task the type check and ESLint were silent. The whole frontend suite on b209ff05: 1233 passed (97 files).
+Mid-slice rulings: M104 only. Nothing pushed.
