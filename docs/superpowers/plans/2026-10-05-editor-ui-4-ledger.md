@@ -3301,3 +3301,14 @@ The owner accepted milestone 1 ("go"). Tasks 7–11, inline, every red and green
 
 After each task the type check and ESLint were silent. The whole frontend suite on c79e9548: 1261 passed (98 files).
 Mid-slice rulings: none. Nothing pushed.
+
+### 4e-1b, milestone 3 (2026-10-17)
+
+The owner accepted milestone 2 ("go"). Tasks 12–14, inline, every red and green as the plan's steps say:
+- Task 12, ec8bec56: cancel. Red: 6 failed, 29 passed; green: 35.
+- Task 13, ba419095: runs that didn't run, an older run, the Start drawer. Red: 6 failed, 27 passed; green: 33.
+- Task 14, 8f69ec09: the ways in (the toolbar's Runs, the Workflows list's last run, the Simulation panel's run).
+  Red: 4 failed, 184 passed; green: 188.
+
+After each task the type check and ESLint were silent. The whole frontend suite on 8f69ec09: 1277 passed (98 files),
+as the plan's own check found. Mid-slice rulings: none. Nothing pushed.
