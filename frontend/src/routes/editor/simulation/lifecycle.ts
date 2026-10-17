@@ -22,11 +22,11 @@ export function stepsEnded(steps: StepSummary[]): { ended: number; of: number } 
   return { ended: steps.filter((s) => s.instances > 0 && !s.statuses.running).length, of: steps.length };
 }
 
-const did = (s: StepSummary, ...statuses: string[]) => statuses.some((k) => (s.statuses[k] ?? 0) > 0);
+const did = (s: Pick<StepSummary, "statuses">, ...statuses: string[]) => statuses.some((k) => (s.statuses[k] ?? 0) > 0);
 
 /** How a simulation ended, naming the step that decided it (the Lifecycle board): the first that failed, the last that
  * ran before a cancel, the one the deadline stopped. */
-export function endedWhat(phase: Phase, steps: StepSummary[]): string {
+export function endedWhat(phase: Phase, steps: Pick<StepSummary, "key" | "statuses">[]): string {
   if (phase === "failed") {
     const at = steps.find((s) => did(s, "failed"));
     return at ? `failed at ${at.key}` : "failed";

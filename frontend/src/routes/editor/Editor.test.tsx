@@ -40,7 +40,7 @@ vi.mock("./Canvas", async () => {
           data-problems={String(props.problems.size)}
           data-problem-steps={[...props.problems.keys()].join(",")}
           data-conditional={[...props.conditional].join(",")}
-          data-simulated={JSON.stringify((props.simulated ? [...props.simulated.entries()] : []).map(([k, tags]) => [k, tags.map((t) => t.text)]))}
+          data-simulated={JSON.stringify((props.results ? [...props.results.entries()] : []).map(([k, tags]) => [k, tags.map((t) => t.text)]))}
           data-start-tags={(props.start.tags ?? []).map((t) => t.text).join(",")}
         >
           <button data-item="start" data-summary={props.start.summary} aria-expanded={props.start.open} onClick={props.start.onOpen}>Start</button>

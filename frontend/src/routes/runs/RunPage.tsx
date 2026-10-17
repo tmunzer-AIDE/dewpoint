@@ -1,15 +1,31 @@
 // SPDX-License-Identifier: Apache-2.0
-// A run's page (editor 4e-1; the runs design §5.3, §5.4; the RunFailed and RunOther boards), laid out like the editor
-// (the owner's answer 6): the compact rail, and a bar naming the run, its workflow and its short id, with the way back
-// to Runs. A run past its tenant's retention, or an id that never was, is said to be neither, with Back to Runs; a run
-// read while its tenant is erased says why it can't be (§5.5).
+// A run's page (editor 4e-1; the runs design §5.3, §5.4; the RunFailed, RunRunning and RunOther boards), laid out like
+// the editor (the owner's answer 6): the compact rail, the run's bar, its banner, and the graph it ran on the read-only
+// canvas, each step's result beside its card, walked with the editor's keys (D16). It's read while it runs
+// (useRunReads). A run past its tenant's retention, or an id that never was, is said to be neither, with Back to Runs;
+// a run read while its tenant is erased says why it can't be (§5.5).
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
+import { useCallback, useMemo, type KeyboardEvent } from "react";
 import { Button, LINK_BUTTON } from "../../components/Button";
+import { When } from "../../components/When";
 import { ApiError } from "../../lib/client";
-import { runQuery } from "../../lib/runs";
+import { findNode, idKey, portsOf } from "../../lib/graph";
+import { isEnded } from "../../lib/runs";
 import { runId } from "../../lib/runStatus";
+import { draftSnapshotQuery } from "../../lib/simulations";
 import { useDocumentTitle } from "../../lib/title";
+import { versionQuery } from "../../lib/triggers";
+import { timeOf } from "../../lib/when";
+import { nodeTypesQuery, type GraphDoc } from "../../lib/workflows";
+import { Canvas } from "../editor/Canvas";
+import { NAV_KEYS, type NavKey } from "../editor/canvasNav";
+import { endedWhat } from "../editor/simulation/lifecycle";
+import { tagsOf, type SimTag } from "../editor/simulation/results";
+import { useCanvasNav } from "../editor/useCanvasNav";
+import { RunBanner, RunBar } from "./RunBar";
+import { triggerOf, triggerWords } from "./trigger";
+import { useRunReads } from "./useRunReads";
 
 /** Why a run couldn't be read: gone, the tenant's key gone during an erasure, or the read failed. */
 function Unread({ tenantId, id, error, retry }: { tenantId: string; id: string; error: Error; retry: () => void }) {
@@ -35,18 +51,106 @@ function Unread({ tenantId, id, error, retry }: { tenantId: string; id: string; 
   );
 }
 
+const NONE: GraphDoc = { graph_format: 1, nodes: [], edges: [] };
+const NO_STEPS: ReadonlySet<string> = new Set();
+const NO_PROBLEMS = new Map();
+const nothing = () => undefined;
+
 export function RunPage({ tenantId, runId: id }: { tenantId: string; runId: string }) {
   useDocumentTitle(`Run ${runId(id)}`);
-  const run = useQuery(runQuery(tenantId, id));
+  const { run, steps } = useRunReads(tenantId, id);
   const r = run.data;
-  // Only a run never read says why it isn't shown: a read that fails later keeps what was read.
+  const types = useQuery(nodeTypesQuery);
+  // The graph it ran: its version's, or the draft a draft simulation froze for it. Neither ever changes.
+  const version = useQuery({ ...versionQuery(tenantId, r?.workflow_id ?? "", r?.version_id ?? ""), enabled: !!r?.version_id });
+  const snapshot = useQuery({ ...draftSnapshotQuery(tenantId, r?.workflow_id ?? "", r?.draft_snapshot_id ?? ""), enabled: !!r?.draft_snapshot_id });
+  const graph = (r?.draft_snapshot_id ? snapshot.data?.graph : version.data?.graph) ?? null;
+  const typeMap = useMemo(() => new Map((types.data ?? []).map((t) => [t.ref, t])), [types.data]);
+  const portsByStep = useCallback((nodeId: string) => {
+    const n = graph && findNode(graph, nodeId);
+    return n ? portsOf(n, typeMap.get(n.type)) : [];
+  }, [graph, typeMap]);  // prettier-ignore
+  const keys = useCanvasNav(graph ?? NONE, portsByStep, false);
+  const ended = r !== undefined && isEnded(r.status);
+  // Each step's tags, 4d-1c's grammar with a run's (§5.3): an attempt is said "of" the step's own limit, else its
+  // type's; an action's time, a failure's code.
+  const results = useMemo(() => {
+    const tags = new Map<string, SimTag[]>();
+    for (const s of steps.data?.steps ?? []) {
+      const type = typeMap.get(s.type);
+      const max = (graph && findNode(graph, s.step_id)?.options?.max_attempts) ?? type?.retry.max_attempts ?? null;
+      tags.set(idKey(s.step_id), tagsOf(s, { maxAttempts: max, ended, run: { action: type?.kind === "action" } }));
+    }
+    return tags;
+  }, [steps.data, typeMap, graph, ended]);
+  // Only a run never read says why it isn't shown: a read that fails later keeps what was read, and says so.
   if (!r) return run.isError ? <Unread tenantId={tenantId} id={id} error={run.error} retry={() => void run.refetch()} /> : <p role="status" className="p-6 text-body text-muted">Reading the run…</p>;
+  const trigger = triggerOf(r);
+  const given = steps.data?.given === "input" ? [{ text: "input", kind: "given" as const }] : undefined;
+  function onCanvasKey(e: KeyboardEvent<HTMLDivElement>) {
+    if (!(e.target as HTMLElement).dataset.item || e.altKey || e.ctrlKey || e.metaKey || !NAV_KEYS.includes(e.key)) return;
+    e.preventDefault();
+    keys.walk(e.key as NavKey);
+  }
+  const endedAt = ended && r.ended_at && r.status !== "refused" && r.status !== "dead" ? r.ended_at : null;
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-line bg-surface px-5 py-2.5">
-        <Link to="/t/$tenantId/runs" params={{ tenantId }} className="text-small text-muted hover:text-ink">← Runs</Link>
-        <h1 className="min-w-0 truncate text-body-lg font-semibold">{r.workflow_name ?? "—"}</h1>
-        <span className="font-mono text-small">{`run ${runId(r.id)}`}</span>
+    <div className="@container flex min-h-0 flex-1 flex-col">
+      <RunBar tenantId={tenantId} run={r} version={version.data?.number ?? null} />
+      <div className="flex flex-col gap-2 border-b border-line bg-surface px-5 py-2.5">
+        {run.isRefetchError && (
+          <p className="flex flex-wrap items-center gap-2 text-small text-muted">
+            {`Couldn't be refreshed · as of ${timeOf(run.dataUpdatedAt)}`}
+            <Button size="sm" onClick={() => void run.refetch()}>Try again</Button>
+          </p>
+        )}
+        <RunBanner run={r} />
+        {endedAt && steps.data && (
+          <p className="text-small text-muted">
+            {`Ended: ${endedWhat(r.status, steps.data.steps)} · `}
+            <When iso={endedAt} />
+          </p>
+        )}
+      </div>
+      <div className="flex min-h-0 flex-1 @max-3xl:flex-col">
+        <div className="relative flex min-h-0 min-w-0 flex-1">
+          {graph === null ? (
+            version.isError || snapshot.isError ? (
+              <p role="alert" className="p-6 text-body text-danger">The workflow it ran couldn&apos;t be read.</p>
+            ) : (
+              <p role="status" className="p-6 text-body text-muted">Reading the workflow it ran…</p>
+            )
+          ) : (
+            <Canvas
+              doc={graph}
+              types={typeMap}
+              problems={NO_PROBLEMS}
+              separate={NO_PROBLEMS}
+              conditional={NO_STEPS}
+              editable={false}
+              current={null}
+              focusId={keys.shown}
+              focusRequest={keys.focusRequest}
+              onFocusItem={keys.onFocusItem}
+              onItem={nothing}
+              onMove={nothing}
+              onConnect={nothing}
+              onLayout={nothing}
+              onKeyDown={onCanvasKey}
+              placing={false}
+              onPlace={nothing}
+              overview
+              start={{
+                summary: trigger.words ? `${trigger.kind} · ${trigger.words}` : trigger.kind,
+                label: `Start: ${triggerWords(r)}. Open the run's start`,
+                open: false,
+                onOpen: nothing,
+                tags: given,
+              }}
+              results={results}
+              resultsLabel="result"
+            />
+          )}
+        </div>
       </div>
     </div>
   );

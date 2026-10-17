@@ -15,15 +15,25 @@ const KIND: Record<NonNullable<RunItem["trigger"]>["source"], string> = {
   dev: "Development",
 };
 
-/** Its kind ("By hand"), and what says more about it, when known. */
-export function triggerOf(run: RunItem): { kind: string; detail: ReactNode } {
+/** Its kind ("By hand"), and what says more about it, when known: drawn (`detail`, a re-run's id in mono) and in
+ * plain words (`words`, for a name). */
+export function triggerOf(run: RunItem): { kind: string; detail: ReactNode; words: string | null } {
   const t = run.trigger;
-  if (t === null) return { kind: "—", detail: null };
-  const detail =
+  if (t === null) return { kind: "—", detail: null, words: null };
+  if (t.source === "rerun" && t.rerun_of) {
+    return { kind: KIND.rerun, detail: <>of <span className="font-mono">{runId(t.rerun_of)}</span></>, words: `of ${runId(t.rerun_of)}` };
+  }
+  const words =
     t.source === "manual" ? run.started_by
-    : t.source === "rerun" ? t.rerun_of && <>of <span className="font-mono">{runId(t.rerun_of)}</span></>
     : t.source === "schedule" ? t.schedule && timingTitle(t.schedule)
     : t.source === "webhook" ? t.endpoint
     : null;  // prettier-ignore
-  return { kind: KIND[t.source], detail: detail ?? null };
+  return { kind: KIND[t.source], detail: words ?? null, words: words ?? null };
+}
+
+/** The same in a sentence: "webhook, Mist events", "schedule, weekdays at 06:00". */
+export function triggerWords(run: RunItem): string {
+  const { kind, words } = triggerOf(run);
+  const said = words && run.trigger?.source === "schedule" ? words.charAt(0).toLowerCase() + words.slice(1) : words;
+  return `${kind.toLowerCase()}${said ? `, ${said}` : ""}`;
 }

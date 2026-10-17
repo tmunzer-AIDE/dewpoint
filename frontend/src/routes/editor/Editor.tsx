@@ -1364,7 +1364,7 @@ function Editor({
             onOpen: () => setSide(side?.kind === "triggers" ? null : { kind: "triggers" }),
             tags: resultShown && simulation.steps?.given === "input" ? [{ text: "input", kind: "given" }] : undefined,
           }}
-          simulated={simulated}
+          results={simulated}
           />
         </div>
         {open && (
