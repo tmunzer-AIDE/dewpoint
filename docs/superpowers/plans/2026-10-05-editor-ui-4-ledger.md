@@ -3312,3 +3312,26 @@ The owner accepted milestone 2 ("go"). Tasks 12–14, inline, every red and gree
 
 After each task the type check and ESLint were silent. The whole frontend suite on 8f69ec09: 1277 passed (98 files),
 as the plan's own check found. Mid-slice rulings: none. Nothing pushed.
+
+### 4e-1b, milestone 4 and the final checkpoint (2026-10-17)
+
+The owner accepted milestone 3 ("go") and left the browser specs to CI's e2e job on the PR (asked in chat):
+- Task 15, 7c592092: `e2e/runs.spec.ts`, three fixtures, the workflows project runs it. Type check and ESLint
+  silent; not run locally (the owner's choice); CI's e2e job runs them on the PR.
+- Task 16: every check on the head:
+  - the whole frontend suite: 1277 passed (98 files), after M105; ESLint and the type check silent;
+  - the build: `Editor-*.js` 149.5 kB, the shared chunk 356.6 kB with the editor's 12.1 kB stylesheet, `RunPage-*.js`
+    19.0 kB, `RunsPage-*.js` 11.0 kB, the entry 641.5 kB (ruling 250);
+  - `check:api` passes, unchanged since 4e-1a;
+  - local CodeQL (javascript-typescript, CLI 2.27.2, javascript-queries 2.4.7, CI's filter): no finding.
+
+M105. **The router's tests wait 5 s for a lazy page's first load** (a test-only commit after Task 15): the first
+      suite run on the head failed one test, "opens a run's page beside the compact rail", at 1051 ms against Testing
+      Library's default second. Opening a run's page compiles its chunk on first import (593 to 1071 ms over three
+      runs, one failing); with the longer wait, five runs passed. Cost if wrong: a slow lazy load is seen 4 s later.
+M106. **The Load more test keeps its queries:** on a second run it timed out at vitest's 5 s with the machine's load
+      at 75 (other sessions' suites); alone it takes 256 ms, and 693 to 714 ms in a full run at the earlier
+      milestones. The cause is the machine, not the test. Cost if wrong: it times out again on a loaded runner, and
+      its role queries over about 100 rows are made cheaper then.
+
+Mid-slice rulings over the slice: M104–M106. The final review follows. Nothing pushed.
