@@ -41,6 +41,7 @@ describe("a run's status, in one vocabulary (the runs design §5.5)", () => {
     expect(reasonWords("input_invalid")).toBe("Its input didn't fit the workflow's input.");
     expect(reasonWords("schedule_paused")).toBe("Its schedule was disabled.");
     expect(reasonWords("a_code_from_later")).toBeNull();
+    expect([reasonWords("constructor"), reasonWords("__proto__"), reasonWords("toString")]).toEqual([null, null, null]);
     expect(reasonWords(null)).toBeNull();
   });
 });

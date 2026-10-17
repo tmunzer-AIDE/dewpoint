@@ -180,6 +180,12 @@ export function RunPage({ tenantId, runId: id }: { tenantId: string; runId: stri
         )}
       </RunBar>
       <div className="flex flex-col gap-2 border-b border-line bg-surface px-5 py-2.5">
+        {steps.isLoadingError && (
+          <p className="flex flex-wrap items-center gap-2 text-small">
+            <span role="alert" className="text-danger">Its steps&apos; results couldn&apos;t be read.</span>
+            <Button size="sm" onClick={() => void steps.refetch()}>Read them again</Button>
+          </p>
+        )}
         {run.isRefetchError && (
           <p className="flex flex-wrap items-center gap-2 text-small text-muted">
             {`Couldn't be refreshed · as of ${timeOf(run.dataUpdatedAt)}`}
@@ -202,7 +208,10 @@ export function RunPage({ tenantId, runId: id }: { tenantId: string; runId: stri
       <div className="flex min-h-0 flex-1 @max-3xl:flex-col">
         <div className="relative flex min-h-0 min-w-0 flex-1">
           {graph === null ? (
-            version.isError || snapshot.isError ? (
+            !r.version_id && !r.draft_snapshot_id ? (
+              // A request refused before its version was resolved (a workflow disabled, none active): no graph ran.
+              <p className="p-6 text-body text-muted">No version of the workflow was chosen for it, so there are no steps to show.</p>
+            ) : version.isError || snapshot.isError ? (
               <p role="alert" className="p-6 text-body text-danger">The workflow it ran couldn&apos;t be read.</p>
             ) : (
               <p role="status" className="p-6 text-body text-muted">Reading the workflow it ran…</p>

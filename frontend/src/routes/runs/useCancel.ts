@@ -4,7 +4,7 @@
 // until the server confirms it, and focus goes to its name, the Cancel it was on gone. A cancel that didn't go through
 // says so, and is offered again.
 import { useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { announce } from "../../lib/announce";
 import { cancelRun, runQuery } from "../../lib/runs";
 
@@ -13,14 +13,20 @@ export const RUN_TITLE = "run-title"; // the bar's heading, where focus goes onc
 export function useCancel(tenantId: string, runId: string, live: boolean) {
   const qc = useQueryClient();
   const [state, setState] = useState<"idle" | "asking" | "sending" | "failed">("idle");
+  const [sent, setSent] = useState(0); // the cancels sent: focus goes to the run's name after each
+  // After the render that closes the question (its dialog's effect runs first, as a child's): a modal dialog leaves
+  // the page inert while open, and gives focus back to its opener, Cancel, which is gone.
+  useEffect(() => {
+    if (sent > 0) document.getElementById(RUN_TITLE)?.focus();
+  }, [sent]);
   async function send() {
     setState("sending");
     try {
       const answer = await cancelRun(tenantId, runId);
       await qc.invalidateQueries({ queryKey: runQuery(tenantId, runId).queryKey });
       setState("idle");
+      setSent((n) => n + 1);
       if (answer.cancel === "requested") announce("Cancel requested. It's shown as cancelled once the server confirms it.");
-      document.getElementById(RUN_TITLE)?.focus();
     } catch {
       setState("failed");
     }

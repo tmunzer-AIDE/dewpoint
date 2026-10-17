@@ -181,7 +181,8 @@ export function RunsPage({ tenantId, filters }: { tenantId: string; filters: Run
   const cursor = cursorOf(runs);
   const more = first.data?.length === PAGE && read.older !== "end" && cursor !== null;
   async function loadMore() {
-    if (cursor === null) return;
+    if (cursor === null || read.older === "reading") return; // one page at a time
+
     setRead((r) => ({ ...r, older: "reading" }));
     try {
       const page = await qc.query(runsQuery(tenantId, filters, cursor)); // read once: an older page isn't read again
@@ -225,9 +226,14 @@ export function RunsPage({ tenantId, filters }: { tenantId: string; filters: Run
       ) : (
         more && (
           <div className="flex flex-wrap items-center gap-3">
-            <Button size="md" disabled={read.older === "reading"} onClick={() => void loadMore()}>Load more</Button>
+            {/* Never disabled while it reads: a disabled button drops the keyboard's focus to the page. */}
+            <Button size="md" aria-disabled={read.older === "reading" || undefined} onClick={() => void loadMore()}>Load more</Button>
             <span className="text-small text-muted">
-              {read.older === "failed" ? "Older runs couldn't be read. Try again." : "The 50 most recent first. New runs appear at the top as they're found."}
+              {read.older === "reading"
+                ? "Reading older runs…"
+                : read.older === "failed"
+                  ? "Older runs couldn't be read. Try again."
+                  : "The 50 most recent first. New runs appear at the top as they're found."}
             </span>
           </div>
         )

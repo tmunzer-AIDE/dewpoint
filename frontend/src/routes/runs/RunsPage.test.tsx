@@ -118,6 +118,18 @@ it("says a draft simulation is one, and a run whose code it doesn't know by its 
   expect(cells("1e8a3f27")[6]).toBe("a_code_from_laterNothing ran.");
 });
 
+it("names a trigger of a kind it doesn't know by its code, and one named after an object's property as itself", async () => {
+  const later = (source: string) => ({ source, schedule: null, endpoint: null, rerun_of: null }) as unknown as RunItem["trigger"];
+  answers.push(() => json([
+    item("aa000001-0001", local(10, 0, 0), { trigger: later("api") }),
+    item("aa000002-0002", local(9, 0, 0), { trigger: later("constructor") }),
+  ]));  // prettier-ignore
+  show("/t/t1/runs?started=all");
+  await screen.findByRole("link", { name: "aa000001" });
+  expect(cells("aa000001")[3]).toBe("api");
+  expect(cells("aa000002")[3]).toBe("constructor");
+});
+
 it("asks for the runs its filters choose", async () => {
   show("/t/t1/runs?status=failed&workflow=w1&started=all");
   await screen.findByRole("link", { name: "a14b2e9c" });
@@ -321,6 +333,30 @@ it("loads older runs on from the last listed, never reading them again, each onc
   expect(await screen.findByText("No older runs in the last 7 days.")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
   expect(shownIds()).toHaveLength(2 * PAGE + 2);
+});
+
+it("keeps Load more where the keys left it while it reads, says it's reading, and reads once", async () => {
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  answers.push(() => json(runsFrom(1000, PAGE)));
+  show("/t/t1/runs?started=all");
+  await screen.findByText("run1000x");
+  const answer = vi.mocked(globalThis.fetch).getMockImplementation()!;
+  vi.mocked(globalThis.fetch).mockImplementation((input) => held.then(() => answer(input)));
+  answers.push(() => json(runsFrom(1000 - PAGE, 3)));
+  const more = screen.getByRole("button", { name: "Load more" });
+  const calls = () => vi.mocked(globalThis.fetch).mock.calls.length;
+  more.focus();
+  await userEvent.keyboard("{Enter}");
+  const asked = calls();
+  expect(more.hasAttribute("disabled")).toBe(false); // a disabled button would drop the keyboard's focus
+  expect(more.getAttribute("aria-disabled")).toBe("true");
+  expect(document.activeElement).toBe(more);
+  expect(screen.getByText("Reading older runs…")).toBeTruthy();
+  await userEvent.keyboard("{Enter}");
+  expect(calls()).toBe(asked); // the second Enter read nothing
+  release();
+  expect(await screen.findByText("No older runs are kept.")).toBeTruthy();
 });
 
 it("says no older run is kept at all once every run kept is listed", async () => {

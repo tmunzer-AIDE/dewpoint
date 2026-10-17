@@ -159,6 +159,7 @@ test("a running live run is cancelled after its question (the RunRunning board)"
   await expect(ask).toBeVisible();
   await accessibleBothWays(page, "a run: cancel's question");
   await ask.getByRole("button", { name: "Cancel the run" }).click();
+  await expect(page.getByRole("heading", { level: 1 })).toBeFocused(); // its Cancel is gone: focus on the run's name
   await expect(page.getByRole("heading", { level: 1 }).locator("..").getByText(/^(Cancel requested|Cancelled)$/)).toBeVisible();
   await expect(page.getByRole("heading", { level: 1 }).locator("..").getByText("Cancelled", { exact: true })).toBeVisible({ timeout: 60_000 });
   await accessibleBothWays(page, "a run: cancelled");

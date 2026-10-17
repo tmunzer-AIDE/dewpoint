@@ -28,7 +28,9 @@ export function triggerOf(run: RunItem): { kind: string; detail: ReactNode; word
     : t.source === "schedule" ? t.schedule && timingTitle(t.schedule)
     : t.source === "webhook" ? t.endpoint
     : null;  // prettier-ignore
-  return { kind: KIND[t.source], detail: words ?? null, words: words ?? null };
+  // A source from a later server is shown by its code; an own-property check, never the prototype's names.
+  const kind = Object.hasOwn(KIND, t.source) ? KIND[t.source] : String(t.source);
+  return { kind, detail: words ?? null, words: words ?? null };
 }
 
 /** The same in a sentence: "webhook, Mist events", "schedule, weekdays at 06:00". */

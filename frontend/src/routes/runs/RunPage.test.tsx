@@ -202,6 +202,19 @@ describe("a run's page (§5.3; the RunFailed board)", () => {
   });
 });
 
+describe("its steps unread", () => {
+  it("says when a run's steps couldn't be read, and reads them again when asked", async () => {
+    answers.set(`/api/v1/t/t1/runs/${RUN.id}`, json(RUN));
+    answers.set(`/api/v1/t/t1/runs/${RUN.id}/steps`, json({ error: "internal_error" }, 500));
+    show();
+    expect((await screen.findByText("Its steps' results couldn't be read.")).getAttribute("role")).toBe("alert");
+    answers.set(`/api/v1/t/t1/runs/${RUN.id}/steps`, json(FAILED_STEPS));
+    await userEvent.click(screen.getByRole("button", { name: "Read them again" }));
+    await vi.waitFor(() => expect(canvas().dataset.results).not.toBe("[]"));
+    expect(screen.queryByText("Its steps' results couldn't be read.")).toBeNull();
+  });
+});
+
 describe("reading a run while it runs (§5.3)", () => {
   // Timers the test moves on, and real time besides, so the page's own waits still pass.
   beforeEach(() => void vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "clearTimeout", "clearInterval"], shouldAdvanceTime: true }));
@@ -317,6 +330,16 @@ describe("a step's result in the drawer (§5.3; the RunFailed and RunLoop boards
       '"#noc-alert"', '"AP Paris-Opera-12 offline since 09:38"', "redacted", "truncated",
     ]);  // prettier-ignore
     expect(within(within(side).getByRole("region", { name: "Output" })).getByText("None: the step failed.")).toBeTruthy();
+  });
+
+  it("shows a value whatever its words, even an object's own property names", async () => {
+    const steps = structuredClone(FAILED_STEPS);
+    steps.steps[3]!.final!.input = { a: "__proto__", b: "constructor", c: "[redacted]" };
+    answers.set(`${RUN_PATH}/steps`, json(steps));
+    answers.set(attemptsOf("notify_noc"), json({ items: [steps.steps[3]!.final] }));
+    show();
+    const input = await within(await screen.findByRole("complementary", { name: "notify_noc" })).findByRole("region", { name: "Input" });
+    await vi.waitFor(() => expect(within(input).getAllByRole("definition").map((d) => d.textContent)).toEqual(['"__proto__"', '"constructor"', "redacted"]));
   });
 
   it("opens a step from the canvas, its setup read only on Setup, and gives focus back to its card on Close", async () => {
@@ -473,6 +496,25 @@ describe("cancel (§5.3; the RunRunning board)", () => {
     stop();
   });
 
+  it("gives focus to the run's name once a live run's cancel is sent and its question has closed (its Cancel is gone)", async () => {
+    const order: string[] = [];
+    const close = vi.spyOn(HTMLDialogElement.prototype, "close");
+    close.mockImplementation(function (this: HTMLDialogElement) {
+      order.push("closed");
+      this.removeAttribute("open");
+      this.dispatchEvent(new Event("close"));
+    });
+    answers.set(CANCEL, json(requested));
+    show();
+    await userEvent.click(await screen.findByRole("button", { name: "Cancel the run" }));
+    const title = screen.getByRole("heading", { level: 1, name: "AP offline triage" });
+    title.addEventListener("focus", () => order.push("title focused"));
+    answers.set(RUN_PATH, json({ ...running, cancel_requested_at: local(10, 2, 20) }));
+    await userEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Cancel the run" }));
+    await vi.waitFor(() => expect(order).toEqual(["closed", "title focused"]));
+    expect(document.activeElement).toBe(title);
+  });
+
   it("cancels a simulated run at once, without asking", async () => {
     answers.set(RUN_PATH, json({ ...running, mode: "simulate" }));
     answers.set(CANCEL, json({ ...requested, request: { ...requested.request, mode: "simulate" } }));
@@ -554,6 +596,14 @@ describe("runs that didn't run, and others (§5.4; the RunOther board)", () => {
     show();
     expect((await screen.findByText(/^input_invalid/)).closest("p")!.textContent).toBe("input_invalid · Its input didn't fit the workflow's input. Nothing ran.");
     expect(screen.queryByRole("button", { name: "Cancel the run" })).toBeNull();
+  });
+
+  it("says there are no steps to show for a request refused before a version of the workflow was chosen", async () => {
+    answers.set(RUN_PATH, json({ ...unstarted("refused", "workflow_disabled"), version_id: null, draft_snapshot_id: null }));
+    answers.set(`${RUN_PATH}/steps`, json({ given: "input", steps: [] }));
+    show();
+    expect(await screen.findByText("No version of the workflow was chosen for it, so there are no steps to show.")).toBeTruthy();
+    expect(screen.queryByText("Reading the workflow it ran…")).toBeNull();
   });
 
   it("says an older run doesn't say how each step ended", async () => {

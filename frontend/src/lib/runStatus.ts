@@ -83,4 +83,4 @@ const REASONS: Record<string, string> = {
 };
 
 /** Why a request didn't start, in words; null for no code, or one these words don't know. */
-export const reasonWords = (code: string | null): string | null => (code === null ? null : (REASONS[code] ?? null));
+export const reasonWords = (code: string | null): string | null => (code !== null && Object.hasOwn(REASONS, code) ? REASONS[code]! : null);
