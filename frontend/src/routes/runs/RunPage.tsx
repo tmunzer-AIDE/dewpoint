@@ -2,16 +2,18 @@
 // A run's page (editor 4e-1; the runs design §5.3, §5.4; the RunFailed, RunRunning and RunOther boards), laid out like
 // the editor (the owner's answer 6): the compact rail, the run's bar, its banner, and the graph it ran on the read-only
 // canvas, each step's result beside its card, walked with the editor's keys (D16). It's read while it runs
-// (useRunReads). A run past its tenant's retention, or an id that never was, is said to be neither, with Back to Runs;
-// a run read while its tenant is erased says why it can't be (§5.5).
+// (useRunReads). A step's result opens in the editor's drawer, read only, its Result tab first; a failed run opens on
+// its failed step (the owner's answer 6), and Close gives focus back to its card. A run past its tenant's retention, or
+// an id that never was, is said to be neither, with Back to Runs; a run read while its tenant is erased says why it
+// can't be (§5.5).
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { useCallback, useMemo, type KeyboardEvent } from "react";
+import { useCallback, useMemo, useState, type KeyboardEvent } from "react";
 import { Button, LINK_BUTTON } from "../../components/Button";
 import { When } from "../../components/When";
 import { ApiError } from "../../lib/client";
-import { findNode, idKey, portsOf } from "../../lib/graph";
-import { isEnded } from "../../lib/runs";
+import { findNode, idKey, nodesOf, portsOf } from "../../lib/graph";
+import { isEnded, type RunStepSummary } from "../../lib/runs";
 import { runId } from "../../lib/runStatus";
 import { draftSnapshotQuery } from "../../lib/simulations";
 import { useDocumentTitle } from "../../lib/title";
@@ -20,10 +22,14 @@ import { timeOf } from "../../lib/when";
 import { nodeTypesQuery, type GraphDoc } from "../../lib/workflows";
 import { Canvas } from "../editor/Canvas";
 import { NAV_KEYS, type NavKey } from "../editor/canvasNav";
+import { READ_ONLY_ACTIONS } from "../editor/drawer/context";
+import { StepDrawer } from "../editor/drawer/StepDrawer";
+import { item, type ItemAction } from "../editor/items";
 import { endedWhat } from "../editor/simulation/lifecycle";
 import { tagsOf, type SimTag } from "../editor/simulation/results";
 import { useCanvasNav } from "../editor/useCanvasNav";
 import { RunBanner, RunBar } from "./RunBar";
+import { StepResult } from "./RunResult";
 import { triggerOf, triggerWords } from "./trigger";
 import { useRunReads } from "./useRunReads";
 
@@ -72,17 +78,22 @@ export function RunPage({ tenantId, runId: id }: { tenantId: string; runId: stri
   }, [graph, typeMap]);  // prettier-ignore
   const keys = useCanvasNav(graph ?? NONE, portsByStep, false);
   const ended = r !== undefined && isEnded(r.status);
-  // Each step's tags, 4d-1c's grammar with a run's (§5.3): an attempt is said "of" the step's own limit, else its
-  // type's; an action's time, a failure's code.
-  const results = useMemo(() => {
-    const tags = new Map<string, SimTag[]>();
-    for (const s of steps.data?.steps ?? []) {
-      const type = typeMap.get(s.type);
-      const max = (graph && findNode(graph, s.step_id)?.options?.max_attempts) ?? type?.retry.max_attempts ?? null;
-      tags.set(idKey(s.step_id), tagsOf(s, { maxAttempts: max, ended, run: { action: type?.kind === "action" } }));
-    }
-    return tags;
-  }, [steps.data, typeMap, graph, ended]);
+  // An attempt is said "of" the step's own limit, else its type's.
+  const attemptsOf = useCallback(
+    (s: RunStepSummary) => (graph && findNode(graph, s.step_id)?.options?.max_attempts) ?? typeMap.get(s.type)?.retry.max_attempts ?? null,
+    [graph, typeMap],
+  );
+  const tagsFor = useCallback(
+    (s: RunStepSummary) => tagsOf(s, { maxAttempts: attemptsOf(s), ended, run: { action: typeMap.get(s.type)?.kind === "action" } }),
+    [attemptsOf, ended, typeMap],
+  );
+  // Each step's tags, 4d-1c's grammar with a run's (§5.3): an action's time, a failure's code.
+  const results = useMemo(() => new Map((steps.data?.steps ?? []).map((s): [string, SimTag[]] => [idKey(s.step_id), tagsFor(s)])), [steps.data, tagsFor]);
+  // The step whose result is open. Undecided until its steps and graph are read: a failed run opens on its failed step.
+  const [open, setOpen] = useState<string | null | undefined>(undefined);
+  if (open === undefined && r && steps.data && graph) {
+    setOpen(r.status === "failed" ? (steps.data.steps.find((s) => (s.statuses.failed ?? 0) > 0)?.step_id ?? null) : null);
+  }
   // Only a run never read says why it isn't shown: a read that fails later keeps what was read, and says so.
   if (!r) return run.isError ? <Unread tenantId={tenantId} id={id} error={run.error} retry={() => void run.refetch()} /> : <p role="status" className="p-6 text-body text-muted">Reading the run…</p>;
   const trigger = triggerOf(r);
@@ -93,6 +104,11 @@ export function RunPage({ tenantId, runId: id }: { tenantId: string; runId: stri
     keys.walk(e.key as NavKey);
   }
   const endedAt = ended && r.ended_at && r.status !== "refused" && r.status !== "dead" ? r.ended_at : null;
+  const node = open && graph ? findNode(graph, open) : undefined;
+  const summary = node && steps.data?.steps.find((s) => idKey(s.step_id) === idKey(node.id));
+  const onItem = (action: ItemAction) => {
+    if (action.kind === "open") setOpen(action.node);
+  };
   return (
     <div className="@container flex min-h-0 flex-1 flex-col">
       <RunBar tenantId={tenantId} run={r} version={version.data?.number ?? null} />
@@ -127,18 +143,18 @@ export function RunPage({ tenantId, runId: id }: { tenantId: string; runId: stri
               separate={NO_PROBLEMS}
               conditional={NO_STEPS}
               editable={false}
-              current={null}
+              current={node ? node.id : null}
               focusId={keys.shown}
               focusRequest={keys.focusRequest}
               onFocusItem={keys.onFocusItem}
-              onItem={nothing}
+              onItem={onItem}
               onMove={nothing}
               onConnect={nothing}
               onLayout={nothing}
               onKeyDown={onCanvasKey}
               placing={false}
               onPlace={nothing}
-              overview
+              overview={!node}
               start={{
                 summary: trigger.words ? `${trigger.kind} · ${trigger.words}` : trigger.kind,
                 label: `Start: ${triggerWords(r)}. Open the run's start`,
@@ -151,6 +167,44 @@ export function RunPage({ tenantId, runId: id }: { tenantId: string; runId: stri
             />
           )}
         </div>
+        {node && graph && (
+          <StepDrawer
+            key={idKey(node.id)}
+            node={node}
+            type={typeMap.get(node.type)}
+            tenantId={tenantId}
+            workflowId={r.workflow_id}
+            revision={null}
+            steps={nodesOf(graph).map((n) => ({ id: n.id, key: n.key, title: typeMap.get(n.type)?.title ?? null }))}
+            ports={portsOf(node, typeMap.get(node.type))}
+            problems={[]}
+            expressions={[]}
+            editable={false}
+            adds={[]}
+            actions={READ_ONLY_ACTIONS}
+            note={null}
+            focusField={null}
+            result={
+              <StepResult
+                tenantId={tenantId}
+                runId={id}
+                summary={summary}
+                max={summary ? attemptsOf(summary) : null}
+                ended={ended}
+                several={summary && <p className="text-small">{tagsFor(summary).map((t) => t.text).join(" · ")}</p>}
+              />
+            }
+            onAdd={nothing}
+            onDelete={nothing}
+            onConnectPort={nothing}
+            onPlace={nothing}
+            onNudge={nothing}
+            onClose={() => {
+              setOpen(null);
+              keys.focus(item.node(node.id));
+            }}
+          />
+        )}
       </div>
     </div>
   );

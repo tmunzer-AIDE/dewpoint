@@ -37,7 +37,7 @@ import { Canvas } from "./Canvas";
 import { NAV_KEYS, navModel, pathTo, type NavKey } from "./canvasNav";
 import { checkLabel, checkState, lastOf, type Check } from "./check";
 import { ConnectDialog } from "./ConnectDialog";
-import type { DrawerActions } from "./drawer/context";
+import { CANT, READ_ONLY_ACTIONS, type DrawerActions } from "./drawer/context";
 import { StepDrawer } from "./drawer/StepDrawer";
 import { addsOf, item, type ItemAction } from "./items";
 import { DeclassifyPanel } from "./DeclassifyPanel";
@@ -96,22 +96,6 @@ function portsQuestion(dropped: GraphEdge[], keyOf: (id: string) => string): str
     dropped.length === 1 ? "its edge" : "their edges"} to ${targets.join(", ")} ${dropped.length === 1 ? "is" : "are"} deleted.`;
 }
 
-const CANT = "Not written: the draft can't be changed now."; // a conflict, an exit agreed to, a version view
-
-/** A version's drawer: read only, and blind to the draft's edits not applied, which are never a version's (the review
- * of milestone 2). */
-const VERSION_ACTIONS: DrawerActions = {
-  set: () => CANT,
-  options: () => CANT,
-  held: () => undefined,
-  hold: () => undefined,
-  release: () => undefined,
-  discard: () => undefined,
-  apply: () => CANT,
-  stale: () => false,
-  rebase: () => undefined,
-  restructure: () => CANT,
-};
 
 export function EditorPage({ tenantId, workflowId, openTriggers = false }: { tenantId: string; workflowId: string; openTriggers?: boolean }) {
   const qc = useQueryClient();
@@ -1384,7 +1368,7 @@ function Editor({
             expressions={(viewing ? viewing.expressions : (trusted?.expressions ?? [])).filter((x) => x.node !== null && sameId(x.node, open.id))}
             editable={editable}
             adds={editable ? addsOf(doc, open, portMap.get(idKey(open.id)) ?? []) : []}
-            actions={viewing ? VERSION_ACTIONS : actionsFor(open.id)}
+            actions={viewing ? READ_ONLY_ACTIONS : actionsFor(open.id)}
             note={noteFor(open.id)}
             focusField={side?.kind === "step" ? (side.field ?? null) : null}
             testAt={side?.kind === "step" ? (side.test?.n ?? null) : null}

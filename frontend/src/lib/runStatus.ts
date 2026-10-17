@@ -21,6 +21,16 @@ export const RUN_STATUS: Record<RunStatus, { word: string; tone: Tone }> = {
   refused: { word: "Refused", tone: "danger" },
 };
 
+/** A step's status, in the same words and looks: a step that was skipped or never started, neutral. */
+export const STEP_STATUS: Record<"running" | "succeeded" | "failed" | "cancelled" | "skipped" | "not_started", { word: string; tone: Tone }> = {
+  running: { word: "Running", tone: "running" },
+  succeeded: { word: "Succeeded", tone: "ok" },
+  failed: { word: "Failed", tone: "danger" },
+  cancelled: { word: "Cancelled", tone: "neutral" },
+  skipped: { word: "Skipped", tone: "neutral" },
+  not_started: { word: "Not started", tone: "neutral" },
+};
+
 /** How long a run ran, as a person reads it: "14 s", "3 min 20 s", "1 h 2 min"; null when either end is unknown. */
 export function duration(from: string | null, to: string | null): string | null {
   if (from === null || to === null) return null;
