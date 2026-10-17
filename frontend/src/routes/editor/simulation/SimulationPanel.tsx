@@ -3,7 +3,7 @@
 // the editor's simulation is, from being sent to its end, in words. It opens when a simulation is sent, and from the
 // toolbar's strip and the canvas's bar; one side panel at a time, as the others (side.ts). The result's sections (the
 // banner, the checks on the server, the steps, the input used) come in below the lifecycle as `children`.
-import { useEffect, useRef, type ReactNode } from "react";
+import { Fragment, useEffect, useRef, type ReactNode } from "react";
 import { Button } from "../../../components/Button";
 import { duration, runId } from "../../../lib/runStatus";
 import { ENDED } from "../../../lib/simulations";
@@ -12,8 +12,9 @@ import { SimulatedChip, StatusChip } from "./chips";
 import { clock, endedWhat, lineOf } from "./lifecycle";
 import type { SimulationSession } from "./useSimulation";
 
-export function SimulationPanel({ session, onSimulateAgain, onClose, children }: {
-  session: SimulationSession; onSimulateAgain?: () => void; onClose: () => void; children?: ReactNode;
+/** `runOf`: its run's name as a link to the run's page (the runs design §5.1), where there's a router to follow it. */
+export function SimulationPanel({ session, onSimulateAgain, onClose, runOf, children }: {
+  session: SimulationSession; onSimulateAgain?: () => void; onClose: () => void; runOf?: (id: string) => ReactNode; children?: ReactNode;
 }) {  // prettier-ignore
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => heading.current?.focus(), []);
@@ -27,11 +28,12 @@ export function SimulationPanel({ session, onSimulateAgain, onClose, children }:
   const line = lineOf(session); // where it is, in a sentence
 
   // Which run it is, and when it started or how it ended (§7.5).
-  const facts =
+  const named = request && (runOf ? runOf(request.id) : `run ${runId(request.id)}`);
+  const facts: ReactNode[] | null =
     request && state && phase && phase !== "dead" && phase !== "refused"
       ? ended
-        ? [`Ended: ${endedWhat(phase, steps)}`, duration(run?.started_at ?? null, run?.ended_at ?? null), `draft revision ${request.draft_revision}`, `run ${runId(request.id)}`]
-        : [`Started ${said(run?.started_at ?? request.queued_at)}`, `draft revision ${request.draft_revision}`, `run ${runId(request.id)}`]
+        ? [`Ended: ${endedWhat(phase, steps)}`, duration(run?.started_at ?? null, run?.ended_at ?? null), `draft revision ${request.draft_revision}`, named]
+        : [`Started ${said(run?.started_at ?? request.queued_at)}`, `draft revision ${request.draft_revision}`, named]
       : null;  // prettier-ignore
 
   return (
@@ -55,7 +57,16 @@ export function SimulationPanel({ session, onSimulateAgain, onClose, children }:
           <SimulatedChip />
         </p>
       )}
-      {facts && <p className="text-small text-muted">{facts.filter(Boolean).join(" · ")}</p>}
+      {facts && (
+        <p className="text-small text-muted">
+          {facts.filter(Boolean).map((f, i) => (
+            <Fragment key={i}>
+              {i > 0 && " · "}
+              {f}
+            </Fragment>
+          ))}
+        </p>
+      )}
       {line && <p className="text-small">{line}</p>}
       {local.kind === "admitted" && local.latest && request && (
         <p className="text-small text-muted">

@@ -2,9 +2,9 @@
 // The editor (screen 1c): the draft, on a canvas, by pointer or keyboard alone (D16), saved as it changes (D17). Task 14
 // adds problems, Task 15 publishing and versions.
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useBlocker, useMatch, useRouter } from "@tanstack/react-router";
+import { Link, useBlocker, useMatch, useRouter } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { Button } from "../../components/Button";
+import { Button, LINK_BUTTON_MD } from "../../components/Button";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { LoadError } from "../../components/LoadError";
 import { announce } from "../../lib/announce";
@@ -20,6 +20,7 @@ import {
 import { begin, record, redo, undo, type History } from "../../lib/history";
 import { CARD, layout } from "../../lib/layout";
 import { guardLeaving } from "../../lib/leaving";
+import { runId } from "../../lib/runStatus";
 import type { Path } from "../../lib/schemaForm";
 import { ENDED, draftSnapshotQuery, freeze, type StepSummary } from "../../lib/simulations";
 import { useDocumentTitle } from "../../lib/title";
@@ -1210,6 +1211,7 @@ function Editor({
         <Button ref={versionsButton} size="md" aria-expanded={side?.kind === "versions"} onClick={() => setSide(side?.kind === "versions" ? null : { kind: "versions" })}>
           Versions
         </Button>
+        <Link to="/t/$tenantId/runs" params={{ tenantId }} search={{ workflow: workflow.id }} className={LINK_BUTTON_MD}>Runs</Link>
         <Button size="md" onClick={() => void exportFile()}>Export</Button>
         {simulator && (
           <Button
@@ -1480,6 +1482,11 @@ function Editor({
         {side?.kind === "simulation" && (
           <SimulationPanel
             session={simulation}
+            runOf={(id) => (
+              <Link to="/t/$tenantId/runs/$runId" params={{ tenantId, runId: id }} className="underline underline-offset-2">
+                {`run ${runId(id)}`}
+              </Link>
+            )}
             onSimulateAgain={simulator && sync.status !== "conflict" && !simulation.busy ? () => whenSettled("simulate", () => void simulate()) : undefined}
             onClose={() => {
               setSide(null);

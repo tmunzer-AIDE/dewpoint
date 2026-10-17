@@ -44,8 +44,9 @@ function Version({ w }: { w: WorkflowRow }) {
   );
 }
 
-/** The last live run, what attention follows; the last simulation apart, in the simulation colour (4b ruling 7). */
-function LastRun({ w }: { w: WorkflowRow }) {
+/** The last live run, what attention follows; the last simulation apart, in the simulation colour (4b ruling 7). Each
+ * links to its run's page (the runs design §5.1). */
+function LastRun({ tenantId, w }: { tenantId: string; w: WorkflowRow }) {
   const live = w.last_run;
   const simulated = w.last_simulation;
   if (!live && !simulated) return <span className="text-muted">No runs yet</span>;
@@ -54,12 +55,18 @@ function LastRun({ w }: { w: WorkflowRow }) {
       {live ? (
         <span className="inline-flex items-center gap-2">
           <span aria-hidden="true" className={`size-2 rounded-sm ${DOT[RUN_STATUS[live.status].tone]}`} />
-          {RUN_STATUS[live.status].word} · {since(live.at)}
+          <Link to="/t/$tenantId/runs/$runId" params={{ tenantId, runId: live.id }} className="underline underline-offset-2">
+            {RUN_STATUS[live.status].word} · {since(live.at)}
+          </Link>
         </span>
       ) : (
         <span className="text-muted">No live runs yet</span>
       )}
-      {simulated && <span className="text-sim">Simulated: {RUN_STATUS[simulated.status].word} · {since(simulated.at)}</span>}
+      {simulated && (
+        <Link to="/t/$tenantId/runs/$runId" params={{ tenantId, runId: simulated.id }} className="text-sim underline underline-offset-2">
+          Simulated: {RUN_STATUS[simulated.status].word} · {since(simulated.at)}
+        </Link>
+      )}
     </span>
   );
 }
@@ -175,7 +182,7 @@ export function WorkflowsPage({ tenantId, startNew = false }: { tenantId: string
                 </Td>
                 <Td className="text-small">{triggerColumn(w.triggers)}</Td>
                 <Td><Version w={w} /></Td>
-                <Td><LastRun w={w} /></Td>
+                <Td><LastRun tenantId={tenantId} w={w} /></Td>
                 <Td className="font-mono text-small">
                   {w.runs_24h.live}
                   {w.runs_24h.simulate > 0 && <span className="font-sans text-sim"> +{w.runs_24h.simulate} simulated</span>}

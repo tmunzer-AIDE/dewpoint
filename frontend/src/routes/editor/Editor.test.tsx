@@ -130,8 +130,10 @@ async function show({ seed, at = "/t/t1/workflows/w1" }: { seed?: (qc: QueryClie
       throw redirect({ to: "/t/$tenantId/workflows/$workflowId", params: { tenantId: "t1", workflowId: "w1" } });
     },
   });
+  const runs = createRoute({ getParentRoute: () => root, path: "/t/$tenantId/runs", component: () => <p>runs</p> });
+  const run = createRoute({ getParentRoute: () => root, path: "/t/$tenantId/runs/$runId", component: () => <p>a run</p> });
   const router = createRouter({
-    routeTree: root.addChildren([list, editor, away]),
+    routeTree: root.addChildren([list, editor, away, runs, run]),
     history: createMemoryHistory({ initialEntries: [at] }),
   });
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -2442,5 +2444,28 @@ describe("Simulate workflow", () => {
     expect(screen.queryByRole("button", { name: "◌ Simulate workflow" })).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "Back to the draft" }));
     expect(await screen.findByRole("button", { name: "◌ Simulate workflow" })).toBeTruthy();
+  });
+});
+
+describe("the runs, from the editor (the runs design §5.1)", () => {
+  it("links to the workflow's runs from the toolbar, its filter set", async () => {
+    await show();
+    expect(screen.getByRole("link", { name: "Runs" }).getAttribute("href")).toBe("/t/t1/runs?workflow=w1");
+  });
+
+  it("links the latest simulation's run to its page, from the Simulation panel", async () => {
+    const SIM = `${BASE}/draft/simulations`;
+    const request = { id: "7c1e9a40-0000-4000-8000-000000000000", workflow_id: "w1", version_id: null, draft_snapshot_id: "s1", draft_revision: 1, target_step_id: null, mode: "simulate", source: "manual", status: "started", reason: null, queued_at: "2026-10-15T10:42:05Z", ended_at: null, admission_checks: [] };
+    const run = { status: "succeeded", queued_at: null, started_at: "2026-10-15T10:42:05Z", ended_at: "2026-10-15T10:42:06Z", error: null, iterations: 0 };
+    answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: draftWith("transform") }));
+    answers.set(`GET ${SIM}`, () => json([request]));
+    answers.set(`GET ${SIM}/${request.id}`, () => json({ request, run, cancel_requested: false, read_back: "kept", input: {}, seeds: null }));
+    answers.set(`GET ${SIM}/${request.id}/steps`, () => json({ given: "input", steps: [] }));
+    const { router } = await show();
+    await screen.findByRole("button", { name: "Hide the result" });
+    await userEvent.click(screen.getByRole("button", { name: "Simulation" }));
+    const panel = await screen.findByRole("complementary", { name: "Simulation" });
+    await userEvent.click(within(panel).getByRole("link", { name: "run 7c1e9a40" }));
+    await vi.waitFor(() => expect(router.state.location.pathname).toBe(`/t/t1/runs/${request.id}`));
   });
 });
