@@ -185,21 +185,25 @@ it("opens Settings → Webhook endpoints from its tab (4c-3b)", async () => {
   expect(router.state.location.pathname).toBe("/t/t1/settings/webhooks");
 });
 
+// A lazy page's first load compiles its chunk (a run's page: the canvas, React Flow, the drawer): longer than the
+// default second under a loaded machine.
+const LAZY = { timeout: 5000 };
+
 it("opens the Runs page from the rail (the runs design §5.1)", async () => {
   const router = showApp("/t/t1/workflows");
   await userEvent.click(await screen.findByRole("link", { name: "Runs" }));
-  expect(await screen.findByRole("heading", { level: 1, name: "Runs" })).toBeTruthy();
+  expect(await screen.findByRole("heading", { level: 1, name: "Runs" }, LAZY)).toBeTruthy();
   expect(router.state.location.pathname).toBe("/t/t1/runs");
 });
 
 it("keeps a link's filters, dropping a value it doesn't know (§5.1)", async () => {
   const router = showApp("/t/t1/runs?status=failed&mode=bogus");
-  expect(await screen.findByRole("heading", { level: 1, name: "Runs" })).toBeTruthy();
+  expect(await screen.findByRole("heading", { level: 1, name: "Runs" }, LAZY)).toBeTruthy();
   expect(router.state.matches.at(-1)!.search).toEqual({ status: "failed" });
 });
 
 it("opens a run's page beside the compact rail, as the editor's (§5.1; the owner's answer 6)", async () => {
   const router = showApp("/t/t1/runs/r1");
-  expect(await screen.findByRole("heading", { level: 1, name: "AP offline triage" })).toBeTruthy();
+  expect(await screen.findByRole("heading", { level: 1, name: "AP offline triage" }, LAZY)).toBeTruthy();
   expect(router.state.matches.some((m) => m.staticData.compactRail === true)).toBe(true);
 });
