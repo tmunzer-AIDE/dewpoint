@@ -1,0 +1,23 @@
+{
+  "format": "dewpoint.workflow",
+  "format_version": 1,
+  "name": "Runs loop",
+  "graph": {
+    "graph_format": 1,
+    "nodes": [
+      { "id": "9d3e4f5a-6b7c-4d8e-9f0a-1b2c3d4e5f01", "key": "each_site", "type": "flow.loop@1", "config": { "items": { "$value": { "kind": "cel", "expr": "trigger.sites" } } }, "position": { "x": 0, "y": 140 } },
+      { "id": "9d3e4f5a-6b7c-4d8e-9f0a-1b2c3d4e5f02", "key": "is_long", "type": "flow.if@1", "config": { "condition": { "$value": { "kind": "cel", "expr": "size(item) > 4" } } }, "position": { "x": 0, "y": 280 } },
+      { "id": "9d3e4f5a-6b7c-4d8e-9f0a-1b2c3d4e5f03", "key": "mark", "type": "flow.transform@1", "config": { "fields": { "site": { "$value": { "kind": "cel", "expr": "item" } } } }, "position": { "x": 0, "y": 420 } }
+    ],
+    "edges": [
+      { "from": { "node": "9d3e4f5a-6b7c-4d8e-9f0a-1b2c3d4e5f01", "port": "body" }, "to": { "node": "9d3e4f5a-6b7c-4d8e-9f0a-1b2c3d4e5f02" } },
+      { "from": { "node": "9d3e4f5a-6b7c-4d8e-9f0a-1b2c3d4e5f02", "port": "true" }, "to": { "node": "9d3e4f5a-6b7c-4d8e-9f0a-1b2c3d4e5f03" } }
+    ],
+    "settings": {
+      "input_schema": {
+        "type": "object", "properties": { "sites": { "type": "array", "items": { "type": "string" }, "title": "Sites" } }, "required": ["sites"]
+      }
+    }
+  },
+  "bindings": []
+}
