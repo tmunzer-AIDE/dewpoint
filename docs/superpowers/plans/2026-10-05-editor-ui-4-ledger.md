@@ -3335,3 +3335,30 @@ M106. **The Load more test keeps its queries:** on a second run it timed out at 
       its role queries over about 100 rows are made cheaper then.
 
 Mid-slice rulings over the slice: M104–M106. The final review follows. Nothing pushed.
+
+### 4e-1b, the final review (2026-10-17)
+
+A fresh reviewer (Fable) on cb7425db..bc2b739c: no critical finding, 4 important, 10 minor; "With fixes". Every Review
+Focus case pinned by a test it saw pass (27 files, 245 passed, read-only). One minor was re-graded important by its
+effect: a run's input value `"__proto__"` crashed the run's page. Fixed test-first, each red then green:
+- I1, a request refused before a version was chosen showed "Reading the workflow it ran…" for ever: it now says no
+  version was chosen, so there are no steps to show.
+- I2, a run's steps that couldn't be read said nothing (an ended run's are never read again): it says so, with Read
+  them again.
+- I3, after a live run's cancel focus fell to the page: the run's name was focused while the modal question still
+  held the page inert, then the question gave focus back to Cancel, gone. It's focused once the question has closed;
+  the e2e cancel spec asserts it.
+- I4, Load more was disabled while it read, which drops the keyboard's focus: it stays enabled (`aria-disabled`),
+  says "Reading older runs…", and reads one page at a time.
+- I5 (minor 6, re-graded), plain-object lookups of run data: a preview value, a reason code or a trigger's source
+  named like an object's property (`"__proto__"`, `"constructor"`) now reads as itself.
+
+After the fixes: the whole frontend suite 1283 passed (98 files); the type check and ESLint silent; the build; local
+CodeQL, no finding.
+
+Deferred minors (a follow-up issue, on the owner's word): "Updated" said as a filter's list empties, not when it
+arrives; Copy id throws without `navigator.clipboard` (plain HTTP); a request cancelled before it started also says
+"Ended: cancelled before any step ran"; the workflow chooser says "No workflow matches." while its list loads or
+failed; a cancel refused during an erasure says "Try again."; "← Runs" names its arrow; ruling 233's cost is sharper
+(a first page falling below 50 after Load more drops every older run in one poll); the media query's range syntax in
+older browsers; the e2e cancel spec relies on a cancel interrupting a 10-minute delay within 60 s.
