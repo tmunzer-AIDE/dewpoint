@@ -3362,3 +3362,9 @@ arrives; Copy id throws without `navigator.clipboard` (plain HTTP); a request ca
 failed; a cancel refused during an erasure says "Try again."; "← Runs" names its arrow; ruling 233's cost is sharper
 (a first page falling below 50 after Load more drops every older run in one poll); the media query's range syntax in
 older browsers; the e2e cancel spec relies on a cancel interrupting a 10-minute delay within 60 s.
+
+M107. **The browser specs' seeding sends `If-Match` and an `Idempotency-Key`** (CI's e2e job on #118, 2026-10-17):
+      publishing answered 428 (`revision_required`: the route takes the draft's revision, as the editor sends it), and a
+      start would too (`idempotency_key_required`, a header the schema types as optional). The import's
+      `draft_revision` goes in `If-Match`; each start gets a fresh key. The three fixtures were validated offline with
+      the engine's validator and the flow catalog: no diagnostic. Cost if wrong: another seeding call refused on CI.

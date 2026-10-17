@@ -17,13 +17,14 @@ async function tenantId(page: Page): Promise<string> {
   return tenants[0]!.id;
 }
 
-/** The API as the web client calls it: an unsafe request names the client and carries the session's CSRF token. */
+/** The API as the web client calls it: an unsafe request names the client and carries the session's CSRF token.
+ * Publishing names the draft's revision it publishes (`If-Match`, as the editor does); a start, its idempotency key. */
 async function api(page: Page) {
   const tenant = await tenantId(page);
   const { csrf_token } = (await (await page.request.get("/api/v1/auth/session")).json()) as { csrf_token: string };
   const headers = { "X-Dewpoint-Client": "web", "X-CSRF-Token": csrf_token };
-  const post = async (path: string, data: unknown) => {
-    const answer = await page.request.post(`/api/v1/t/${tenant}${path}`, { data, headers });
+  const post = async (path: string, data: unknown, more: Record<string, string> = {}) => {
+    const answer = await page.request.post(`/api/v1/t/${tenant}${path}`, { data, headers: { ...headers, ...more } });
     expect(answer.ok(), `POST ${path}: ${answer.status()}`).toBe(true);
     return (await answer.json()) as Record<string, unknown>;
   };
@@ -33,12 +34,12 @@ async function api(page: Page) {
     async publish(fixture: string, name: string): Promise<string> {
       const document = JSON.parse(readFileSync(`e2e/fixtures/${fixture}`, "utf8")) as unknown;
       const workflow = await post("/workflows/import", { name, document });
-      await post(`/workflows/${String(workflow.id)}/publish`, { expected_latest_version: null });
+      await post(`/workflows/${String(workflow.id)}/publish`, { expected_latest_version: null }, { "If-Match": String(workflow.draft_revision) });
       return String(workflow.id);
     },
     /** A run started by hand: its id. */
     async start(workflowId: string, input: Record<string, unknown>, mode: "live" | "simulate" = "live"): Promise<string> {
-      return String((await post(`/workflows/${workflowId}/runs`, { input, mode })).id);
+      return String((await post(`/workflows/${workflowId}/runs`, { input, mode }, { "Idempotency-Key": crypto.randomUUID() })).id);
     },
     /** Waits for a run to end, as the dispatcher and the worker run it. */
     async ended(runId: string): Promise<void> {
