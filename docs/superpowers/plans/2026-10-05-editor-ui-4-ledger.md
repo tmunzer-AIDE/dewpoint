@@ -3285,3 +3285,19 @@ Tasks 1–6, inline, each from its diff blocks as the plan writes them, every re
 
 After each task the type check and ESLint were silent. The whole frontend suite on b209ff05: 1233 passed (97 files).
 Mid-slice rulings: M104 only. Nothing pushed.
+
+### 4e-1b, milestone 2 (2026-10-17)
+
+The owner accepted milestone 1 ("go"). Tasks 7–11, inline, every red and green as the plan's steps say:
+- Task 7, 14ac7c7b: the canvas's keyboard in `useCanvasNav`. Red: the hook's test can't import it (the editor's and
+  the model's 184 pass); green: 186.
+- Task 8, 51089ca7: a run's tags. Red: 8 failed, 14 passed; green: 22.
+- Task 9, ecc0fbec: a run's page. Red: 12 failed, 172 passed; green: 184. The build: `Editor-*.js` 247.0 kB, the
+  shared chunk 257.7 kB with the editor's stylesheet, `RunPage-*.js` 7.1 kB and `RunsPage-*.js` 11.1 kB of their own
+  (ruling 250).
+- Task 10, e529e9a4: a step's result in the drawer. Red: 5 failed, 177 passed; green: 182.
+- Task 11, c79e9548: a loop. Red: 5 failed, 137 passed ("totals each step on the canvas" passes at once, as planned);
+  green: 142.
+
+After each task the type check and ESLint were silent. The whole frontend suite on c79e9548: 1261 passed (98 files).
+Mid-slice rulings: none. Nothing pushed.
