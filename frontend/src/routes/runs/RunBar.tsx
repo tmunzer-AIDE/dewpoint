@@ -2,18 +2,19 @@
 // A run's bar and banner (editor 4e-1; the runs design §5.3; the RunFailed, RunRunning and RunOther boards). The bar:
 // the way back to Runs, the workflow, the run's short id and Copy id, its status and what it was (live in orange,
 // D3; a simulation hatched, D2), its version or a draft's revision, its trigger, start and duration, and Open the
-// workflow ("Open in the editor" for a draft simulation). The banner says what a live run did, or what a simulation
-// proves, in the present while it runs.
+// workflow ("Open in the editor" for a draft simulation); a cancel asked for says so in place of its status. The
+// banner says what a live run did, or what a simulation proves, in the present while it runs.
 import { Link } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 import { Button, LINK_BUTTON } from "../../components/Button";
-import { ModeChip, RunStatusChip } from "../../components/RunChips";
+import { ModeChip, RunStatusChip, ToneChip } from "../../components/RunChips";
 import { When } from "../../components/When";
 import { announce } from "../../lib/announce";
 import { isEnded, type Run } from "../../lib/runs";
 import { duration, runId } from "../../lib/runStatus";
 import { SimBanner } from "../editor/simulation/SimBanner";
 import { triggerWords } from "./trigger";
+import { RUN_TITLE } from "./useCancel";
 
 /** The run's facts in a line: "version 2 · webhook, Mist events · started today 09:41:12 · 38 s". */
 function Facts({ run, version }: { run: Run; version: number | null }) {
@@ -36,10 +37,10 @@ export function RunBar({ tenantId, run, version, children }: { tenantId: string;
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-line bg-surface px-5 py-2.5">
       <Link to="/t/$tenantId/runs" params={{ tenantId }} className="text-small text-muted hover:text-ink">← Runs</Link>
-      <h1 className="min-w-0 truncate text-body-lg font-semibold">{run.workflow_name ?? "—"}</h1>
+      <h1 id={RUN_TITLE} tabIndex={-1} className="min-w-0 truncate text-body-lg font-semibold">{run.workflow_name ?? "—"}</h1>
       <span className="font-mono text-small">{`run ${runId(run.id)}`}</span>
       <Button size="sm" onClick={() => void copy()}>Copy id</Button>
-      <RunStatusChip status={run.status} />
+      {run.cancel_requested_at && !isEnded(run.status) ? <ToneChip tone="running">Cancel requested</ToneChip> : <RunStatusChip status={run.status} />}
       <ModeChip mode={run.mode} draft={run.draft_snapshot_id !== null} />
       <Facts run={run} version={version} />
       {children}

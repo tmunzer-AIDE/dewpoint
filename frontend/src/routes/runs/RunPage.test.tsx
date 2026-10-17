@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
-import { act, render, screen, within } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { onAnnounce } from "../../lib/announce";
@@ -54,9 +54,12 @@ const VERSION = { id: "v2", number: 2, graph: FAILED_GRAPH, active: true, blocke
 
 let answers: Map<string, (url: URL) => Response>;
 let reads: string[];
+let role: string;
 
 beforeEach(() => {
+  role = "operator";
   answers = new Map([
+    ["/api/v1/t/t1", () => json({ id: "t1", name: "Acme Retail", slug: "acme-retail", require_passkey: false, role })()],
     ["/api/v1/node-types", json(RUN_TYPES)],
     ["/api/v1/t/t1/workflows/w1/versions/v2", json(VERSION)],
     [`/api/v1/t/t1/runs/${RUN.id}/steps`, json(FAILED_STEPS)],
@@ -434,5 +437,90 @@ describe("a loop (§5.3; the RunLoop board)", () => {
     const side = await screen.findByRole("complementary", { name: "notify" });
     expect(within(side).getByText("120 instances: 14 succeeded · 3 failed · 103 skipped")).toBeTruthy();
     expect(await within(side).findByRole("combobox", { name: "Iteration" })).toBeTruthy();
+  });
+});
+
+describe("cancel (§5.3; the RunRunning board)", () => {
+  const RUN_PATH = `/api/v1/t/t1/runs/${RUN.id}`;
+  const CANCEL = `${RUN_PATH}/cancel`;
+  const running: Run = { ...RUN, status: "running", ended_at: null, error: null };
+  const requested = { cancel: "requested", request: { id: RUN.id, workflow_id: "w1", version_id: "v2", draft_snapshot_id: null, target_step_id: null,
+    mode: "live", source: "webhook", status: "started", reason: null, queued_at: RUN.queued_at, ended_at: null } };  // prettier-ignore
+  const posts = () => reads.filter((r) => r === CANCEL).length;
+
+  beforeEach(() => answers.set(RUN_PATH, json(running)));
+
+  it("asks before cancelling a live run, then says it's requested until the server confirms it", async () => {
+    const said: string[] = [];
+    const stop = onAnnounce((m) => said.push(m));
+    show();
+    await userEvent.click(await screen.findByRole("button", { name: "Cancel the run" }));
+    const ask = screen.getByRole("alertdialog", { name: "Cancel this run?" });
+    expect(within(ask).getByText("It stops at its next step. What it already did against Mist and its other connections isn't undone.")).toBeTruthy();
+    await userEvent.click(within(ask).getByRole("button", { name: "Keep it running" }));
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(posts()).toBe(0);
+    answers.set(CANCEL, json(requested));
+    await userEvent.click(screen.getByRole("button", { name: "Cancel the run" }));
+    answers.set(RUN_PATH, json({ ...running, cancel_requested_at: local(10, 2, 20) }));
+    await userEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Cancel the run" }));
+    expect(await within(bar()).findByText("Cancel requested")).toBeTruthy();
+    expect(within(bar()).queryByText("Running")).toBeNull();
+    expect(screen.getByText("It's shown as cancelled once the server confirms it.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Cancel the run" })).toBeNull();
+    expect(posts()).toBe(1);
+    expect(said).toContain("Cancel requested. It's shown as cancelled once the server confirms it.");
+    stop();
+  });
+
+  it("cancels a simulated run at once, without asking", async () => {
+    answers.set(RUN_PATH, json({ ...running, mode: "simulate" }));
+    answers.set(CANCEL, json({ ...requested, request: { ...requested.request, mode: "simulate" } }));
+    show();
+    await userEvent.click(await screen.findByRole("button", { name: "Cancel the run" }));
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    await vi.waitFor(() => expect(posts()).toBe(1));
+  });
+
+  it("says when the cancel didn't go through, and offers it again", async () => {
+    answers.set(RUN_PATH, json({ ...running, mode: "simulate" }));
+    answers.set(CANCEL, json({ error: "internal_error" }, 500));
+    show();
+    await userEvent.click(await screen.findByRole("button", { name: "Cancel the run" }));
+    expect((await screen.findByRole("alert")).textContent).toBe("Couldn't cancel it. Try again.");
+    expect(screen.getByRole("button", { name: "Cancel the run" })).toBeTruthy();
+    expect(within(bar()).getByText("Running")).toBeTruthy();
+  });
+
+  it("offers no Cancel to a role without run.cancel, nor on a run that ended", async () => {
+    role = "viewer";
+    show();
+    await screen.findByRole("heading", { level: 1, name: "AP offline triage" });
+    await vi.waitFor(() => expect(reads).toContain("/api/v1/t/t1"));
+    expect(screen.queryByRole("button", { name: "Cancel the run" })).toBeNull();
+    cleanup();
+    role = "operator";
+    answers.set(RUN_PATH, json(RUN));
+    show();
+    await screen.findByRole("heading", { level: 1, name: "AP offline triage" });
+    await vi.waitFor(() => expect(reads.filter((r) => r === "/api/v1/t/t1")).toHaveLength(2));
+    expect(screen.queryByRole("button", { name: "Cancel the run" })).toBeNull();
+  });
+
+  it("reads a run cancelled while it waited as cancelled, never as a cancel requested", async () => {
+    const said: string[] = [];
+    const stop = onAnnounce((m) => said.push(m));
+    const queued: Run = { ...running, status: "queued", started_at: null, request: { status: "queued", source: "webhook", reason: null } };
+    answers.set(RUN_PATH, json(queued));
+    answers.set(CANCEL, json({ ...requested, cancel: "cancelled", request: { ...requested.request, status: "cancelled" } }));
+    show();
+    await userEvent.click(await screen.findByRole("button", { name: "Cancel the run" }));
+    answers.set(RUN_PATH, json({ ...queued, status: "cancelled", ended_at: local(10, 2, 20), request: { ...queued.request!, status: "cancelled" } }));
+    await userEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Cancel the run" }));
+    expect(await within(bar()).findByText("Cancelled")).toBeTruthy();
+    expect(screen.queryByText("Cancel requested")).toBeNull();
+    await vi.waitFor(() => expect(said).toContain("Run ended: cancelled"));
+    expect(said).not.toContain("Cancel requested. It's shown as cancelled once the server confirms it.");
+    stop();
   });
 });
