@@ -3374,3 +3374,13 @@ M108. **The Workflows list's run links are 24 px targets; the runs spec finds it
       18 px tall and 2 px apart, below WCAG 2.5.8's 24 px, once a workflow had both (the runs spec's seeding made one);
       each is now at least 24 px tall. The live banner's check met CI's development note, a `note` too: it filters by
       "Live run.". Cost if wrong: another axe finding once the remaining specs run.
+
+M109. **The cancel spec's delay follows a step** (CI's e2e job on #118, its third run): the delay that started the run
+      alone still read "not reached yet" 5 s after the run was running. The engine queues a waiting control step's
+      `running` row (D-a2) inside its own unit, after the drive loop has looked for rows to send, and a sleeping timer
+      wakes nothing: with no other unit and no projection outstanding, that row isn't sent until the delay ends. A probe
+      on the worker harness showed it (alone, nothing projected in 4 s; with a step before it, `running`, then
+      `cancelled` after a cancel). The backend's D-a2 test passes only because an activity beside the delay wakes the
+      loop. The fixture now runs a transform first; the spec waits 15 s for "running" (the steps are read every 5 s)
+      and checks the delay ends "cancelled". A run that starts with a delay still shows it "not reached yet" while it
+      sleeps: an engine gap, outside 4e-1b, for the owner to schedule. Cost if wrong: another e2e round.

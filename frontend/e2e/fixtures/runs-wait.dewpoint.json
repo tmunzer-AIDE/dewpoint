@@ -5,10 +5,14 @@
   "graph": {
     "graph_format": 1,
     "nodes": [
+      { "id": "9e3e4f5a-6b7c-4d8e-9f0a-1b2c3d4e5f00", "key": "first", "type": "flow.transform@1", "config": { "fields": { "n": 0 } }, "position": { "x": 0, "y": 0 } },
       { "id": "9e3e4f5a-6b7c-4d8e-9f0a-1b2c3d4e5f01", "key": "wait", "type": "flow.delay@1", "config": { "duration_s": 600 }, "position": { "x": 0, "y": 140 } },
       { "id": "9e3e4f5a-6b7c-4d8e-9f0a-1b2c3d4e5f02", "key": "after", "type": "flow.transform@1", "config": { "fields": { "n": 1 } }, "position": { "x": 0, "y": 280 } }
     ],
-    "edges": [{ "from": { "node": "9e3e4f5a-6b7c-4d8e-9f0a-1b2c3d4e5f01" }, "to": { "node": "9e3e4f5a-6b7c-4d8e-9f0a-1b2c3d4e5f02" } }]
+    "edges": [
+      { "from": { "node": "9e3e4f5a-6b7c-4d8e-9f0a-1b2c3d4e5f00" }, "to": { "node": "9e3e4f5a-6b7c-4d8e-9f0a-1b2c3d4e5f01" } },
+      { "from": { "node": "9e3e4f5a-6b7c-4d8e-9f0a-1b2c3d4e5f01" }, "to": { "node": "9e3e4f5a-6b7c-4d8e-9f0a-1b2c3d4e5f02" } }
+    ]
   },
   "bindings": []
 }

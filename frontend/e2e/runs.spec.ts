@@ -148,12 +148,14 @@ test("a loop's iterations, four at a time, and one step's, picked (the RunLoop b
 
 test("a running live run is cancelled after its question (the RunRunning board)", async ({ page }) => {
   const seed = await api(page);
+  // `first`, then `wait`'s delay: the engine sends a sleeping delay's `running` row once another unit ends (here, the
+  // projection of `first`'s end). A delay that starts the run alone isn't recorded until it ends (M109).
   const wait = await seed.publish("runs-wait.dewpoint.json", "Runs D");
   const run = await seed.start(wait, {});
   await seed.running(run);
   await page.goto(`/t/${seed.tenant}/runs/${run}`);
   await expect(page.getByRole("note").filter({ hasText: /^Live run\./ })).toHaveText("Live run. It acts for real: steps marked sent called their connections.");
-  await expect(tags(page, "wait")).toContainText("running");
+  await expect(tags(page, "wait")).toContainText("running", { timeout: 15_000 }); // its steps are read every 5 s
   await accessibleBothWays(page, "a run: running");
   await page.getByRole("button", { name: "Cancel the run" }).click();
   const ask = page.getByRole("alertdialog", { name: "Cancel this run?" });
@@ -163,6 +165,7 @@ test("a running live run is cancelled after its question (the RunRunning board)"
   await expect(page.getByRole("heading", { level: 1 })).toBeFocused(); // its Cancel is gone: focus on the run's name
   await expect(page.getByRole("heading", { level: 1 }).locator("..").getByText(/^(Cancel requested|Cancelled)$/)).toBeVisible();
   await expect(page.getByRole("heading", { level: 1 }).locator("..").getByText("Cancelled", { exact: true })).toBeVisible({ timeout: 60_000 });
+  await expect(tags(page, "wait")).toContainText("cancelled", { timeout: 15_000 }); // its steps read again at the end
   await accessibleBothWays(page, "a run: cancelled");
 });
 
