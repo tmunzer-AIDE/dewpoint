@@ -31,6 +31,13 @@ export function duration(from: string | null, to: string | null): string | null 
   return `${Math.floor(s / 3600)} h${Math.floor((s % 3600) / 60) ? ` ${Math.floor((s % 3600) / 60)} min` : ""}`;
 }
 
+/** How long a step took, to the tenth of a second under 10 s ("0.4 s", "1.8 s"), else as a run's duration. */
+export function took(from: string | null, to: string | null): string | null {
+  if (from === null || to === null) return null;
+  const ms = Date.parse(to) - Date.parse(from);
+  return ms < 10_000 ? `${(Math.floor(ms / 100) / 10).toFixed(1)} s` : duration(from, to);
+}
+
 /** A run named by its id's first eight characters (a run's id is its request's). */
 export const runId = (id: string) => id.slice(0, 8);
 

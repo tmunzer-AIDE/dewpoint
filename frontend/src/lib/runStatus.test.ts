@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from "vitest";
-import { RUN_STATUS, duration, reasonWords, runId } from "./runStatus";
+import { RUN_STATUS, duration, reasonWords, runId, took } from "./runStatus";
 
 describe("a run's status, in one vocabulary (the runs design §5.5)", () => {
   it("words each status, and says how it looks, as every screen that shows a run does", () => {
@@ -23,6 +23,13 @@ describe("a run's status, in one vocabulary (the runs design §5.5)", () => {
     expect(duration("2026-10-15T10:00:00Z", "2026-10-15T11:02:00Z")).toBe("1 h 2 min");
     expect(duration("2026-10-15T10:42:05Z", "2026-10-15T10:42:05.300Z")).toBe("under 1 s");
     expect(duration(null, "2026-10-15T10:42:05Z")).toBeNull();
+  });
+
+  it("gives a step's time to the tenth of a second while it's short", () => {
+    expect(took("2026-10-16T09:41:12Z", "2026-10-16T09:41:12.400Z")).toBe("0.4 s");
+    expect(took("2026-10-16T09:41:12Z", "2026-10-16T09:41:13.849Z")).toBe("1.8 s");
+    expect(took("2026-10-16T09:41:12Z", "2026-10-16T09:41:42Z")).toBe("30 s");
+    expect(took("2026-10-16T09:41:12Z", null)).toBeNull();
   });
 
   it("names a run by its id's first eight characters", () => {
