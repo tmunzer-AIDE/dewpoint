@@ -13,9 +13,9 @@ import { Button, LINK_BUTTON } from "../../components/Button";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { When } from "../../components/When";
 import { ApiError } from "../../lib/client";
-import { findNode, idKey, nodesOf, portsOf, sameId } from "../../lib/graph";
-import { canCancel, isEnded, runInstancesQuery, type RunStepSummary } from "../../lib/runs";
-import { runId } from "../../lib/runStatus";
+import { START, findNode, idKey, nodesOf, portsOf, sameId } from "../../lib/graph";
+import { canCancel, isEnded, runInstancesQuery, type Run, type RunStepSummary } from "../../lib/runs";
+import { reasonWords, runId } from "../../lib/runStatus";
 import { draftSnapshotQuery } from "../../lib/simulations";
 import { useDocumentTitle } from "../../lib/title";
 import { versionQuery } from "../../lib/triggers";
@@ -32,6 +32,7 @@ import { tagsOf, type SimTag } from "../editor/simulation/results";
 import { useCanvasNav } from "../editor/useCanvasNav";
 import { RunBanner, RunBar } from "./RunBar";
 import { LoopResult, SeveralResult, StepResult } from "./RunResult";
+import { StartDrawer } from "./StartDrawer";
 import { triggerOf, triggerWords } from "./trigger";
 import { useCancel } from "./useCancel";
 import { useRunReads } from "./useRunReads";
@@ -56,6 +57,29 @@ function Unread({ tenantId, id, error, retry }: { tenantId: string; id: string; 
     <p className="flex flex-wrap items-center gap-3 p-6">
       <span role="alert" className="text-body text-danger">The run couldn&apos;t be read.</span>
       <Button size="sm" onClick={retry}>Try again</Button>
+    </p>
+  );
+}
+
+/** What a request that never started says in place of a run's banner (§5.4): waiting, cancelled before it started, or
+ * why it couldn't start or was refused, by its code and words. Nothing ran. */
+function Unstarted({ run }: { run: Run }) {
+  if (run.status === "refused" || run.status === "dead") {
+    const code = run.request?.reason ?? null;
+    const words = reasonWords(code);
+    return (
+      <p className="rounded-lg border border-danger bg-danger-bg px-3 py-2 text-small">
+        {code && <span className="font-mono text-danger">{code}</span>}
+        {`${code ? " · " : ""}${words ? `${words} ` : ""}Nothing ran.`}
+      </p>
+    );
+  }
+  const waiting = run.status === "queued" || run.status === "starting";
+  return (
+    <p className="text-small">
+      {waiting ? "Waiting to start" : "Cancelled before it started"}
+      {run.queued_at && <> · queued <When iso={run.queued_at} /></>}
+      {waiting ? ". Nothing has run yet." : ". Nothing ran."}
     </p>
   );
 }
@@ -127,6 +151,8 @@ export function RunPage({ tenantId, runId: id }: { tenantId: string; runId: stri
     setOpen(stepId);
     setIteration((i) => ({ key, n: (i?.n ?? 0) + 1 }));
   };
+  // A request that never started shows its graph without tags: nothing ran (§5.4).
+  const unstarted = r.request !== null && r.request.status !== "started";
   // A step's result: a loop that ran once, its iterations; a step in a loop, its instances one at a time; else its one
   // instance, or why it has none.
   function resultOf(summary: RunStepSummary | undefined) {
@@ -160,7 +186,10 @@ export function RunPage({ tenantId, runId: id }: { tenantId: string; runId: stri
             <Button size="sm" onClick={() => void run.refetch()}>Try again</Button>
           </p>
         )}
-        <RunBanner run={r} />
+        {unstarted ? <Unstarted run={r} /> : <RunBanner run={r} />}
+        {!unstarted && !r.outcomes_recorded && (
+          <p className="text-small">This run is older than step-by-step results: a step it didn&apos;t record shows “not recorded”.</p>
+        )}
         {r.cancel_requested_at && !ended && <p className="text-small">It&apos;s shown as cancelled once the server confirms it.</p>}
         {cancel.state === "failed" && <p role="alert" className="text-small text-danger">Couldn&apos;t cancel it. Try again.</p>}
         {endedAt && steps.data && (
@@ -197,19 +226,29 @@ export function RunPage({ tenantId, runId: id }: { tenantId: string; runId: stri
               onKeyDown={onCanvasKey}
               placing={false}
               onPlace={nothing}
-              overview={!node}
+              overview={!node && open !== START}
               start={{
                 summary: trigger.words ? `${trigger.kind} · ${trigger.words}` : trigger.kind,
                 label: `Start: ${triggerWords(r)}. Open the run's start`,
-                open: false,
-                onOpen: nothing,
-                tags: given,
+                open: open === START,
+                onOpen: () => setOpen(open === START ? null : START),
+                tags: unstarted ? undefined : given,
               }}
-              results={results}
+              results={unstarted ? undefined : results}
               resultsLabel="result"
             />
           )}
         </div>
+        {open === START && (
+          <StartDrawer
+            tenantId={tenantId}
+            run={r}
+            onClose={() => {
+              setOpen(null);
+              keys.focus(item.start);
+            }}
+          />
+        )}
         {node && graph && (
           <StepDrawer
             key={idKey(node.id)}

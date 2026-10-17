@@ -524,3 +524,95 @@ describe("cancel (§5.3; the RunRunning board)", () => {
     stop();
   });
 });
+
+describe("runs that didn't run, and others (§5.4; the RunOther board)", () => {
+  const RUN_PATH = `/api/v1/t/t1/runs/${RUN.id}`;
+  const unstarted = (status: Run["status"], reason: string | null = null): Run => ({
+    ...RUN, status, started_at: null, ended_at: status === "queued" ? null : RUN.queued_at, error: null,
+    request: { status: status === "running" ? "started" : (status as "queued"), source: "webhook", reason },
+  });  // prettier-ignore
+  const notReached: RunSteps = { given: "input", steps: FAILED_STEPS.steps.map((s) => ({ ...s, origin: "not_reached_yet", instances: 0, statuses: {}, final: null })) };
+
+  it("says a run is waiting to start, its steps without tags, with Cancel", async () => {
+    answers.set(RUN_PATH, json(unstarted("queued")));
+    answers.set(`${RUN_PATH}/steps`, json(notReached));
+    show();
+    expect((await screen.findByText(/^Waiting to start/)).textContent).toBe("Waiting to start · queued today 09:41:12. Nothing has run yet.");
+    await vi.waitFor(() => expect(reads).toContain(`${RUN_PATH}/steps`));
+    await vi.waitFor(() => expect(canvas().dataset.results).toBe("[]"));
+    expect(screen.queryByRole("note")).toBeNull(); // nothing has acted yet
+    expect(await screen.findByRole("button", { name: "Cancel the run" })).toBeTruthy();
+  });
+
+  it("says why a run couldn't start, or was refused, by its code, and that nothing ran", async () => {
+    answers.set(RUN_PATH, json(unstarted("dead", "start_throttled")));
+    show();
+    expect((await screen.findByText(/^start_throttled/)).closest("p")!.textContent).toBe("start_throttled · Too many runs were starting at once. Nothing ran.");
+    expect(within(bar()).getByText("Couldn't start")).toBeTruthy();
+    cleanup();
+    answers.set(RUN_PATH, json(unstarted("refused", "input_invalid")));
+    show();
+    expect((await screen.findByText(/^input_invalid/)).closest("p")!.textContent).toBe("input_invalid · Its input didn't fit the workflow's input. Nothing ran.");
+    expect(screen.queryByRole("button", { name: "Cancel the run" })).toBeNull();
+  });
+
+  it("says an older run doesn't say how each step ended", async () => {
+    answers.set(RUN_PATH, json({ ...RUN, outcomes_recorded: false }));
+    show();
+    expect(await screen.findByText("This run is older than step-by-step results: a step it didn't record shows “not recorded”.")).toBeTruthy();
+  });
+
+  describe("its start (the Start drawer)", () => {
+    const byHand: Run = { ...RUN, started_by: "nadia@example.com", trigger: { source: "manual", schedule: null, endpoint: null, rerun_of: null } };
+    const start = () => within(canvas()).getByRole("button", { name: "Start: by hand, nadia@example.com. Open the run's start" });
+    beforeEach(() => answers.set(RUN_PATH, json(byHand)));
+
+    it("says who started it and when, and its input as its request stored it, redacted", async () => {
+      answers.set(`${RUN_PATH}/input`, json({ read_back: "kept", input: { org: "Acme Retail", api_token: "[redacted]" }, seeds: null }));
+      show();
+      await screen.findByRole("complementary", { name: "notify_noc" });
+      await userEvent.click(start());
+      const side = screen.getByRole("complementary", { name: "Start" });
+      await vi.waitFor(() => expect(document.activeElement).toBe(within(side).getByRole("heading", { name: "Start" })));
+      expect(within(side).getByText(/^By hand/).textContent).toBe("By hand · nadia@example.com · today 09:41:12");
+      const input = within(side).getByRole("region", { name: "Input" });
+      expect(await within(input).findByText("As the run's request stored it. Sensitive values are redacted.")).toBeTruthy();
+      expect(within(input).getAllByRole("definition").map((d) => d.textContent)).toEqual(['"Acme Retail"', "redacted"]);
+      expect(canvas().dataset.current).toBe("");
+      await userEvent.click(within(side).getByRole("button", { name: "Close" }));
+      expect(screen.queryByRole("complementary", { name: "Start" })).toBeNull();
+      await vi.waitFor(() => expect(document.activeElement).toBe(start()));
+    });
+
+    it("says when its input isn't kept any more, or can't be read back", async () => {
+      answers.set(`${RUN_PATH}/input`, json({ read_back: "absent", input: null, seeds: null }));
+      show();
+      await screen.findByRole("complementary", { name: "notify_noc" });
+      await userEvent.click(start());
+      expect(await screen.findByText("Its input isn't kept any more. The run's steps and results still are.")).toBeTruthy();
+      cleanup();
+      answers.set(`${RUN_PATH}/input`, json({ read_back: "unreadable", input: null, seeds: null }));
+      show();
+      await screen.findByRole("complementary", { name: "notify_noc" });
+      await userEvent.click(start());
+      expect(await screen.findByText("Its input can't be read back: it doesn't open, or the tenant's key is gone during an erasure.")).toBeTruthy();
+    });
+
+    it("shows a CSV run's file: the rows read, run and skipped, why each was skipped, and its columns", async () => {
+      answers.set(RUN_PATH, json({
+        ...byHand,
+        csv: { row_count: 50, headers: ["site_name", "country"], mapping: { name: "site_name", country_code: "country" },
+          skipped: [{ row: 7, code: "missing_value" }, { row: 19, code: "not_a_number" }], errors: [], error_count: 0 },
+      }));  // prettier-ignore
+      answers.set(`${RUN_PATH}/input`, json({ read_back: "kept", input: {}, seeds: null }));
+      show();
+      await screen.findByRole("complementary", { name: "notify_noc" });
+      await userEvent.click(start());
+      const file = await screen.findByRole("region", { name: "CSV file" });
+      expect(within(file).getAllByRole("term").map((d) => d.textContent)).toEqual(["Rows", "Skipped", "Columns"]);
+      expect(within(file).getAllByRole("definition").map((d) => d.textContent)).toEqual([
+        "50 read · 48 run · 2 skipped", "row 7 missing_value · row 19 not_a_number", "site_name → name, country → country_code",
+      ]);  // prettier-ignore
+    });
+  });
+});

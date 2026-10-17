@@ -36,7 +36,7 @@ export function Section({ title, children }: { title: string; children: ReactNod
 }
 
 /** A preview as the server stored it: an object as its keys and values, a value wholly redacted or cut as its mark. */
-function Values({ value, none }: { value: unknown; none: string }) {
+export function Values({ value, none }: { value: unknown; none: string }) {
   const one = (v: unknown) => (typeof v === "string" && MARKS[v] ? <Chip>{MARKS[v]}</Chip> : <PreviewValue value={v} />);
   if (value === null || value === undefined) return <p className="text-small text-muted">{none}</p>;
   if (typeof value !== "object" || Array.isArray(value)) return <p className="text-small break-words">{one(value)}</p>;
