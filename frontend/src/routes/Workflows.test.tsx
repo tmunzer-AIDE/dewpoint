@@ -189,3 +189,10 @@ it("links each workflow's last run, and its last simulation, to their pages (the
   expect(within(rowOf("Triage")).getByRole("link", { name: "Failed · 1 h ago" }).getAttribute("href")).toBe("/t/t1/runs/run-triage");
   expect(within(rowOf("Triage")).getByRole("link", { name: "Simulated: Succeeded · 30 min ago" }).getAttribute("href")).toBe("/t/t1/runs/sim-triage");
 });
+
+it("gives each of those links a target of at least 24 px, one above the other (WCAG 2.5.8)", async () => {
+  await show();
+  for (const name of ["Failed · 1 h ago", "Simulated: Succeeded · 30 min ago"]) {
+    expect(within(rowOf("Triage")).getByRole("link", { name }).className).toMatch(/(?:^|\s)min-h-\[24px\](?:\s|$)/);
+  }
+});

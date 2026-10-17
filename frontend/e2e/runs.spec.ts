@@ -111,7 +111,7 @@ test("a failed live run opens on its failed step, its result in the drawer (the 
   await page.goto(`/t/${seed.tenant}/runs?workflow=${check}`);
   await page.getByRole("link", { name: failed.slice(0, 8) }).click();
   await expect(page.getByRole("heading", { level: 1, name: "Runs B" })).toBeVisible();
-  await expect(page.getByRole("note")).toHaveText("Live run. It acted for real: steps marked sent called their connections.");
+  await expect(page.getByRole("note").filter({ hasText: /^Live run\./ })).toHaveText("Live run. It acted for real: steps marked sent called their connections.");
   await expect(tags(page, "greet")).toContainText("succeeded");
   await expect(tags(page, "check")).toContainText("→ false");
   await expect(tags(page, "done")).toContainText("skipped");
@@ -152,7 +152,7 @@ test("a running live run is cancelled after its question (the RunRunning board)"
   const run = await seed.start(wait, {});
   await seed.running(run);
   await page.goto(`/t/${seed.tenant}/runs/${run}`);
-  await expect(page.getByRole("note")).toHaveText("Live run. It acts for real: steps marked sent called their connections.");
+  await expect(page.getByRole("note").filter({ hasText: /^Live run\./ })).toHaveText("Live run. It acts for real: steps marked sent called their connections.");
   await expect(tags(page, "wait")).toContainText("running");
   await accessibleBothWays(page, "a run: running");
   await page.getByRole("button", { name: "Cancel the run" }).click();

@@ -3368,3 +3368,9 @@ M107. **The browser specs' seeding sends `If-Match` and an `Idempotency-Key`** (
       start would too (`idempotency_key_required`, a header the schema types as optional). The import's
       `draft_revision` goes in `If-Match`; each start gets a fresh key. The three fixtures were validated offline with
       the engine's validator and the flow catalog: no diagnostic. Cost if wrong: another seeding call refused on CI.
+
+M108. **The Workflows list's run links are 24 px targets; the runs spec finds its banner by its words** (CI's e2e job
+      on #118, its second run): axe's target-size flagged the last run's and last simulation's links (Task 14), about
+      18 px tall and 2 px apart, below WCAG 2.5.8's 24 px, once a workflow had both (the runs spec's seeding made one);
+      each is now at least 24 px tall. The live banner's check met CI's development note, a `note` too: it filters by
+      "Live run.". Cost if wrong: another axe finding once the remaining specs run.

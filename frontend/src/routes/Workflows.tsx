@@ -44,6 +44,9 @@ function Version({ w }: { w: WorkflowRow }) {
   );
 }
 
+// Each run's link a 24 px target at least (WCAG 2.5.8): the two sit one above the other, closer than that apart.
+const RUN_LINK = "inline-flex min-h-[24px] items-center underline underline-offset-2";
+
 /** The last live run, what attention follows; the last simulation apart, in the simulation colour (4b ruling 7). Each
  * links to its run's page (the runs design §5.1). */
 function LastRun({ tenantId, w }: { tenantId: string; w: WorkflowRow }) {
@@ -55,7 +58,7 @@ function LastRun({ tenantId, w }: { tenantId: string; w: WorkflowRow }) {
       {live ? (
         <span className="inline-flex items-center gap-2">
           <span aria-hidden="true" className={`size-2 rounded-sm ${DOT[RUN_STATUS[live.status].tone]}`} />
-          <Link to="/t/$tenantId/runs/$runId" params={{ tenantId, runId: live.id }} className="underline underline-offset-2">
+          <Link to="/t/$tenantId/runs/$runId" params={{ tenantId, runId: live.id }} className={RUN_LINK}>
             {RUN_STATUS[live.status].word} · {since(live.at)}
           </Link>
         </span>
@@ -63,7 +66,7 @@ function LastRun({ tenantId, w }: { tenantId: string; w: WorkflowRow }) {
         <span className="text-muted">No live runs yet</span>
       )}
       {simulated && (
-        <Link to="/t/$tenantId/runs/$runId" params={{ tenantId, runId: simulated.id }} className="text-sim underline underline-offset-2">
+        <Link to="/t/$tenantId/runs/$runId" params={{ tenantId, runId: simulated.id }} className={`${RUN_LINK} self-start text-sim`}>
           Simulated: {RUN_STATUS[simulated.status].word} · {since(simulated.at)}
         </Link>
       )}
