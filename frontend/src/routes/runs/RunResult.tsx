@@ -3,7 +3,8 @@
 // boards). An instance: its status, "attempt N of M" and its times; its error's code and message; its attempts, one row
 // each (at most 20, §4.4); the last attempt's input and its output, sensitive values redacted and long ones cut as the
 // server stored them, said in words (D20: never dots); and the run it started. Its attempts are read again while the
-// run runs. A step with no instance says why, in the canvas's words.
+// run runs. A step with no instance says why, in the canvas's words. A loop gives its iterations four at a time, with
+// Open; a step in a loop, one iteration at a time, picked from its first 50 or opened from the loop's list (4d-1c's).
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { Fragment, useId, type ReactNode } from "react";
@@ -12,10 +13,16 @@ import { runAttemptsQuery, runQuery, type RunStep, type RunStepSummary } from ".
 import { RUN_STATUS, STEP_STATUS, runId, took } from "../../lib/runStatus";
 import { timeOf } from "../../lib/when";
 import { Chip, PreviewValue } from "../editor/drawer/PillDetails";
-import { ORIGIN } from "../editor/simulation/results";
+import { IterationPicker } from "../editor/simulation/IterationPicker";
+import { Iterations, type BodyStep } from "../editor/simulation/Iterations";
+import type { InstancePages } from "../editor/simulation/loopBody";
+import { ORIGIN, field } from "../editor/simulation/results";
 
 const READ_EVERY = 5000; // an open drawer's reads, while the run runs: with the summary
 const at = (iso: string) => timeOf(Date.parse(iso));
+/** When it ran: "09:41:20 to 09:41:50", one time when both are the same second, "since 09:41:20" while it runs. */
+const timesOf = (from: string | null, to: string | null) =>
+  from && to ? (at(from) === at(to) ? at(from) : `${at(from)} to ${at(to)}`) : from ? `since ${at(from)}` : null;
 const MARKS: Record<string, string> = { "[redacted]": "redacted", "[truncated]": "truncated" };
 
 export function Section({ title, children }: { title: string; children: ReactNode }) {
@@ -63,16 +70,17 @@ function SubRun({ tenantId, id }: { tenantId: string; id: string }) {
 
 /** One instance of a step, from its final attempt: as its attempts' read gives it once read, fresher while the run
  * runs; `max`: its attempts, its own or its type's. */
-export function InstanceResult({ tenantId, runId: id, step: final, max, ended }: {
-  tenantId: string; runId: string; step: RunStep; max: number | null; ended: boolean;
+export function InstanceResult({ tenantId, runId: id, step: final, max, ended, iteration }: {
+  tenantId: string; runId: string; step: RunStep; max: number | null; ended: boolean; iteration?: string;
 }) {  // prettier-ignore
   const attempts = useQuery({ ...runAttemptsQuery(tenantId, id, final.step_id, final.iteration_key), refetchInterval: ended ? false : READ_EVERY });
   const all = attempts.data?.items.length ? attempts.data.items : [final];
   const step = all.at(-1)!;
   const from = all[0]?.started_at ?? step.started_at;
   const to = step.ended_at;
-  const times = from && to ? (at(from) === at(to) ? at(from) : `${at(from)} to ${at(to)}`) : from ? `since ${at(from)}` : null;
-  const facts = [max ? `attempt ${step.attempt} of ${max}` : `attempt ${step.attempt}`, times, took(from, to)].filter(Boolean).join(" · ");
+  const facts = [
+    iteration && `iteration ${iteration}`, max ? `attempt ${step.attempt} of ${max}` : `attempt ${step.attempt}`, timesOf(from, to), took(from, to),
+  ].filter(Boolean).join(" · ");  // prettier-ignore
   const status = STEP_STATUS[step.status];
   return (
     <>
@@ -115,15 +123,72 @@ export function InstanceResult({ tenantId, runId: id, step: final, max, ended }:
   );
 }
 
-/** A step's result: its one instance, or why it has none; `summary` undefined when the run's steps don't name it. */
-export function StepResult({ tenantId, runId: id, summary, max, ended, several }: {
-  tenantId: string; runId: string; summary: RunStepSummary | undefined; max: number | null; ended: boolean; several: ReactNode;
+/** A loop that ran once: how many iterations and when, then its iterations, four at a time, once it has ended (a
+ * running loop's pages would move under the reader, 4d-1c ruling 4). */
+export function LoopResult({ summary, pages, body, onOpen }: {
+  summary: RunStepSummary; pages: InstancePages; body: BodyStep[]; onOpen: (stepId: string, iterationKey: string) => void;
 }) {  // prettier-ignore
-  if (!summary) return <p className="text-small text-muted">This run has no result for this step.</p>;
-  if (summary.instances === 0) {
+  const final = summary.final!;
+  const count = field(final.output, "count");
+  const status = STEP_STATUS[final.status];
+  const facts = [
+    typeof count === "number" && `${count} ${count === 1 ? "iteration" : "iterations"}`, timesOf(final.started_at, final.ended_at), took(final.started_at, final.ended_at),
+  ].filter(Boolean).join(" · ");  // prettier-ignore
+  return (
+    <>
+      <p className="flex flex-wrap items-center gap-2">
+        <ToneChip tone={status.tone}>{status.word}</ToneChip>
+        <span className="text-small text-muted">{facts}</span>
+      </p>
+      {final.error && (
+        <p className="rounded-lg border border-danger bg-danger-bg px-3 py-2 text-small">
+          <span className="font-mono text-danger">{final.error.code}</span>
+          {final.error.message && ` · ${final.error.message}`}
+        </p>
+      )}
+      <Section title="Iterations">
+        {final.status === "running" ? (
+          <p className="text-small text-muted">Its iterations are listed once it ends.</p>
+        ) : (
+          <Iterations pages={pages} loop={{ key: summary.key, prefix: final.iteration_key }} body={body} onOpen={onOpen} />
+        )}
+      </Section>
+    </>
+  );
+}
+
+/** A step that ran in a loop: its instances' totals, then one iteration at a time, picked once the run has ended;
+ * `loopKey`: the loop whose list opens any other. */
+export function SeveralResult({ tenantId, runId: id, summary, total, pages, loopKey, iteration, max, ended }: {
+  tenantId: string; runId: string; summary: RunStepSummary; total: string; pages: InstancePages; loopKey: string | null;
+  iteration: { key: string; n: number } | null; max: number | null; ended: boolean;
+}) {  // prettier-ignore
+  return (
+    <>
+      <p className="text-small">{total}</p>
+      {ended ? (
+        <IterationPicker
+          pages={pages}
+          stepId={summary.step_id}
+          iteration={iteration}
+          beyond={loopKey ? `Open any other from ${loopKey}'s list.` : undefined}
+          show={(item, n) => <InstanceResult tenantId={tenantId} runId={id} step={item as RunStep} max={max} ended={ended} iteration={n} />}
+        />
+      ) : (
+        <p className="text-small text-muted">Its iterations can be picked once the run ends.</p>
+      )}
+    </>
+  );
+}
+
+/** A step's result when it ran once, or why it has none; `summary` undefined when the run's steps don't name it. */
+export function StepResult({ tenantId, runId: id, summary, max, ended }: {
+  tenantId: string; runId: string; summary: RunStepSummary | undefined; max: number | null; ended: boolean;
+}) {  // prettier-ignore
+  if (!summary || (summary.instances > 0 && !summary.final)) return <p className="text-small text-muted">This run has no result for this step.</p>;
+  if (summary.instances === 0 || !summary.final) {
     const why = summary.origin === null ? "No result." : `${ORIGIN[summary.origin].charAt(0).toUpperCase()}${ORIGIN[summary.origin].slice(1)}.`;
     return <p className="text-small">{why}</p>;
   }
-  if (summary.instances === 1 && summary.final) return <InstanceResult tenantId={tenantId} runId={id} step={summary.final} max={max} ended={ended} />;
-  return several;
+  return <InstanceResult tenantId={tenantId} runId={id} step={summary.final} max={max} ended={ended} />;
 }

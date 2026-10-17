@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { stepInstancesQuery } from "../../../lib/simulations";
 import { Iterations } from "./Iterations";
 
 const PATH = "/api/v1/t/t1/workflows/w1/draft/simulations/r1/steps";
@@ -42,7 +43,7 @@ function show() {
   render(
     <QueryClientProvider client={qc}>
       <Iterations
-        tenantId="t1" workflowId="w1" requestId="r1" loop={{ key: "each_ap", prefix: "" }}
+        pages={{ key: ["simulation", "r1"], read: (step, page) => qc.query(stepInstancesQuery("t1", "w1", "r1", step, page)) }} loop={{ key: "each_ap", prefix: "" }}
         body={[{ id: "id-is_offline", key: "is_offline", type: "flow.if@1" }, { id: "id-notify", key: "notify", type: "slack.post@1" }]}
         onOpen={onOpen}
       />

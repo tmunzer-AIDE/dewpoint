@@ -3,7 +3,7 @@
 // steps. Made up, never a real tenant's (D24).
 import type { Run, RunItem, RunStep, RunStepSummary, RunSteps } from "../lib/runs";
 import type { GraphDoc, NodeType } from "../lib/workflows";
-import { IF, TRANSFORM, typeWith } from "./nodeTypes";
+import { IF, LOOP, TRANSFORM, typeWith } from "./nodeTypes";
 
 /** An instant on the person's own clock, today (16 October 2026) unless `day` says: what a page says of it doesn't
  * depend on the zone the tests run in. */
@@ -30,6 +30,7 @@ export const RUN_TYPES: NodeType[] = [
   typeWith({}, { ref: "acme.send_request@1", type: "acme.send_request", title: "Send a request" }),
   typeWith({}, { ref: "acme.post_message@1", type: "acme.post_message", title: "Post a message" }),
   IF,
+  LOOP,
   TRANSFORM,
 ];
 
@@ -69,5 +70,38 @@ export const FAILED_STEPS: RunSteps = {
       }),
     }),
     summary("log_recovery", "flow.transform@1", { origin: "skipped", statuses: { skipped: 1 }, final: attempt("log_recovery", { status: "skipped" }) }),
+  ],
+};  // prettier-ignore
+
+/** The RunLoop board: list_aps, then each_ap over its output; in its body, is_offline, and notify where it's true. */
+export const LOOP_GRAPH: GraphDoc = {
+  graph_format: 1,
+  nodes: [
+    step("list_aps", "acme.get_device@1", 140), { ...step("each_ap", "flow.loop@1", 280), config: { items: { $value: { kind: "cel", expr: "steps.list_aps.output" } } } },
+    step("is_offline", "flow.if@1", 420), step("notify", "acme.post_message@1", 560),
+  ],
+  edges: [to("list_aps", "each_ap"), to("each_ap", "is_offline", "body"), to("is_offline", "notify", "true")],
+};  // prettier-ignore
+export const LOOP_TOTAL = 120;
+/** Iteration n (from 0): is_offline took "true" on every seventh; notify ran there (the 4th iteration's failed), and
+ * was skipped elsewhere. */
+export function loopInstance(key: "is_offline" | "notify", n: number): RunStep {
+  const on = n % 7 === 3 || n === 1;
+  const at = local(14, 2, 10 + (n % 50), 0);
+  if (key === "is_offline") return attempt(key, { iteration_key: `each_ap:${n}`, started_at: at, ended_at: at, effect: { port: on ? "true" : "false" } });
+  if (!on) return attempt(key, { iteration_key: `each_ap:${n}`, status: "skipped", started_at: null, ended_at: null });
+  return attempt(key, {
+    iteration_key: `each_ap:${n}`, status: n === 3 ? "failed" : "succeeded", started_at: at, ended_at: local(14, 2, 10 + (n % 50), 900),
+    error: n === 3 ? { code: "invalid_blocks", message: "Slack refused the message's blocks." } : null,
+    input: { channel: "#noc-alert", text: `AP-Lobby-0${n} offline` },
+  });  // prettier-ignore
+}
+export const LOOP_STEPS: RunSteps = {
+  given: "input",
+  steps: [
+    summary("list_aps", "acme.get_device@1", { origin: "sent" }),
+    summary("each_ap", "flow.loop@1", { final: attempt("each_ap", { started_at: local(14, 2, 10), ended_at: local(14, 4, 30), output: { count: LOOP_TOTAL } }) }),
+    summary("is_offline", "flow.if@1", { instances: LOOP_TOTAL, statuses: { succeeded: LOOP_TOTAL }, ports: { true: 17, false: 103 }, final: null }),
+    summary("notify", "acme.post_message@1", { origin: "sent", instances: LOOP_TOTAL, statuses: { succeeded: 14, failed: 3, skipped: 103 }, final: null }),
   ],
 };  // prettier-ignore

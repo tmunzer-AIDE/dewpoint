@@ -9,6 +9,13 @@ import type { GraphDoc, GraphNode } from "../../../lib/workflows";
 const LOOP = "flow.loop@";
 export const PAGE = 4;
 
+/** Where a loop's instances are read (4e-1): under the simulation or the run they're of (`key`), a page of one step's
+ * at a time, under an iteration when `within` names one. */
+export interface InstancePages {
+  key: readonly unknown[];
+  read: (stepId: string, page: { offset: number; limit: number; within?: string }) => Promise<{ total: number; items: unknown[] }>;
+}
+
 /** Every step reachable from a loop's `body` port, as the engine reads a loop's region (engine/graph/structure.py). */
 export function regionOf(doc: GraphDoc, loopId: string): Set<string> {
   const edges = edgesOf(doc);

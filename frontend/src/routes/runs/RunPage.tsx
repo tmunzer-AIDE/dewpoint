@@ -6,14 +6,14 @@
 // its failed step (the owner's answer 6), and Close gives focus back to its card. A run past its tenant's retention, or
 // an id that never was, is said to be neither, with Back to Runs; a run read while its tenant is erased says why it
 // can't be (§5.5).
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useCallback, useMemo, useState, type KeyboardEvent } from "react";
 import { Button, LINK_BUTTON } from "../../components/Button";
 import { When } from "../../components/When";
 import { ApiError } from "../../lib/client";
-import { findNode, idKey, nodesOf, portsOf } from "../../lib/graph";
-import { isEnded, type RunStepSummary } from "../../lib/runs";
+import { findNode, idKey, nodesOf, portsOf, sameId } from "../../lib/graph";
+import { isEnded, runInstancesQuery, type RunStepSummary } from "../../lib/runs";
 import { runId } from "../../lib/runStatus";
 import { draftSnapshotQuery } from "../../lib/simulations";
 import { useDocumentTitle } from "../../lib/title";
@@ -26,10 +26,11 @@ import { READ_ONLY_ACTIONS } from "../editor/drawer/context";
 import { StepDrawer } from "../editor/drawer/StepDrawer";
 import { item, type ItemAction } from "../editor/items";
 import { endedWhat } from "../editor/simulation/lifecycle";
+import { bodyOf, type InstancePages } from "../editor/simulation/loopBody";
 import { tagsOf, type SimTag } from "../editor/simulation/results";
 import { useCanvasNav } from "../editor/useCanvasNav";
 import { RunBanner, RunBar } from "./RunBar";
-import { StepResult } from "./RunResult";
+import { LoopResult, SeveralResult, StepResult } from "./RunResult";
 import { triggerOf, triggerWords } from "./trigger";
 import { useRunReads } from "./useRunReads";
 
@@ -90,7 +91,14 @@ export function RunPage({ tenantId, runId: id }: { tenantId: string; runId: stri
   // Each step's tags, 4d-1c's grammar with a run's (§5.3): an action's time, a failure's code.
   const results = useMemo(() => new Map((steps.data?.steps ?? []).map((s): [string, SimTag[]] => [idKey(s.step_id), tagsFor(s)])), [steps.data, tagsFor]);
   // The step whose result is open. Undecided until its steps and graph are read: a failed run opens on its failed step.
+  // A loop's "Open" asks for one iteration of a step in it (counted: the same one asked again shows again).
   const [open, setOpen] = useState<string | null | undefined>(undefined);
+  const [iteration, setIteration] = useState<{ key: string; n: number } | null>(null);
+  const qc = useQueryClient();
+  const pages = useMemo<InstancePages>(
+    () => ({ key: ["run", tenantId, id], read: (stepId, page) => qc.query(runInstancesQuery(tenantId, id, stepId, page)) }),
+    [qc, tenantId, id],
+  );
   if (open === undefined && r && steps.data && graph) {
     setOpen(r.status === "failed" ? (steps.data.steps.find((s) => (s.statuses.failed ?? 0) > 0)?.step_id ?? null) : null);
   }
@@ -107,8 +115,33 @@ export function RunPage({ tenantId, runId: id }: { tenantId: string; runId: stri
   const node = open && graph ? findNode(graph, open) : undefined;
   const summary = node && steps.data?.steps.find((s) => idKey(s.step_id) === idKey(node.id));
   const onItem = (action: ItemAction) => {
-    if (action.kind === "open") setOpen(action.node);
+    if (action.kind !== "open") return;
+    setOpen(action.node);
+    setIteration(null);
   };
+  const openIteration = (stepId: string, key: string) => {
+    setOpen(stepId);
+    setIteration((i) => ({ key, n: (i?.n ?? 0) + 1 }));
+  };
+  // A step's result: a loop that ran once, its iterations; a step in a loop, its instances one at a time; else its one
+  // instance, or why it has none.
+  function resultOf(summary: RunStepSummary | undefined) {
+    const max = summary ? attemptsOf(summary) : null;
+    if (summary && graph && summary.type.startsWith("flow.loop@") && summary.instances === 1 && summary.final) {
+      const body = bodyOf(graph, summary.step_id).map((n) => ({ id: n.id, key: n.key, type: n.type }));
+      return <LoopResult summary={summary} pages={pages} body={body} onOpen={openIteration} />;
+    }
+    if (summary && graph && summary.instances > 1) {
+      const loop = nodesOf(graph).find((n) => n.type.startsWith("flow.loop@") && bodyOf(graph, n.id).some((b) => sameId(b.id, summary.step_id)));
+      return (
+        <SeveralResult
+          tenantId={tenantId} runId={id} summary={summary} total={tagsFor(summary)[0]?.text ?? ""} pages={pages}
+          loopKey={loop?.key ?? null} iteration={iteration} max={max} ended={ended}
+        />
+      );  // prettier-ignore
+    }
+    return <StepResult tenantId={tenantId} runId={id} summary={summary} max={max} ended={ended} />;
+  }
   return (
     <div className="@container flex min-h-0 flex-1 flex-col">
       <RunBar tenantId={tenantId} run={r} version={version.data?.number ?? null} />
@@ -184,16 +217,7 @@ export function RunPage({ tenantId, runId: id }: { tenantId: string; runId: stri
             actions={READ_ONLY_ACTIONS}
             note={null}
             focusField={null}
-            result={
-              <StepResult
-                tenantId={tenantId}
-                runId={id}
-                summary={summary}
-                max={summary ? attemptsOf(summary) : null}
-                ended={ended}
-                several={summary && <p className="text-small">{tagsFor(summary).map((t) => t.text).join(" · ")}</p>}
-              />
-            }
+            result={resultOf(summary)}
             onAdd={nothing}
             onDelete={nothing}
             onConnectPort={nothing}

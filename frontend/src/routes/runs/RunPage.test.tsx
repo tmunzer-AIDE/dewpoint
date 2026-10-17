@@ -6,7 +6,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { onAnnounce } from "../../lib/announce";
 import type { Run, RunSteps } from "../../lib/runs";
-import { FAILED_GRAPH, FAILED_RUN, FAILED_STEPS, RUN_TYPES, attempt, local } from "../../test/runs";
+import { FAILED_GRAPH, FAILED_RUN, FAILED_STEPS, LOOP_GRAPH, LOOP_STEPS, LOOP_TOTAL, RUN_TYPES, attempt, local, loopInstance } from "../../test/runs";
 import type { CanvasProps } from "../editor/Canvas";
 import { RunPage } from "./RunPage";
 
@@ -52,7 +52,7 @@ const NOW = Date.parse(local(10, 2, 19));
 const VERSION = { id: "v2", number: 2, graph: FAILED_GRAPH, active: true, blocked_by: [], cel_profile: "p", engine_abi: 9, executable: true,
   expressions: [], graph_hash: "h", node_refs: [], published_at: local(8, 0, 0), published_by: null, version_hash: "vh" };  // prettier-ignore
 
-let answers: Map<string, () => Response>;
+let answers: Map<string, (url: URL) => Response>;
 let reads: string[];
 
 beforeEach(() => {
@@ -64,10 +64,10 @@ beforeEach(() => {
   reads = [];
   vi.spyOn(Date, "now").mockReturnValue(NOW);
   vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
-    const path = new URL((input as Request).url).pathname;
-    reads.push(path);
-    const answer = answers.get(path);
-    return Promise.resolve(answer ? answer() : new Response(JSON.stringify({ error: "not_found" }), { status: 404 }));
+    const url = new URL((input as Request).url);
+    reads.push(url.pathname);
+    const answer = answers.get(url.pathname);
+    return Promise.resolve(answer ? answer(url) : new Response(JSON.stringify({ error: "not_found" }), { status: 404 }));
   });
 });
 afterEach(() => vi.restoreAllMocks());
@@ -359,5 +359,80 @@ describe("a step's result in the drawer (§5.3; the RunFailed and RunLoop boards
     expect(await within(side).findByText("attempt 1 · 09:41:13 · 0.4 s")).toBeTruthy();
     await userEvent.click(within(side).getByRole("tab", { name: "Setup" }));
     expect(within(side).getByText("This server doesn't know this step's type, so its settings can't be shown. They're kept as they are.")).toBeTruthy();
+  });
+});
+
+describe("a loop (§5.3; the RunLoop board)", () => {
+  const RUN_PATH = `/api/v1/t/t1/runs/${RUN.id}`;
+  const loopRun: Run = { ...RUN, status: "succeeded", error: null, ended_at: local(14, 4, 31) };
+  const instances = (key: "is_offline" | "notify") => (url: URL) => {
+    const [offset, limit, within] = [Number(url.searchParams.get("offset")), Number(url.searchParams.get("limit")), url.searchParams.get("within")];
+    const all = Array.from({ length: LOOP_TOTAL }, (_, n) => loopInstance(key, n)).filter((i) => !within || i.iteration_key === within);
+    return new Response(JSON.stringify({ total: all.length, items: all.slice(offset, offset + limit) }));
+  };
+  const drawer = (key: string) => screen.getByRole("complementary", { name: key });
+
+  beforeEach(() => {
+    answers.set(RUN_PATH, json(loopRun));
+    answers.set(`${RUN_PATH}/steps`, json(LOOP_STEPS));
+    answers.set("/api/v1/t/t1/workflows/w1/versions/v2", json({ ...VERSION, graph: LOOP_GRAPH }));
+    answers.set(`${RUN_PATH}/steps/id-is_offline/instances`, instances("is_offline"));
+    answers.set(`${RUN_PATH}/steps/id-notify/instances`, instances("notify"));
+    answers.set(`${RUN_PATH}/steps/id-notify/attempts`, (url) => json({ items: [loopInstance("notify", Number(url.searchParams.get("iteration")!.split(":")[1]))] })());
+    answers.set(`${RUN_PATH}/steps/id-each_ap/attempts`, json({ items: [LOOP_STEPS.steps[1]!.final] }));
+  });
+
+  it("totals each step on the canvas, from the server's summary", async () => {
+    show();
+    await vi.waitFor(() => expect(canvas().dataset.results).not.toBe("[]"));
+    expect((JSON.parse(canvas().dataset.results!) as unknown[]).slice(1)).toEqual([
+      ["id-each_ap", ["succeeded", "120 iterations"]],
+      ["id-is_offline", ["120 instances: 120 succeeded", "→ true ×17", "→ false ×103"]],
+      ["id-notify", ["120 instances: 14 succeeded · 3 failed · 103 skipped", "sent"]],
+    ]);  // prettier-ignore
+  });
+
+  it("pages the loop's iterations four at a time, and opens a failed one's step at that iteration", async () => {
+    show();
+    await vi.waitFor(() => expect(canvas().dataset.results).not.toBe("[]"));
+    await userEvent.click(within(canvas()).getByRole("button", { name: "each_ap" }));
+    const side = drawer("each_ap");
+    expect(await within(side).findByText("120 iterations · 14:02:10 to 14:04:30 · 2 min 20 s")).toBeTruthy();
+    const list = await within(side).findByRole("list", { name: "each_ap's iterations, 1 to 4 of 120" });
+    expect(within(list).getAllByRole("listitem").map((li) => li.textContent)).toEqual([
+      "1 · is_offline → false · notify skipped", "2 · is_offline → true · notify succeeded", "3 · is_offline → false · notify skipped",
+      "4 · is_offline → true · notify failed · invalid_blocks Open",
+    ]);  // prettier-ignore
+    await userEvent.click(within(side).getByRole("button", { name: "Next 4" }));
+    expect(await within(side).findByRole("list", { name: "each_ap's iterations, 5 to 8 of 120" })).toBeTruthy();
+    await userEvent.click(within(side).getByRole("button", { name: "Previous 4" }));
+    await userEvent.click(await within(side).findByRole("button", { name: "Open notify, iteration 4" }));
+    const step = drawer("notify");
+    expect(await within(step).findByText("iteration 4 · attempt 1 of 3 · 14:02:13 · 0.9 s")).toBeTruthy();
+    expect(within(step).getAllByText("invalid_blocks")[0]!.closest("p")!.textContent).toBe("invalid_blocks · Slack refused the message's blocks.");
+    expect(within(step).getByRole<HTMLSelectElement>("combobox", { name: "Iteration" }).value).toBe("each_ap:3");
+  });
+
+  it("shows one of a loop step's first 50 iterations at a time, picked (§5.3; 4d-1c's picker)", async () => {
+    show();
+    await vi.waitFor(() => expect(canvas().dataset.results).not.toBe("[]"));
+    await userEvent.click(within(canvas()).getByRole("button", { name: "notify" }));
+    const side = drawer("notify");
+    expect(within(side).getByText("120 instances: 14 succeeded · 3 failed · 103 skipped")).toBeTruthy();
+    const pick = await within(side).findByRole("combobox", { name: "Iteration" });
+    expect(within(pick).getAllByRole("option")).toHaveLength(50);
+    expect(within(side).getByText("The first 50 of 120 iterations. Open any other from each_ap's list.")).toBeTruthy();
+    await userEvent.selectOptions(pick, "each_ap:1");
+    await userEvent.click(within(side).getByRole("button", { name: "Show" }));
+    expect(await within(side).findByText("iteration 2 · attempt 1 of 3 · 14:02:11 · 0.9 s")).toBeTruthy();
+    expect(within(side).getByText("Succeeded").className).toContain("border-ok");
+  });
+
+  it("opens a failed run on its failed step in a loop, one of its iterations at a time", async () => {
+    answers.set(RUN_PATH, json({ ...loopRun, status: "failed", error: { code: "invalid_blocks", message: "Slack refused the message's blocks." } }));
+    show();
+    const side = await screen.findByRole("complementary", { name: "notify" });
+    expect(within(side).getByText("120 instances: 14 succeeded · 3 failed · 103 skipped")).toBeTruthy();
+    expect(await within(side).findByRole("combobox", { name: "Iteration" })).toBeTruthy();
   });
 });

@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
-// A loop's iterations in the Simulation panel, four at a time (4d-1c; the simulation design §7.5; the ResultPanel
-// board): each row, what the loop's own steps did in that iteration, read a page at a time from the server's
-// instances (decision 5), never the whole run at once. A failed step opens its instance in that iteration. While the
+// A loop's iterations, four at a time (4d-1c; the simulation design §7.5; the ResultPanel board; and a run's drawer,
+// 4e-1, the RunLoop board): each row, what the loop's own steps did in that iteration, read a page at a time from the
+// server's instances (decision 5), never the whole run at once. A failed step opens its instance in that iteration. While the
 // next page is read, the one shown stays, with the focus where it was; when a page has no button the person was on
 // (the last has no Next, the first no Previous), the focus goes to the other one.
-import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { Fragment, useEffect, useRef, useState } from "react";
 import { Button } from "../../../components/Button";
-import { stepInstancesQuery } from "../../../lib/simulations";
-import { PAGE, cellOf, iterationOf } from "./loopBody";
+import { PAGE, cellOf, iterationOf, type InstancePages } from "./loopBody";
 
 export interface BodyStep {
   id: string;
@@ -18,25 +17,22 @@ export interface BodyStep {
 
 const keyed = (item: unknown): unknown => (typeof item === "object" && item !== null ? (item as Record<string, unknown>).iteration_key : undefined);
 
-export function Iterations({ tenantId, workflowId, requestId, loop, body, onOpen }: {
-  tenantId: string; workflowId: string; requestId: string; loop: { key: string; prefix: string }; body: BodyStep[];
-  onOpen?: (stepId: string, iterationKey: string) => void;
+export function Iterations({ pages, loop, body, onOpen }: {
+  pages: InstancePages; loop: { key: string; prefix: string }; body: BodyStep[]; onOpen?: (stepId: string, iterationKey: string) => void;
 }) {  // prettier-ignore
   const [offset, setOffset] = useState(0); // the page asked for
   const [view, setView] = useState(0); // the page shown while the one asked for is read
   const [paged, setPaged] = useState<"next" | "previous" | null>(null); // the button the person paged with
   const next = useRef<HTMLButtonElement>(null);
   const previous = useRef<HTMLButtonElement>(null);
-  // One query per page, each step's instances read through the client (and kept under their own keys): one observer, so
+  // One query per page, each step's instances read through `pages` (and kept under their own keys): one observer, so
   // the page shown stays while the next is read (useQueries makes a new observer per key, with nothing to keep).
-  const qc = useQueryClient();
-  const pages = useQuery({
-    queryKey: ["simulation-iterations", tenantId, workflowId, requestId, loop.prefix, loop.key, body.map((b) => b.id), offset],
-    queryFn: () =>
-      Promise.all(body.map((b) => qc.fetchQuery(stepInstancesQuery(tenantId, workflowId, requestId, b.id, { offset, limit: PAGE, within: loop.prefix || undefined })))),
+  const read = useQuery({
+    queryKey: ["iterations", ...pages.key, loop.prefix, loop.key, body.map((b) => b.id), offset],
+    queryFn: () => Promise.all(body.map((b) => pages.read(b.id, { offset, limit: PAGE, within: loop.prefix || undefined }))),
     placeholderData: keepPreviousData,
   });
-  const reading = pages.isPlaceholderData;
+  const reading = read.isPlaceholderData;
   useEffect(() => {
     if (!reading) setView(offset);
   }, [reading, offset]);
@@ -46,17 +42,17 @@ export function Iterations({ tenantId, workflowId, requestId, loop, body, onOpen
     if (lost) (paged === "next" ? previous : next).current?.focus();
     setPaged(null);
   }, [paged, reading, offset]);
-  if (pages.isError) {
+  if (read.isError) {
     return (
       <p className="flex flex-wrap items-center gap-2 text-small">
         The iterations couldn&apos;t be read.
-        <Button size="sm" onClick={() => void pages.refetch()}>Read them again</Button>
+        <Button size="sm" onClick={() => void read.refetch()}>Read them again</Button>
       </p>
     );
   }
-  const read = pages.data;
-  if (read === undefined) return <p className="text-small text-muted">Reading the iterations…</p>;
-  const total = Math.max(0, ...read.map((d) => d.total));
+  const answers = read.data;
+  if (answers === undefined) return <p className="text-small text-muted">Reading the iterations…</p>;
+  const total = Math.max(0, ...answers.map((d) => d.total));
   if (total === 0) return <p className="text-small text-muted">No iteration was opened.</p>;
   const at0 = reading ? view : offset; // the first iteration shown
   const shown = Math.max(0, Math.min(PAGE, total - at0));
@@ -76,7 +72,7 @@ export function Iterations({ tenantId, workflowId, requestId, loop, body, onOpen
             <li key={n} className="border-t border-line py-1.5 first:border-t-0">
               {n + 1}
               {body.map((b, j) => {
-                const c = cellOf(read[j]?.items.find((item) => keyed(item) === at), b.type);
+                const c = cellOf(answers[j]?.items.find((item) => keyed(item) === at), b.type);
                 return (
                   <Fragment key={b.id}>
                     {" · "}
