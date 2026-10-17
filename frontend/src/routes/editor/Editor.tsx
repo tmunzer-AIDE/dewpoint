@@ -34,7 +34,7 @@ import {
   type WorkflowDetail,
 } from "../../lib/workflows";  // prettier-ignore
 import { Canvas } from "./Canvas";
-import { NAV_KEYS, isPath, navModel, pathTo, step, type NavKey } from "./canvasNav";
+import { NAV_KEYS, navModel, pathTo, type NavKey } from "./canvasNav";
 import { checkLabel, checkState, lastOf, type Check } from "./check";
 import { ConnectDialog } from "./ConnectDialog";
 import type { DrawerActions } from "./drawer/context";
@@ -56,6 +56,7 @@ import { StepPicker, type PickMode } from "./StepPicker";
 import { READ_ONLY, type PanelActions } from "./triggers/context";
 import { TriggersPanel } from "./triggers/TriggersPanel";
 import { UnappliedPanel } from "./UnappliedPanel";
+import { useCanvasNav } from "./useCanvasNav";
 import { VersionsPanel } from "./VersionsPanel";
 import { Toolbar } from "./Toolbar";
 
@@ -318,9 +319,6 @@ function Editor({
     setLeaveQuestion(null);
   };
   const [reloading, setReloading] = useState(false);
-  const [focusId, setFocusId] = useState<string>(START);
-  const [focusRequest, setFocusRequest] = useState<{ id: string; n: number } | null>(null);
-  const [trail, setTrail] = useState<string[] | null>(null); // the path the keys came by to the focused item
   const [picker, setPicker] = useState<PickMode | null>(null);
   // Steps by identity (`idKey`, `findNode`): an item names a step's canonical id, the document its authored one.
   const keyOf = (id: string) => (id === TRIGGERS ? "Triggers" : (findNode(doc, id)?.key ?? "a step"));
@@ -329,11 +327,8 @@ function Editor({
     () => new Map(nodesOf(shownDoc).map((n) => [idKey(n.id), portsOf(n, typeMap.get(n.type))])),
     [shownDoc, typeMap],
   );
-  const nav = useMemo(
-    () => navModel(shownDoc, (id) => portMap.get(idKey(id)) ?? [], editable),
-    [shownDoc, portMap, editable],
-  );
-  const shown = nav.order.includes(focusId) ? focusId : START; // a deleted item's tab stop falls back to the start card
+  const portsByStep = useCallback((id: string) => portMap.get(idKey(id)) ?? [], [portMap]);
+  const { nav, focusId, shown, focusRequest, trail, focus, onFocusItem, walk } = useCanvasNav(shownDoc, portsByStep, editable);
   const [connecting, setConnecting] = useState<PortRef | null>(null);
   const [asking, setAsking] = useState<Asking | null>(null);
   // What's typed in the drawer but not in the draft (ruling 18): the editor's, never a control's, so a tab, a toggle
@@ -782,12 +777,6 @@ function Editor({
     return step !== null && nav.order.includes(step) ? step : START;
   }
 
-  function focus(id: string, path: string[] | null = null) {
-    setFocusId(id);
-    setTrail(path);
-    setFocusRequest((r) => ({ id, n: (r?.n ?? 0) + 1 }));
-  }
-
   /** One edit: recorded (edits sharing a field's mark are one undo step, ruling 8), saved, and said, unless `message`
    * is null: a field's edits aren't announced, its control says what it holds. Whether it landed. */
   function change(next: GraphDoc, message: string | null, then?: string, mark?: string): boolean {
@@ -1092,11 +1081,7 @@ function Editor({
     if (NAV_KEYS.includes(e.key) && plain) {
       e.preventDefault();
       if (e.shiftKey && editable && id.startsWith("node:")) return nudge(id.slice(5), e.key as NavKey);
-      // The path the keys came by while it still holds (at a join, the branch taken); else the walk's own path.
-      const path = trail && trail.at(-1) === id && isPath(nav, trail) ? trail : pathTo(nav, id);
-      const next = step(nav, path, e.key as NavKey);
-      if (next.at(-1) !== id) focus(next.at(-1)!, next);
-      return;
+      return walk(e.key as NavKey);
     }
     if (!editable || !plain) return;
     if (e.key === "a" || e.key === "A") {
@@ -1364,10 +1349,7 @@ function Editor({
           current={panel}
           focusId={shown}
           focusRequest={focusRequest}
-          onFocusItem={(id) => {
-            setFocusId(id);
-            setTrail((t) => (t?.at(-1) === id ? t : null));
-          }}
+          onFocusItem={onFocusItem}
           onItem={onItem}
           onMove={(positions) => change(moveNodes(doc, positions), "Moved")}
           onConnect={onConnect}
