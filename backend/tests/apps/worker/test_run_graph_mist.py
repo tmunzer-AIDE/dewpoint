@@ -37,7 +37,7 @@ from tests.apps.dispatcher.support import BUILD
 from tests.apps.dispatcher.support import workers as ready_workers
 from tests.apps.test_admission import KEYS, current
 from tests.apps.test_workflow_ops import actor, create, publish
-from tests.apps.worker.harness import workers
+from tests.apps.worker.harness import wait_for_close, workers
 from tests.support.connections import add_connection
 from tests.support.graphs import G, ref
 from tests.support.netfakes import Request, Server, guard, serve, tls
@@ -124,7 +124,7 @@ async def _run(env: Any, ctx: Any, wf: Any, dispatch: Any, worker: Any, settings
                                   simulate=simulate, idempotency_key=f"m-{simulate}")  # fmt: skip
     async with workers(env.client, DbRunStore(worker, KEYS), plugins=(TESTKIT, MIST), network=network):
         assert await dispatch_once(dispatch, env.client, KEYS, settings, BUILD) == {"started": 1}
-        return request, await dev_run.wait_for_end(dispatch, ctx.tenant_id, request.id, within=60, poll=0.1)
+        return request, await wait_for_close(env.client, dispatch, ctx.tenant_id, request.id, within=60, poll=0.1)
 
 
 async def test_a_mist_workflow_lists_devices_and_merge_updates_a_wlan(
@@ -199,7 +199,9 @@ async def test_a_mist_webhook_envelope_runs_the_workflow_its_topic_binds(
     request_id = requests[str(alarms)][0]
     async with workers(env.client, DbRunStore(worker_sessionmaker, KEYS)):
         assert await dispatch_once(dispatch_sessionmaker, env.client, KEYS, api_settings, BUILD) == {"started": 1}
-        ended = await dev_run.wait_for_end(dispatch_sessionmaker, ready.tenant_id, request_id, within=30, poll=0.1)
+        ended = await wait_for_close(
+            env.client, dispatch_sessionmaker, ready.tenant_id, request_id, within=30, poll=0.1
+        )
     assert ended is not None and ended.status == "succeeded", ended
     async with owner_sessionmaker() as s:
         steps = (await s.execute(text("select node_key, status from run_steps"))).all()

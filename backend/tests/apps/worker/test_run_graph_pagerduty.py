@@ -40,7 +40,7 @@ from tests.apps.dispatcher.support import BUILD
 from tests.apps.dispatcher.support import workers as ready_workers
 from tests.apps.test_admission import KEYS, current
 from tests.apps.test_workflow_ops import actor, create, publish
-from tests.apps.worker.harness import workers
+from tests.apps.worker.harness import wait_for_close, workers
 from tests.support.connections import add_connection
 from tests.support.graphs import G, ref
 from tests.support.netfakes import Request, Server, guard, tls
@@ -123,7 +123,7 @@ async def _run(env: Any, ctx: Any, wf: Any, dispatch: Any, worker: Any, settings
                                   simulate=simulate, idempotency_key=f"pd-{simulate}")  # fmt: skip
     async with workers(env.client, DbRunStore(worker, KEYS), plugins=(PAGERDUTY,), network=network):
         assert await dispatch_once(dispatch, env.client, KEYS, settings, BUILD) == {"started": 1}
-        return request, await dev_run.wait_for_end(dispatch, ctx.tenant_id, request.id, within=90, poll=0.1)
+        return request, await wait_for_close(env.client, dispatch, ctx.tenant_id, request.id, within=90, poll=0.1)
 
 
 async def test_an_alert_is_triggered_once_however_retried_then_acknowledged_and_resolved(

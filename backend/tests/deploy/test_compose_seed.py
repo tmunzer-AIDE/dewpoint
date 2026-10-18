@@ -20,6 +20,7 @@ from dewpoint.core.crypto.keyring import Keyring
 from dewpoint.core.crypto.keys import KeyringKeys
 from tests.apps.dispatcher.support import BUILD, workers
 from tests.apps.test_admission import current
+from tests.apps.worker.harness import wait_for_close
 from tests.apps.worker.harness import workers as engine_workers
 from tests.support.registry import sync_test_plugins
 
@@ -52,7 +53,7 @@ async def test_the_seeded_workflow_runs_to_success_through_the_dispatcher(
         assert await dispatch_once(dispatch_sessionmaker, env.client, dispatch_keys, api_settings, BUILD) == {
             "started": 1
         }
-        ended = await dev_run.wait_for_end(dispatch_sessionmaker, tenant_id, request.id, within=30, poll=0.1)
+        ended = await wait_for_close(env.client, dispatch_sessionmaker, tenant_id, request.id, within=30, poll=0.1)
     assert ended == dev_run.Ended("run", "succeeded", None, None)
 
 
