@@ -345,6 +345,9 @@ test("at 320 px a panel leaves the canvas room: Go to shows its step, and a step
   await expect(step).toBeInViewport({ ratio: 0.9 });
   // Placed with a click at 320 px: the panel's Place, then a click on the canvas, where the step lands and shows.
   await page.getByRole("button", { name: "Place on the canvas…" }).click();
+  // The page at its end, as reaching the panel's buttons leaves it: the placing is an edit, so the panel shows less until
+  // the next check (its problems), and the page mustn't shorten under the canvas (the canvas would move off the click).
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
   // An empty place: the first point of a grid over the canvas where the pane itself, not a card or a control, is hit.
   const box = (await canvas.boundingBox())!;
   const grid = [0.5, 0.35, 0.65, 0.2, 0.8].flatMap((fy) => [0.5, 0.3, 0.7].map((fx) => ({ x: box.x + box.width * fx, y: box.y + box.height * fy })));
