@@ -244,14 +244,14 @@ async def test_a_sub_runs_bug_leaves_none_of_its_steps_running(
     own_env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch
 ) -> None:  # fmt: skip
     """The parent writes the end of a sub-run its bug failed, and that end leaves none of the sub-run's steps
-    `running`: a step persisted `running` ends `outcome_unconfirmed`; one whose end was never projected is absent."""
+    `running`: a step persisted `running` ends `outcome_unconfirmed`; one whose end was projected keeps it."""
     store = MemoryStore()
 
     def chosen(self: execution.Execution) -> bool:
         return self.parent is not None and running(store, self.run_id, "")
 
     bug_in(monkeypatch, chosen)
-    sub = graph().node("s", "testkit.slow@1", {"seconds": 5}).node("t", "testkit.slow@1", {"seconds": 1})  # t wakes it
+    sub = graph().node("s", "testkit.slow@1", {"seconds": 5}).node("t", "flow.transform@1", {"fields": {"v": 1}})
     g = graph(code=ref("steps.r.error.code", default="none"))
     g.node("r", "flow.run_workflow@1", {"workflow_id": str(store.publish(sub))}, on_error="continue")
     async with workers(own_env.client, store):
@@ -261,7 +261,7 @@ async def test_a_sub_runs_bug_leaves_none_of_its_steps_running(
     [sub_run] = [s for s in store.starts if s != run_id_of(handle)]
     rows = {r.node_key: (r.status, r.error_code) for r in store.steps(sub_run)}
     assert rows["s"] == ("failed", OUTCOME_UNCONFIRMED)
-    assert rows.get("t", ("succeeded", None)) == ("succeeded", None)  # projected before the bug, or absent
+    assert rows["t"] == ("succeeded", None)  # it settled at once: its end went in the projection of `s`'s start
 
 
 async def test_a_runs_bug_starts_no_failure_handler(env: WorkflowEnvironment, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -22,6 +22,7 @@ from tests.support.plugins.testkit import Slow
 ECHO, SLOW, FAIL_N = "testkit.echo@1", "testkit.slow@1", "testkit.fail_n@1"
 IF, LOOP, SET, DELAY, STOP = "flow.if@1", "flow.loop@1", "flow.set_variables@1", "flow.delay@1", "flow.stop@1"
 FAIL, FILTER = "flow.fail@1", "flow.filter@1"
+SAID_TIMEOUT_S = 10  # real time for a projection to land, far more than one takes
 
 
 def graph() -> G:
@@ -88,6 +89,40 @@ async def test_a_stop_cancels_a_sleeping_timer_that_said_it_was_running(env: Wor
         result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
     assert result.status == "succeeded"  # a stop ends the run as succeeded
     assert ("d", "running") in store.seen
+    assert ended(store, run_id_of(handle))[("d", "", 1)] == ("cancelled", True)
+
+
+async def test_a_timer_alone_in_its_run_says_it_is_running_while_it_sleeps(env: WorkflowEnvironment) -> None:
+    """D-a2 with nothing beside the timer to wake the run: its `running` row is projected as it falls asleep, not
+    when it wakes. The test waits in real time, never for the result, so the server skips no time meanwhile."""
+    store = Seen()
+    g = graph().node("d", DELAY, {"duration_s": 3600})
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, {})
+        try:
+            await asyncio.wait_for(store.said.wait(), SAID_TIMEOUT_S)
+        finally:
+            await handle.cancel()
+            with pytest.raises(WorkflowFailureError):
+                await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
+    assert ended(store, run_id_of(handle))[("d", "", 1)] == ("cancelled", True)
+
+
+async def test_a_plugin_step_alone_in_its_run_says_it_is_running_while_its_activity_runs(
+    own_env: WorkflowEnvironment,
+) -> None:
+    """Its attempt's `running` row is projected as the activity starts, not when it ends. On a test server of its
+    own: the run is cancelled while the activity runs."""
+    store = Seen()
+    g = graph().node("d", SLOW, {"seconds": 60})
+    async with workers(own_env.client, store):
+        handle = await start(own_env.client, store, g, {})
+        try:
+            await asyncio.wait_for(store.said.wait(), SAID_TIMEOUT_S)
+        finally:
+            await handle.cancel()
+            with pytest.raises(WorkflowFailureError):
+                await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
     assert ended(store, run_id_of(handle))[("d", "", 1)] == ("cancelled", True)
 
 

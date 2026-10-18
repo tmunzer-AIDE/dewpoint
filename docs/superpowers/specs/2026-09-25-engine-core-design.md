@@ -1201,7 +1201,9 @@ cancel while the version loads cancels the run.
   assignments). Since engine ABI 9 (B4b; `2026-10-13-editor-4d1-simulation-design.md` §3), every instance of every
   opened scope ends with a row: `skipped` on a branch not taken, `not_started` when it never began (a retry stopped in
   its backoff records its next attempt so), `cancelled` once it began; a control step that waits on something says
-  `running` first. A row's genuine end is never replaced: a provisional close (`outcome_unconfirmed`) gives way to it,
+  `running` first. Since ABI 10 a row queued while no projection is in flight is projected at once, so a step that
+  waits (a timer, a child, a plugin attempt) says `running` as it starts, not once something else wakes the run. A
+  row's genuine end is never replaced: a provisional close (`outcome_unconfirmed`) gives way to it,
   and a different genuine end is refused and logged (`step_result_conflict`).
 - **Writes:**
   - A batched `project` activity upserts rows keyed `(run_id, step_id, iteration_key, attempt)`. It is the only
