@@ -5,8 +5,10 @@ the drain. Time runs for real here: waits are short, and a sleeping child is ter
 
 import asyncio
 import gc
-import inspect
 import logging
+import types
+import uuid
+import weakref
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -593,13 +595,22 @@ def left_behind(run_id: str, workflow_type: str) -> Any:
     found = [
         o
         for o in gc.get_objects()
-        if inspect.iscoroutine(o)
+        if type(o) is types.CoroutineType  # never `isinstance`: on a dead weak proxy, it raises
         and o.cr_code.co_qualname == f"{workflow_type}.run"
         and o.cr_frame is not None
         and getattr(o.cr_frame.f_locals.get("self"), "run_id", None) == run_id
     ]
     assert len(found) == 1, found
     return found[0]
+
+
+def test_a_dead_weak_proxy_on_the_heap_is_not_left_behind() -> None:
+    """As `test_run_graph_policies.py`'s scan met one (PR #121's CI): `isinstance` on a dead weak proxy raises
+    `ReferenceError`. The scan finds no run here, and says so."""
+    dead = weakref.proxy(set())  # its referent is gone at once
+    with pytest.raises(AssertionError, match=r"^\[\]\n"):  # nothing found
+        left_behind(str(uuid.uuid4()), "RunGraph")
+    del dead
 
 
 def sleeping_batch() -> G:

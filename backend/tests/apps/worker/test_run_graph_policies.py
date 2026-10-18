@@ -7,6 +7,7 @@ import gc
 import logging
 import types
 import uuid
+import weakref
 from datetime import timedelta
 from typing import Any
 
@@ -369,9 +370,17 @@ async def test_a_worker_without_the_run_in_its_cache_replays_it_and_carries_on(e
 
 def _left_suspended(o: object) -> str | None:
     """The run a `RunGraph.run` coroutine still suspended belongs to."""
-    if isinstance(o, types.CoroutineType) and o.cr_frame is not None and o.cr_code.co_qualname == "RunGraph.run":
+    if type(o) is types.CoroutineType and o.cr_frame is not None and o.cr_code.co_qualname == "RunGraph.run":
         return getattr(o.cr_frame.f_locals.get("self"), "run_id", None)
     return None
+
+
+def test_a_dead_weak_proxy_on_the_heap_is_no_run_left_suspended() -> None:
+    """A websockets connection's logger keeps a weak proxy to the connection, which can outlive it: `isinstance` on a
+    dead proxy raises `ReferenceError`, and the heap scan below met one after a websockets test had run in the same
+    process (PR #121's CI)."""
+    dead = weakref.proxy(set())  # its referent is gone at once
+    assert _left_suspended(dead) is None
 
 
 async def test_a_run_its_worker_dropped_is_closed_without_running_anything(

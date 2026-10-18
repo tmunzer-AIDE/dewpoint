@@ -3,6 +3,7 @@
 in-memory store and an in-process CEL evaluator (the real one needs Linux and its own container)."""
 
 import asyncio
+import contextlib
 import dataclasses
 import json
 import uuid
@@ -12,14 +13,15 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio.api.common.v1 import Payload
-from temporalio.client import Client, WorkflowHandle
+from temporalio.client import Client, WorkflowFailureError, WorkflowHandle
 from temporalio.converter import WorkflowSerializationContext
 from temporalio.exceptions import ApplicationError
 from temporalio.worker import Worker, WorkflowRunner
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 
-from dewpoint.apps import codec
+from dewpoint.apps import codec, dev_run
 from dewpoint.apps.worker.activities import Evaluate, RunStore, cel_activity, engine_activities, internal_activities
 from dewpoint.apps.worker.main import engine_worker, internal_worker
 from dewpoint.apps.worker.network import Network
@@ -352,6 +354,22 @@ async def build_workers(
         internal_worker(client, store, settings, build=build, identity=build),
     ):
         yield
+
+
+async def wait_for_close(
+    client: Client, sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, request_id: uuid.UUID, *,
+    within: float, poll: float = 0.5,
+) -> dev_run.Ended | None:  # fmt: skip
+    """`dev_run.wait_for_end`, then the run's execution closing: what a test awaits before it leaves `workers`. The
+    database records a run's end in its last projection activity, and the execution closes only on the workflow task
+    after that: a worker stopped in between leaves that task scheduled and the run open, which holds the test server's
+    clock for good (`skips_time`). A request that ended without starting has no execution."""
+    ended = await dev_run.wait_for_end(sessionmaker, tenant_id, request_id, within=within, poll=poll)
+    if ended is not None and ended.what == "run":
+        handle = client.get_workflow_handle_for(RunGraph.run, run_workflow_id(str(tenant_id), str(request_id)))
+        with contextlib.suppress(WorkflowFailureError):  # failed, cancelled or terminated: closed all the same
+            await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
+    return ended
 
 
 async def start(

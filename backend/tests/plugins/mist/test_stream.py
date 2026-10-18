@@ -7,6 +7,7 @@ makes a retry unsafe. The stream is always closed."""
 
 import asyncio
 import json
+import time
 from typing import Any
 
 import pytest
@@ -337,16 +338,52 @@ def test_the_channel_is_the_devices_command_channel_in_lower_case() -> None:
 
 
 DEEP = "[" * 200_000  # past the JSON decoder's recursion limit
+DEEP_RAW = '{"a":' * 50_000  # a session's raw that starts as a table, past it too
 
 
-async def test_deeply_nested_json_is_unreadable_and_discarded_in_every_phase() -> None:
-    """Review L1: `RecursionError` isn't a `ValueError`; each phase discards such a message instead of raising it."""
-    deep_raw = '{"a":' * 50_000
-    mist = Mist(data(deep_raw), data("after\n"), answer=Reply(200, {"session": SESSION}, delay_s=0.1))
+def pausing(monkeypatch: pytest.MonkeyPatch, pause_s: float) -> None:
+    """Decoding a deep message takes `pause_s` longer, as on a busy runner whose process stalls."""
+    parsed, finished = stream._parsed, stream._finished
+
+    def slow_parsed(text: str) -> Any:
+        if text == DEEP:
+            time.sleep(pause_s)
+        return parsed(text)
+
+    def slow_finished(raw: str) -> bool:
+        if raw == DEEP_RAW:
+            time.sleep(pause_s)
+        return finished(raw)
+
+    monkeypatch.setattr(stream, "_parsed", slow_parsed)
+    monkeypatch.setattr(stream, "_finished", slow_finished)
+
+
+@pytest.mark.parametrize("pause_s", [0.0, 0.45])  # 0.45 s: past every timer `quick` shrinks
+async def test_deeply_nested_json_is_unreadable_and_discarded_in_every_phase(
+    monkeypatch: pytest.MonkeyPatch, pause_s: float
+) -> None:
+    """Review L1: `RecursionError` isn't a `ValueError`; each phase discards such a message instead of raising it.
+    However long one takes to decode (`pause_s`: a loaded CI runner stalled past the shrunk acknowledgement), only the
+    idle that ends a collection is waited for: a deep message comes before the acknowledgement, whose deadline is the
+    shipped one here, and the POST answers once the stream delivered all it held, so the session's messages are
+    buffered before the collection reads them."""
+    pausing(monkeypatch, pause_s)
+    monkeypatch.setattr(stream, "ACK_S", 10.0)
+    mist = Mist(data(DEEP_RAW), data("after\n"))
     mist.stream._on_send = lambda text: [DEEP, json.dumps(ACK), DEEP]  # type: ignore[assignment]
+    post = mist.http.request
+
+    async def answered_once_delivered(*args: Any, **kwargs: Any) -> Any:
+        answer = await post(*args, **kwargs)  # queues the output
+        while not mist.stream.inbox.empty():  # noqa: ASYNC110  # the reader empties it meanwhile; no event says when
+            await asyncio.sleep(0)
+        return answer
+
+    mist.http.request = answered_once_delivered  # type: ignore[method-assign]
     out = await mist.collect()
     assert out["received"] == 2 and out["lines"][-1] == "after"
-    terminal = Mist(data(deep_raw))
+    terminal = Mist(data(DEEP_RAW))
     with pytest.raises(stream.Unmet) as raised:
         await terminal.collect(terminal=True)
     assert raised.value.code == "mist.completion_unknown"
