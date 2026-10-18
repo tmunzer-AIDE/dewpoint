@@ -293,6 +293,27 @@ differently:
 - A run writes about one more projection than before, as such a step starts: one more `project` activity, and six more
   events in its history.
 
+### ABI 11: what changes
+
+ABI 11 moves the engine's own activities to a task queue of their own, not what publishing accepts: a workflow
+published under ABI 10 publishes again unchanged, as every workflow must once the ABI 11 build is current (above). The
+CEL profile stays `cel-cpp-0.1.3+dewpoint.1/fn-1/cls-1`, and its queue becomes
+`dewpoint-cel.abi11.cel-cpp-0.1.3+dewpoint.1/fn-1/cls-1`: deploy the new build's evaluator workers with it, while the
+old build's runs keep `dewpoint-cel.abi10.cel-cpp-0.1.3+dewpoint.1/fn-1/cls-1` until they end. What a run does
+differently:
+
+- Its projection, a loop batch's close and its claims crossings run on `dewpoint-engine-internal`, which every
+  `dewpoint worker` of the build polls beside `dewpoint-engine`, in the build's version of the deployment, with 15 slots
+  of their own. Before, they shared the engine queue's 100 slots with the plugin steps, which one run's long steps
+  could hold all of (a run keeps up to 100 running). While they did, no run on that worker had its rows or its end
+  written until a step attempt ended. A cancelled run's end, which also frees its tenant's run slot, waited for its
+  steps to hear the cancel (about 30 seconds when they heartbeat) or to end their attempts. Runs of the ABI 10 build
+  still do, until they end.
+- A cancelled run now ends while its steps' attempts may still be running: they stop when they hear the cancel, as
+  before, but the run no longer waits for them.
+- Nothing else to deploy: the same process polls both queues, and Temporal's authorizer allows the worker's polls on
+  any queue.
+
 ## Upgrading from a build without versioning
 
 A build from before Worker Versioning doesn't join the `dewpoint-engine` deployment: `dewpoint deployment status`

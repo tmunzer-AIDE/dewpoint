@@ -13,13 +13,13 @@ from temporalio.testing import WorkflowEnvironment
 from dewpoint.apps import runs as run_ops
 from dewpoint.apps.runs import NotAdmissibleError, start_run
 from dewpoint.apps.worker.deployment import current_abi, set_current, this_build
-from dewpoint.apps.worker.main import engine_worker
 from dewpoint.apps.worker.store import DbRunStore
 from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.runtime.build import abi_of
 from dewpoint.engine.runtime.ids import run_workflow_id
 from dewpoint.engine.runtime.workflow import RunGraph
 from tests.apps.test_workflow_ops import ECHO_GRAPH, actor, create, publish, published_by_the_previous_build
+from tests.apps.worker.harness import build_workers
 from tests.apps.worker.test_deployment import placement
 from tests.apps.worker.test_main import settings
 from tests.engine.replay.record import executions
@@ -74,9 +74,9 @@ async def test_admission_follows_the_current_build_through_a_promotion(
 
     store = DbRunStore(worker_sessionmaker, FixtureKeys())
     n1, n = dewpoint_build(OLD), dewpoint_build(NEW)
-    async with engine_worker(client, store, [TESTKIT], settings(), build=n1, identity=n1, abi=OLD):
+    async with build_workers(client, store, [TESTKIT], settings(), build=n1, abi=OLD):
         await set_current(client, n1)
-        async with engine_worker(client, store, [TESTKIT], settings(), build=n, identity=n):
+        async with build_workers(client, store, [TESTKIT], settings(), build=n):
             assert await current_abi(client) == OLD
             with pytest.raises(NotAdmissibleError) as early:
                 await started(old.id)

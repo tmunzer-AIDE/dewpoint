@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from temporalio import activity
 from temporalio.converter import DefaultFailureConverterWithEncodedAttributes
 from temporalio.testing import WorkflowEnvironment
 
@@ -15,9 +16,21 @@ from dewpoint.apps import cel_client
 from dewpoint.apps.codec import FailureConverter, TenantCodec
 from dewpoint.apps.worker import health, main
 from dewpoint.apps.worker.health import WorkerUnhealthyError
-from dewpoint.apps.worker.main import engine_worker
+from dewpoint.apps.worker.main import INTERNAL_SLOTS, SHARED_OVERFLOW, SHARED_POOL, engine_worker, internal_worker
 from dewpoint.core import logs
 from dewpoint.core.config import Settings
+from dewpoint.engine.runtime.activities import (
+    CLAIMS_CHILD_INPUT,
+    CLAIMS_DERIVE,
+    CLAIMS_GRANT,
+    CLAIMS_MESSAGE,
+    CLAIMS_SPILL,
+    CLOSE_BATCH,
+    ENGINE_QUEUE,
+    INTERNAL_QUEUE,
+    LOAD_VERSION,
+    PROJECT,
+)
 from dewpoint.engine.runtime.build import build_id
 from dewpoint.engine.runtime.workflow import LoopBatch, RunGraph
 from tests.apps.worker.harness import MemoryStore
@@ -59,6 +72,28 @@ async def test_the_engine_worker_serves_this_builds_version_of_the_deployment(ow
         "dewpoint-engine",
         build_id(dewpoint.__version__),
     )
+
+
+async def test_the_engines_own_activities_have_a_queue_and_slots_of_their_own(own_env: WorkflowEnvironment) -> None:
+    """The owner's ruling of 2026-10-18 (option A): a run's steps hold the engine queue's activity slots, never the
+    internal queue's. The internal worker serves the projection, a batch's close and the claims crossings, in the same
+    version of the deployment, so a pinned run's projection runs on its build; it has a slot for each of the shared
+    pool's connections, and stops with the same grace. The engine queue keeps the version loader (a local activity)
+    and the steps."""
+    engine = engine_worker(own_env.client, MemoryStore(), [TESTKIT], settings(worker_shutdown_grace_s=45)).config()
+    internal = internal_worker(own_env.client, MemoryStore(), settings(worker_shutdown_grace_s=45)).config()
+
+    def names(config: Any) -> set[str | None]:
+        return {activity._Definition.must_from_callable(a).name for a in config["activities"]}
+
+    assert (engine["task_queue"], internal["task_queue"]) == (ENGINE_QUEUE, INTERNAL_QUEUE)
+    assert names(internal) == {
+        PROJECT, CLOSE_BATCH, CLAIMS_DERIVE, CLAIMS_CHILD_INPUT, CLAIMS_GRANT, CLAIMS_MESSAGE, CLAIMS_SPILL
+    }  # fmt: skip
+    assert LOAD_VERSION in names(engine) and names(engine).isdisjoint(names(internal))
+    assert internal["max_concurrent_activities"] == INTERNAL_SLOTS == SHARED_POOL + SHARED_OVERFLOW == 15
+    assert internal["deployment_config"] == engine["deployment_config"]
+    assert internal["graceful_shutdown_timeout"] == engine["graceful_shutdown_timeout"] == timedelta(seconds=45)
 
 
 async def test_the_worker_connects_with_the_tenant_codec(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -227,6 +262,7 @@ class Serving:
         monkeypatch.setattr(main, "self_check", proven)
         monkeypatch.setattr(main, "temporal_connect", connect)
         monkeypatch.setattr(main, "engine_worker", Worker)
+        monkeypatch.setattr(main, "internal_worker", Worker)
         monkeypatch.setattr(main, "PluginCallServer", PluginCalls)
         monkeypatch.setattr(main, "watch", watch)
 
@@ -242,9 +278,9 @@ async def test_a_stop_request_stops_the_workers_then_their_helpers_then_the_engi
     await asyncio.wait_for(s.polling.wait(), 10)
     requested.set()
     await asyncio.wait_for(running, 10)
-    assert s.events[:2] == ["connected", "polling"]
-    assert sorted(s.events[2:5]) == ["plugin calls ended", "shutdown", "worker ended"]
-    assert s.events[5:] == ["watch cancelled", "disposed", "disposed"]
+    assert s.events[:3] == ["connected", "polling", "polling"]  # the engine worker and the internal one
+    assert sorted(s.events[3:8]) == ["plugin calls ended", "shutdown", "shutdown", "worker ended", "worker ended"]
+    assert s.events[8:] == ["watch cancelled", "disposed", "disposed"]
 
 
 async def test_a_stop_while_starting_abandons_the_start(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -277,9 +313,9 @@ async def test_a_failed_promotion_stops_the_workers_before_the_process_ends(monk
     monkeypatch.setattr(main, "promote", promote)
     with pytest.raises(OutOfTime):
         await asyncio.wait_for(main.run(settings(worker_set_current=True), stop_requested=asyncio.Event()), 10)
-    assert s.events[:2] == ["connected", "polling"]
-    assert sorted(s.events[2:5]) == ["plugin calls ended", "shutdown", "worker ended"]
-    assert s.events[5:] == ["watch cancelled", "disposed", "disposed"]
+    assert s.events[:3] == ["connected", "polling", "polling"]  # the engine worker and the internal one
+    assert sorted(s.events[3:8]) == ["plugin calls ended", "shutdown", "shutdown", "worker ended", "worker ended"]
+    assert s.events[8:] == ["watch cancelled", "disposed", "disposed"]
 
 
 async def test_a_failed_self_check_still_ends_the_worker_unhealthy(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -306,5 +342,6 @@ async def test_a_worker_that_fails_before_it_polls_ends_the_process(monkeypatch:
     s.refused = LookupError("namespace not found")
     with pytest.raises(LookupError, match="namespace"):
         await asyncio.wait_for(main.run(settings(), stop_requested=asyncio.Event()), 10)
-    assert s.events[0] == "connected" and sorted(s.events[1:3]) == ["plugin calls ended", "shutdown"]  # at once
-    assert s.events[3:] == ["watch cancelled", "disposed", "disposed"]
+    assert s.events[0] == "connected"
+    assert sorted(s.events[1:4]) == ["plugin calls ended", "shutdown", "shutdown"]  # at once
+    assert s.events[4:] == ["watch cancelled", "disposed", "disposed"]

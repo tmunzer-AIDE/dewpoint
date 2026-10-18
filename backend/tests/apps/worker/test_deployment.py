@@ -19,12 +19,11 @@ from temporalio.worker import Worker
 from dewpoint.apps.worker import main
 from dewpoint.apps.worker.activities import cel_activity
 from dewpoint.apps.worker.deployment import deployment_config, describe, set_current, this_build
-from dewpoint.apps.worker.main import engine_worker
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
-from dewpoint.engine.runtime.activities import ENGINE_QUEUE, cel_queue
+from dewpoint.engine.runtime.activities import ENGINE_QUEUE, INTERNAL_QUEUE, cel_queue
 from dewpoint.engine.runtime.ids import run_workflow_id
 from tests.apps.worker.autocomplete_workflow import CancelsAnUnstartedActivity, echoed
-from tests.apps.worker.harness import TENANT, MemoryStore, in_process, start
+from tests.apps.worker.harness import TENANT, MemoryStore, build_workers, in_process, start
 from tests.apps.worker.test_main import proven, settings, unrecorded
 from tests.engine.replay.record import executions
 from tests.support.graphs import G, cel, ref
@@ -36,8 +35,11 @@ def build(name: str) -> str:
     return f"{name}-{uuid.uuid4().hex[:8]}"
 
 
-def engine(client: Client, store: MemoryStore, build_id: str) -> Worker:
-    return engine_worker(client, store, [TESTKIT], settings(), build=build_id, identity=build_id)
+def engine(client: Client, store: MemoryStore, build_id: str) -> contextlib.AbstractAsyncContextManager[None]:
+    return build_workers(client, store, [TESTKIT], settings(), build=build_id)
+
+
+ENGINE_QUEUES = (ENGINE_QUEUE, INTERNAL_QUEUE)  # the engine deployment's queues: its build serves both
 
 
 @dataclass(frozen=True)
@@ -46,7 +48,7 @@ class Placement:
 
     builds: set[str]  # the builds that completed its workflow tasks
     behaviours: set[int]  # the versioning behaviour each workflow task reported
-    engine: set[str]  # the workers that ran its `dewpoint-engine` activities
+    engine: set[str]  # the workers that ran its `dewpoint-engine` and `dewpoint-engine-internal` activities
     cel: set[tuple[str, str]]  # (task queue, worker) of its `cel.evaluate` activities
 
 
@@ -70,8 +72,8 @@ def placement(history: WorkflowHistory) -> Placement:
     return Placement(
         builds={t.deployment_version.build_id for t in tasks},
         behaviours={t.versioning_behavior for t in tasks},
-        engine={who for queue, who in started if queue == ENGINE_QUEUE},
-        cel={(queue, who) for queue, who in started if queue != ENGINE_QUEUE},
+        engine={who for queue, who in started if queue in ENGINE_QUEUES},
+        cel={(queue, who) for queue, who in started if queue not in ENGINE_QUEUES},
     )
 
 

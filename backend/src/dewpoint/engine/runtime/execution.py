@@ -50,6 +50,7 @@ with workflow.unsafe.imports_passed_through():
         CLAIMS_SPILL,
         CLOSE_BATCH,
         ENGINE_QUEUE,
+        INTERNAL_QUEUE,
         MAPPED,
         OUTCOME_UNKNOWN,
         PROJECT,
@@ -875,6 +876,7 @@ class Execution:
         await workflow.execute_activity(
             CLOSE_BATCH,
             data,
+            task_queue=INTERNAL_QUEUE,
             start_to_close_timeout=timedelta(seconds=30),
             retry_policy=RetryPolicy(maximum_interval=timedelta(seconds=30)),
         )
@@ -887,6 +889,7 @@ class Execution:
         await workflow.execute_activity(
             PROJECT,
             data,
+            task_queue=INTERNAL_QUEUE,
             start_to_close_timeout=timedelta(seconds=30),
             retry_policy=RetryPolicy(maximum_interval=timedelta(seconds=30)),
         )
@@ -1053,6 +1056,7 @@ class Execution:
                 CLAIMS_DERIVE,
                 data,
                 result_type=DeriveResult,
+                task_queue=INTERNAL_QUEUE,
                 start_to_close_timeout=timedelta(minutes=1),
                 retry_policy=RetryPolicy(maximum_attempts=3, initial_interval=timedelta(seconds=1)),
             )
@@ -1593,6 +1597,7 @@ class Execution:
                 name,
                 data,
                 result_type=result_type,
+                task_queue=INTERNAL_QUEUE,
                 start_to_close_timeout=timedelta(minutes=1),
                 retry_policy=RetryPolicy(maximum_attempts=3, initial_interval=timedelta(seconds=1)),
             )

@@ -26,10 +26,9 @@ from temporalio.worker import Worker
 from dewpoint.apps.worker import claims
 from dewpoint.apps.worker.activities import cel_activity, remote_evaluator
 from dewpoint.apps.worker.deployment import set_current
-from dewpoint.apps.worker.main import engine_worker
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.engine.runtime.activities import cel_queue
-from tests.apps.worker.harness import MemoryStore, start
+from tests.apps.worker.harness import MemoryStore, build_workers, start
 from tests.apps.worker.test_deployment import build
 from tests.apps.worker.test_main import settings
 from tests.apps.worker.test_real_server import task_failures
@@ -94,7 +93,7 @@ async def serving(client: Client, store: MemoryStore, socket: str, calls: list[i
 
     this = build("socket")
     evaluator = Worker(client, task_queue=cel_queue(CURRENT_CEL_PROFILE), activities=[cel_activity(counted, store)])
-    async with evaluator, engine_worker(client, store, [TESTKIT], settings(), build=this, identity=this):
+    async with evaluator, build_workers(client, store, [TESTKIT], settings(), build=this):
         await set_current(client, this)
         yield
 
