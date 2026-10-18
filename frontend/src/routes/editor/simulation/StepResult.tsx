@@ -5,10 +5,11 @@
 // redacted) and its output.
 import type { ReactNode } from "react";
 import { Button } from "../../../components/Button";
+import { runId } from "../../../lib/runStatus";
 import { ENDED, type StepSummary } from "../../../lib/simulations";
 import { StatusChip } from "./chips";
 import { Failure } from "./Failure";
-import { lineOf, runId } from "./lifecycle";
+import { lineOf } from "./lifecycle";
 import { field, originTag } from "./results";
 import { SimBanner } from "./SimBanner";
 import { InlineTags } from "./SimTags";

@@ -434,7 +434,11 @@ run, or any run of its tree, is never re-run: 409 `draft_run`.
 ## The worker
 
 `dewpoint worker` polls the `dewpoint-engine` task queue: the `RunGraph` and `LoopBatch` workflows, the version
-loader, the projection, and one activity per installed plugin node type. It needs:
+loader, and one activity per installed plugin node type. It also polls `dewpoint-engine-internal`, in the same
+version of the deployment: the engine's own activities (the projection, a batch's close, the claims crossings), with
+slots of their own (15, one per connection of its shared pool). The steps take up to 100 slots on `dewpoint-engine`
+(Temporal's default), and a run may keep 100 steps running, so one run's long steps can make other runs' steps wait;
+they never hold up any run's rows or end. It needs:
 
 - `DEWPOINT_DATABASE_URL` with a login in the `dewpoint_worker` role. That role reads versions and the tenant's data
   keys, writes `runs` and `run_steps`, and reads and writes claims (`run_inputs`, `step_outputs`, `claim_grants`) and

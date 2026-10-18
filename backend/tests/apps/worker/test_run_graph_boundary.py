@@ -19,7 +19,7 @@ from dewpoint.apps.worker.activities import MESSAGE_WITHHELD, engine_activities
 from dewpoint.engine.handles import ClaimRef
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, StepInput, StepResult, step_activity
 from dewpoint.engine.runtime.workflow import LoopBatch, RunGraph
-from tests.apps.worker.harness import EVALUATOR_ONLY, MemoryStore, decoded, run, run_id_of, start, workers
+from tests.apps.worker.harness import EVALUATOR_ONLY, MemoryStore, decoded, internal, run, run_id_of, start, workers
 from tests.engine.replay.record import executions
 from tests.support.graphs import G, cel, ref, template
 
@@ -107,7 +107,7 @@ async def test_plain_data_at_a_sensitive_position_fails_the_run(env: WorkflowEnv
     g.node("s", "testkit.sensitive@1")
     worker = Worker(env.client, task_queue=ENGINE_QUEUE, workflows=[RunGraph, LoopBatch],
                     activities=[*engine_activities(store, []), leaky])  # fmt: skip
-    async with worker:
+    async with worker, internal(env.client, store):
         handle = await start(env.client, store, g, {})
         with pytest.raises(WorkflowFailureError) as failed:
             await handle.result()

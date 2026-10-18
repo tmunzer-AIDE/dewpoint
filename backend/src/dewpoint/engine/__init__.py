@@ -14,5 +14,8 @@
 # still pending as an execution closes, cancelled with its close (#16's extra failure; the `cancel-pending-yield`
 # patch). 9: editor 4d-1a (the simulation design): every step instance's end projected (`skipped`, `not_started`,
 # `cancelled`) with control steps' `running` rows and effects; simulated attempts never of unknown outcome; flow timers
-# not waited in a simulation; single-step runs (`RunInput.target_step_id`).
-ENGINE_ABI = 9
+# not waited in a simulation; single-step runs (`RunInput.target_step_id`). 10: a row queued while no projection is in
+# flight is projected at once, so a step that waits (a timer, a child, a plugin attempt) says `running` as it starts,
+# not once something else wakes the run. 11: the projection, a batch's close and the claims crossings go to their own
+# queue, `dewpoint-engine-internal`, so a run's steps never hold the slots its rows and its end, or another run's, need.
+ENGINE_ABI = 11

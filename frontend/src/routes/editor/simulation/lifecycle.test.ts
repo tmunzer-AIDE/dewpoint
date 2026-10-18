@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from "vitest";
 import type { StepSummary } from "../../../lib/simulations";
-import { duration, endedWhat, runId, stepsEnded } from "./lifecycle";
+import { STATUS, endedWhat, stepsEnded } from "./lifecycle";
 
 const step = (key: string, statuses: Record<string, number>, origin: StepSummary["origin"] = "evaluated"): StepSummary => ({
   step_id: `id-${key}`, key, type: "flow.transform@1", origin, instances: Object.values(statuses).reduce((a, b) => a + b, 0),
@@ -9,16 +9,11 @@ const step = (key: string, statuses: Record<string, number>, origin: StepSummary
 });  // prettier-ignore
 
 describe("a simulation's lifecycle, in words (§7.2, §7.5; the Lifecycle board)", () => {
-  it("gives a run's duration as a person reads it", () => {
-    expect(duration("2026-10-15T10:42:05Z", "2026-10-15T10:42:19Z")).toBe("14 s");
-    expect(duration("2026-10-15T10:42:05Z", "2026-10-15T10:45:25Z")).toBe("3 min 20 s");
-    expect(duration("2026-10-15T10:00:00Z", "2026-10-15T11:02:00Z")).toBe("1 h 2 min");
-    expect(duration("2026-10-15T10:42:05Z", "2026-10-15T10:42:05.300Z")).toBe("under 1 s");
-    expect(duration(null, "2026-10-15T10:42:05Z")).toBeNull();
-  });
-
-  it("names a run by its id's first eight characters", () => {
-    expect(runId("7c1e9a40-3b2d-4e5f-9a1b-2c3d4e5f6a7b")).toBe("7c1e9a40");
+  it("words a simulation's status as every run's, keeping \"Not simulated\" for its own refusals (the runs design §5.5)", () => {
+    expect(STATUS.deadline_exceeded).toBe("Ran out of time");
+    expect(STATUS.dead).toBe("Couldn't start");
+    expect(STATUS.refused).toBe("Not simulated");
+    expect(STATUS.cancel_requested).toBe("Running");
   });
 
   it("counts the steps that have ended while it runs", () => {

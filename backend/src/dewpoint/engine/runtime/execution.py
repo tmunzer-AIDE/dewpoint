@@ -50,6 +50,7 @@ with workflow.unsafe.imports_passed_through():
         CLAIMS_SPILL,
         CLOSE_BATCH,
         ENGINE_QUEUE,
+        INTERNAL_QUEUE,
         MAPPED,
         OUTCOME_UNKNOWN,
         PROJECT,
@@ -454,6 +455,7 @@ class Execution:
                         lambda: (
                             bool(self._mail or self._answers or self._dirty)
                             or (not self._draining and self._drain_due())
+                            or self._rows_wake(tasks)
                         )
                     )
                 )
@@ -514,6 +516,13 @@ class Execution:
             or info.get_current_history_size() - self._history_from >= DRAIN_BYTES
             or info.is_continue_as_new_suggested()
         )
+
+    def _rows_wake(self, tasks: Mapping[tuple[Any, ...], asyncio.Task[Any]]) -> bool:
+        """A row queued while no projection is in flight (whose end would wake the loop) wakes the loop's wait, to be
+        projected at once. A unit queues its rows as it runs, after the loop looked for them, then awaits what may wake
+        nothing for hours (a timer, an activity, a child): a control step's `running` row (D-a2), and a plugin
+        attempt's, would otherwise wait for its end (ENGINE_ABI 10)."""
+        return bool(self._rows) and not any(key[0] == "project" for key in tasks)
 
     def _units(self, tasks: Mapping[tuple[Any, ...], asyncio.Task[Any]]) -> dict[str, int]:
         """What's outstanding, by kind: activities, children, timers, values (CEL, filters), collects, the
@@ -867,6 +876,7 @@ class Execution:
         await workflow.execute_activity(
             CLOSE_BATCH,
             data,
+            task_queue=INTERNAL_QUEUE,
             start_to_close_timeout=timedelta(seconds=30),
             retry_policy=RetryPolicy(maximum_interval=timedelta(seconds=30)),
         )
@@ -879,6 +889,7 @@ class Execution:
         await workflow.execute_activity(
             PROJECT,
             data,
+            task_queue=INTERNAL_QUEUE,
             start_to_close_timeout=timedelta(seconds=30),
             retry_policy=RetryPolicy(maximum_interval=timedelta(seconds=30)),
         )
@@ -1045,6 +1056,7 @@ class Execution:
                 CLAIMS_DERIVE,
                 data,
                 result_type=DeriveResult,
+                task_queue=INTERNAL_QUEUE,
                 start_to_close_timeout=timedelta(minutes=1),
                 retry_policy=RetryPolicy(maximum_attempts=3, initial_interval=timedelta(seconds=1)),
             )
@@ -1585,6 +1597,7 @@ class Execution:
                 name,
                 data,
                 result_type=result_type,
+                task_queue=INTERNAL_QUEUE,
                 start_to_close_timeout=timedelta(minutes=1),
                 retry_policy=RetryPolicy(maximum_attempts=3, initial_interval=timedelta(seconds=1)),
             )

@@ -1116,10 +1116,13 @@ cancel while the version loads cancels the run.
     - `RunGraph`;
     - its child workflow types: loop batches and sub-flows;
     - the version-loading local activity;
-    - the projection activities;
     - every plugin activity.
+  - **A second versioned queue**, `dewpoint-engine-internal` (since engine ABI 11, the owner's ruling of 2026-10-18),
+    carries the engine's own activities: the projection, a batch's close and the claims crossings. Its slots are its
+    own, so a run's steps, which can hold all of the engine queue's (the in-flight cap is per execution), never hold
+    up any run's rows or end.
 
-    Only workers of the matching build poll it for that version.
+    Only workers of the matching build poll them for that version.
   - **Pinned, explicitly.** `RunGraph` and every child workflow type declare `VersioningBehavior.PINNED`. Children
     are started on `dewpoint-engine`, a queue that belongs to the parent's version, so they inherit that version.
     Because they are also declared Pinned, they stay on it.
@@ -1139,7 +1142,8 @@ cancel while the version loads cancels the run.
   - **Two-build deployment test (required).** N-1 drains while N serves new runs, and N lacks a node type retired
     in between. The N-1 runs exercise child sub-flows, loop batches, plugin activities and continue-as-new.
     - Their histories must show that every **engine** task of an N-1 run executed on N-1: workflow tasks and
-      `dewpoint-engine` activities, in the run itself, its children and its continued runs.
+      `dewpoint-engine` and `dewpoint-engine-internal` activities, in the run itself, its children and its continued
+      runs.
     - `cel.evaluate` is deliberately excluded. Instead, the test asserts that each CEL task ran on a worker serving the version's profile (§5.7).
     - It runs on Temporal's dev server: the test server refuses Worker Versioning. An activity's history events name
       no version, so each build's worker has an identity of its own.
@@ -1201,7 +1205,9 @@ cancel while the version loads cancels the run.
   assignments). Since engine ABI 9 (B4b; `2026-10-13-editor-4d1-simulation-design.md` §3), every instance of every
   opened scope ends with a row: `skipped` on a branch not taken, `not_started` when it never began (a retry stopped in
   its backoff records its next attempt so), `cancelled` once it began; a control step that waits on something says
-  `running` first. A row's genuine end is never replaced: a provisional close (`outcome_unconfirmed`) gives way to it,
+  `running` first. Since ABI 10 a row queued while no projection is in flight is projected at once, so a step that
+  waits (a timer, a child, a plugin attempt) says `running` as it starts, not once something else wakes the run. A
+  row's genuine end is never replaced: a provisional close (`outcome_unconfirmed`) gives way to it,
   and a different genuine end is refused and logged (`step_result_conflict`).
 - **Writes:**
   - A batched `project` activity upserts rows keyed `(run_id, step_id, iteration_key, attempt)`. It is the only

@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import text
 
 from dewpoint.apps import step_summary
+from dewpoint.engine import ENGINE_ABI
 from tests.apps.api.helpers import member_client
 from tests.apps.test_admission import TOKEN, admit, current, published
 from tests.apps.test_admission_drafts import simulate
@@ -52,7 +53,7 @@ async def test_a_run_whose_graph_predates_b4b_says_its_ends_arent_all_recorded(
 ) -> None:
     ctx, wf = ready
     request = (await admit(api_sessionmaker, ctx, wf, key="h")).request
-    monkeypatch.setattr(step_summary, "OUTCOMES_ABI", step_summary.OUTCOMES_ABI + 1)  # its graph's ABI, now older
+    monkeypatch.setattr(step_summary, "OUTCOMES_ABI", ENGINE_ABI + 1)  # its graph's ABI, this build's, now older
     assert (await read(app, owner_sessionmaker, api_settings, ctx, request.id)).json()["outcomes_recorded"] is False
 
 

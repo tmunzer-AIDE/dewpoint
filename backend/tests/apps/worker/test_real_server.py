@@ -22,13 +22,12 @@ from temporalio.worker import Replayer, Worker
 
 from dewpoint.apps.worker.activities import cel_activity
 from dewpoint.apps.worker.deployment import set_current
-from dewpoint.apps.worker.main import engine_worker
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.engine.runtime.activities import cel_queue
 from dewpoint.engine.runtime.execution import SUBFLOW_GRANT
 from dewpoint.engine.runtime.workflow import LoopBatch, RunGraph
 from dewpoint.sdk import Empty, StepContext
-from tests.apps.worker.harness import MemoryStore, in_process, run_id_of, start
+from tests.apps.worker.harness import MemoryStore, build_workers, in_process, run_id_of, start
 from tests.apps.worker.test_deployment import build
 from tests.apps.worker.test_main import settings
 from tests.engine.replay.record import executions
@@ -47,7 +46,7 @@ async def serving(
     this = again or build("real")
     evaluator = Worker(client, task_queue=cel_queue(CURRENT_CEL_PROFILE), activities=[cel_activity(in_process, store)])
     grace = {} if grace_s is None else {"worker_shutdown_grace_s": grace_s}
-    async with evaluator, engine_worker(client, store, [TESTKIT], settings(**grace), build=this, identity=this):
+    async with evaluator, build_workers(client, store, [TESTKIT], settings(**grace), build=this):
         if again is None:
             await set_current(client, this)
         yield this

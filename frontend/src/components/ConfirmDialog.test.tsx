@@ -95,3 +95,14 @@ it("asks afresh when its question changes while open: focus goes back to Cancel"
   rerender(ask("Publish version 2"));
   expect(document.activeElement).toBe(screen.getByRole("button", { name: "Cancel" }));
 });
+
+it("asks as an alert dialog when told, its words its description (a live run's cancel, the runs design §5.3)", () => {
+  render(
+    <ConfirmDialog open alert title="Cancel this run?" confirmLabel="Cancel the run" cancelLabel="Keep it running" onConfirm={vi.fn()} onCancel={vi.fn()}>
+      It stops at its next step.
+    </ConfirmDialog>,
+  );
+  const dialog = screen.getByRole("alertdialog", { name: "Cancel this run?" });
+  expect(document.getElementById(dialog.getAttribute("aria-describedby")!)!.textContent).toBe("It stops at its next step.");
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "Keep it running" }));
+});

@@ -214,7 +214,7 @@ async function assetsFetched(page: Page, act: () => Promise<void>): Promise<Map<
   return seen;
 }
 
-const EDITOR_CHUNK = /^\/assets\/Editor-[\w-]+\.(?:js|css)$/;
+const EDITOR_CHUNK = /^\/assets\/Editor-[\w-]+\.js$/;
 
 test("the list and sign-in load without the editor's code, which loads when a workflow opens", async ({ page, browser }) => {
   const total = (m: Map<string, number>) => [...m.values()].reduce((a, b) => a + b, 0);
@@ -235,7 +235,11 @@ test("the list and sign-in load without the editor's code, which loads when a wo
     await page.getByRole("link", { name: "Cycle" }).click();
     await expect(page.getByRole("button", { name: /^Start: by hand/ })).toBeVisible();
   });
-  expect([...opened.keys()].filter((p) => EDITOR_CHUNK.test(p)).length).toBe(2); // its script and its stylesheet
+  // Its script, and the canvas it shares with a run's page (React Flow and the cards, with their stylesheet), in a chunk
+  // Rollup names: none of it was in the list's or sign-in's load (the runs design §5.1).
+  expect([...opened.keys()].filter((p) => EDITOR_CHUNK.test(p))).toHaveLength(1);
+  expect([...opened.keys()].some((p) => p.endsWith(".css"))).toBe(true);
+  expect([...opened.keys()].filter((p) => list.has(p) || login.has(p))).toEqual([]);
   console.log(`first load: list ${total(list)} bytes, sign-in ${total(login)} bytes; the editor adds ${total(opened)} bytes`);
 });
 

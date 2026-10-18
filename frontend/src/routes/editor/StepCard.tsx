@@ -86,8 +86,9 @@ export type StepData = {
   focusId: string;
   editable: boolean;
   onItem: (action: ItemAction) => void;
-  simulated?: SimTag[]; // its result in the editor's simulation, beside the card (4d-1c)
-  simulatedPlace?: "beside" | "under"; // where its tags go: under when another card is beside it
+  results?: SimTag[]; // its result, beside the card: in the editor's simulation (4d-1c), or a run (4e-1)
+  resultsPlace?: "beside" | "under"; // where its tags go: under when another card is beside it
+  resultsLabel?: string; // what they are, in their name
 };
 
 // React Flow turns a node's pointer events off when it can be neither selected nor dragged (ledger M11): its
@@ -115,7 +116,7 @@ export function StepNode({ data }: NodeProps<Node<StepData, "step">>) {
         tabIndex={data.focusId === item.node(node.id) ? 0 : -1}
         onOpen={() => data.onItem({ kind: "open", node: node.id })}
       />
-      {data.simulated && <SimTags label={node.key} tags={data.simulated} place={data.simulatedPlace} />}
+      {data.results && <SimTags label={node.key} tags={data.results} place={data.resultsPlace} what={data.resultsLabel} />}
       {ports.map((port, i) => {
         const from: PortRef = { node: node.id, port };
         const id = item.port(node.id, port);

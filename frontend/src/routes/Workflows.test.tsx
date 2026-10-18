@@ -10,13 +10,13 @@ const NOW = Date.parse("2026-10-06T12:00:00Z");
 const row = (over: Record<string, unknown>) => ({
   id: "w1", name: "Nightly", enabled: true, draft_revision: 3, active_version_id: "v2", active_version_number: 2,
   executable: true, blocked_by: [], created_at: "2026-10-01T00:00:00Z", updated_at: "2026-10-06T10:00:00Z",
-  unpublished_changes: false, last_run: { status: "succeeded", at: "2026-10-06T11:48:00Z" }, last_simulation: null,
+  unpublished_changes: false, last_run: { id: "run-nightly", status: "succeeded", at: "2026-10-06T11:48:00Z" }, last_simulation: null,
   runs_24h: { live: 4, simulate: 0 }, needs_attention: [], triggers: { schedules: 0, schedules_enabled: 0, webhook_bindings: 0, csv: false }, ...over,
 });  // prettier-ignore
 const ROWS = [
   row({}),
   row({ id: "w2", name: "Triage", enabled: false, unpublished_changes: true, runs_24h: { live: 1, simulate: 2 },
-        last_run: { status: "failed", at: "2026-10-06T11:00:00Z" }, last_simulation: { status: "succeeded", at: "2026-10-06T11:30:00Z" },
+        last_run: { id: "run-triage", status: "failed", at: "2026-10-06T11:00:00Z" }, last_simulation: { id: "sim-triage", status: "succeeded", at: "2026-10-06T11:30:00Z" },
         needs_attention: ["last_run_failed"] }),
   row({ id: "w3", name: "Sketch", active_version_id: null, active_version_number: null, executable: null,
         unpublished_changes: true, last_run: null, runs_24h: { live: 0, simulate: 0 } }),
@@ -50,7 +50,8 @@ beforeEach(() => {
 async function show({ startNew = false } = {}) {
   const root = createRootRoute({ component: () => <WorkflowsPage tenantId="t1" startNew={startNew} /> });
   const editor = createRoute({ getParentRoute: () => root, path: "/t/$tenantId/workflows/$workflowId", component: () => <p>editor</p> });
-  const router = createRouter({ routeTree: root.addChildren([editor]), history: createMemoryHistory({ initialEntries: ["/"] }) });
+  const run = createRoute({ getParentRoute: () => root, path: "/t/$tenantId/runs/$runId", component: () => <p>a run</p> });
+  const router = createRouter({ routeTree: root.addChildren([editor, run]), history: createMemoryHistory({ initialEntries: ["/"] }) });
   render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <RouterProvider router={router} />
@@ -61,6 +62,8 @@ async function show({ startNew = false } = {}) {
 }
 
 const rowOf = (name: string) => screen.getByRole("link", { name }).closest("tr")!;
+/** The workflows listed, by the name link in each row's first cell. */
+const names = () => screen.getAllByRole("row").slice(1).map((r) => r.querySelector("td a")?.textContent);
 
 it("shows each workflow's version, last run and last 24 hours in words", async () => {
   await show();
@@ -81,13 +84,13 @@ it("filters by state, with counts, and by name", async () => {
     "All 3", "Published 2", "Unpublished changes 2", "Needs attention 1",
   ]);  // prettier-ignore
   await userEvent.click(within(filters).getByRole("button", { name: "Unpublished changes 2" }));
-  expect(screen.getAllByRole("link").map((l) => l.textContent)).toEqual(["Triage", "Sketch"]); // never published counts
+  expect(names()).toEqual(["Triage", "Sketch"]); // never published counts
   await userEvent.click(within(filters).getByRole("button", { name: "Needs attention 1" }));
   expect(screen.queryByRole("link", { name: "Nightly" })).toBeNull();
   expect(screen.getByRole("link", { name: "Triage" })).toBeTruthy();
   await userEvent.click(within(filters).getByRole("button", { name: "All 3" }));
   await userEvent.type(screen.getByLabelText("Filter by name"), "sk");
-  expect(screen.getAllByRole("link").map((l) => l.textContent)).toEqual(["Sketch"]);
+  expect(names()).toEqual(["Sketch"]);
 });
 
 it("lets a publisher switch a workflow off, and says why one can't be switched on", async () => {
@@ -179,4 +182,17 @@ it("names what starts each workflow besides a person, and says why one needs att
   expect(rowOf("Triage").cells[0]!.textContent).toContain("Needs attention: its last run failed.");
   expect(rowOf("Audit").cells[0]!.textContent).toContain("Needs attention: a schedule couldn't be synced.");
   expect(rowOf("Rename").cells[1]!.textContent).toBe("CSV file");
+});
+
+it("links each workflow's last run, and its last simulation, to their pages (the runs design §5.1)", async () => {
+  await show();
+  expect(within(rowOf("Triage")).getByRole("link", { name: "Failed · 1 h ago" }).getAttribute("href")).toBe("/t/t1/runs/run-triage");
+  expect(within(rowOf("Triage")).getByRole("link", { name: "Simulated: Succeeded · 30 min ago" }).getAttribute("href")).toBe("/t/t1/runs/sim-triage");
+});
+
+it("gives each of those links a target of at least 24 px, one above the other (WCAG 2.5.8)", async () => {
+  await show();
+  for (const name of ["Failed · 1 h ago", "Simulated: Succeeded · 30 min ago"]) {
+    expect(within(rowOf("Triage")).getByRole("link", { name }).className).toMatch(/(?:^|\s)min-h-\[24px\](?:\s|$)/);
+  }
 });

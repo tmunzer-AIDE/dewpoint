@@ -468,10 +468,11 @@ def step_activity_for(
 def engine_activities(
     store: RunStore, plugins: Iterable[Plugin], *, abi: int = ENGINE_ABI, network: Network | None = None
 ) -> list[Callable[..., Any]]:
-    """Everything the engine queue serves: the version loader, the projection, and one activity per action node.
-    `abi` is the engine ABI this build runs (another build's in the two-build tests): a version runs only on a build
-    of its ABI (spec §7). Admission already compares with the current build's; the loader refuses any other too, for
-    a run that reached this build anyway (a promotion that raced its start), a sub-flow or a failure handler."""
+    """What the engine queue serves besides its workflows: the version loader (a local activity) and one activity per
+    action node; the engine's own activities are on a queue of their own (`internal_activities`). `abi` is the engine
+    ABI this build runs (another build's in the two-build tests): a version runs only on a build of its ABI (spec §7).
+    Admission already compares with the current build's; the loader refuses any other too, for a run that reached
+    this build anyway (a promotion that raced its start), a sub-flow or a failure handler."""
     logs.withhold_activity_errors()  # Temporal's records of failed attempts keep no error text (engine 2b spec §12)
 
     @activity.defn(name=LOAD_VERSION)
@@ -493,6 +494,21 @@ def engine_activities(
         if not size.fits(version, JSON):  # its result would pass Temporal's payload limit (engine 2b spec §5.2)
             raise ApplicationError(size.VERSION_TOO_LARGE, type=VERSION_UNUSABLE, non_retryable=True)
         return version
+
+    steps = [
+        step_activity_for(node, store, network)
+        for plugin in plugins
+        for node in plugin.nodes
+        if node.kind == NodeKind.ACTION
+    ]
+    return [load_version, *steps]
+
+
+def internal_activities(store: RunStore) -> list[Callable[..., Any]]:
+    """What the internal queue serves: the projection, a batch's close and the claims crossings, each a few short
+    store calls. A run's steps hold none of their slots, so its rows and its end, and every other run's, never wait
+    for an attempt to end."""
+    logs.withhold_activity_errors()
 
     @activity.defn(name=PROJECT)
     async def project(data: ProjectInput) -> None:
@@ -529,23 +545,7 @@ def engine_activities(
     async def claims_spill(data: SpillInput) -> None:
         await spill(data, store)
 
-    steps = [
-        step_activity_for(node, store, network)
-        for plugin in plugins
-        for node in plugin.nodes
-        if node.kind == NodeKind.ACTION
-    ]
-    return [
-        load_version,
-        project,
-        close_batch,
-        claims_derive,
-        claims_child_input,
-        claims_grant,
-        claims_message,
-        claims_spill,
-        *steps,
-    ]
+    return [project, close_batch, claims_derive, claims_child_input, claims_grant, claims_message, claims_spill]
 
 
 def remote_evaluator(socket_path: str, profile: str) -> Evaluate:

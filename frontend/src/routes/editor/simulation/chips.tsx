@@ -1,19 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // A simulation's status and what it is, as chips (4d-1c; the Lifecycle and ResultPanel boards): words first, the
-// colour only repeating them (§7.4). Simulated results are slate (D2), never live orange (D3).
+// colour only repeating them (§7.4), in every run's vocabulary (4e-1). Simulated results are slate (D2), never live
+// orange (D3).
+import { ToneChip } from "../../../components/RunChips";
+import { RUN_STATUS } from "../../../lib/runStatus";
 import type { Phase } from "../../../lib/simulations";
 import { STATUS } from "./lifecycle";
 
-const TONE: Partial<Record<Phase, string>> = {
-  succeeded: "border-ok text-ok",
-  failed: "border-danger text-danger",
-  deadline_exceeded: "border-danger text-danger",
-  dead: "border-danger text-danger",
-  refused: "border-danger text-danger",
-};
-
+/** Its status, looking as every run's does (the runs design §5.5); a cancel asked for, as running. */
 export function StatusChip({ phase }: { phase: Phase }) {
-  return <span className={`rounded-md border px-1.5 text-meta ${TONE[phase] ?? "border-line-strong text-muted"}`}>{STATUS[phase]}</span>;
+  return <ToneChip tone={phase === "cancel_requested" ? "running" : RUN_STATUS[phase].tone}>{STATUS[phase]}</ToneChip>;
 }
 
 export function SimulatedChip() {

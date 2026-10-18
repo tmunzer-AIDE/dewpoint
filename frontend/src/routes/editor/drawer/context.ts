@@ -51,6 +51,24 @@ export interface Drawer extends DrawerActions {
   explains?: (pointer: string) => () => void;
 }
 
+/** Why a read-only drawer writes nothing: a conflict, an exit agreed to, a version's or a run's view. */
+export const CANT = "Not written: the draft can't be changed now.";
+
+/** A drawer that changes nothing: a version's, or a run's (4e-1), blind to the draft's edits not applied, which are
+ * never theirs (the review of milestone 2). */
+export const READ_ONLY_ACTIONS: DrawerActions = {
+  set: () => CANT,
+  options: () => CANT,
+  held: () => undefined,
+  hold: () => undefined,
+  release: () => undefined,
+  discard: () => undefined,
+  apply: () => CANT,
+  stale: () => false,
+  rebase: () => undefined,
+  restructure: () => CANT,
+};
+
 export const DrawerContext = createContext<Drawer | null>(null);
 
 export function useDrawer(): Drawer {

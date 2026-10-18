@@ -3226,3 +3226,161 @@ description), `check:api` and the type check passing; local CodeQL, no finding.
 Deferred minors (a follow-up issue, as for earlier slices): `get_run` reads a whole graph for its engine ABI while the
 page polls it; a request that never started on a pre-ABI-9 version says "not recorded" where ruling 222 says "didn't
 run"; `run_input` learns "unreadable" by catching the read-back's 503.
+
+### 4e-1a merged; the 4e-1b plan accepted (2026-10-16)
+
+The owner merged 4e-1a as #116 (squash cb7425db), CI green ("green and merged"); its three deferred minors are issue
+#117. `docs/superpowers/plans/2026-10-16-editor-ui-4e1b-runs-ui.md`, revision 1 (898c6e96): the UI of the runs design
+§5, one plan with milestone pauses, as 4d-1c's. The owner accepted it ("1. yes 2. inline"): its rulings 1–30 join this
+ledger as 230–259; it runs inline, with pauses after Tasks 6, 11 and 14 and a fresh reviewer at the end. The branch
+`feat/editor-4e1b` starts at `origin/main` cb7425db, the frontend packages restored offline (the owner's choices).
+Mid-slice rulings start at M104. The frontend only: no backend change, no migration, no ABI change; the API is
+4e-1a's.
+
+230. **Accepted. One plan with milestone pauses** (plan ruling 1).
+231. **Accepted. One vocabulary module, `lib/runStatus.ts`; the Simulation panel keeps "Not simulated"** (plan ruling 2).
+232. **Accepted. Why a request didn't start is worded here, from its code** (plan ruling 3; with ruling 213).
+233. **Accepted. The list pages on from its last run's `(queued_at, id)`; `listed` merges the reads** (plan ruling 4).
+234. **Accepted. An empty list says what was asked** (plan ruling 5; departs from the ListStates board's copy).
+235. **Accepted. The Mode menu's items say what they hold** (plan ruling 6).
+236. **Accepted. The Workflow filter is a native modal dialog around cmdk** (plan ruling 7).
+237. **Accepted. Below 640 px the list is a list, in place of the table** (plan ruling 8).
+238. **Accepted. One lazy loader, `LazyPage`** (plan ruling 9).
+239. **Accepted. Times in the person's zone, the full date on hover** (plan ruling 10).
+240. **Accepted. Changes are said through the shell's one live region** (plan ruling 11).
+241. **Accepted. One-off reads use `queryClient.query`** (plan ruling 12).
+242. **Accepted. A trigger's words** (plan ruling 13).
+243. **Accepted. The filters' validation names every filter** (plan ruling 14).
+244. **Accepted. The canvas's keyboard moves into `useCanvasNav`** (plan ruling 15).
+245. **Accepted. 4d-1c's tags serve any run** (plan ruling 16).
+246. **Accepted. The canvas's `simulated` prop becomes `results`** (plan ruling 17).
+247. **Accepted. The banner's tense follows the run** (plan ruling 18).
+248. **Accepted. Reading a run; a read that fails later keeps the page** (plan ruling 19).
+249. **Accepted. Copy id is named by its words** (plan ruling 20).
+250. **Accepted. The editor's chunk: the canvas in a shared chunk; the e2e asset test by meaning** (plan ruling 21).
+251. **Accepted. A step's drawer is the editor's, read only, its Result tab first** (plan ruling 22).
+252. **Accepted. A failed run opens on its first failed step, once** (plan ruling 23).
+253. **Accepted. An instance shows its attempts read's last attempt** (plan ruling 24).
+254. **Accepted. Loops: iterations once ended, shared through `InstancePages`** (plan ruling 25).
+255. **Accepted. Cancel: a live run asks in an alert dialog** (plan ruling 26).
+256. **Accepted. A request that never started shows its graph without tags** (plan ruling 27).
+257. **Accepted. The Start drawer's words** (plan ruling 28).
+258. **Accepted. The Simulation panel's run id links through `runOf`** (plan ruling 29).
+259. **Accepted. The browser specs seed their runs through the API** (plan ruling 30).
+
+M104. **This section records the plan as accepted, its rulings listed**, as 4e-1a's did: the owner accepted it before
+      Task 1, whose text was written to say "proposed".
+
+### 4e-1b, milestone 1 (2026-10-16)
+
+Tasks 1–6, inline, each from its diff blocks as the plan writes them, every red and green as its steps say:
+- Task 1, 0329362f: this plan accepted, rulings 230–259 (M104).
+- Task 2, 765b26a7: one status vocabulary. Red: 1 failed, 22 passed (two modules missing; "Deadline exceeded");
+  green: 29 passed.
+- Task 3, 7788c2e7: the runs from the API, `when`. Red: neither module exists; green: 13 passed.
+- Task 4, 693ef615: Runs on the rail, the routes, the list's rows, a run gone. Red: 5 failed, 24 passed; green: 43.
+- Task 5, 019ef08d: the filters. Red: 7 failed, 8 passed; green: 15.
+- Task 6, b209ff05: reading the list. Red: 5 failed, 16 passed (the hidden tab's test passes at once, as planned);
+  green: 21.
+
+After each task the type check and ESLint were silent. The whole frontend suite on b209ff05: 1233 passed (97 files).
+Mid-slice rulings: M104 only. Nothing pushed.
+
+### 4e-1b, milestone 2 (2026-10-17)
+
+The owner accepted milestone 1 ("go"). Tasks 7–11, inline, every red and green as the plan's steps say:
+- Task 7, 14ac7c7b: the canvas's keyboard in `useCanvasNav`. Red: the hook's test can't import it (the editor's and
+  the model's 184 pass); green: 186.
+- Task 8, 51089ca7: a run's tags. Red: 8 failed, 14 passed; green: 22.
+- Task 9, ecc0fbec: a run's page. Red: 12 failed, 172 passed; green: 184. The build: `Editor-*.js` 247.0 kB, the
+  shared chunk 257.7 kB with the editor's stylesheet, `RunPage-*.js` 7.1 kB and `RunsPage-*.js` 11.1 kB of their own
+  (ruling 250).
+- Task 10, e529e9a4: a step's result in the drawer. Red: 5 failed, 177 passed; green: 182.
+- Task 11, c79e9548: a loop. Red: 5 failed, 137 passed ("totals each step on the canvas" passes at once, as planned);
+  green: 142.
+
+After each task the type check and ESLint were silent. The whole frontend suite on c79e9548: 1261 passed (98 files).
+Mid-slice rulings: none. Nothing pushed.
+
+### 4e-1b, milestone 3 (2026-10-17)
+
+The owner accepted milestone 2 ("go"). Tasks 12–14, inline, every red and green as the plan's steps say:
+- Task 12, ec8bec56: cancel. Red: 6 failed, 29 passed; green: 35.
+- Task 13, ba419095: runs that didn't run, an older run, the Start drawer. Red: 6 failed, 27 passed; green: 33.
+- Task 14, 8f69ec09: the ways in (the toolbar's Runs, the Workflows list's last run, the Simulation panel's run).
+  Red: 4 failed, 184 passed; green: 188.
+
+After each task the type check and ESLint were silent. The whole frontend suite on 8f69ec09: 1277 passed (98 files),
+as the plan's own check found. Mid-slice rulings: none. Nothing pushed.
+
+### 4e-1b, milestone 4 and the final checkpoint (2026-10-17)
+
+The owner accepted milestone 3 ("go") and left the browser specs to CI's e2e job on the PR (asked in chat):
+- Task 15, 7c592092: `e2e/runs.spec.ts`, three fixtures, the workflows project runs it. Type check and ESLint
+  silent; not run locally (the owner's choice); CI's e2e job runs them on the PR.
+- Task 16: every check on the head:
+  - the whole frontend suite: 1277 passed (98 files), after M105; ESLint and the type check silent;
+  - the build: `Editor-*.js` 149.5 kB, the shared chunk 356.6 kB with the editor's 12.1 kB stylesheet, `RunPage-*.js`
+    19.0 kB, `RunsPage-*.js` 11.0 kB, the entry 641.5 kB (ruling 250);
+  - `check:api` passes, unchanged since 4e-1a;
+  - local CodeQL (javascript-typescript, CLI 2.27.2, javascript-queries 2.4.7, CI's filter): no finding.
+
+M105. **The router's tests wait 5 s for a lazy page's first load** (a test-only commit after Task 15): the first
+      suite run on the head failed one test, "opens a run's page beside the compact rail", at 1051 ms against Testing
+      Library's default second. Opening a run's page compiles its chunk on first import (593 to 1071 ms over three
+      runs, one failing); with the longer wait, five runs passed. Cost if wrong: a slow lazy load is seen 4 s later.
+M106. **The Load more test keeps its queries:** on a second run it timed out at vitest's 5 s with the machine's load
+      at 75 (other sessions' suites); alone it takes 256 ms, and 693 to 714 ms in a full run at the earlier
+      milestones. The cause is the machine, not the test. Cost if wrong: it times out again on a loaded runner, and
+      its role queries over about 100 rows are made cheaper then.
+
+Mid-slice rulings over the slice: M104–M106. The final review follows. Nothing pushed.
+
+### 4e-1b, the final review (2026-10-17)
+
+A fresh reviewer (Fable) on cb7425db..bc2b739c: no critical finding, 4 important, 10 minor; "With fixes". Every Review
+Focus case pinned by a test it saw pass (27 files, 245 passed, read-only). One minor was re-graded important by its
+effect: a run's input value `"__proto__"` crashed the run's page. Fixed test-first, each red then green:
+- I1, a request refused before a version was chosen showed "Reading the workflow it ran…" for ever: it now says no
+  version was chosen, so there are no steps to show.
+- I2, a run's steps that couldn't be read said nothing (an ended run's are never read again): it says so, with Read
+  them again.
+- I3, after a live run's cancel focus fell to the page: the run's name was focused while the modal question still
+  held the page inert, then the question gave focus back to Cancel, gone. It's focused once the question has closed;
+  the e2e cancel spec asserts it.
+- I4, Load more was disabled while it read, which drops the keyboard's focus: it stays enabled (`aria-disabled`),
+  says "Reading older runs…", and reads one page at a time.
+- I5 (minor 6, re-graded), plain-object lookups of run data: a preview value, a reason code or a trigger's source
+  named like an object's property (`"__proto__"`, `"constructor"`) now reads as itself.
+
+After the fixes: the whole frontend suite 1283 passed (98 files); the type check and ESLint silent; the build; local
+CodeQL, no finding.
+
+Deferred minors (a follow-up issue, on the owner's word): "Updated" said as a filter's list empties, not when it
+arrives; Copy id throws without `navigator.clipboard` (plain HTTP); a request cancelled before it started also says
+"Ended: cancelled before any step ran"; the workflow chooser says "No workflow matches." while its list loads or
+failed; a cancel refused during an erasure says "Try again."; "← Runs" names its arrow; ruling 233's cost is sharper
+(a first page falling below 50 after Load more drops every older run in one poll); the media query's range syntax in
+older browsers; the e2e cancel spec relies on a cancel interrupting a 10-minute delay within 60 s.
+
+M107. **The browser specs' seeding sends `If-Match` and an `Idempotency-Key`** (CI's e2e job on #118, 2026-10-17):
+      publishing answered 428 (`revision_required`: the route takes the draft's revision, as the editor sends it), and a
+      start would too (`idempotency_key_required`, a header the schema types as optional). The import's
+      `draft_revision` goes in `If-Match`; each start gets a fresh key. The three fixtures were validated offline with
+      the engine's validator and the flow catalog: no diagnostic. Cost if wrong: another seeding call refused on CI.
+
+M108. **The Workflows list's run links are 24 px targets; the runs spec finds its banner by its words** (CI's e2e job
+      on #118, its second run): axe's target-size flagged the last run's and last simulation's links (Task 14), about
+      18 px tall and 2 px apart, below WCAG 2.5.8's 24 px, once a workflow had both (the runs spec's seeding made one);
+      each is now at least 24 px tall. The live banner's check met CI's development note, a `note` too: it filters by
+      "Live run.". Cost if wrong: another axe finding once the remaining specs run.
+
+M109. **The cancel spec's delay follows a step** (CI's e2e job on #118, its third run): the delay that started the run
+      alone still read "not reached yet" 5 s after the run was running. The engine queues a waiting control step's
+      `running` row (D-a2) inside its own unit, after the drive loop has looked for rows to send, and a sleeping timer
+      wakes nothing: with no other unit and no projection outstanding, that row isn't sent until the delay ends. A probe
+      on the worker harness showed it (alone, nothing projected in 4 s; with a step before it, `running`, then
+      `cancelled` after a cancel). The backend's D-a2 test passes only because an activity beside the delay wakes the
+      loop. The fixture now runs a transform first; the spec waits 15 s for "running" (the steps are read every 5 s)
+      and checks the delay ends "cancelled". A run that starts with a delay still shows it "not reached yet" while it
+      sleeps: an engine gap, outside 4e-1b, for the owner to schedule. Cost if wrong: another e2e round.

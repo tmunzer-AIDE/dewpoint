@@ -48,3 +48,25 @@ it("goes under its card on one line, cut short, where another card is beside it;
   expect(screen.getByRole("list", { name: "notify: simulated result" }).className).toMatch(/@max-3xl:truncate/);
 });
 
+
+it("names a run's tags for what they are, and draws its origins: sent in live orange, may have been sent dashed (the runs design §5.5)", () => {
+  render(
+    <SimTags
+      label="notify_noc"
+      what="result"
+      tags={[
+        { text: "sent", kind: "sent" },
+        { text: "may have been sent", kind: "maybe" },
+        { text: "channel_not_found", kind: "code" },
+      ]}
+    />,
+  );
+  const list = screen.getByRole("list", { name: "notify_noc: result" });
+  const tag = (text: string) => within(list).getByText(text).className;
+  expect(tag("sent")).toMatch(/border-live/);
+  expect(tag("sent")).toMatch(/text-live/);
+  expect(tag("may have been sent")).toMatch(/border-dashed/);
+  expect(tag("may have been sent")).toMatch(/text-warn-ink/);
+  expect(tag("channel_not_found")).toMatch(/font-mono/);
+  expect(tag("channel_not_found")).toMatch(/text-danger/);
+});

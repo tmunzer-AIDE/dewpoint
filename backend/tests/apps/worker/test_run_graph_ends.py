@@ -22,6 +22,7 @@ from tests.support.plugins.testkit import Slow
 ECHO, SLOW, FAIL_N = "testkit.echo@1", "testkit.slow@1", "testkit.fail_n@1"
 IF, LOOP, SET, DELAY, STOP = "flow.if@1", "flow.loop@1", "flow.set_variables@1", "flow.delay@1", "flow.stop@1"
 FAIL, FILTER = "flow.fail@1", "flow.filter@1"
+SAID_TIMEOUT_S = 10  # real time for a projection to land, far more than one takes
 
 
 def graph() -> G:
@@ -88,6 +89,40 @@ async def test_a_stop_cancels_a_sleeping_timer_that_said_it_was_running(env: Wor
         result = await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
     assert result.status == "succeeded"  # a stop ends the run as succeeded
     assert ("d", "running") in store.seen
+    assert ended(store, run_id_of(handle))[("d", "", 1)] == ("cancelled", True)
+
+
+async def test_a_timer_alone_in_its_run_says_it_is_running_while_it_sleeps(env: WorkflowEnvironment) -> None:
+    """D-a2 with nothing beside the timer to wake the run: its `running` row is projected as it falls asleep, not
+    when it wakes. The test waits in real time, never for the result, so the server skips no time meanwhile."""
+    store = Seen()
+    g = graph().node("d", DELAY, {"duration_s": 3600})
+    async with workers(env.client, store):
+        handle = await start(env.client, store, g, {})
+        try:
+            await asyncio.wait_for(store.said.wait(), SAID_TIMEOUT_S)
+        finally:
+            await handle.cancel()
+            with pytest.raises(WorkflowFailureError):
+                await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
+    assert ended(store, run_id_of(handle))[("d", "", 1)] == ("cancelled", True)
+
+
+async def test_a_plugin_step_alone_in_its_run_says_it_is_running_while_its_activity_runs(
+    own_env: WorkflowEnvironment,
+) -> None:
+    """Its attempt's `running` row is projected as the activity starts, not when it ends. On a test server of its
+    own: the run is cancelled while the activity runs."""
+    store = Seen()
+    g = graph().node("d", SLOW, {"seconds": 60})
+    async with workers(own_env.client, store):
+        handle = await start(own_env.client, store, g, {})
+        try:
+            await asyncio.wait_for(store.said.wait(), SAID_TIMEOUT_S)
+        finally:
+            await handle.cancel()
+            with pytest.raises(WorkflowFailureError):
+                await asyncio.wait_for(handle.result(), RESULT_TIMEOUT_S)
     assert ended(store, run_id_of(handle))[("d", "", 1)] == ("cancelled", True)
 
 
@@ -273,16 +308,19 @@ async def test_a_control_step_whose_result_was_being_claimed_as_its_iteration_fa
     assert store.conflicts == []
 
 
-async def test_a_cancel_ends_started_work_cancelled_and_queued_work_not_started(env: WorkflowEnvironment) -> None:
+async def test_a_cancel_ends_started_work_cancelled_and_queued_work_not_started(own_env: WorkflowEnvironment) -> None:
     """101 steps ready at once: the in-flight cap starts 100 and queues one. A cancel stops the 100 that began
-    (`cancelled`, with their start); the one queued never began (`not_started`, no start). About 30 s: a cancel reaches
-    a running activity with its next heartbeat the SDK sends, and no step sets a heartbeat timeout."""
+    (`cancelled`, with their start); the one queued never began (`not_started`, no start). About 30 s: the run's last
+    projection waits for one of the worker's 100 activity slots, which the steps hold until a cancel reaches them with
+    the next heartbeat the SDK sends (no step sets a heartbeat timeout). The run ends once one step gives its slot back,
+    and others may still be running (one whose first heartbeat came after the cancel hears of it at once): on a test
+    server of its own, as a shared one would stop skipping time."""
     store = MemoryStore()
     g = graph()
     for n in range(101):
         g.node(f"s{n}", SLOW, {"seconds": 120})
-    async with workers(env.client, store):
-        handle = await start(env.client, store, g, {})
+    async with workers(own_env.client, store):
+        handle = await start(own_env.client, store, g, {})
         run_id = run_id_of(handle)
         for _ in range(600):  # until the cap's 100 have begun: each beats once a second
             if sum(1 for run, _ in Slow.beats if run == run_id) >= 100:

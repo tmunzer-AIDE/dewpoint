@@ -2,9 +2,9 @@
 // The editor (screen 1c): the draft, on a canvas, by pointer or keyboard alone (D16), saved as it changes (D17). Task 14
 // adds problems, Task 15 publishing and versions.
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useBlocker, useMatch, useRouter } from "@tanstack/react-router";
+import { Link, useBlocker, useMatch, useRouter } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { Button } from "../../components/Button";
+import { Button, LINK_BUTTON_MD } from "../../components/Button";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { LoadError } from "../../components/LoadError";
 import { announce } from "../../lib/announce";
@@ -20,6 +20,7 @@ import {
 import { begin, record, redo, undo, type History } from "../../lib/history";
 import { CARD, layout } from "../../lib/layout";
 import { guardLeaving } from "../../lib/leaving";
+import { runId } from "../../lib/runStatus";
 import type { Path } from "../../lib/schemaForm";
 import { ENDED, draftSnapshotQuery, freeze, type StepSummary } from "../../lib/simulations";
 import { useDocumentTitle } from "../../lib/title";
@@ -34,10 +35,10 @@ import {
   type WorkflowDetail,
 } from "../../lib/workflows";  // prettier-ignore
 import { Canvas } from "./Canvas";
-import { NAV_KEYS, isPath, navModel, pathTo, step, type NavKey } from "./canvasNav";
+import { NAV_KEYS, navModel, pathTo, type NavKey } from "./canvasNav";
 import { checkLabel, checkState, lastOf, type Check } from "./check";
 import { ConnectDialog } from "./ConnectDialog";
-import type { DrawerActions } from "./drawer/context";
+import { CANT, READ_ONLY_ACTIONS, type DrawerActions } from "./drawer/context";
 import { StepDrawer } from "./drawer/StepDrawer";
 import { addsOf, item, type ItemAction } from "./items";
 import { DeclassifyPanel } from "./DeclassifyPanel";
@@ -56,6 +57,7 @@ import { StepPicker, type PickMode } from "./StepPicker";
 import { READ_ONLY, type PanelActions } from "./triggers/context";
 import { TriggersPanel } from "./triggers/TriggersPanel";
 import { UnappliedPanel } from "./UnappliedPanel";
+import { useCanvasNav } from "./useCanvasNav";
 import { VersionsPanel } from "./VersionsPanel";
 import { Toolbar } from "./Toolbar";
 
@@ -95,22 +97,6 @@ function portsQuestion(dropped: GraphEdge[], keyOf: (id: string) => string): str
     dropped.length === 1 ? "its edge" : "their edges"} to ${targets.join(", ")} ${dropped.length === 1 ? "is" : "are"} deleted.`;
 }
 
-const CANT = "Not written: the draft can't be changed now."; // a conflict, an exit agreed to, a version view
-
-/** A version's drawer: read only, and blind to the draft's edits not applied, which are never a version's (the review
- * of milestone 2). */
-const VERSION_ACTIONS: DrawerActions = {
-  set: () => CANT,
-  options: () => CANT,
-  held: () => undefined,
-  hold: () => undefined,
-  release: () => undefined,
-  discard: () => undefined,
-  apply: () => CANT,
-  stale: () => false,
-  rebase: () => undefined,
-  restructure: () => CANT,
-};
 
 export function EditorPage({ tenantId, workflowId, openTriggers = false }: { tenantId: string; workflowId: string; openTriggers?: boolean }) {
   const qc = useQueryClient();
@@ -318,9 +304,6 @@ function Editor({
     setLeaveQuestion(null);
   };
   const [reloading, setReloading] = useState(false);
-  const [focusId, setFocusId] = useState<string>(START);
-  const [focusRequest, setFocusRequest] = useState<{ id: string; n: number } | null>(null);
-  const [trail, setTrail] = useState<string[] | null>(null); // the path the keys came by to the focused item
   const [picker, setPicker] = useState<PickMode | null>(null);
   // Steps by identity (`idKey`, `findNode`): an item names a step's canonical id, the document its authored one.
   const keyOf = (id: string) => (id === TRIGGERS ? "Triggers" : (findNode(doc, id)?.key ?? "a step"));
@@ -329,11 +312,8 @@ function Editor({
     () => new Map(nodesOf(shownDoc).map((n) => [idKey(n.id), portsOf(n, typeMap.get(n.type))])),
     [shownDoc, typeMap],
   );
-  const nav = useMemo(
-    () => navModel(shownDoc, (id) => portMap.get(idKey(id)) ?? [], editable),
-    [shownDoc, portMap, editable],
-  );
-  const shown = nav.order.includes(focusId) ? focusId : START; // a deleted item's tab stop falls back to the start card
+  const portsByStep = useCallback((id: string) => portMap.get(idKey(id)) ?? [], [portMap]);
+  const { nav, focusId, shown, focusRequest, trail, focus, onFocusItem, walk } = useCanvasNav(shownDoc, portsByStep, editable);
   const [connecting, setConnecting] = useState<PortRef | null>(null);
   const [asking, setAsking] = useState<Asking | null>(null);
   // What's typed in the drawer but not in the draft (ruling 18): the editor's, never a control's, so a tab, a toggle
@@ -782,12 +762,6 @@ function Editor({
     return step !== null && nav.order.includes(step) ? step : START;
   }
 
-  function focus(id: string, path: string[] | null = null) {
-    setFocusId(id);
-    setTrail(path);
-    setFocusRequest((r) => ({ id, n: (r?.n ?? 0) + 1 }));
-  }
-
   /** One edit: recorded (edits sharing a field's mark are one undo step, ruling 8), saved, and said, unless `message`
    * is null: a field's edits aren't announced, its control says what it holds. Whether it landed. */
   function change(next: GraphDoc, message: string | null, then?: string, mark?: string): boolean {
@@ -1092,11 +1066,7 @@ function Editor({
     if (NAV_KEYS.includes(e.key) && plain) {
       e.preventDefault();
       if (e.shiftKey && editable && id.startsWith("node:")) return nudge(id.slice(5), e.key as NavKey);
-      // The path the keys came by while it still holds (at a join, the branch taken); else the walk's own path.
-      const path = trail && trail.at(-1) === id && isPath(nav, trail) ? trail : pathTo(nav, id);
-      const next = step(nav, path, e.key as NavKey);
-      if (next.at(-1) !== id) focus(next.at(-1)!, next);
-      return;
+      return walk(e.key as NavKey);
     }
     if (!editable || !plain) return;
     if (e.key === "a" || e.key === "A") {
@@ -1241,6 +1211,7 @@ function Editor({
         <Button ref={versionsButton} size="md" aria-expanded={side?.kind === "versions"} onClick={() => setSide(side?.kind === "versions" ? null : { kind: "versions" })}>
           Versions
         </Button>
+        <Link to="/t/$tenantId/runs" params={{ tenantId }} search={{ workflow: workflow.id }} className={LINK_BUTTON_MD}>Runs</Link>
         <Button size="md" onClick={() => void exportFile()}>Export</Button>
         {simulator && (
           <Button
@@ -1364,10 +1335,7 @@ function Editor({
           current={panel}
           focusId={shown}
           focusRequest={focusRequest}
-          onFocusItem={(id) => {
-            setFocusId(id);
-            setTrail((t) => (t?.at(-1) === id ? t : null));
-          }}
+          onFocusItem={onFocusItem}
           onItem={onItem}
           onMove={(positions) => change(moveNodes(doc, positions), "Moved")}
           onConnect={onConnect}
@@ -1382,7 +1350,7 @@ function Editor({
             onOpen: () => setSide(side?.kind === "triggers" ? null : { kind: "triggers" }),
             tags: resultShown && simulation.steps?.given === "input" ? [{ text: "input", kind: "given" }] : undefined,
           }}
-          simulated={simulated}
+          results={simulated}
           />
         </div>
         {open && (
@@ -1402,7 +1370,7 @@ function Editor({
             expressions={(viewing ? viewing.expressions : (trusted?.expressions ?? [])).filter((x) => x.node !== null && sameId(x.node, open.id))}
             editable={editable}
             adds={editable ? addsOf(doc, open, portMap.get(idKey(open.id)) ?? []) : []}
-            actions={viewing ? VERSION_ACTIONS : actionsFor(open.id)}
+            actions={viewing ? READ_ONLY_ACTIONS : actionsFor(open.id)}
             note={noteFor(open.id)}
             focusField={side?.kind === "step" ? (side.field ?? null) : null}
             testAt={side?.kind === "step" ? (side.test?.n ?? null) : null}
@@ -1514,6 +1482,11 @@ function Editor({
         {side?.kind === "simulation" && (
           <SimulationPanel
             session={simulation}
+            runOf={(id) => (
+              <Link to="/t/$tenantId/runs/$runId" params={{ tenantId, runId: id }} className="underline underline-offset-2">
+                {`run ${runId(id)}`}
+              </Link>
+            )}
             onSimulateAgain={simulator && sync.status !== "conflict" && !simulation.busy ? () => whenSettled("simulate", () => void simulate()) : undefined}
             onClose={() => {
               setSide(null);

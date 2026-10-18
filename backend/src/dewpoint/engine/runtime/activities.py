@@ -13,6 +13,9 @@ from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.runtime.size import INLINE_LIMIT
 
 ENGINE_QUEUE = "dewpoint-engine"
+# The engine's own activities (the projection, a batch's close, the claims crossings), in the same version of the
+# deployment: slots of their own, so a run's long steps never hold up its rows, its end or another run's.
+INTERNAL_QUEUE = "dewpoint-engine-internal"
 LOAD_VERSION = "dewpoint.load_version"
 PROJECT = "dewpoint.project"
 CLOSE_BATCH = "dewpoint.close_batch"

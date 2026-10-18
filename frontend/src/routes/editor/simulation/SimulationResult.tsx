@@ -5,13 +5,14 @@
 // request stored it (§6.6's read-back: never recomputed from today's draft). A result from before the person's edits
 // says so, and marks each step changed since or no longer in the draft; a failed step says its code and message, and
 // that nothing was sent; a refusal is shown in the server's words (§7.7; the Stale and Refusals boards).
+import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Button } from "../../../components/Button";
 import { findNode, idKey } from "../../../lib/graph";
-import { ENDED, type StepSummary } from "../../../lib/simulations";
+import { ENDED, stepInstancesQuery, type StepSummary } from "../../../lib/simulations";
 import type { GraphDoc } from "../../../lib/workflows";
 import { Failure } from "./Failure";
-import { bodyOf } from "./loopBody";
+import { bodyOf, type InstancePages } from "./loopBody";
 import { Iterations } from "./Iterations";
 import { tagsOf } from "./results";
 import { SimBanner } from "./SimBanner";
@@ -33,6 +34,7 @@ export function SimulationResult({ tenantId, workflowId, session, doc, ran, stal
   onGoTo: (stepId: string) => void; onShowProblems: () => void; onOpen?: (stepId: string, iterationKey: string) => void;
 }) {  // prettier-ignore
   const [open, setOpen] = useState<string | null>(null); // the loop whose iterations are shown
+  const qc = useQueryClient();
   const { local, state, phase } = session;
   if (local.kind === "refused") {
     return <Refusal error={local.error} doc={doc} onGoTo={onGoTo} onShowProblems={onShowProblems} onTryAgain={() => void session.checkAgain()} />;
@@ -41,6 +43,10 @@ export function SimulationResult({ tenantId, workflowId, session, doc, ran, stal
   const ended = ENDED.has(phase);
   const began = phase !== "refused" && phase !== "dead"; // it ran, if only in part
   const request = state.request;
+  const pages: InstancePages = {
+    key: ["simulation", tenantId, workflowId, request.id],
+    read: (stepId, page) => qc.query(stepInstancesQuery(tenantId, workflowId, request.id, stepId, page)),
+  };
   const all = session.steps?.steps ?? [];
   const steps = ended ? all : all.filter((s) => s.instances > 0);
   const goTo = (id: string, key: string) =>
@@ -109,7 +115,7 @@ export function SimulationResult({ tenantId, workflowId, session, doc, ran, stal
                   {expanded && (
                     <div className="basis-full ps-3">
                       <Iterations
-                        tenantId={tenantId} workflowId={workflowId} requestId={request.id} loop={{ key: s.key, prefix: iterationKey(s.final) }}
+                        pages={pages} loop={{ key: s.key, prefix: iterationKey(s.final) }}
                         body={body.map((n) => ({ id: n.id, key: n.key, type: n.type }))} onOpen={onOpen}
                       />
                     </div>

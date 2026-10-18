@@ -33,7 +33,13 @@ const NUDGES: { key: Nudge; glyph: string; word: string }[] = [
   { key: "ArrowRight", glyph: "→", word: "right" },
 ];
 
-type Tab = "setup" | "options" | "test";
+const UNKNOWN = (
+  <p className="text-small">
+    This server doesn&apos;t know this step&apos;s type, so its settings can&apos;t be shown. They&apos;re kept as they are.
+  </p>
+);
+
+type Tab = "result" | "setup" | "options" | "test";
 
 /** The drawer's disabled controls, its own and 4a's alike, look disabled: the disabled fill and line, their values in
  * muted ink, which stays legible where the disabled ink wouldn't (the owner's ruling O2). 4a's forms elsewhere keep
@@ -80,13 +86,16 @@ function locate(root: HTMLElement, { pointer, kind }: FocusRequest): HTMLElement
 
 export function StepDrawer({
   node, type, tenantId, workflowId, revision, steps, openDeclassify, ports, problems, expressions, editable, adds, actions, note, focusField,
-  test, testAt, onAdd, onDelete, onConnectPort, onPlace, onNudge, onClose,
+  test, testAt, result, onAdd, onDelete, onConnectPort, onPlace, onNudge, onClose,
 }: {
   node: GraphNode; type: NodeType | undefined; tenantId: string; workflowId: string; revision: number | null;
   steps: { id: string; key: string; title: string | null }[]; openDeclassify?: () => void; ports: string[];
   problems: Diagnostic[] | null; expressions: Expression[]; editable: boolean; adds: { label: string; action: ItemAction }[];
   actions: DrawerActions; note: string | null; focusField: { pointer: string; kind?: UnappliedKind; n: number } | null;
   test?: ReactNode; // the Test tab, for editors (4d-1c, §7.6), even on a step with nothing to set up
+  // On a run's page (4e-1, the runs design §5.3): its result, the first tab and the one shown; Setup then holds every
+  // setting, read only
+  result?: ReactNode;
   testAt?: number | null; // asked to show the Test tab (the Simulation panel's "Open"), counted
   onAdd: (action: ItemAction) => void; onDelete: () => void; onConnectPort: (port: string) => void;
   onPlace: () => void; onNudge: (key: Nudge) => void; onClose: () => void;
@@ -100,7 +109,7 @@ export function StepDrawer({
   }, [node.id]);
   const fields = useMemo(() => (type ? fieldsOf(type) : []), [type]);
   const { setup, options } = tabsOf(fields);
-  const [tab, setTab] = useState<Tab>(test && testAt ? "test" : setup.length > 0 ? "setup" : "options");
+  const [tab, setTab] = useState<Tab>(result ? "result" : test && testAt ? "test" : setup.length > 0 ? "setup" : "options");
   useEffect(() => {
     if (test && testAt) setTab("test");
   }, [testAt]);
@@ -231,10 +240,28 @@ export function StepDrawer({
             </section>
           )
         )}
-        {!type ? (
-          <p className="text-small">
-            This server doesn&apos;t know this step&apos;s type, so its settings can&apos;t be shown. They&apos;re kept as they are.
-          </p>
+        {result ? (
+          <Tabs
+            label="Result and setup"
+            value={tab}
+            onChange={setTab}
+            tabs={[
+              { value: "result", label: "Result", content: result },
+              {
+                value: "setup",
+                label: "Setup",
+                content: !type ? (
+                  UNKNOWN
+                ) : fields.length > 0 ? (
+                  [...setup, ...options].map((f) => <FieldView key={f.pointer} spec={f} />)
+                ) : (
+                  <p className="text-small text-muted">This step has nothing to set up.</p>
+                ),
+              },
+            ]}
+          />
+        ) : !type ? (
+          UNKNOWN
         ) : fields.length === 0 && !test ? (
           <p className="text-small text-muted">This step has nothing to set up.</p>
         ) : (

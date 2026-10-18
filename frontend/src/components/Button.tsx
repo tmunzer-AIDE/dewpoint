@@ -41,6 +41,12 @@ const SIZES = {
 
 const DISABLED = "disabled:bg-disabled-bg disabled:border-disabled-line disabled:text-disabled-ink";
 
+const LINK = "inline-flex items-center justify-center gap-2 rounded-lg border border-line-strong bg-surface font-medium text-ink hover:bg-surface-hover active:bg-surface-pressed";
+/** A link that looks like a small secondary button: an action that goes to another page ("Back to Runs"). */
+export const LINK_BUTTON = `${LINK} ${SIZES.sm}`;
+/** The same at a toolbar's size (the editor's Runs). */
+export const LINK_BUTTON_MD = `${LINK} ${SIZES.md}`;
+
 export function Button({
   variant = "secondary",
   size = "lg",
