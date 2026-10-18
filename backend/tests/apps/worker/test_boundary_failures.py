@@ -7,6 +7,7 @@ NESTING_MAX are refused as any unreadable claim is, `claim_unavailable`."""
 
 import asyncio
 import uuid
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -27,22 +28,27 @@ def fresh() -> None:
 
 
 class Flaky(MemoryStore):
-    """A store whose index reads fail `fail_reads` times, and whose version checks fail inside the activity named
-    `fail_versions_in`: a database that stops answering just then."""
+    """A store whose index fails to answer inside the activity named `fail_in`: the reads and version checks made
+    there, counted from 1, that `fails` picks. A database that stops answering just then, for that step alone: the
+    run's projections read the index too, beside its attempt, and once one has cached it the attempt checks its
+    version where it would have read it."""
 
-    def __init__(self, *, fail_reads: int = 0, fail_versions_in: str | None = None) -> None:
+    def __init__(self, fail_in: str, fails: Callable[[int], bool]) -> None:
         super().__init__()
-        self.fail_reads, self.fail_versions_in = fail_reads, fail_versions_in
+        self.fail_in, self.fails, self.asked = fail_in, fails, 0
+
+    def _answer(self) -> None:
+        if activity.info().activity_type == self.fail_in:
+            self.asked += 1
+            if self.fails(self.asked):
+                raise ConnectionError("the database didn't answer")
 
     async def index(self, tenant_id: str, root_run_id: str) -> Index:
-        if self.fail_reads > 0:
-            self.fail_reads -= 1
-            raise ConnectionError("the database didn't answer")
+        self._answer()
         return await super().index(tenant_id, root_run_id)
 
     async def index_version(self, tenant_id: str, root_run_id: str) -> int:
-        if self.fail_versions_in is not None and activity.info().activity_type == self.fail_versions_in:
-            raise ConnectionError("the database didn't answer")
+        self._answer()
         return await super().index_version(tenant_id, root_run_id)
 
 
@@ -57,7 +63,7 @@ async def test_a_store_that_doesnt_answer_before_an_ambiguous_node_runs_is_retri
 ) -> None:
     """The index can't be read before the attempt: nothing was sent, so the attempt fails retryable with
     `secret_index_unavailable` and no outcome, and the next one runs the node."""
-    store = Flaky(fail_reads=1)
+    store = Flaky(step_activity("testkit.ambiguous_send@1"), lambda asked: asked == 1)  # attempt 1's, before it runs
     g = graph().node("p", "testkit.ambiguous_send@1", {"outcome": "sent"})
     g.nodes[-1]["options"]["max_attempts"] = 3
     async with workers(env.client, store):
@@ -74,7 +80,7 @@ async def test_a_store_that_doesnt_answer_before_an_ambiguous_node_runs_is_retri
 async def test_a_failure_stays_the_nodes_when_the_index_cant_be_read_again(env: WorkflowEnvironment) -> None:
     """The node ran and failed for good; masking its message would read the index again, which fails: the message
     is masked with what the boundary already holds, and the failure stays the node's, never retried."""
-    store = Flaky(fail_versions_in=step_activity("testkit.slow_echo@1"))
+    store = Flaky(step_activity("testkit.slow_echo@1"), lambda asked: asked > 1)  # every one once the node ran
     g = graph(code=ref("steps.f.error.code", default=""))
     g.node("f", "testkit.slow_echo@1", {"seconds": 0, "value": 1, "fail": True}, on_error="continue")
     g.nodes[-1]["options"]["max_attempts"] = 3

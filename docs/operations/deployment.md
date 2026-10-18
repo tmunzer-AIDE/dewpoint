@@ -277,6 +277,22 @@ old build's runs keep `dewpoint-cel.abi7.cel-cpp-0.1.3/fn-1/cls-1` until they en
   ABI 7 build: rolling back publishes every workflow again under the old profile, which a retired profile refuses, and
   no command makes a retired profile active again.
 
+### ABI 10: what changes
+
+ABI 10 changes when a run writes a waiting step's `running` row, not what publishing accepts: a workflow published
+under ABI 9 publishes again unchanged, as every workflow must once the ABI 10 build is current (above). The CEL profile
+stays `cel-cpp-0.1.3+dewpoint.1/fn-1/cls-1`, and its queue becomes
+`dewpoint-cel.abi10.cel-cpp-0.1.3+dewpoint.1/fn-1/cls-1`: deploy the new build's evaluator workers with it, while the
+old build's runs keep `dewpoint-cel.abi9.cel-cpp-0.1.3+dewpoint.1/fn-1/cls-1` until they end. What a run does
+differently:
+
+- A step that starts waiting has its `running` row written at once: a delay or a wait-until, a sub-flow, a plugin
+  step's attempt. Before, the row waited until something else in the run ended, so where nothing else was running (a
+  run that starts with a delay, or a lone long plugin call) it was written only when the step ended, and the run's
+  steps said `not_reached_yet` for that step meanwhile. Runs of the ABI 9 build still do, until they end.
+- A run writes about one more projection than before, as such a step starts: one more `project` activity, and six more
+  events in its history.
+
 ## Upgrading from a build without versioning
 
 A build from before Worker Versioning doesn't join the `dewpoint-engine` deployment: `dewpoint deployment status`
