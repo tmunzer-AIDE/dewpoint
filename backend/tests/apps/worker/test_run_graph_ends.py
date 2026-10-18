@@ -273,16 +273,19 @@ async def test_a_control_step_whose_result_was_being_claimed_as_its_iteration_fa
     assert store.conflicts == []
 
 
-async def test_a_cancel_ends_started_work_cancelled_and_queued_work_not_started(env: WorkflowEnvironment) -> None:
+async def test_a_cancel_ends_started_work_cancelled_and_queued_work_not_started(own_env: WorkflowEnvironment) -> None:
     """101 steps ready at once: the in-flight cap starts 100 and queues one. A cancel stops the 100 that began
-    (`cancelled`, with their start); the one queued never began (`not_started`, no start). About 30 s: a cancel reaches
-    a running activity with its next heartbeat the SDK sends, and no step sets a heartbeat timeout."""
+    (`cancelled`, with their start); the one queued never began (`not_started`, no start). About 30 s: the run's last
+    projection waits for one of the worker's 100 activity slots, which the steps hold until a cancel reaches them with
+    the next heartbeat the SDK sends (no step sets a heartbeat timeout). The run ends once one step gives its slot back,
+    and others may still be running (one whose first heartbeat came after the cancel hears of it at once): on a test
+    server of its own, as a shared one would stop skipping time."""
     store = MemoryStore()
     g = graph()
     for n in range(101):
         g.node(f"s{n}", SLOW, {"seconds": 120})
-    async with workers(env.client, store):
-        handle = await start(env.client, store, g, {})
+    async with workers(own_env.client, store):
+        handle = await start(own_env.client, store, g, {})
         run_id = run_id_of(handle)
         for _ in range(600):  # until the cap's 100 have begun: each beats once a second
             if sum(1 for run, _ in Slow.beats if run == run_id) >= 100:
