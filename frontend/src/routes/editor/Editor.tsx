@@ -1315,7 +1315,10 @@ function Editor({
           onCancel={() => void simulation.cancel()}
         />
       )}
-      <div className="flex min-h-0 flex-1 @max-3xl:flex-col">
+      {/* Below 48rem, with a panel open, the canvas and its panel share one window's height: a height of their own, so
+          what the panel shows never moves the canvas in a page that scrolls (its content would set the page's height,
+          and a page scrolled to its end would then move the canvas off a click; the panel scrolls inside its half). */}
+      <div className="flex min-h-0 flex-1 @max-3xl:flex-col @max-3xl:has-[>aside]:h-svh @max-3xl:has-[>aside]:flex-none">
         <div className="relative flex min-h-0 min-w-0 flex-1">
           {placing && editable && (
             // Over the canvas's top edge, never above it: the canvas doesn't move when placing starts or ends, so a
