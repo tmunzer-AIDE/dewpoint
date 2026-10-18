@@ -180,9 +180,18 @@ test("at 320 px: the list as a list, a simulation's page and its start, and a ru
   await expect(list.getByRole("link", { name: simulated.slice(0, 8) })).toBeVisible();
   await expect(page.getByRole("table")).toHaveCount(0);
   await accessibleBothWays(page, "runs: the list, 320 px");
+  // The graph it ran is read once its steps are: their "Ended" line is drawn before the canvas fits the graph, on the
+  // least height it gets. The graph is taller than that even at the farthest zoom: centred, it hid the start card under
+  // the banner.
+  const stepsRead = page.waitForResponse((r) => new URL(r.url()).pathname === `/api/v1/t/${seed.tenant}/runs/${simulated}/steps`);
+  await page.route(`**/api/v1/t/${seed.tenant}/workflows/${check}/versions/*`, async (route) => {
+    await stepsRead;
+    await route.continue();
+  });
   await list.getByRole("link", { name: simulated.slice(0, 8) }).click();
   await expect(page.getByText(/^Simulated\./).first()).toBeVisible();
   await expect(tags(page, "greet")).toContainText("succeeded");
+  await expect(page.getByRole("button", { name: /^Start: by hand/ })).toBeInViewport({ ratio: 0.99 }); // on the canvas: its scaled box rounds
   await page.getByRole("button", { name: /^Start: by hand/ }).click();
   const start = page.getByRole("complementary", { name: "Start" });
   await expect(start.getByRole("region", { name: "Input" })).toContainText("Lab");
