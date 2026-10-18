@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""`dewpoint worker` (spec §6, §7): `RunGraph` and the engine activities on `dewpoint-engine`. When an evaluator is
-configured, it also serves `cel.evaluate`, only on the queue of the profile the evaluator reports: it waits for the
-evaluator, then asks its identity. The engine worker serves this build's version of the `dewpoint-engine` Worker
-Deployment (deployment.py); the CEL worker is outside it, routed by profile."""
+"""`dewpoint worker` (spec §6, §7): `RunGraph`, the version loader and the plugin steps on `dewpoint-engine`, and the
+engine's own activities on `dewpoint-engine-internal`. When an evaluator is configured, it also serves `cel.evaluate`,
+only on the queue of the profile the evaluator reports: it waits for the evaluator, then asks its identity. The engine
+and internal workers serve this build's version of the `dewpoint-engine` Worker Deployment (deployment.py); the CEL
+worker is outside it, routed by profile."""
 
 import asyncio
 import uuid
@@ -18,7 +19,13 @@ from dewpoint.apps import cel_client, stopping
 from dewpoint.apps.codec import KeyringKeys, data_converter
 from dewpoint.apps.environment import verify_environment
 from dewpoint.apps.plugin_loader import installed_plugins
-from dewpoint.apps.worker.activities import RunStore, cel_activity, engine_activities, remote_evaluator
+from dewpoint.apps.worker.activities import (
+    RunStore,
+    cel_activity,
+    engine_activities,
+    internal_activities,
+    remote_evaluator,
+)
 from dewpoint.apps.worker.claims import ClaimStore
 from dewpoint.apps.worker.deployment import deployment_config, set_current, this_build
 from dewpoint.apps.worker.health import reporter, self_check, start_healthy, watch
@@ -34,7 +41,7 @@ from dewpoint.core.egress.guard import Guard, SystemResolver
 from dewpoint.core.temporal_connect import connect as temporal_connect
 from dewpoint.core.temporal_connect import keep_token_fresh
 from dewpoint.engine import ENGINE_ABI
-from dewpoint.engine.runtime.activities import ENGINE_QUEUE, cel_queue
+from dewpoint.engine.runtime.activities import ENGINE_QUEUE, INTERNAL_QUEUE, cel_queue
 from dewpoint.engine.runtime.workflow import LoopBatch, RunGraph
 from dewpoint.sdk import Plugin
 
@@ -77,6 +84,24 @@ def engine_worker(
     )
 
 
+def internal_worker(
+    client: Client, store: RunStore, settings: Settings, *, build: str | None = None, identity: str | None = None
+) -> Worker:
+    """The engine's own activities, in the same version of the deployment as `engine_worker`, so a pinned run's
+    projection runs on its build. Its slots are its own: a run's long steps hold the engine queue's, never these, so
+    its rows, its end and every other run's land at once. Each holds a connection briefly, so it has as many slots as
+    the shared pool has connections. It stops as the engine worker does."""
+    return Worker(
+        client,
+        task_queue=INTERNAL_QUEUE,
+        activities=internal_activities(store),
+        max_concurrent_activities=INTERNAL_SLOTS,
+        graceful_shutdown_timeout=timedelta(seconds=settings.worker_shutdown_grace_s),
+        deployment_config=deployment_config(build or this_build()),
+        identity=identity,
+    )
+
+
 def cel_worker(
     client: Client, socket_path: str, profile: str, store: ClaimStore, *, max_concurrent: int, grace: timedelta
 ) -> Worker:
@@ -103,6 +128,7 @@ async def promote(client: Client) -> None:
 SHARED_POOL, SHARED_OVERFLOW = POOL_SIZE, MAX_OVERFLOW
 PLUGIN_CALLS = 8  # plugin calls in flight at once
 CONNECTIONS = SHARED_POOL + SHARED_OVERFLOW + PLUGIN_CALLS
+INTERNAL_SLOTS = SHARED_POOL + SHARED_OVERFLOW  # the internal worker's activities at once: one connection each
 
 
 def engines(url: str) -> tuple[AsyncEngine, AsyncEngine]:
@@ -152,7 +178,10 @@ async def _started(
         guard=guard, connections=DbConnections(sessionmaker), sessionmaker=sessionmaker, keys=keys,
         types=worker_types(plugins),  # the installed plugins' connection types (D11)
     )  # fmt: skip
-    workers = [engine_worker(client, store, plugins, settings, network=network)]
+    workers = [
+        engine_worker(client, store, plugins, settings, network=network),
+        internal_worker(client, store, settings),
+    ]
     if settings.cel_socket:
         profile = await evaluator_profile(settings.cel_socket)
         log.info("cel_queue", profile=profile)

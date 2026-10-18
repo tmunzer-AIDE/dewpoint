@@ -151,6 +151,7 @@ async def test_a_worker_process_opens_at_most_its_budgeted_connections(monkeypat
     monkeypatch.setattr(main, "reporter", lambda *args: unrecorded)
     monkeypatch.setattr(main, "self_check", proven)
     monkeypatch.setattr(main, "engine_worker", lambda *args, **kwargs: SimpleNamespace(run=lambda: asyncio.sleep(0)))
+    monkeypatch.setattr(main, "internal_worker", lambda *args, **kwargs: SimpleNamespace(run=lambda: asyncio.sleep(0)))
     monkeypatch.setattr(stopping, "serve", serve)
     with pytest.raises(Polling):
         await main.run(settings())

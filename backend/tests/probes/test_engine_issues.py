@@ -22,7 +22,7 @@ from temporalio.common import RetryPolicy
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
-from dewpoint.apps.worker.activities import engine_activities
+from dewpoint.apps.worker.activities import internal_activities
 from dewpoint.apps.worker.store import DbRunStore
 from dewpoint.core.claims.service import NewClaim
 from dewpoint.engine.handles import ClaimRef
@@ -34,7 +34,6 @@ from tests.apps.worker.harness import MemoryStore, start
 from tests.apps.worker.test_real_server import continued_inputs, issue_16, serving
 from tests.core.retention.support import tenant
 from tests.support.keys import FIXTURE_CONVERTER
-from tests.support.plugins.testkit import TESTKIT
 
 pytestmark = pytest.mark.skipif(not os.environ.get("DEWPOINT_PROBE"), reason="a probe, run by hand (DEWPOINT_PROBE)")
 
@@ -103,7 +102,7 @@ async def test_a_crossing_that_grants_many_claims(
     await store.grant(t, granted_by=str(owner), to=str(run), claim_ids=every, root_run_id=str(owner))  # held by grant
     value = {"xs": [ClaimRef(str(c)).to_json() for c in listed]}
     queue = f"probe-grant-{uuid.uuid4()}"
-    activities = engine_activities(store, [TESTKIT])
+    activities = internal_activities(store)
     async with Worker(dev.client, task_queue=queue, workflows=[ProbeGrant], activities=activities,
                       workflow_runner=UnsandboxedWorkflowRunner()):  # fmt: skip
         t0 = time.monotonic()

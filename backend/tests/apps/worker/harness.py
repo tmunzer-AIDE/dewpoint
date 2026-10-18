@@ -20,10 +20,12 @@ from temporalio.worker import Worker, WorkflowRunner
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 
 from dewpoint.apps import codec
-from dewpoint.apps.worker.activities import Evaluate, RunStore, cel_activity, engine_activities
+from dewpoint.apps.worker.activities import Evaluate, RunStore, cel_activity, engine_activities, internal_activities
+from dewpoint.apps.worker.main import engine_worker, internal_worker
 from dewpoint.apps.worker.network import Network
 from dewpoint.core.claims import secret_index
 from dewpoint.core.claims.service import ClaimConflictError, ClaimUnavailableError, NewClaim
+from dewpoint.core.config import Settings
 from dewpoint.core.runs.service import OUTCOME_UNCONFIRMED, UNCONFIRMED_MESSAGE, batch_keys, in_batch
 from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.cel import ipc
@@ -32,6 +34,7 @@ from dewpoint.engine.graph.validate import SubflowInfo, ValidationContext, valid
 from dewpoint.engine.handles import ClaimRef, StoredClaim, handles_in
 from dewpoint.engine.runtime.activities import (
     ENGINE_QUEUE,
+    INTERNAL_QUEUE,
     LIVE,
     CloseBatchInput,
     ProjectInput,
@@ -323,7 +326,7 @@ async def workers(
         workflow_runner=runner or SandboxedWorkflowRunner(),
         max_cached_workflows=cache,
     )
-    async with engine:
+    async with engine, internal(client, store):
         if evaluate is None:  # no evaluator serves the profile
             yield
             return
@@ -331,6 +334,24 @@ async def workers(
             client, task_queue=cel_queue(CURRENT_CEL_PROFILE), activities=[cel_activity(evaluate, store)]
         ):
             yield
+
+
+def internal(client: Client, store: RunStore) -> Worker:
+    """The engine's own activities (the projection, a batch's close, the claims crossings), on their queue."""
+    return Worker(client, task_queue=INTERNAL_QUEUE, activities=internal_activities(store))
+
+
+@asynccontextmanager
+async def build_workers(
+    client: Client, store: RunStore, plugins: Iterable[Plugin], settings: Settings, *, build: str, abi: int = ENGINE_ABI
+) -> AsyncIterator[None]:
+    """A build's workers as `dewpoint worker` runs them (apps/worker/main.py): the engine worker and the internal one,
+    in the build's version of the deployment, each named for the build (an activity's events name no version)."""
+    async with (
+        engine_worker(client, store, plugins, settings, build=build, identity=build, abi=abi),
+        internal_worker(client, store, settings, build=build, identity=build),
+    ):
+        yield
 
 
 async def start(

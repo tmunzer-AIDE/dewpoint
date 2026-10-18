@@ -24,7 +24,7 @@ from dewpoint.engine.graph.validate import ValidationContext, validate
 from dewpoint.engine.runtime import execution
 from dewpoint.engine.runtime.activities import ENGINE_QUEUE, cel_queue
 from dewpoint.engine.runtime.workflow import LoopBatch, RunGraph
-from tests.apps.worker.harness import CATALOG, TESTKIT, MemoryStore, in_process, run_id_of, start
+from tests.apps.worker.harness import CATALOG, TESTKIT, MemoryStore, in_process, internal, run_id_of, start
 from tests.engine.cel.test_gate_cost import ADVERSARIAL, AT_CAPS, BINDING, TASK_CPU_TARGET_S, WORST
 from tests.support.graphs import G, cel
 from tests.support.keys import FIXTURE_CONVERTER
@@ -150,7 +150,7 @@ async def test_no_workflow_task_passes_the_cpu_target(name: str, monkeypatch: py
             evaluator = Worker(
                 env.client, task_queue=cel_queue(CURRENT_CEL_PROFILE), activities=[cel_activity(in_process, store)]
             )
-            async with engine, evaluator:
+            async with engine, evaluator, internal(env.client, store):
                 handle = await start(env.client, store, g, AT_CAPS)
                 result = await asyncio.wait_for(handle.result(), 300)
     assert result.status == "succeeded"
@@ -204,7 +204,7 @@ async def test_many_views_binding_one_large_value_stay_within_the_cpu_target(
             evaluator = Worker(
                 env.client, task_queue=cel_queue(CURRENT_CEL_PROFILE), activities=[cel_activity(in_process, store)]
             )
-            async with engine, evaluator:
+            async with engine, evaluator, internal(env.client, store):
                 handle = await start(env.client, store, g, {name: value})
                 result = await asyncio.wait_for(handle.result(), 600)
     assert result.status == "succeeded", result

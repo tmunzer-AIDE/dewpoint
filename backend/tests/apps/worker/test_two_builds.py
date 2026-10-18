@@ -23,12 +23,19 @@ from temporalio.worker import Worker
 
 from dewpoint.apps.worker.activities import cel_activity
 from dewpoint.apps.worker.deployment import describe, set_current
-from dewpoint.apps.worker.main import engine_worker
 from dewpoint.engine import ENGINE_ABI
 from dewpoint.engine.cel.profile import CURRENT_CEL_PROFILE
 from dewpoint.engine.runtime.activities import CEL_EVALUATE, cel_queue
 from dewpoint.sdk import Plugin
-from tests.apps.worker.harness import EVALUATOR_ONLY, MemoryStore, in_process, run_id_of, start, start_version
+from tests.apps.worker.harness import (
+    EVALUATOR_ONLY,
+    MemoryStore,
+    build_workers,
+    in_process,
+    run_id_of,
+    start,
+    start_version,
+)
 from tests.apps.worker.test_deployment import build, placement
 from tests.apps.worker.test_main import settings
 from tests.engine.replay.record import executions
@@ -69,10 +76,10 @@ async def test_the_old_build_drains_while_the_new_one_serves_new_runs(dev_env: W
     evaluator = Worker(
         client, task_queue=cel_queue(CURRENT_CEL_PROFILE), activities=[cel_activity(in_process, store)], identity=CEL
     )
-    async with evaluator, engine_worker(client, store, [TESTKIT], settings(), build=n1, identity=n1):
+    async with evaluator, build_workers(client, store, [TESTKIT], settings(), build=n1):
         await set_current(client, n1)
         old = await start(client, store, old_graph, {}, checkpoint_events=60)
-        async with engine_worker(client, store, [WITHOUT_SLOW], settings(), build=n, identity=n):
+        async with build_workers(client, store, [WITHOUT_SLOW], settings(), build=n):
             await asyncio.sleep(1)  # N-1's run is in its `testkit.slow` step
             await set_current(client, n)
             new = await start(client, store, new_graph, {})
@@ -143,7 +150,7 @@ async def test_a_cel_worker_of_an_older_abi_never_receives_this_builds_requests(
         data_converter=dataclasses.replace(DataConverter.default, payload_codec=older),
     )
     old_cel = Worker(old_client, task_queue=LEGACY_CEL_QUEUE, activities=[cel_activity(in_process)])
-    async with old_cel, engine_worker(client, store, [TESTKIT], settings(), build=n, identity=n):
+    async with old_cel, build_workers(client, store, [TESTKIT], settings(), build=n):
         await set_current(client, n)
         run = await start(client, store, new_graph, {})
         await scheduled(run, CEL_EVALUATE)
@@ -187,11 +194,11 @@ async def test_after_a_new_abi_is_promoted_old_versions_wait_to_be_published_aga
         return g.edge("s", "r")
 
     old_parent = store.add(parent(), engine_abi=old)
-    async with engine_worker(client, store, [TESTKIT], settings(), build=n1, identity=n1, abi=old):
+    async with build_workers(client, store, [TESTKIT], settings(), build=n1, abi=old):
         await set_current(client, n1)
         on_old = await start_version(client, old_parent)  # in its slow step when N takes over
         await pinned(on_old)
-        async with engine_worker(client, store, [TESTKIT], settings(), build=n, identity=n):
+        async with build_workers(client, store, [TESTKIT], settings(), build=n):
             await set_current(client, n)
             refused = await start_version(client, old_parent)
             parent_only = await start_version(client, store.add(parent()))  # it still pins N-1's child
