@@ -12,6 +12,7 @@ from sqlalchemy import text
 
 from dewpoint.apps import step_summary
 from dewpoint.apps.dispatcher import dispatch as dispatch_module
+from dewpoint.engine import ENGINE_ABI
 from tests.apps.api.test_run_requests_api import as_role, keyed_app
 from tests.apps.api.test_simulation_steps import LOOPED, ended, row
 from tests.apps.dispatcher.support import begin, workers
@@ -95,7 +96,7 @@ async def test_a_step_with_no_row_is_not_recorded_when_its_graph_predates_b4b(
     viewer = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "viewer")
     await row(owner_sessionmaker, ctx, run_id, "l", "", 1, "succeeded", at=1)
     await ended(owner_sessionmaker, run_id)
-    monkeypatch.setattr(step_summary, "OUTCOMES_ABI", step_summary.OUTCOMES_ABI + 1)  # its graph's ABI, now older
+    monkeypatch.setattr(step_summary, "OUTCOMES_ABI", ENGINE_ABI + 1)  # its graph's ABI, this build's, now older
     assert (await origins(viewer, ctx, run_id))["t"] == "not_recorded"
     monkeypatch.undo()
     assert (await origins(viewer, ctx, run_id))["t"] == "didnt_run"
