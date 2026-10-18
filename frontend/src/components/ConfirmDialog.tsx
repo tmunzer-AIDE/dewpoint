@@ -3,14 +3,16 @@
 // the page behind is inert, no injected styles: D23). Focus starts on Cancel, the safe choice. A constructive action
 // (publish, make active) confirms in the primary colour; focus still starts on Cancel, and goes back there when the
 // question changes. While its action runs (`busy`) it holds: Escape is refused and Cancel is off, so a cancel never
-// races the action it can't stop.
-import { useEffect, useRef, type ReactNode } from "react";
+// races the action it can't stop. One that warns of what can't be taken back (a live run's cancel) asks as an alert
+// dialog, its words its description.
+import { useEffect, useId, useRef, type ReactNode } from "react";
 import { Button } from "./Button";
 
 export function ConfirmDialog({
-  open, title, confirmLabel, cancelLabel = "Cancel", tone = "danger", busy = false, onConfirm, onCancel, children,
+  open, title, confirmLabel, cancelLabel = "Cancel", tone = "danger", busy = false, alert = false, onConfirm, onCancel, children,
 }: {
   open: boolean;
+  alert?: boolean;
   tone?: "danger" | "primary";
   title: string;
   confirmLabel: string;
@@ -23,6 +25,7 @@ export function ConfirmDialog({
   const dialog = useRef<HTMLDialogElement>(null);
   const cancel = useRef<HTMLButtonElement>(null);
   const closing = useRef(false); // set while the dialog closes because `open` turned false
+  const words = useId();
   useEffect(() => {
     const d = dialog.current;
     if (!d) return;
@@ -42,6 +45,8 @@ export function ConfirmDialog({
     <dialog
       ref={dialog}
       aria-label={title}
+      role={alert ? "alertdialog" : undefined}
+      aria-describedby={alert ? words : undefined}
       onCancel={(e) => {
         if (busy) e.preventDefault();
       }}
@@ -53,7 +58,7 @@ export function ConfirmDialog({
       className="mx-auto mt-24 w-[480px] max-w-[calc(100vw-32px)] rounded-dialog border border-line bg-surface p-6 text-ink shadow-dialog backdrop:bg-overlay"
     >
       <h2 className="text-h3 font-semibold">{title}</h2>
-      <div className="mt-2 text-body text-muted">{children}</div>
+      <div id={words} className="mt-2 text-body text-muted">{children}</div>
       <div className="mt-6 flex justify-end gap-2">
         <Button ref={cancel} onClick={onCancel} disabled={busy}>{cancelLabel}</Button>
         <Button variant={tone} onClick={onConfirm} disabled={busy}>{confirmLabel}</Button>

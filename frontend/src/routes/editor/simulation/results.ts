@@ -1,14 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
-// A simulated step's result, as tags beside its card (4d-1c; the simulation design §7.3, §7.4; the ResultCanvas and
-// Running boards), from the server's per-step summary, never a partial page. A step that ran once shows its final
-// attempt; a loop's step totals its instances, one per opened iteration, skipped ones included, its ports apart; a
-// step with none says why, in the server's tag. Always words: the colour and the hatch only repeat them.
+// A step's result, as tags beside its card (4d-1c; the simulation design §7.3, §7.4; the ResultCanvas and Running
+// boards), from the server's per-step summary, never a partial page. A step that ran once shows its final attempt; a
+// loop's step totals its instances, one per opened iteration, skipped ones included, its ports apart; a step with none
+// says why, in the server's tag. Always words: the colour and the hatch only repeat them. A run's page (editor 4e-1;
+// the runs design §5.3, §5.5) says the same of any run: a live step's origin (sent, may have been sent; a control step
+// says none, its port alone), how long an action took, and a failure's code.
 import { CARD } from "../../../lib/layout";
-import type { Origin, StepSummary } from "../../../lib/simulations";
+import type { RunOrigin } from "../../../lib/runs";
+import { took } from "../../../lib/runStatus";
+
+type Origin = NonNullable<RunOrigin>;
 
 /** What a tag is: a status (ok, failed or other), values a person gave, a plugin's fixture, an evaluation, an absence,
- * or a note (an attempt, a loop's iterations). */
-export type SimTagKind = "ok" | "fail" | "status" | "given" | "fixture" | "evaluated" | "absent" | "note";
+ * a note (an attempt, a loop's iterations, a time), a live step's request sent or maybe sent, or an error's code. */
+export type SimTagKind = "ok" | "fail" | "status" | "given" | "fixture" | "evaluated" | "absent" | "note" | "sent" | "maybe" | "code";
 export interface SimTag {
   text: string;
   kind: SimTagKind;
@@ -16,6 +21,8 @@ export interface SimTag {
 
 /** §7.4's tags, in the server's code and the words the editor shows. */
 export const ORIGIN: Record<Origin | "input" | "seeded", string> = {
+  sent: "sent",
+  may_have_been_sent: "may have been sent",
   input: "input",
   seeded: "seeded",
   evaluated: "evaluated",
@@ -29,6 +36,8 @@ export const ORIGIN: Record<Origin | "input" | "seeded", string> = {
   not_reached_yet: "not reached yet",
 };
 const ORIGIN_KIND: Record<Origin, SimTagKind> = {
+  sent: "sent",
+  may_have_been_sent: "maybe",
   evaluated: "evaluated",
   evaluated_not_waited: "evaluated",
   fixture_not_sent: "fixture",
@@ -47,6 +56,7 @@ const ORDER = ["succeeded", "failed", "cancelled", "skipped", "not_started", "ru
 const said = (status: string) => status.replace("_", " ");
 const statusKind = (status: string): SimTagKind => (status === "succeeded" ? "ok" : status === "failed" ? "fail" : "status");
 export const field = (v: unknown, key: string): unknown => (typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>)[key] : undefined);
+const strOf = (v: unknown) => (typeof v === "string" ? v : null);
 
 export const words = (tags: SimTag[]) => tags.map((t) => t.text);
 
@@ -61,10 +71,23 @@ export function tagsFitBeside(at: At, others: At[]): boolean {
   return !others.some((o) => o.x < box.x + box.width && box.x < o.x + CARD.width && o.y < box.y + box.height && box.y < o.y + CARD.height);
 }
 
-/** A step's tags. `maxAttempts`: its own, or its type's (an attempt is said "of" it); `ended`: whether the
- * simulation has (while it runs, a loop's step says what it has so far). */
-export function tagsOf(s: StepSummary, { maxAttempts, ended }: { maxAttempts: number | null; ended: boolean }): SimTag[] {
-  if (s.instances === 0) return [{ text: ORIGIN[s.origin], kind: ORIGIN_KIND[s.origin] }];
+/** A step's summary, a simulation's or any run's: a live one's origin may be none. */
+export interface Summary {
+  type: string;
+  origin: RunOrigin;
+  instances: number;
+  statuses: Record<string, number>;
+  ports: Record<string, number>;
+  final?: unknown;
+}
+
+const originTags = (origin: RunOrigin): SimTag[] => (origin === null ? [] : [originTag(origin)]);
+
+/** A step's tags. `maxAttempts`: its own, or its type's (an attempt is said "of" it); `ended`: whether the run has
+ * (while it runs, a loop's step says what it has so far). `run`, on a run's page: whether the step is an action, whose
+ * time is said; a control step's is the engine's own. A failure says its code there, in place of its time. */
+export function tagsOf(s: Summary, { maxAttempts, ended, run }: { maxAttempts: number | null; ended: boolean; run?: { action: boolean } }): SimTag[] {
+  if (s.instances === 0) return originTags(s.origin);
   const loop = s.type.startsWith("flow.loop@");
   if (s.instances === 1) {
     const status = typeof field(s.final, "status") === "string" ? (field(s.final, "status") as string) : (Object.keys(s.statuses)[0] ?? "running");
@@ -80,14 +103,21 @@ export function tagsOf(s: StepSummary, { maxAttempts, ended }: { maxAttempts: nu
       return tags;
     }
     const port = field(field(s.final, "effect"), "port");
-    const origin = ORIGIN[s.origin] + (typeof port === "string" && s.origin === "evaluated" ? ` · → ${port}` : "");
-    return [...tags, { text: origin, kind: ORIGIN_KIND[s.origin] }];
+    if (s.origin === "evaluated" && typeof port === "string") tags.push({ text: `${ORIGIN.evaluated} · → ${port}`, kind: "evaluated" });
+    else if (s.origin === null && typeof port === "string") tags.push({ text: `→ ${port}`, kind: "evaluated" });
+    else tags.push(...originTags(s.origin));
+    if (!run) return tags;
+    const code = field(field(s.final, "error"), "code");
+    const time = run.action ? took(strOf(field(s.final, "started_at")), strOf(field(s.final, "ended_at"))) : null;
+    if (status === "failed" && typeof code === "string") tags.push({ text: code, kind: "code" });
+    else if (time !== null) tags.push({ text: time, kind: "note" });
+    return tags;
   }
   const counts = ORDER.filter((k) => (s.statuses[k] ?? 0) > 0).map((k) => `${s.statuses[k]} ${said(k)}`).join(" · ");
   const total = `${s.instances} instances: ${counts}`;
   return [
     { text: ended ? total : `So far, ${total}`, kind: "status" },
-    ...(loop ? [] : [{ text: ORIGIN[s.origin], kind: ORIGIN_KIND[s.origin] }]),
+    ...(loop ? [] : originTags(s.origin)),
     ...Object.entries(s.ports).map(([port, n]): SimTag => ({ text: `→ ${port} ×${n}`, kind: "evaluated" })),
   ];
 }

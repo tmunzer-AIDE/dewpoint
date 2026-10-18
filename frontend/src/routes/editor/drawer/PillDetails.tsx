@@ -13,7 +13,7 @@ import { useDrawer } from "./context";
 import { usePillEntry } from "./Pill";
 
 /** A preview's marker, as a chip: never the value it stands for (D20). */
-const Chip = ({ children }: { children: ReactNode }) => (
+export const Chip = ({ children }: { children: ReactNode }) => (
   <span className="rounded-sm border border-line-strong px-1.5 font-mono text-meta text-muted">{children}</span>
 );
 

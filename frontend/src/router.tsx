@@ -5,11 +5,13 @@ import { unsavedWork } from "./lib/leaving";
 import { useSession } from "./lib/session";
 import { useAfterAuth } from "./lib/useAfterAuth";
 import { ConnectionsPage } from "./routes/Connections";
+import { validateRunsSearch } from "./lib/runs";
 import { LazyEditor } from "./routes/editor/LazyEditor";
 import { EnrollPage } from "./routes/Enroll";
 import { LoginPage } from "./routes/Login";
 import { MembersPage } from "./routes/Members";
 import { MfaPage } from "./routes/Mfa";
+import { LazyRunPage, LazyRunsPage } from "./routes/runs/LazyRuns";
 import { SecurityPage } from "./routes/Security";
 import { SettingsLayout } from "./routes/Settings";
 import { TenantsPage } from "./routes/Tenants";
@@ -62,6 +64,17 @@ function Editor() {
   return <LazyEditor key={`${tenantId}:${workflowId}`} tenantId={tenantId} workflowId={workflowId} openTriggers={search.triggers === true} />;
 }
 
+function Runs() {
+  const { tenantId } = useParams({ from: "/app/t/$tenantId/runs" });
+  const filters = runsRoute.useSearch();
+  return <LazyRunsPage key={tenantId} tenantId={tenantId} filters={filters} />;
+}
+
+function Run() {
+  const { tenantId, runId } = useParams({ from: "/app/t/$tenantId/runs/$runId" });
+  return <LazyRunPage key={`${tenantId}:${runId}`} tenantId={tenantId} runId={runId} />;
+}
+
 function Connections() {
   const { tenantId } = useParams({ from: "/app/t/$tenantId/connections" });
   return <ConnectionsPage key={tenantId} tenantId={tenantId} />;
@@ -112,6 +125,15 @@ const editorRoute = createRoute({
   validateSearch: (search: Record<string, unknown>): { triggers?: true } =>
     search.triggers === true || search.triggers === "true" ? { triggers: true } : {},
 });
+// The Runs page keeps its filters in its address, so a link keeps them (the runs design §5.1); a run's page is laid out
+// like the editor, beside the compact rail (the owner's answer 6).
+const runsRoute = createRoute({ getParentRoute: () => appRoute, path: "/t/$tenantId/runs", component: Runs, validateSearch: validateRunsSearch });
+const runRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: "/t/$tenantId/runs/$runId",
+  component: Run,
+  staticData: { compactRail: true },
+});
 const connectionsRoute = createRoute({
   getParentRoute: () => appRoute,
   path: "/t/$tenantId/connections",
@@ -135,6 +157,8 @@ export const routeTree = rootRoute.addChildren([
     tenantHomeRoute,
     workflowsRoute,
     editorRoute,
+    runsRoute,
+    runRoute,
     connectionsRoute,
     settingsRoute.addChildren([settingsIndexRoute, membersRoute, webhooksRoute]),
   ]),

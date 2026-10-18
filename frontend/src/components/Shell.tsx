@@ -12,7 +12,7 @@ import { authenticatePasskey } from "../lib/webauthn";
 import { Announcer } from "./Announcer";
 import { Button } from "./Button";
 import { CommandPalette } from "./CommandPalette";
-import { ConnectionsIcon, SettingsIcon, WorkflowsIcon } from "./icons";
+import { ConnectionsIcon, RunsIcon, SettingsIcon, WorkflowsIcon } from "./icons";
 import { Mark, Wordmark } from "./Mark";
 import { TenantSwitcher } from "./TenantSwitcher";
 import { ThemeSelect } from "./ThemeSelect";
@@ -107,6 +107,18 @@ export function Shell({ sessionEnded = false }: { sessionEnded?: boolean }) {
             >
               <WorkflowsIcon />
               <span className={label}>Workflows</span>
+            </Link>
+          )}
+          {params.tenantId && (
+            <Link
+              to="/t/$tenantId/runs"
+              params={{ tenantId: params.tenantId }}
+              className={item}
+              activeProps={{ className: current }}
+              inactiveProps={{ className: INACTIVE }}
+            >
+              <RunsIcon />
+              <span className={label}>Runs</span>
             </Link>
           )}
           {params.tenantId && (

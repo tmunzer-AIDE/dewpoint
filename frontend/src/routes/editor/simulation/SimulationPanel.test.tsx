@@ -122,3 +122,15 @@ describe("the Simulation panel's lifecycle (§7.2; the Lifecycle and Running boa
     expect(onClose).toHaveBeenCalledTimes(2);
   });
 });
+
+it("links its run to the run's page when it's given one (the runs design §5.1)", () => {
+  render(
+    <SimulationPanel
+      session={admitted("started", run("succeeded", "2026-10-15T10:42:19Z"), { phase: "succeeded" })}
+      onClose={vi.fn()}
+      runOf={(id) => <a href={`/runs/${id}`}>{`run ${id.slice(0, 8)}`}</a>}
+    />,
+  );
+  expect(screen.getByRole("link", { name: "run 7c1e9a40" }).getAttribute("href")).toBe(`/runs/${ID}`);
+  expect(screen.getByText(/^Ended: /).textContent).toMatch(/ · draft revision 14 · run 7c1e9a40$/);
+});

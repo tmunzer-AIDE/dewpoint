@@ -3,7 +3,8 @@
 // beside it, under it at narrow widths, never on it, so the card and its problem and "may not run" badges stay as they
 // are. Where another card is beside it, under it (`place`); under, they take one line, cut short, every word still read
 // out (the review's 1). Each tag is drawn as what it is: a status, values a person gave (slate outline), a fixture (hatched slate), an
-// evaluation, an absence (dashed), a note; the words carry it, the look only repeats them (§7.4).
+// evaluation, an absence (dashed), a note; on a run's page (4e-1), a request sent (live orange), maybe sent (the
+// warning's, dashed) and an error's code (mono); the words carry it, the look only repeats them (§7.4).
 import type { SimTag, SimTagKind } from "./results";
 
 const LOOK: Record<SimTagKind, string> = {
@@ -15,6 +16,9 @@ const LOOK: Record<SimTagKind, string> = {
   evaluated: "rounded-sm border border-line-strong bg-surface px-1.5 text-muted",
   absent: "rounded-sm border border-dashed border-line-strong bg-surface px-1.5 text-muted",
   note: "bg-surface text-muted",
+  sent: "rounded-sm border border-live bg-surface px-1.5 text-live",
+  maybe: "rounded-sm border border-dashed border-warn-line bg-surface px-1.5 text-warn-ink",
+  code: "bg-surface font-mono text-danger",
 };
 
 const PLACE = {
@@ -24,10 +28,13 @@ const PLACE = {
   under: "top-full left-0 mt-[56px] block w-[260px] truncate",
 } as const;
 
-export function SimTags({ label, tags, place = "beside" }: { label: string; tags: SimTag[]; place?: keyof typeof PLACE }) {
+/** `what` the tags are: a simulated result (the editor's), or a run's result (its page's). */
+export function SimTags({ label, tags, place = "beside", what = "simulated result" }: {
+  label: string; tags: SimTag[]; place?: keyof typeof PLACE; what?: string;
+}) {  // prettier-ignore
   if (tags.length === 0) return null;
   return (
-    <ul aria-label={`${label}: simulated result`} className={`pointer-events-none absolute text-meta ${PLACE[place]}`}>
+    <ul aria-label={`${label}: ${what}`} className={`pointer-events-none absolute text-meta ${PLACE[place]}`}>
       {tags.map((t, i) => (
         // Inline, so a line cut short ends in "…"; a flex item when beside.
         <li key={i} className={`inline leading-[18px] whitespace-nowrap ${place === "under" ? "me-1" : "@max-3xl:me-1"} ${LOOK[t.kind]}`}>{t.text}</li>

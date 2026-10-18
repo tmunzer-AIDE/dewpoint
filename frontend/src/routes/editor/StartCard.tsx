@@ -18,6 +18,8 @@ export type StartData = {
   summary: string; // what starts a run, in words
   open: boolean; // the Triggers panel is open
   tags?: SimTag[]; // in a simulation of the whole workflow: the input a person gave (§7.4)
+  resultsLabel?: string; // what those tags are, in their name
+  label?: string; // its name, when it opens something other than the Triggers panel (a run's start, 4e-1)
   onOpen: () => void;
 };
 
@@ -29,7 +31,7 @@ export function StartNode({ data }: NodeProps<Node<StartData, "start">>) {
         type="button"
         data-item={item.start}
         tabIndex={data.focusId === item.start ? 0 : -1}
-        aria-label={startLabel(data.summary)}
+        aria-label={data.label ?? startLabel(data.summary)}
         aria-expanded={data.open}
         onClick={data.onOpen}
         className="pointer-events-auto flex h-[64px] w-[260px] flex-col justify-center rounded-lg border border-dashed border-line-strong bg-surface px-3.5 text-left"
@@ -38,7 +40,7 @@ export function StartNode({ data }: NodeProps<Node<StartData, "start">>) {
         <span className="truncate text-small text-muted">{data.summary}</span>
       </button>
       <Handle type="source" id="out" position={Position.Bottom} isConnectable={false} />
-      {data.tags && <SimTags label="Start" tags={data.tags} />}
+      {data.tags && <SimTags label="Start" tags={data.tags} what={data.resultsLabel} />}
       {data.empty && data.editable && (
         <button
           type="button"

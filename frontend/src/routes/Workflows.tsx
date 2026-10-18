@@ -15,6 +15,7 @@ import { Table, Td, Th } from "../components/Table";
 import { announce } from "../lib/announce";
 import { ApiError, client, ok } from "../lib/client";
 import { downloadJson, fileName } from "../lib/download";
+import { RUN_STATUS, type Tone } from "../lib/runStatus";
 import { useDocumentTitle } from "../lib/title";
 import { attentionWords, triggerColumn } from "../lib/triggers";
 import { canEdit, canPublish, notPortable, since, tenantQuery, workflowsQuery, type PortableProblem, type WorkflowRow } from "../lib/workflows";
@@ -30,13 +31,8 @@ const FILTERS: { value: Filter; label: string; keep: (w: WorkflowRow) => boolean
   { value: "attention", label: "Needs attention", keep: (w) => w.needs_attention.length > 0 },
 ];
 
-const STATUS: Record<NonNullable<WorkflowRow["last_run"]>["status"], { text: string; dot: string }> = {
-  running: { text: "Running", dot: "bg-accent" },
-  succeeded: { text: "Succeeded", dot: "bg-ok" },
-  failed: { text: "Failed", dot: "bg-danger" },
-  cancelled: { text: "Cancelled", dot: "bg-line-strong" },
-  deadline_exceeded: { text: "Ran out of time", dot: "bg-danger" },
-};
+// A run's status in every run's words (the runs design §5.5), its dot repeating them.
+const DOT: Record<Tone, string> = { waiting: "bg-line-strong", running: "bg-accent", ok: "bg-ok", danger: "bg-danger", neutral: "bg-line-strong" };
 
 function Version({ w }: { w: WorkflowRow }) {
   if (w.active_version_number === null) return <span className="text-muted">Not published</span>;
@@ -48,8 +44,12 @@ function Version({ w }: { w: WorkflowRow }) {
   );
 }
 
-/** The last live run, what attention follows; the last simulation apart, in the simulation colour (4b ruling 7). */
-function LastRun({ w }: { w: WorkflowRow }) {
+// Each run's link a 24 px target at least (WCAG 2.5.8): the two sit one above the other, closer than that apart.
+const RUN_LINK = "inline-flex min-h-[24px] items-center underline underline-offset-2";
+
+/** The last live run, what attention follows; the last simulation apart, in the simulation colour (4b ruling 7). Each
+ * links to its run's page (the runs design §5.1). */
+function LastRun({ tenantId, w }: { tenantId: string; w: WorkflowRow }) {
   const live = w.last_run;
   const simulated = w.last_simulation;
   if (!live && !simulated) return <span className="text-muted">No runs yet</span>;
@@ -57,13 +57,19 @@ function LastRun({ w }: { w: WorkflowRow }) {
     <span className="flex flex-col gap-0.5 text-small">
       {live ? (
         <span className="inline-flex items-center gap-2">
-          <span aria-hidden="true" className={`size-2 rounded-sm ${STATUS[live.status].dot}`} />
-          {STATUS[live.status].text} · {since(live.at)}
+          <span aria-hidden="true" className={`size-2 rounded-sm ${DOT[RUN_STATUS[live.status].tone]}`} />
+          <Link to="/t/$tenantId/runs/$runId" params={{ tenantId, runId: live.id }} className={RUN_LINK}>
+            {RUN_STATUS[live.status].word} · {since(live.at)}
+          </Link>
         </span>
       ) : (
         <span className="text-muted">No live runs yet</span>
       )}
-      {simulated && <span className="text-sim">Simulated: {STATUS[simulated.status].text} · {since(simulated.at)}</span>}
+      {simulated && (
+        <Link to="/t/$tenantId/runs/$runId" params={{ tenantId, runId: simulated.id }} className={`${RUN_LINK} self-start text-sim`}>
+          Simulated: {RUN_STATUS[simulated.status].word} · {since(simulated.at)}
+        </Link>
+      )}
     </span>
   );
 }
@@ -179,7 +185,7 @@ export function WorkflowsPage({ tenantId, startNew = false }: { tenantId: string
                 </Td>
                 <Td className="text-small">{triggerColumn(w.triggers)}</Td>
                 <Td><Version w={w} /></Td>
-                <Td><LastRun w={w} /></Td>
+                <Td><LastRun tenantId={tenantId} w={w} /></Td>
                 <Td className="font-mono text-small">
                   {w.runs_24h.live}
                   {w.runs_24h.simulate > 0 && <span className="font-sans text-sim"> +{w.runs_24h.simulate} simulated</span>}

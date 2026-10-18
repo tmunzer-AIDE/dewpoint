@@ -36,7 +36,7 @@ beforeEach(() => {
 async function renderAt(path: string) {
   const root = createRootRoute({ component: Shell });
   const page = () => <p>page</p>;
-  const children = ["/t/$tenantId/workflows", "/t/$tenantId/connections", "/t/$tenantId/settings/members", "/tenants", "/account/security"].map((p) =>
+  const children = ["/t/$tenantId/workflows", "/t/$tenantId/runs", "/t/$tenantId/connections", "/t/$tenantId/settings/members", "/tenants", "/account/security"].map((p) =>
     createRoute({ getParentRoute: () => root, path: p, component: page }),
   );
   const router = createRouter({
@@ -120,8 +120,14 @@ it("offers a theme choice in the header: the OS's, light or dark (D6)", async ()
 it("offers Workflows first on the rail, current on its pages", async () => {
   await renderAt("/t/t1/workflows");
   const links = screen.getAllByRole("link").filter((l) => l.closest("nav"));
-  expect(links.map((l) => l.textContent)).toEqual(["Workflows", "Connections", "Settings"]);
+  expect(links.map((l) => l.textContent)).toEqual(["Workflows", "Runs", "Connections", "Settings"]);
   expect(screen.getByRole("link", { name: "Workflows" }).getAttribute("aria-current")).toBe("page");
+});
+
+it("offers Runs after Workflows, current on its pages (the runs design §5.1)", async () => {
+  await renderAt("/t/t1/runs");
+  expect(screen.getByRole("link", { name: "Runs" }).getAttribute("aria-current")).toBe("page");
+  expect(screen.getByRole("link", { name: "Workflows" }).getAttribute("aria-current")).toBeNull();
 });
 
 it("keeps the editor's rail to icons at every width (outline §2)", async () => {

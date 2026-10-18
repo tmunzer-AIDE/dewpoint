@@ -25,6 +25,14 @@ globalThis.ResizeObserver ??= class {
 if (!("scrollIntoView" in Element.prototype)) {
   Object.defineProperty(Element.prototype, "scrollIntoView", { value: () => undefined, configurable: true, writable: true });
 }
+// jsdom has no media queries: each answers false, the wide layout (a test that asks for a narrow one says so).
+if (typeof window.matchMedia !== "function") {
+  const matchMedia = (query: string): MediaQueryList => ({
+    matches: false, media: query, onchange: null, dispatchEvent: () => false,
+    addEventListener: () => undefined, removeEventListener: () => undefined, addListener: () => undefined, removeListener: () => undefined,
+  });  // prettier-ignore
+  Object.defineProperty(window, "matchMedia", { value: matchMedia, configurable: true, writable: true });
+}
 // The router restores scroll on navigation; jsdom only reports that it has no scrolling.
 window.scrollTo = () => undefined;
 // Node 26's own (experimental) localStorage global wins over jsdom's and is undefined without a storage file: an
