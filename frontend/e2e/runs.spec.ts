@@ -148,8 +148,8 @@ test("a loop's iterations, four at a time, and one step's, picked (the RunLoop b
 
 test("a running live run is cancelled after its question (the RunRunning board)", async ({ page }) => {
   const seed = await api(page);
-  // `first`, then `wait`'s delay: the engine sends a sleeping delay's `running` row once another unit ends (here, the
-  // projection of `first`'s end). A delay that starts the run alone isn't recorded until it ends (M109).
+  // `first`, then `wait`'s delay (M109): before engine ABI 10 (#119), a delay that started the run alone wasn't recorded
+  // as running until it ended. Now a step that starts waiting writes its `running` row at once; `first` is harmless.
   const wait = await seed.publish("runs-wait.dewpoint.json", "Runs D");
   const run = await seed.start(wait, {});
   await seed.running(run);
