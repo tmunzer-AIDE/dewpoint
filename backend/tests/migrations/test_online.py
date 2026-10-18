@@ -420,6 +420,7 @@ class Holder:
 
     async def __aenter__(self) -> "Holder":
         self.c = await asyncpg.connect(self.url)
+        self.pid = self.c.get_server_pid()
         self.tx = self.c.transaction()
         await self.tx.start()
         await self.c.execute(f"LOCK TABLE {self.table} IN {self.mode} MODE")
@@ -448,6 +449,22 @@ class GivingWay(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         if "gave way" in record.getMessage():
             self.loop.call_soon_threadsafe(self.seen.set)
+
+
+async def blocked_by(url: str, holder: Holder) -> None:
+    """Until a session waits for a lock `holder` blocks, in the server's own view (`pg_blocking_pids`): the step behind
+    it, waiting for its table (or, an index built concurrently, for its transaction). Never a probe: each takes a mode
+    the holder's doesn't conflict with, so it waits only behind the step."""
+    query = "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE NOT granted AND $1 = ANY(pg_blocking_pids(pid)))"
+    c = await asyncpg.connect(url)
+    try:
+        for _ in range(3000):
+            if await c.fetchval(query, holder.pid):
+                return
+            await asyncio.sleep(0.02)
+    finally:
+        await c.close()
+    raise AssertionError(f"nothing waited for the lock held on {holder.table}")
 
 
 HELD = {  # the table held and how, from which revision; the writes probed meanwhile; the first migration that waits
@@ -514,6 +531,7 @@ async def test_a_step_behind_a_held_lock_gives_way_until_it_is_released(cluster,
             await asyncio.wait_for(giving_way.seen.wait(), 60)
         finally:
             logging.getLogger("alembic.online").removeHandler(giving_way)
+        await blocked_by(url, holder)  # tried again, the step waits for the held lock
         await asyncio.sleep(1.5)  # held well past a step's budget
         while_held = gave_way(caplog)  # logged before the release: each attempt gave way while the lock was held
         await holder.release()
@@ -522,11 +540,13 @@ async def test_a_step_behind_a_held_lock_gives_way_until_it_is_released(cluster,
         finally:
             stop.set()
             await asyncio.gather(*writing)
-    # While the lock was held, the held step gave way on it, or on its budget when a loaded machine ran its statements
-    # before the lock too slowly (seen under the parallel suite); the attempt the release came during, and a later
-    # step's, may end on its budget too: each is tried again
+    # While the lock was held, the held step waited for it (the holder blocked its session, above) and gave way: on its
+    # lock timeout, or on its statement's when the statement reached the lock later than its margin, its work before
+    # the lock slowed by a loaded machine (seen under the parallel suite: 0045's new table and its key on `runs`, made
+    # before the one on `tenants`); the attempt the release came during, and a later step's, may end on its budget too:
+    # each is tried again
     assert while_held and all(m.startswith(f"online step {first} ") for m in while_held), while_held
-    assert any(m.endswith("(lock)") for m in while_held) and all(m.endswith(("(lock)", "(budget)")) for m in while_held)
+    assert all(m.endswith(("(lock)", "(budget)")) for m in while_held), while_held
     assert await scalar(url, "SELECT version_num FROM alembic_version") == HEAD
     assert max(waits) < 1.0  # the server's deadlock_timeout
 
