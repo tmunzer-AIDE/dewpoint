@@ -5,8 +5,8 @@
 import "@xyflow/react/dist/base.css";
 import "./canvas.css";
 import {
-  Background, BackgroundVariant, MiniMap, ReactFlow, ReactFlowProvider, applyNodeChanges, useReactFlow, useViewport,
-  type Edge, type EdgeTypes, type Node, type NodeChange, type NodeTypes,
+  Background, BackgroundVariant, MiniMap, ReactFlow, ReactFlowProvider, applyNodeChanges, useNodesInitialized, useReactFlow, useStore,
+  useStoreApi, useViewport, type Edge, type EdgeTypes, type Node, type NodeChange, type NodeTypes,
 } from "@xyflow/react";  // prettier-ignore
 import { useCallback, useEffect, useMemo, useRef, useState, type FocusEvent, type KeyboardEvent } from "react";
 import { Button } from "../../components/Button";
@@ -15,6 +15,7 @@ import {
 } from "../../lib/graph";  // prettier-ignore
 import { CARD, MIN_ZOOM } from "../../lib/layout";
 import type { GraphDoc, GraphEdge, NodeType } from "../../lib/workflows";
+import { fitted } from "./fit";
 import { FlowEdge, type FlowData } from "./FlowEdge";
 import { item, say, type ItemAction } from "./items";
 import { StartNode, type StartData } from "./StartCard";
@@ -136,6 +137,7 @@ function obstacles(nodes: Node[]): { cards: Box[]; fixed: Box[] } {
 
 function Flow(p: CanvasProps) {
   const flow = useReactFlow();
+  const store = useStoreApi();
   const { zoom } = useViewport();
   const container = useRef<HTMLDivElement>(null);
   const built = useMemo(() => build(p), [p]);
@@ -182,6 +184,21 @@ function Flow(p: CanvasProps) {
     (changes: NodeChange[]) => setNodes((ns) => applyNodeChanges(changes.filter((c) => c.type === "position" || c.type === "dimensions"), ns)),
     [],
   );
+
+  // The view it opens on, once its cards and its own size are known, and Fit's: the whole graph, the start card in the
+  // clear when even the farthest zoom can't hold it all (fit.ts).
+  const fit = useCallback(() => {
+    const { width, height } = store.getState();
+    void flow.setViewport(fitted(flow.getNodesBounds(flow.getNodes()), flow.getNodesBounds([START]), { width, height }), { duration: 0 });
+  }, [flow, store]);
+  const ready = useNodesInitialized();
+  const sized = useStore((s) => s.width > 0 && s.height > 0);
+  const opened = useRef(false);
+  useEffect(() => {
+    if (opened.current || !ready || !sized || !flow.viewportInitialized) return;
+    opened.current = true;
+    fit();
+  }, [ready, sized, flow.viewportInitialized, fit]);
 
   /** Brings the item focus landed on into view, keeping the zoom, when `mustReveal` says so: for the keyboard unless
    * it's wholly in the clear; otherwise only when it's entirely hidden, so a pointer's press never slides it away
@@ -266,8 +283,6 @@ function Flow(p: CanvasProps) {
           zoomOnDoubleClick={false}
           minZoom={MIN_ZOOM}
           maxZoom={1.5}
-          fitView
-          fitViewOptions={{ padding: 0.2, minZoom: MIN_ZOOM, maxZoom: 1 }}
           proOptions={{ hideAttribution: true }}
           onPaneClick={(e) => {
             if (p.placing) p.onPlace(flow.screenToFlowPosition({ x: e.clientX, y: e.clientY }));
@@ -287,7 +302,7 @@ function Flow(p: CanvasProps) {
         )}
         <Button size="md" aria-label="Zoom in" onClick={() => void flow.zoomIn({ duration: 0 })}>＋</Button>
         <Button size="md" aria-label="Zoom out" onClick={() => void flow.zoomOut({ duration: 0 })}>−</Button>
-        <Button size="md" onClick={() => void flow.fitView({ padding: 0.2, minZoom: MIN_ZOOM, maxZoom: 1, duration: 0 })}>Fit</Button>
+        <Button size="md" onClick={fit}>Fit</Button>
         <span className="canvas-zoom-level ml-1.5 font-mono text-small text-muted">{Math.round(zoom * 100)}%</span>
       </div>
     </div>
