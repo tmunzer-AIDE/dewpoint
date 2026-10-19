@@ -4,5 +4,5 @@
 useDefault = true
 
 [allowlist]
-description = "Test fixtures and names, not credentials: the password unit tests and the e2e admin bootstrap use, a canary secret the engine's tests plant to prove it never reaches Temporal, the ingress key's environment-variable name, which generic-api-key reads as a value, and the database password the settings tests plant to prove a startup failure never quotes it"
-regexes = ['''^violet-otter-canyon-42$''', '''^sk-k3y-echoed-canary-0003$''', '''^DEWPOINT_INGRESS_KEY_B64$''', '''^pw-0d4e7a5c1e9b$''']
+description = "Test fixtures and names, not credentials: the password unit tests and the e2e admin bootstrap use, a canary secret the engine's tests plant to prove it never reaches Temporal, the ingress key's environment-variable name, which generic-api-key reads as a value, the database password the settings tests plant to prove a startup failure never quotes it, and the token the CLI logging tests plant to prove a crash never logs it"
+regexes = ['''^violet-otter-canyon-42$''', '''^sk-k3y-echoed-canary-0003$''', '''^DEWPOINT_INGRESS_KEY_B64$''', '''^pw-0d4e7a5c1e9b$''', '''^tok-live-3a9e7d1c$''']
