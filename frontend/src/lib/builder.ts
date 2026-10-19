@@ -68,13 +68,26 @@ export function opsFor(types: readonly string[], format: string | null, mayBeMis
   }
 }
 
+const isNumber = (t: string) => t === "integer" || t === "number";
+
 /** Whether "is" and "is not" compare with a number: the value is only ever one. */
 export const numeric = (types: readonly string[]): boolean => {
   const t = types.filter((x) => x !== "null");
-  return t.length > 0 && t.every((x) => x === "integer" || x === "number");
+  return t.length > 0 && t.every(isNumber);
+};
+
+/** Whether a value may be a number and may be something else: none of its types is known (any value), or a number is
+ * one of several. "is" and "is not" then compare with what the person means, text or a number (#85). */
+export const eitherKind = (types: readonly string[]): boolean => {
+  const t = types.filter((x) => x !== "null");
+  return types.length === 0 || (t.some(isNumber) && t.some((x) => !isNumber(x)));
 };
 
 const JSON_NUMBER = /^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$/;
+
+/** What typed text is compared as where it may be either: a number as JSON writes one, else text, every space kept
+ * (#85): "3 apples" is typed one key at a time, and "3 " read as 3 would lose its space at the next write. */
+export const kindOfText = (text: string): Literal["kind"] => (JSON_NUMBER.test(text) ? "number" : "text");
 const INT64 = { min: -(2n ** 63n), max: 2n ** 63n - 1n };
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 

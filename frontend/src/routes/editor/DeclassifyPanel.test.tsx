@@ -84,3 +84,15 @@ describe("Declassify", () => {
     expect(screen.getByText(/show once the draft is checked/)).toBeTruthy();
   });
 });
+
+it("closes on Escape, as the other panels do (#85)", async () => {
+  const props = show(doc(), check());
+  screen.getByRole("heading", { name: "Declassify" }).focus();
+  await userEvent.keyboard("{Escape}");
+  expect(props.onClose).toHaveBeenCalledTimes(1);
+});
+
+it("puts focus on its heading as it opens, as the other panels do, so Escape closes it at once (#85)", () => {
+  show(doc(), check());
+  expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Declassify" }));
+});

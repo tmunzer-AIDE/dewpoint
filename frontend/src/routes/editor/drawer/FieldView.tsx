@@ -26,6 +26,8 @@ type Control = (props: ControlProps) => ReactNode;
 const OWN: UnappliedKind[] = ["text", "template", "condition", "json", "number", "formula", "port"]; // what a field's own control may hold
 const NEITHER = "This field takes only references or text with references, which can't be set in this drawer.";
 export const PILLS_NOTE = "Press / or ＋ Data to insert data from earlier steps. A dashed pill may be missing when this runs: give it a default.";
+/** What a viewer and a version's view are told: they can't insert data or give a default (#85). */
+export const PILLS_SEEN = "A dashed pill may be missing when this runs.";
 
 /** The control for what's held, of this kind: it shows first, whatever the value under it has become (ruling 18). A
  * field with live choices keeps its own control, so its choices stay a click away. */
@@ -308,7 +310,9 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
     );  // prettier-ignore
   } else if (held?.kind === "template" || (mode === "fixed" && asText && !hidden && !(held && Held))) {
     // Text with data pills: what's held, or the value, as text and pills (4c-2b).
-    body = frame(textPills, joined(spec.hint, (held?.literal ?? kind === "literal") ? LITERAL_NOTE : null, PILLS_NOTE));
+    // "/" and "＋ Data" work where the person may edit the draft: the note says them only there (#85).
+    const pillsNote = !disabled && drawer.revision !== null ? PILLS_NOTE : PILLS_SEEN;
+    body = frame(textPills, joined(spec.hint, (held?.literal ?? kind === "literal") ? LITERAL_NOTE : null, pillsNote));
   } else if (held && Held) {
     // What's held shows first, before what the value under it has become (a reference, a hidden secret, another
     // mode): it stays visible, and recoverable, until it's applied or discarded (the review of revision 3).

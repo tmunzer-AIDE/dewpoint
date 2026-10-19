@@ -159,6 +159,27 @@ export function DataTree({ field, purpose, onPick, onClose }: {
   const drawer = useDrawer();
   const where = useWhere(field);
   const [find, setFind] = useState("");
+  // The search asked of the server: a quarter second after the last key, an emptied one at once (#85). Moving into
+  // the tree drops one still waiting, so the list the person is in never changes under them; back in the search, what
+  // it holds is asked (the review).
+  const [asked, setAsked] = useState("");
+  const pending = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const drop = () => {
+    if (pending.current !== null) clearTimeout(pending.current);
+    pending.current = null;
+  };
+  useEffect(() => {
+    drop();
+    if (find.trim() === "") setAsked("");
+    else {
+      pending.current = setTimeout(() => {
+        pending.current = null;
+        setAsked(find);
+      }, 250);
+    }
+    return drop;
+  }, [find]);
+  const ask = asked.trim();
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
   const [active, setActive] = useState<string | null>(null);
   const items = useRef(new Map<string, HTMLLIElement>());
@@ -167,7 +188,7 @@ export function DataTree({ field, purpose, onPick, onClose }: {
   const findId = useId();
   // Opened, by "/" or "＋ Data", focus goes to its search: typing finds, ↓ enters the tree, Escape gives focus back.
   useEffect(() => document.getElementById(findId)?.focus(), [findId]);
-  const top = useQuery({ ...scopeQuery(where ?? ({} as Where), find.trim() === "" ? { kind: "top" } : { kind: "find", text: find.trim() }), enabled: where !== null });
+  const top = useQuery({ ...scopeQuery(where ?? ({} as Where), ask === "" ? { kind: "top" } : { kind: "find", text: ask }), enabled: where !== null });
   const titleOf = (key: string) => {
     const node = drawer.steps.find((s) => s.key === key);
     return node?.title ?? null;
@@ -177,7 +198,7 @@ export function DataTree({ field, purpose, onPick, onClose }: {
   const groups = (() => {
     const entries = top.data?.state === "ok" ? top.data.entries : [];
     const roots = entries.filter((e) => e.parent === null);
-    const found = find.trim() !== "";
+    const found = ask !== "";
     const byGroup = new Map<string, { title: string; detail: string | null; rows: ScopeEntry[] }>();
     for (const e of found ? entries : roots) {
       const g = groupOf(e, titleOf);
@@ -253,11 +274,16 @@ export function DataTree({ field, purpose, onPick, onClose }: {
         else if (entry?.children) move(loaded.current.get(entry.path)?.[0]?.path);
         else return;
         break;
-      case "ArrowLeft":
+      case "ArrowLeft": {
+        // To its parent: an item's, or, for a value shown directly under its group (a root's field, a root shown as
+        // itself, a search's result), the group (#85).
+        const group = entry && groups.find(([, g]) => g.rows.some((r) => r.path === entry.path))?.[0];
         if (entry && open.has(entry.path)) toggle(entry.path);
         else if (entry?.parent && items.current.has(entry.parent)) move(entry.parent);
+        else if (group !== undefined && group !== null) move(`group:${group}`);
         else return;
         break;
+      }
       case "Enter":
         if (entry) pick(entry);
         break;
@@ -304,6 +330,9 @@ export function DataTree({ field, purpose, onPick, onClose }: {
             setFind(e.target.value);
             setActive(null);
           }}
+          onFocus={() => {
+            if (find.trim() !== asked.trim()) setAsked(find);
+          }}
           onKeyDown={(e) => {
             if (e.key === "ArrowDown") {
               e.preventDefault();
@@ -324,11 +353,11 @@ export function DataTree({ field, purpose, onPick, onClose }: {
       ) : top.data.state === "unavailable" ? (
         <p className="px-3 text-small text-muted">{top.data.reason}</p>
       ) : groups.length === 0 ? (
-        <p className="px-3 text-small text-muted">{find.trim() === "" ? "No data is available here yet." : "Nothing matches."}</p>
+        <p className="px-3 text-small text-muted">{ask === "" ? "No data is available here yet." : "Nothing matches."}</p>
       ) : (
         <>
         {untyped && purpose === "text" && <TypedPath where={where} pick={pick} />}
-        <ul role="tree" aria-label="Data available here" onKeyDown={onKey} className="max-h-96 overflow-y-auto">
+        <ul role="tree" aria-label="Data available here" onKeyDown={onKey} onFocus={drop} className="max-h-96 overflow-y-auto">
           {groups.map(([key, g]) => (
             <li
               key={key} role="treeitem" aria-level={1} aria-expanded={true} aria-selected={current === `group:${key}`}

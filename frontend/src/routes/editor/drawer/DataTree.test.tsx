@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ScopeEntry } from "../../../lib/data";
@@ -196,5 +196,147 @@ describe("the data tree", () => {
     const rows = within(t).getAllByRole("treeitem").filter((r) => r.getAttribute("aria-level") === "2");
     expect(rows.map((r) => r.querySelector(".font-mono")?.textContent)).toEqual(["site", "now"]);
     expect(screen.queryByRole("textbox", { name: "A path in the trigger" })).toBeNull(); // declared: browsed, not typed
+  });
+});
+
+describe("the data tree's ← and search (#85)", () => {
+  const at = () => (document.activeElement as HTMLElement);
+
+  it("moves with ← from a value shown under its group to the group", async () => {
+    serve();
+    tree();
+    await screen.findByRole("tree");
+    await userEvent.keyboard("{ArrowDown}{ArrowDown}{ArrowDown}{ArrowDown}"); // Trigger, its path, list, results
+    expect(at().dataset.path).toBe(`${OUT}.results`);
+    await userEvent.keyboard("{ArrowLeft}");
+    expect(at().textContent?.startsWith("list")).toBe(true);
+  });
+
+  it("moves with ← from a root shown as itself to its group", async () => {
+    serve();
+    tree();
+    await screen.findByRole("tree");
+    await userEvent.keyboard("{ArrowDown}{ArrowDown}"); // Trigger, the trigger itself
+    expect(at().dataset.path).toBe("trigger");
+    await userEvent.keyboard("{ArrowLeft}");
+    expect(at().textContent?.startsWith("Trigger")).toBe(true);
+  });
+
+  it("moves with ← from a nested value to its parent, as before", async () => {
+    serve();
+    tree();
+    await screen.findByRole("tree");
+    await userEvent.keyboard("{ArrowDown}{ArrowDown}{ArrowDown}{ArrowDown}{ArrowRight}");
+    await screen.findByText("[0]");
+    await userEvent.keyboard("{ArrowRight}{ArrowLeft}");
+    expect(at().dataset.path).toBe(`${OUT}.results`);
+  });
+
+  /** The scope's answers, keeping each search asked. */
+  function serveFinds() {
+    const finds: string[] = [];
+    serve({
+      "GET /api/v1/t/t1/workflows/w1/draft/scope": (q) => {
+        const find = q.get("find");
+        if (find === null) return answer(ENTRIES.filter((e) => e.parent === null || e.parent === OUT));
+        finds.push(find);
+        return answer(ENTRIES.filter((e) => e.name.includes(find)));
+      },
+    });
+    return finds;
+  }
+
+  it("asks once for a search typed quickly, a quarter second after the last key; an emptied one at once", async () => {
+    const finds = serveFinds();
+    tree();
+    const box = await screen.findByRole("searchbox", { name: "Find data" });
+    await screen.findByRole("tree");
+    for (const typed of ["t", "to", "tot", "tota"]) fireEvent.change(box, { target: { value: typed } }); // one key each
+    await waitFor(() => expect(screen.queryByText("This run")).toBeNull());
+    expect(finds).toEqual(["tota"]);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(finds).toEqual(["tota"]);
+    fireEvent.change(box, { target: { value: "" } });
+    expect(screen.getByText("This run")).toBeTruthy(); // the data available here again, at once
+  });
+
+  it("moves into the list shown when ↓ comes before the next answer, and Enter picks what's shown", async () => {
+    const finds = serveFinds();
+    const { onPick } = tree();
+    const box = await screen.findByRole("searchbox", { name: "Find data" });
+    await screen.findByRole("tree");
+    fireEvent.change(box, { target: { value: "tot" } });
+    await waitFor(() => expect(finds).toEqual(["tot"]));
+    await waitFor(() => expect(screen.queryByText("This run")).toBeNull()); // tot's answer, drawn
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] }); // the keys come before the quarter second, however slow
+    try {
+      fireEvent.change(box, { target: { value: "tota" } }); // asked a quarter second later
+      fireEvent.keyDown(box, { key: "ArrowDown" }); // into the list shown: the group
+      fireEvent.keyDown(at(), { key: "ArrowDown" }); // total
+      act(() => void vi.advanceTimersByTime(300));
+      for (let i = 0; i < 5; i++) await act(() => Promise.resolve());
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(finds).toEqual(["tot"]); // the search waiting was dropped: the list the person is in stays
+    expect(at().dataset.path).toBe(`${OUT}.total`);
+    fireEvent.keyDown(at(), { key: "Enter" });
+    expect(onPick).toHaveBeenCalledWith(expect.objectContaining({ path: `${OUT}.total` }));
+  });
+
+  it("shows the last answer, as it was, while a search waits", async () => {
+    serveFinds();
+    tree();
+    const t = await screen.findByRole("tree");
+    const shown = () => within(t).getAllByRole("treeitem").map((i) => i.firstChild?.textContent);
+    const before = shown();
+    fireEvent.change(screen.getByRole("searchbox", { name: "Find data" }), { target: { value: "t" } });
+    expect(shown()).toEqual(before);
+  });
+
+  it("asks the search typed when the person comes back to it, after entering the tree before its answer", async () => {
+    const finds = serveFinds();
+    tree();
+    const box = await screen.findByRole("searchbox", { name: "Find data" });
+    await screen.findByRole("tree");
+    fireEvent.change(box, { target: { value: "total" } });
+    fireEvent.keyDown(box, { key: "ArrowDown" }); // into the list shown at once: the search waiting is dropped
+    await new Promise((r) => setTimeout(r, 300));
+    expect(finds).toEqual([]);
+    await userEvent.click(box);
+    await waitFor(() => expect(finds).toEqual(["total"]));
+    await waitFor(() => expect(screen.queryByText("This run")).toBeNull());
+  });
+
+  it("waits a quarter second after the last key before asking", async () => {
+    const finds = serveFinds();
+    tree();
+    const box = await screen.findByRole("searchbox", { name: "Find data" });
+    await screen.findByRole("tree");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      for (const typed of ["t", "to", "tot", "tota"]) fireEvent.change(box, { target: { value: typed } }); // one key each
+      act(() => void vi.advanceTimersByTime(249));
+      for (let i = 0; i < 5; i++) await act(() => Promise.resolve()); // what an earlier timer would have asked, answered
+      expect(finds).toEqual([]);
+      act(() => void vi.advanceTimersByTime(1));
+    } finally {
+      vi.useRealTimers();
+    }
+    await waitFor(() => expect(finds).toEqual(["tota"]));
+  });
+
+  it("moves with ← from a search's result to its group", async () => {
+    const finds = serveFinds();
+    tree();
+    const box = await screen.findByRole("searchbox", { name: "Find data" });
+    await screen.findByRole("tree");
+    fireEvent.change(box, { target: { value: "tot" } });
+    await waitFor(() => expect(finds).toEqual(["tot"]));
+    await waitFor(() => expect(screen.queryByText("This run")).toBeNull()); // tot's answer, drawn
+    await userEvent.keyboard("{ArrowDown}{ArrowDown}"); // the group, then total
+    expect(at().dataset.path).toBe(`${OUT}.total`);
+    await userEvent.keyboard("{ArrowLeft}");
+    expect(at().textContent?.startsWith("list")).toBe(true);
   });
 });
