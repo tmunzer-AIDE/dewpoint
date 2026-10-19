@@ -3384,3 +3384,12 @@ M109. **The cancel spec's delay follows a step** (CI's e2e job on #118, its thir
       loop. The fixture now runs a transform first; the spec waits 15 s for "running" (the steps are read every 5 s)
       and checks the delay ends "cancelled". A run that starts with a delay still shows it "not reached yet" while it
       sleeps: an engine gap, outside 4e-1b, for the owner to schedule. Cost if wrong: another e2e round.
+
+### 4c-2b's deferred minors, fixed (#85) (built 2026-10-15, signed off 2026-10-19)
+
+The seven minors of 4c-2b's final review (issue #85), on the owner's choice and "go, build it with option A for both".
+The plan, its rulings and its record: `2026-10-15-editor-4c2b-minors.md`. On a value of no known type, the condition
+builder's "is" and "is not" compare as text or as a number: what's typed says which in a comparison made there, until
+the person picks; the builder's pill opens its details (Replace…, Remove); Declassify takes focus and closes on Escape;
+the pills note says "/" and "＋ Data" only where they work; ← in the data tree reaches a value's group; its search asks
+a quarter second after the last key; a browser flow checks "/". The fresh review's findings are all fixed.
