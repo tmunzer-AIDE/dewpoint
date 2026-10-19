@@ -8,14 +8,15 @@ import { useEffect, useId, useRef, useState } from "react";
 import { Button } from "../../../components/Button";
 import { controlClass } from "../../../components/Field";
 import {
-  isGroup, NO_VALUE, numeric, OP_WORDS, opsFor, read, valueProblem, write, type Condition, type Group, type Literal,
-  type Op, type Row,
+  eitherKind, isGroup, kindOfText, NO_VALUE, numeric, OP_WORDS, opsFor, read, valueProblem, write, type Condition, type Group,
+  type Literal, type Op, type Row,
 } from "../../../lib/builder";  // prettier-ignore
 import { formula, formulaOf, kindOf } from "../../../lib/config";
 import type { ScopeEntry } from "../../../lib/data";
 import { useDrawer } from "./context";
 import { DataTree } from "./DataTree";
 import { PillButton, usePillEntry } from "./Pill";
+import { PillDetails } from "./PillDetails";
 
 const EMPTY: Condition = { match: "all", items: [] };
 
@@ -55,24 +56,69 @@ function Match({ label, match, disabled, onChange }: {
   );  // prettier-ignore
 }
 
-function RowView({ row, label, field, disabled, onChange, onRemove }: {
-  row: Row; label: string; field: string; disabled: boolean; onChange: (r: Row) => void; onRemove: () => void;
+const EQUALITY: ReadonlySet<Op> = new Set(["is", "is_not"]);
+
+/** "is" and "is not" on a value that may be text or a number (#85): in a comparison made here, what's typed says which,
+ * until the person picks one; a pick, and a comparison read back, keep their kind. */
+function CompareAs({ label, kind, disabled, onChange }: {
+  label: string; kind: Literal["kind"]; disabled: boolean; onChange: (kind: Literal["kind"]) => void;
+}) {  // prettier-ignore
+  return (
+    <div role="group" aria-label={`Compare as, ${label}`} className="inline-flex gap-px overflow-hidden rounded-lg border border-line-strong bg-line-strong">
+      {(["text", "number"] as const).map((k) => (
+        <button
+          key={k} type="button" aria-pressed={kind === k} disabled={disabled} onClick={() => kind !== k && onChange(k)}
+          className={`min-h-8 px-3 text-small disabled:bg-disabled-bg disabled:text-muted ${kind === k ? "bg-accent-soft font-semibold text-accent-ink" : "bg-surface text-ink enabled:hover:bg-surface-hover"}`}
+        >
+          as {k}
+        </button>
+      ))}
+    </div>
+  );  // prettier-ignore
+}
+
+type Opened = "details" | "tree";
+
+function RowView({ row, label, field, disabled, follows, opened, onOpened, onPicked, onChange, onRemove, onReplace }: {
+  row: Row; label: string; field: string; disabled: boolean; follows: boolean; opened: Opened | null;
+  onOpened: (o: Opened | null) => void; onPicked: () => void; onChange: (r: Row) => void; onRemove: () => void;
+  onReplace: (entry: ScopeEntry) => void;
 }) {  // prettier-ignore
   const { entry, shown } = usePillEntry(row.path, field);
+  // The previous revision's facts while a save's are asked: the choice stays, and what's typed follows (the review).
+  const facts = entry ?? shown;
+  // Its pill opens its details, as a pill in text does, without a default: the comparison's guards decide missing data
+  // (#85). Replace… opens the tree here; closed, focus goes back to the pill. The builder keeps what's open.
+  const pill = useRef<HTMLButtonElement | null>(null);
+  const back = () => {
+    onOpened(null);
+    pill.current?.focus();
+  };
   const ops = entry ? opsFor(entry.types, entry.format, entry.missing || entry.nullable || row.guards.length > 0) : [row.op];
   const problem = rowProblem(row);
   const note = noteOf(row);
   const problemId = useId();
+  const either = facts !== null && eitherKind(facts.types) && EQUALITY.has(row.op) && row.value !== null;
   return (
     <div role="group" aria-label={label} className="flex flex-col gap-1.5 border-t border-line py-2.5">
-      <div><PillButton pill={{ ref: row.path }} entry={shown} index={0} onOpen={() => undefined} /></div>
+      <div>
+        <PillButton
+          pill={{ ref: row.path }} entry={shown} index={0} buttonRef={(el) => void (pill.current = el)}
+          onOpen={() => onOpened(opened === "details" ? null : "details")}
+        />
+      </div>
       <div className="flex flex-wrap items-center gap-2">
         <select
           aria-label={`Comparison, ${label}`} value={row.op} disabled={disabled}
           onChange={(e) => {
             const op = e.target.value as Op;
-            const kind = (entry && numeric(entry.types)) || ["more", "less", "at_least", "at_most"].includes(op) ? "number" : "text";
-            const value: Literal | null = NO_VALUE.has(op) ? null : { kind, text: row.value?.text ?? "" };
+            const text = row.value?.text ?? "";
+            // To "is" or "is not": a picked kind stays; a comparison made here follows what's typed.
+            const kind =
+              (facts && numeric(facts.types)) || ["more", "less", "at_least", "at_most"].includes(op) ? "number"
+              : facts && eitherKind(facts.types) && EQUALITY.has(op) ? (!follows && row.value ? row.value.kind : kindOfText(text))
+              : "text";  // prettier-ignore
+            const value: Literal | null = NO_VALUE.has(op) ? null : { kind, text };
             onChange({ ...row, op, value });
           }}
           className={`${controlClass(false)} w-auto`}
@@ -83,16 +129,73 @@ function RowView({ row, label, field, disabled, onChange, onRemove }: {
           <input
             type="text" aria-label={`Value, ${label}`} value={row.value.text} disabled={disabled} spellCheck={false}
             aria-invalid={problem !== null} aria-describedby={problem ? problemId : undefined}
-            onChange={(e) => onChange({ ...row, value: { kind: row.value!.kind, text: e.target.value } })}
+            onChange={(e) => {
+              const text = e.target.value;
+              onChange({ ...row, value: { kind: either && follows ? kindOfText(text) : row.value!.kind, text } });
+            }}
             className={`${controlClass(problem !== null)} w-auto min-w-0 flex-1`}
+          />
+        )}
+        {either && (
+          <CompareAs
+            label={label} kind={row.value!.kind} disabled={disabled}
+            onChange={(kind) => {
+              onPicked();
+              onChange({ ...row, value: { kind, text: row.value!.text } });
+            }}
           />
         )}
         {!disabled && <Button size="sm" aria-label={`Remove ${label.toLowerCase()}`} onClick={onRemove}>×</Button>}
       </div>
       {problem && <p id={problemId} className="text-small text-danger">{problem}</p>}
       {note && <p className="text-meta text-muted">{note}</p>}
+      {opened === "details" && (
+        <PillDetails
+          field={field} pill={{ ref: row.path }} defaults={false} onDefault={() => undefined}
+          onReplace={() => onOpened("tree")} onRemove={onRemove} onClose={back}
+        />
+      )}
+      {opened === "tree" && (
+        <DataTree
+          field={field} purpose="condition" onClose={back}
+          onPick={(picked) => {
+            onOpened(null);
+            onReplace(picked);
+          }}
+        />
+      )}
     </div>
   );  // prettier-ignore
+}
+
+/** The comparison on another value (#85): its operator and value kept when the new value takes that operator, else
+ * started again on it, as a new comparison is. Where the new value may be either, its kind stays. */
+function replaced(row: Row, entry: ScopeEntry): Row {
+  const f = entry.formula!;
+  if (!opsFor(entry.types, entry.format, entry.missing || entry.nullable).includes(row.op)) return rowFor(entry);
+  const was = row.value;
+  const kind: Literal["kind"] | null =
+    was === null ? null
+    : numeric(entry.types) || ["more", "less", "at_least", "at_most"].includes(row.op) ? "number"
+    : eitherKind(entry.types) && EQUALITY.has(row.op) ? was.kind
+    : "text";  // prettier-ignore
+  return { ...row, path: entry.path, guards: f.guards, nullTest: f.null_test, value: was === null || kind === null ? null : { kind, text: was.text } };
+}
+
+/** The places after a removal (item `i`, or row `k` of group `i`): the one removed goes, those after it move up. */
+function shifted(places: ReadonlySet<string>, i: number, k?: number): Set<string> {
+  const out = new Set<string>();
+  for (const place of places) {
+    const [a, b] = place.split(".").map(Number) as [number, number | undefined];
+    if (k === undefined) {
+      if (a === i) continue;
+      out.add(a < i ? place : b === undefined ? `${a - 1}` : `${a - 1}.${b}`);
+    } else {
+      if (a === i && b === k) continue;
+      out.add(a === i && b !== undefined && b > k ? `${a}.${b - 1}` : place);
+    }
+  }
+  return out;
 }
 
 /** A comparison of an entry picked from the tree, with its first operator. */
@@ -110,8 +213,20 @@ export function ConditionBuilder({ spec, value, disabled, onChange }: {
   const drawer = useDrawer();
   const held = drawer.held("condition", spec.pointer);
   const c: Condition = held?.condition ?? conditionOf(value) ?? EMPTY;
-  // Where a picked comparison goes: the top, a new group (whose first it is: an empty group writes nothing), a group.
-  const [adding, setAdding] = useState<number | "top" | "group" | null>(null);
+  // What's open, one at a time (the review of #85): the tree where a picked comparison goes (the top, a new group whose
+  // first it is, a group), or a comparison's details or its Replace tree, by its place ("2", "1.3"). A removal closes it.
+  const [panel, setPanel] = useState<{ adding: number | "top" | "group" } | { at: string; opened: Opened } | null>(null);
+  const adding = panel !== null && "adding" in panel ? panel.adding : null;
+  const setAdding = (at: number | "top" | "group") => setPanel({ adding: at });
+  // The comparisons made here, by place: in those, what's typed says text or a number until the person picks (#85). A
+  // removal moves the places after it; a condition changed from elsewhere (an undo, Formula) starts again with none.
+  const following = useRef(new Set<string>());
+  const written = useRef<string | null | undefined>(null); // null: nothing drawn yet
+  const now = write(c);
+  if (written.current !== now) {
+    following.current = new Set();
+    written.current = now;
+  }
   const fixed = typeof value === "boolean" ? value : null;
   // Where focus goes once the change is drawn, never to <body> (the final review): the button that opened the tree,
   // after Escape; a picked comparison's operator; "＋ Condition" after a removal. Tried twice, then dropped, so a
@@ -132,6 +247,7 @@ export function ConditionBuilder({ spec, value, disabled, onChange }: {
   const put = (next: Condition, typed: boolean) => {
     const problem = next.items.flatMap((x) => (isGroup(x) ? x.rows : [x])).map(rowProblem).find((p) => p !== null) ?? null;
     const text = write(next);
+    written.current = text; // its own change: the places it follows stay
     const why = problem ?? onChange(text === undefined ? undefined : formula(text), typed);
     if (why === null) drawer.release("condition", spec.pointer);
     else drawer.hold("condition", spec.pointer, { path: spec.path, label: spec.label, text: text ?? "", condition: next, why, entry: spec.entry });
@@ -140,8 +256,17 @@ export function ConditionBuilder({ spec, value, disabled, onChange }: {
     put({ ...c, items: c.items.map((x, j) => (j === i ? item : x)) }, typed);
   const removeItem = (i: number) => {
     focusOn('[data-add="top"]');
+    setPanel(null);
+    following.current = shifted(following.current, i);
     put({ ...c, items: c.items.filter((_, j) => j !== i) }, false);
   };
+  /** A comparison's row, with what the builder keeps of it: whether it follows what's typed, and what's open. */
+  const rowProps = (place: string) => ({
+    follows: following.current.has(place),
+    opened: panel !== null && "at" in panel && panel.at === place ? panel.opened : null,
+    onOpened: (o: Opened | null) => setPanel(o === null ? null : { at: place, opened: o }),
+    onPicked: () => void following.current.delete(place),
+  });
   const text = write(c);
 
   return (
@@ -164,11 +289,18 @@ export function ConditionBuilder({ spec, value, disabled, onChange }: {
               </div>
               {x.rows.map((r, k) => (
                 <RowView
-                  key={k} row={r} label={`Condition ${i + 1}.${k + 1}`} field={spec.pointer} disabled={disabled}
+                  key={k} row={r} label={`Condition ${i + 1}.${k + 1}`} field={spec.pointer} disabled={disabled} {...rowProps(`${i}.${k}`)}
                   onChange={(next) => setItem(i, { ...x, rows: x.rows.map((y, m) => (m === k ? next : y)) }, true)}
+                  onReplace={(entry) => {
+                    focusOn(comparison(`Condition ${i + 1}.${k + 1}`));
+                    setItem(i, { ...x, rows: x.rows.map((y, m) => (m === k ? replaced(r, entry) : y)) });
+                  }}
                   onRemove={() => {
                     // Its only comparison gone, the group goes too (an empty group writes nothing): "＋ Condition" below.
-                    focusOn(x.rows.length > 1 ? `[data-add="${i}"]` : '[data-add="top"]');
+                    if (x.rows.length === 1) return removeItem(i);
+                    focusOn(`[data-add="${i}"]`);
+                    setPanel(null);
+                    following.current = shifted(following.current, i, k);
                     setItem(i, { ...x, rows: x.rows.filter((_, m) => m !== k) });
                   }}
                 />
@@ -177,8 +309,12 @@ export function ConditionBuilder({ spec, value, disabled, onChange }: {
             </div>
           ) : (
             <RowView
-              key={i} row={x} label={`Condition ${i + 1}`} field={spec.pointer} disabled={disabled}
+              key={i} row={x} label={`Condition ${i + 1}`} field={spec.pointer} disabled={disabled} {...rowProps(`${i}`)}
               onChange={(next) => setItem(i, next, true)} onRemove={() => removeItem(i)}
+              onReplace={(entry) => {
+                focusOn(comparison(`Condition ${i + 1}`));
+                setItem(i, replaced(x, entry));
+              }}
             />
           ),
         )}
@@ -194,22 +330,25 @@ export function ConditionBuilder({ spec, value, disabled, onChange }: {
           field={spec.pointer} purpose="condition"
           onClose={() => {
             focusOn(`[data-add="${adding}"]`);
-            setAdding(null);
+            setPanel(null);
           }}
           onPick={(entry) => {
             const row = rowFor(entry);
             const at = adding;
-            setAdding(null);
+            setPanel(null);
             if (at === "top") {
               focusOn(comparison(`Condition ${c.items.length + 1}`));
+              following.current.add(`${c.items.length}`);
               put({ ...c, items: [...c.items, row] }, false);
             } else if (at === "group") {
               focusOn(comparison(`Condition ${c.items.length + 1}.1`));
+              following.current.add(`${c.items.length}.0`);
               put({ ...c, items: [...c.items, { match: "any", rows: [row] }] }, false);
             } else {
               const g = c.items[at];
               if (g && isGroup(g)) {
                 focusOn(comparison(`Condition ${at + 1}.${g.rows.length + 1}`));
+                following.current.add(`${at}.${g.rows.length}`);
                 setItem(at, { ...g, rows: [...g.rows, row] });
               }
             }

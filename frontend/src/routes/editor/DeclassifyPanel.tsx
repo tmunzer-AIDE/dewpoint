@@ -3,7 +3,7 @@
 // sensitive data, which make something visible in a run's history, and the ones listed as acceptable. Nothing is listed
 // for the person: each is chosen, with what it reveals said first, as the server says it. A draft keeps its entries;
 // publishing them needs `workflow.declassify` (the server answers).
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Button } from "../../components/Button";
 import { fieldLabel } from "../../lib/schemaForm";
 import type { Diagnostic, GraphDoc, NodeType, Validation } from "../../lib/workflows";
@@ -49,6 +49,9 @@ export function DeclassifyPanel({ doc, types, check, editable, onDeclassify, onR
   doc: GraphDoc; types: Map<string, NodeType>; check: Validation | null; editable: boolean;
   onDeclassify: (site: Site) => void; onRemove: (index: number) => void; onGo: (site: Site) => void; onClose: () => void;
 }) {  // prettier-ignore
+  // Its heading takes focus as it opens, as the other panels' do: Escape then closes it at once (the review of #85).
+  const heading = useRef<HTMLHeadingElement>(null);
+  useEffect(() => heading.current?.focus(), []);
   const labelOf = (site: Site): string => {
     const node = findNode(doc, site.node);
     if (!node) return "A step no longer in the draft";
@@ -69,10 +72,20 @@ export function DeclassifyPanel({ doc, types, check, editable, onDeclassify, onR
     return hit ? `Reveals ${hit.reveals}.` : null;
   };
   return (
-    <aside aria-labelledby="declassify-title" className={`${SIDE} flex flex-col gap-4 overflow-y-auto p-5`}>
+    <aside
+      aria-labelledby="declassify-title"
+      onKeyDown={(e) => {
+        // Escape closes it, as it closes the other panels (#85).
+        if (e.key === "Escape") {
+          e.stopPropagation();
+          onClose();
+        }
+      }}
+      className={`${SIDE} flex flex-col gap-4 overflow-y-auto p-5`}
+    >
       <div className="flex items-start justify-between gap-2">
         <div className="flex flex-col">
-          <h2 id="declassify-title" tabIndex={-1} className="text-body-lg font-semibold outline-none">Declassify</h2>
+          <h2 id="declassify-title" ref={heading} tabIndex={-1} className="text-body-lg font-semibold outline-none">Declassify</h2>
           <span className="text-small text-muted">Workflow settings</span>
         </div>
         <Button size="md" onClick={onClose}>Close</Button>

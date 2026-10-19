@@ -77,6 +77,26 @@ describe("text with data pills", () => {
     expect(await screen.findByRole("dialog", { name: "Insert data" })).toBeTruthy();
   });
 
+  it("leaves focus in the text until the browser has typed the /: the tree opens after it (#85, seen in a browser)", async () => {
+    showFields(NOTE, { steps, config: { message: "at" } });
+    const text = screen.getByLabelText<HTMLInputElement>("Message");
+    text.focus();
+    text.setSelectionRange(2, 2);
+    // A browser's order: keydown, what runs before its default action (microtasks, and what React flushes with them),
+    // then the "/" typed into whatever has focus then.
+    fireEvent.keyDown(text, { key: " " });
+    fireEvent.change(text, { target: { value: "at " } });
+    text.setSelectionRange(3, 3);
+    fireEvent.keyDown(text, { key: "/" });
+    await act(() => Promise.resolve());
+    expect(document.activeElement).toBe(text); // the "/" goes here, never into the tree's search
+    fireEvent.change(text, { target: { value: "at /" } });
+    const find = await screen.findByRole("searchbox", { name: "Find data" });
+    await waitFor(() => expect(document.activeElement).toBe(find));
+    expect(find).toHaveProperty("value", "");
+    expect(text.value).toBe("at /");
+  });
+
   it("replaces the / typed to ask for data with the pill picked", async () => {
     const f = showFields(NOTE, { steps });
     await userEvent.type(screen.getByLabelText("Message"), "at /");

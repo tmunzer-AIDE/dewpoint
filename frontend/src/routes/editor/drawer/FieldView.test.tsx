@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { screen, within } from "@testing-library/react";
+import { cleanup, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { formula, literal } from "../../../lib/config";
@@ -41,6 +41,18 @@ const HOLDER = typeWith({
 });  // prettier-ignore
 
 const typedValues = () => [...document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input, textarea")].map((f) => f.value);
+
+it("says how to insert data only where it can be inserted: never to a viewer, nor in a version's view (#85)", () => {
+  const hint = () => document.getElementById(screen.getByLabelText("Name").getAttribute("aria-describedby")!.split(" ")[0]!)!.textContent;
+  showFields(PLAIN);
+  expect(hint()).toBe("Shown to people. Press / or ＋ Data to insert data from earlier steps. A dashed pill may be missing when this runs: give it a default.");
+  cleanup();
+  showFields(PLAIN, { editable: false });
+  expect(hint()).toBe("Shown to people. A dashed pill may be missing when this runs.");
+  cleanup();
+  showFields(PLAIN, { revision: null }); // a version's view
+  expect(hint()).toBe("Shown to people. A dashed pill may be missing when this runs.");
+});
 
 it("labels a field by its title, its hint and the server's problems described by it", () => {
   showFields(PLAIN, { problems: [problem("/name", "Too short.")] });

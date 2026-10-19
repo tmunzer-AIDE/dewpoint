@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from "vitest";
-import { NO_VALUE, OP_WORDS, opsFor, read, rowCel, valueProblem, write, type Condition, type Op, type Row } from "./builder";
+import { NO_VALUE, OP_WORDS, eitherKind, kindOfText, opsFor, read, rowCel, valueProblem, write, type Condition, type Op, type Row } from "./builder";
 import type { Guard } from "./data";
 
 const g = (kind: Guard["kind"], path: string, size: number | null = null): Guard => ({ kind, path, size });
@@ -179,5 +179,17 @@ describe("the condition builder's formulas", () => {
     expect(valueProblem({ kind: "number", text: "1.5" }, "index")).toBe("The loop's position is a whole number.");
     expect(valueProblem({ kind: "text", text: "a\ud800b" }, "x")).not.toBeNull();
     expect(valueProblem({ kind: "text", text: "emoji 😀" }, "x")).toBeNull();
+  });
+});
+
+describe("a value of no known type (#85)", () => {
+  it("may be a number or something else when it has no type, or a number among other types", () => {
+    expect([[], ["integer", "string"], ["null", "number", "boolean"]].map(eitherKind)).toEqual([true, true, true]);
+    expect([["string"], ["integer", "null"], ["integer", "number"], ["array", "string"], ["null"]].map(eitherKind)).toEqual([false, false, false, false, false]);
+  });
+
+  it("reads typed text as a number only as JSON writes one", () => {
+    expect(["3", "-2", "0.5", "1e3"].map(kindOfText)).toEqual(["number", "number", "number", "number"]);
+    expect(["", "HQ", "007", "+5", ".5", "3a", " ", "3 ", " 3"].map(kindOfText)).toEqual(Array(9).fill("text")); // every space kept
   });
 });

@@ -706,6 +706,32 @@ test("a text field takes a data pill from the tree, and the pill's details say w
   await expect(page.getByRole("button", { name: /^trigger › site, trigger\.site/ })).toBeVisible();
 });
 
+// #85: "/" opens the tree in a microtask, so the browser types the "/" into the field first; a pick replaces it.
+test("\"/\" in a text field opens the tree over it: a pick replaces it, and Escape keeps it", async ({ page }) => {
+  await importFile(page, "Slash", "e2e/fixtures/data.dewpoint.json");
+  await page.getByRole("button", { name: /^stop_it, Fail/ }).click();
+  const text = page.getByLabel("Message", { exact: true });
+  await text.click();
+  await text.press("End");
+  const before = await text.inputValue();
+  await text.pressSequentially(" /");
+  const tree = page.getByRole("tree", { name: "Data available here" });
+  await expect(tree.getByText("site", { exact: true })).toBeVisible({ timeout: 10_000 });
+  const find = page.getByRole("searchbox", { name: "Find data" });
+  await expect(find).toBeFocused();
+  await expect(find).toHaveValue(""); // the "/" went into the field, never into the search
+  await expect(text).toHaveValue(`${before} /`);
+  await tree.getByText("site", { exact: true }).click();
+  await expect(page.getByRole("button", { name: /^trigger › site, trigger\.site/ })).toBeVisible();
+  await expect(text).toHaveValue(`${before} `); // the pill where the "/" was, the "/" gone
+  await page.keyboard.type(" /"); // after the pill
+  await expect(tree).toBeVisible();
+  await expect(find).toBeFocused(); // Escape goes to the tree, not the field (which would close the drawer)
+  await page.keyboard.press("Escape");
+  await expect(tree).toBeHidden();
+  await expect(page.locator("input:focus")).toHaveValue(/ \/$/); // Escape keeps the "/", as typed
+});
+
 test("the builder writes a condition the server checks clean, and opens it again", async ({ page }) => {
   await importFile(page, "Builder", "e2e/fixtures/data.dewpoint.json");
   await page.getByRole("button", { name: /^check, If/ }).click();

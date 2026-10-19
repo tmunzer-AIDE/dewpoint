@@ -75,9 +75,11 @@ export function TextPills({ spec, value, literal, id, describedBy, invalid, disa
     const at = input.selectionStart ?? 0;
     const collapsed = at === (input.selectionEnd ?? at);
     if (e.key === "/" && collapsed && asksForData(input.value, at) && !disabled) {
-      // The "/" is typed as text: the tree opens over it, and a pick replaces it (Escape keeps it, as typed).
+      // The "/" is typed as text: the tree opens over it, and a pick replaces it (Escape keeps it, as typed). It opens in
+      // the next task, once the browser has typed the "/": opened in a microtask, React draws it with the keydown, and
+      // the tree's search takes focus, and the "/", first (seen in a browser, #85).
       panel.caret.current = { segment, offset: at + 1 };
-      queueMicrotask(() => panel.open({ kind: "tree", at: { segment, offset: at + 1 }, slash: true }));
+      setTimeout(() => panel.open({ kind: "tree", at: { segment, offset: at + 1 }, slash: true }), 0);
     } else if (e.key === "ArrowLeft" && collapsed && at === 0 && segment > 0) {
       e.preventDefault();
       pills.current[segment - 1]?.focus();

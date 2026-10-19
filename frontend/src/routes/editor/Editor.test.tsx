@@ -2046,6 +2046,21 @@ it("offers a switch case's decision again when its entry doesn't name the case's
   expect((put.body as GraphDoc).settings?.declassify).toEqual([{ node: "id-pick", field: "/cases/1/when", port: "b" }]);
 });
 
+it("goes back to the toolbar's Declassify when Escape closes its panel (#85)", async () => {
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: draftWith("a") }));
+  answers.set(`POST ${BASE}/validate`, () =>
+    json({
+      draft_revision: 1, valid: false, expressions: [], conditional_steps: [], taint: { sites: [{ node: "id-a", field: "/x" }], declassified: [] },
+      diagnostics: [{ code: "taint.undeclassified", severity: "error", node: "id-a", field: "/x", message: "This decision reads sensitive data, so the branch taken becomes visible.", fix: null }],
+    }));  // prettier-ignore
+  await show();
+  await userEvent.click(await screen.findByRole("button", { name: "Declassify" }));
+  await screen.findByRole("complementary", { name: "Declassify" });
+  await userEvent.keyboard("{Escape}"); // at once: the panel took focus as it opened
+  expect(screen.queryByRole("complementary", { name: "Declassify" })).toBeNull();
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Declassify" })));
+});
+
 it("lands on Versions when Declassify closes after its last entry is removed (the final review)", async () => {
   answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: { ...draftWith("a"), settings: { declassify: [{ node: "id-a", field: "/x" }] } } }));
   answers.set(`POST ${BASE}/validate`, () =>
