@@ -221,3 +221,13 @@ The owner, at the checkpoint: "1. sign-off 2. yes 3. yes 4. yes": rulings 1 to 7
 the full suite (the backend's isn't run: no backend file changes); push and a pull request. Main had moved on since
 the build (13 commits, 4e-1 among them): the branch is rebased onto it (00cbbad9; the ledger's end merged by hand)
 and checked again before the push: lint, typecheck, `check:api`, 1,327 tests (twice) and the build pass.
+
+## CI on PR #129 (2026-10-19)
+
+The new browser flow (ruling 7) failed in CI's e2e job, its first run in a real browser: the "/" went into the tree's
+search, not the text field (`Received: "/"`), the bug 4c-2b's final review suspected. The tree opened in a microtask
+after the keydown; React drew that update with the keydown's own (discrete) priority, effects included, so the tree's
+search took focus before the browser typed the "/". It now opens in the next task (`setTimeout(…, 0)`), once the "/"
+is in the field. A unit test emulates a browser's order (keydown, what runs before its default action, then the
+character typed where focus is): it failed as CI did, and passes now; a mutant back to the microtask is killed. The
+frontend's whole run: lint, typecheck, 1,328 tests (twice), build pass. The other 48 browser flows passed.
