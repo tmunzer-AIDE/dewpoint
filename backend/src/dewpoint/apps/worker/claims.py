@@ -196,6 +196,20 @@ def _built(index: Index) -> Secrets:
     return Secrets(index, Matcher(index.strings), frozenset(index.strings))
 
 
+def _kept(key: tuple[str, str], held: Secrets) -> None:
+    cached = SECRETS.get(key)
+    if cached is None or cached.index.version < held.index.version:  # never an older version over a newer
+        SECRETS[key] = held
+
+
+def _ended(key: tuple[str, str], building: tuple[Any, ...], build: "asyncio.Future[Secrets]") -> None:
+    """A build that ended: its automaton cached before the build is let go, in one step. The boundaries waiting for
+    it resume a loop iteration later, and a boundary that ran in between found neither and built it again."""
+    if not build.cancelled() and build.exception() is None:
+        _kept(key, build.result())
+    _BUILDING.pop(building, None)
+
+
 async def secrets_for(index: Index, tenant: str, root: str) -> Secrets:
     """`index` (just read or extended) with its automaton: built once per version, in a worker thread, and cached
     with it (§3.7; the review's I3: at the index's bounds a build takes about a second, which on the event loop
@@ -208,11 +222,9 @@ async def secrets_for(index: Index, tenant: str, root: str) -> Secrets:
         build = _BUILDING.get(building)
         if build is None:
             build = _BUILDING[building] = asyncio.ensure_future(asyncio.to_thread(_built, index))
-            build.add_done_callback(lambda _: _BUILDING.pop(building, None))
+            build.add_done_callback(functools.partial(_ended, key, building))
         held = await asyncio.shield(build)  # a boundary cancelled meanwhile leaves the build to the others
-        cached = SECRETS.get(key)
-        if cached is None or cached.index.version < held.index.version:  # never an older version over a newer
-            SECRETS[key] = held
+        _kept(key, held)
     if key in SECRETS:
         SECRETS.move_to_end(key)
     while len(SECRETS) > SECRETS_CACHE:
