@@ -67,3 +67,18 @@ if (typeof Blob.prototype.text !== "function") {
     },
   });
 }
+// Nor arrayBuffer(): a CSV file is sent as its bytes (the run form, 4e-2).
+if (typeof Blob.prototype.arrayBuffer !== "function") {
+  Object.defineProperty(Blob.prototype, "arrayBuffer", {
+    configurable: true,
+    writable: true,
+    value(this: Blob): Promise<ArrayBuffer> {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as ArrayBuffer);
+        reader.onerror = () => reject(reader.error ?? new Error("the file couldn't be read"));
+        reader.readAsArrayBuffer(this);
+      });
+    },
+  });
+}
