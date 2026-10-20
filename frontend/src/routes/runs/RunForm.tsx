@@ -202,7 +202,7 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, onStarted, o
           </p>
         )}
         <div className="flex flex-wrap justify-end gap-2">
-          <Button onClick={onClose}>Cancel</Button>
+          <Button onClick={() => dialog.current?.close()}>Cancel</Button>
           <Button type="submit" variant={mode === "live" ? "live-outline" : "simulate"} disabled={form === null || sending}>
             {mode === "live" ? "Start the live run" : "◌ Start the simulation"}
           </Button>

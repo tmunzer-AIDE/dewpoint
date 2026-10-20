@@ -8,6 +8,7 @@ import { onAnnounce } from "../../lib/announce";
 import type { Run, RunSteps } from "../../lib/runs";
 import { FAILED_GRAPH, FAILED_RUN, FAILED_STEPS, LOOP_GRAPH, LOOP_STEPS, LOOP_TOTAL, RUN_TYPES, attempt, local, loopInstance } from "../../test/runs";
 import type { CanvasProps } from "../editor/Canvas";
+import { landOn } from "./landing";
 import { RunPage } from "./RunPage";
 
 // The canvas stands in as the editor's tests have it: React Flow isn't drawn in jsdom. It shows what it was given.
@@ -99,6 +100,14 @@ it("names the run by its workflow and its short id, with the way back to Runs (�
   expect(screen.getByText("run 4a2b17e0")).toBeTruthy();
   await userEvent.click(screen.getByRole("link", { name: "← Runs" }));
   expect(router.state.location.pathname).toBe("/t/t1/runs");
+});
+
+it("focuses its name when a start landed on it, once it's read (the run form design §5.2)", async () => {
+  answers.set(`/api/v1/t/t1/runs/${RUN.id}`, json(RUN));
+  landOn(RUN.id);
+  show();
+  const heading = await screen.findByRole("heading", { level: 1, name: "AP offline triage" });
+  await vi.waitFor(() => expect(document.activeElement).toBe(heading));
 });
 
 it("says a run that isn't kept any more, or never was, is neither, with Back to Runs (§5.4; the RunOther board)", async () => {

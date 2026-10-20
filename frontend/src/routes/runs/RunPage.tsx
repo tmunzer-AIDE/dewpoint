@@ -33,6 +33,7 @@ import { useCanvasNav } from "../editor/useCanvasNav";
 import { RunBanner, RunBar } from "./RunBar";
 import { LoopResult, SeveralResult, StepResult } from "./RunResult";
 import { StartDrawer } from "./StartDrawer";
+import { useLanded } from "./landing";
 import { triggerOf, triggerWords } from "./trigger";
 import { useCancel } from "./useCancel";
 import { useRunReads } from "./useRunReads";
@@ -96,6 +97,7 @@ export function RunPage({ tenantId, runId: id }: { tenantId: string; runId: stri
   const types = useQuery(nodeTypesQuery);
   const tenant = useQuery(tenantQuery(tenantId));
   const cancel = useCancel(tenantId, id, r?.mode === "live");
+  useLanded(id, r !== undefined); // a run just started: its name takes focus once read (4e-2)
   // The graph it ran: its version's, or the draft a draft simulation froze for it. Neither ever changes.
   const version = useQuery({ ...versionQuery(tenantId, r?.workflow_id ?? "", r?.version_id ?? ""), enabled: !!r?.version_id });
   const snapshot = useQuery({ ...draftSnapshotQuery(tenantId, r?.workflow_id ?? "", r?.draft_snapshot_id ?? ""), enabled: !!r?.draft_snapshot_id });

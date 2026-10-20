@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // The workflows list (screen 1a; 4b rulings 4-7): each workflow's state at a glance, filters, the enable switch for
 // publishers, and export. No delete: no route deletes a workflow. 4c-3b adds the Trigger column (ruling 68: what starts
-// it besides a person) and, under a workflow's name, why it needs attention.
+// it besides a person) and, under a workflow's name, why it needs attention. 4e-2 adds Start… on each row that can start,
+// for the roles that hold run.start: the run form, then the new run's page.
 import * as Dropdown from "@radix-ui/react-dropdown-menu";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
@@ -15,11 +16,14 @@ import { Table, Td, Th } from "../components/Table";
 import { announce } from "../lib/announce";
 import { ApiError, client, ok } from "../lib/client";
 import { downloadJson, fileName } from "../lib/download";
+import { canStart, startable } from "../lib/runForm";
 import { RUN_STATUS, type Tone } from "../lib/runStatus";
 import { useDocumentTitle } from "../lib/title";
 import { attentionWords, triggerColumn } from "../lib/triggers";
 import { canEdit, canPublish, notPortable, since, tenantQuery, workflowsQuery, type PortableProblem, type WorkflowRow } from "../lib/workflows";
 import { NewWorkflow } from "./NewWorkflow";
+import { useLand } from "./runs/landing";
+import { LazyRunForm } from "./runs/LazyRuns";
 
 type Filter = "all" | "published" | "unpublished" | "attention";
 
@@ -84,6 +88,8 @@ export function WorkflowsPage({ tenantId, startNew = false }: { tenantId: string
   const [text, setText] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(startNew);
+  const [starting, setStarting] = useState<WorkflowRow | null>(null);
+  const land = useLand(tenantId);
 
   function closeNew() {
     setCreating(false);
@@ -133,6 +139,7 @@ export function WorkflowsPage({ tenantId, startNew = false }: { tenantId: string
   const named = rows.filter((w) => w.name.toLowerCase().includes(text.trim().toLowerCase()));
   const shown = named.filter(FILTERS.find((f) => f.value === filter)!.keep);
   const publisher = canPublish(tenant.data?.role);
+  const starter = canStart(tenant.data?.role);
 
   return (
     <section className="flex flex-col gap-4 p-6">
@@ -202,28 +209,33 @@ export function WorkflowsPage({ tenantId, startNew = false }: { tenantId: string
                     <span className="text-small">{w.enabled ? "On" : "Off"}</span>
                   )}
                 </Td>
-                <Td className="text-right">
-                  <Dropdown.Root modal={false}>
-                    <Dropdown.Trigger aria-label={`Actions for ${w.name}`} className="inline-grid min-h-8 place-items-center rounded-md border border-line-strong bg-surface px-2 text-small text-ink hover:bg-surface-hover">
-                      <MoreIcon />
-                    </Dropdown.Trigger>
-                    <Dropdown.Portal>
-                      <Dropdown.Content align="end" sideOffset={4} className="min-w-40 rounded-lg border border-line bg-surface p-1 shadow-dialog">
-                        <Dropdown.Item
-                          onSelect={() => void navigate({ to: "/t/$tenantId/workflows/$workflowId", params: { tenantId, workflowId: w.id } })}
-                          className="cursor-pointer rounded-md px-3 py-2 text-body data-[highlighted]:bg-accent-soft data-[highlighted]:text-accent-ink"
-                        >
-                          Open
-                        </Dropdown.Item>
-                        <Dropdown.Item
-                          onSelect={() => void exportOne(w)}
-                          className="cursor-pointer rounded-md px-3 py-2 text-body data-[highlighted]:bg-accent-soft data-[highlighted]:text-accent-ink"
-                        >
-                          Export
-                        </Dropdown.Item>
-                      </Dropdown.Content>
-                    </Dropdown.Portal>
-                  </Dropdown.Root>
+                <Td>
+                  <div className="flex items-center justify-end gap-2">
+                    {starter && startable(w) && (
+                      <Button size="sm" aria-haspopup="dialog" aria-label={`Start a run of ${w.name}`} onClick={() => setStarting(w)}>Start…</Button>
+                    )}
+                    <Dropdown.Root modal={false}>
+                      <Dropdown.Trigger aria-label={`Actions for ${w.name}`} className="inline-grid min-h-8 place-items-center rounded-md border border-line-strong bg-surface px-2 text-small text-ink hover:bg-surface-hover">
+                        <MoreIcon />
+                      </Dropdown.Trigger>
+                      <Dropdown.Portal>
+                        <Dropdown.Content align="end" sideOffset={4} className="min-w-40 rounded-lg border border-line bg-surface p-1 shadow-dialog">
+                          <Dropdown.Item
+                            onSelect={() => void navigate({ to: "/t/$tenantId/workflows/$workflowId", params: { tenantId, workflowId: w.id } })}
+                            className="cursor-pointer rounded-md px-3 py-2 text-body data-[highlighted]:bg-accent-soft data-[highlighted]:text-accent-ink"
+                          >
+                            Open
+                          </Dropdown.Item>
+                          <Dropdown.Item
+                            onSelect={() => void exportOne(w)}
+                            className="cursor-pointer rounded-md px-3 py-2 text-body data-[highlighted]:bg-accent-soft data-[highlighted]:text-accent-ink"
+                          >
+                            Export
+                          </Dropdown.Item>
+                        </Dropdown.Content>
+                      </Dropdown.Portal>
+                    </Dropdown.Root>
+                  </div>
                 </Td>
               </tr>
             ))}
@@ -241,6 +253,7 @@ export function WorkflowsPage({ tenantId, startNew = false }: { tenantId: string
       </p>
       {/* Asked for by the address (?new) too: opened only once the role is known to create one. */}
       {creating && canEdit(tenant.data?.role) && <NewWorkflow tenantId={tenantId} onClose={closeNew} />}
+      {starting && <LazyRunForm tenantId={tenantId} workflow={starting} onStarted={land} onClose={() => setStarting(null)} />}
     </section>
   );
 }

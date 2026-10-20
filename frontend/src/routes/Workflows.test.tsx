@@ -22,6 +22,10 @@ const ROWS = [
         unpublished_changes: true, last_run: null, runs_24h: { live: 0, simulate: 0 } }),
 ];  // prettier-ignore
 
+const START_FORM = {
+  workflow_id: "w1", version_id: "v2", version_number: 2, published_at: "2026-10-06T09:00:00Z", published_by: "nadia@corp.test", csv: null, fields: [],
+};  // prettier-ignore
+
 let role = "editor";
 let sent: { method: string; path: string; body: unknown }[];
 let patchAnswer: Response | null;
@@ -38,6 +42,8 @@ beforeEach(() => {
     const path = new URL(request.url).pathname;
     const text = await request.text();
     sent.push({ method: request.method, path, body: text ? JSON.parse(text) : null });
+    if (path === "/api/v1/t/t1/workflows/w1/start-form") return new Response(JSON.stringify(START_FORM));
+    if (request.method === "POST" && path === "/api/v1/t/t1/workflows/w1/runs") return new Response(JSON.stringify({ id: "r1" }), { status: 202 });
     if (request.method === "PATCH") return patchAnswer ?? new Response(JSON.stringify({ ...ROWS[0], enabled: false, warnings: [] }));
     if (path === "/api/v1/t/t1") return new Response(JSON.stringify({ id: "t1", name: "Acme", slug: "acme", require_passkey: false, role }));
     if (path === "/api/v1/trigger-types") return new Response("[]"); // what New workflow offers to start it
@@ -195,4 +201,26 @@ it("gives each of those links a target of at least 24 px, one above the other (W
   for (const name of ["Failed · 1 h ago", "Simulated: Succeeded · 30 min ago"]) {
     expect(within(rowOf("Triage")).getByRole("link", { name }).className).toMatch(/(?:^|\s)min-h-\[24px\](?:\s|$)/);
   }
+});
+
+it("offers Start… on each row that can start, to the roles that hold run.start (the run form design §5.1)", async () => {
+  role = "operator";
+  await show();
+  expect(within(rowOf("Nightly")).getByRole("button", { name: "Start a run of Nightly" }).textContent).toBe("Start…");
+  expect(within(rowOf("Triage")).queryByRole("button", { name: /Start a run/ })).toBeNull(); // switched off
+  expect(within(rowOf("Sketch")).queryByRole("button", { name: /Start a run/ })).toBeNull(); // never published
+  cleanup();
+  role = "viewer";
+  await show();
+  expect(screen.queryByRole("button", { name: /Start a run/ })).toBeNull();
+});
+
+it("starts a run from its row and lands on its page (the run form design §5.2)", async () => {
+  const router = await show();
+  await userEvent.click(screen.getByRole("button", { name: "Start a run of Nightly" }));
+  const form = await screen.findByRole("dialog", { name: "Start a run" });
+  expect(within(form).getByText("Nightly")).toBeTruthy();
+  await userEvent.click(await within(form).findByRole("button", { name: "Start the live run" }));
+  await vi.waitFor(() => expect(router.state.location.pathname).toBe("/t/t1/runs/r1"));
+  expect(sent.filter((r) => r.method === "POST").map((r) => r.path)).toEqual(["/api/v1/t/t1/workflows/w1/runs"]);
 });
