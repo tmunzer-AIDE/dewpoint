@@ -3555,3 +3555,17 @@ Mid-slice rulings start at M113.
      28).
 301. **Accepted. The checks, and the browser specs on the owner's word** (plan ruling 29).
 302. **Accepted. The form's code loads when the Workflows list first opens it** (plan ruling 30).
+
+### 4e-2b, milestone 1 (2026-10-20)
+
+The owner chose inline execution ("yes, inline, commit the plan"); the plan is 6ca74c49 on `docs/editor-ui-4e2b-plan`,
+merged into `feat/editor-4e2b` (from origin/main 11647275) as 9d1fa361. Each task's tests failed as its step says,
+then passed, with the type check and ESLint silent:
+- Task 1, c828cc94: the plan accepted, rulings 273–302.
+- Task 2, 5acf6d38: the form's calls and words. Red: `runForm.test.ts` can't import its module; green: 13 passed.
+- Task 3, b9820b4e: the form for typed input. Red: 1 failed, 18 passed (`RunForm.test.tsx` can't import its module);
+  green: 33 passed.
+- Task 4, ab658c8b: the ways in, the landing. Red: 7 failed, 217 passed (`./landing` unresolved twice); green: 263
+  passed.
+
+Mid-slice rulings: none. Nothing pushed.
