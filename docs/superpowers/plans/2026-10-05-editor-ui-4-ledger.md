@@ -3515,3 +3515,43 @@ M112. **A tick's codec doesn't list `version_changed`** (CI's backend job on #13
       outcomes. Only a start or a re-run through the API confirms a version, and their refusals are raised, never
       recorded; a schedule's tick confirms none. The test sets it aside, as it does a draft simulation's codes. The
       local broad suites hadn't included this file. Cost if wrong: a tick's outcome reading "refused" for that code.
+
+### 4e-2a merged; the 4e-2b plan accepted (2026-10-20)
+
+The owner merged 4e-2a as #130 (squash 11647275), every check green ("green and merged"); its six deferred minors are
+issue #131. `docs/superpowers/plans/2026-10-20-editor-ui-4e2b-run-form-ui.md`, revision 1: the UI of the run form
+design §5, against the boards "4e-2 Run Form Mockups" v10, one plan with milestone pauses. The owner accepted it: its
+rulings 1–30 join this ledger as 273–302. The frontend only: no backend change, no migration, no ABI change.
+Mid-slice rulings start at M113.
+
+273. **Accepted. One plan with milestone pauses** (plan ruling 1).
+274. **Accepted. One module for the form's calls and words; the CSV file sent as its bytes** (plan ruling 2).
+275. **Accepted. One key per submitted form** (plan ruling 3).
+276. **Accepted. The version shown is the version started** (plan ruling 4).
+277. **Accepted. A newer version keeps what still fits** (plan ruling 5).
+278. **Accepted. The version line: the time to the second, the publisher's email** (plan ruling 6).
+279. **Accepted. A refusal in the form's words, its code beside them** (plan ruling 7).
+280. **Accepted. An input's reasons beside the field they name** (plan ruling 8).
+281. **Accepted. The Simulate dialog's field labels and hints are shared** (plan ruling 9).
+282. **Accepted. Focus on the first field; Cancel and Close give it back to the opener** (plan ruling 10).
+283. **Accepted. Landing on the new run: a mark the run's page takes once its run is read** (plan ruling 11).
+284. **Accepted. The ways in: a Workflows row, the Runs page's chooser, the editor** (plan ruling 12).
+285. **Accepted. How a column's choice was proposed comes from the upload's default** (plan ruling 13).
+286. **Accepted. A column is named by its header** (plan ruling 14).
+287. **Accepted. What a column holds, in words** (plan ruling 15).
+288. **Accepted. A file's problems in words, with their codes** (plan ruling 16).
+289. **Accepted. A file checked again: one check at a time, the last change's** (plan ruling 17).
+290. **Accepted. The errors at a glance, then every error row by row** (plan ruling 18).
+291. **Accepted. Every row passing: the first rows, the columns folded, the count on Start** (plan ruling 19).
+292. **Accepted. Saving the columns before the start; a failed save starts nothing** (plan ruling 20).
+293. **Accepted. Why Start waits, beside it** (plan ruling 21).
+294. **Accepted. Reading and checking are announced** (plan ruling 22).
+295. **Accepted. A file checked against a version published since is checked again under it** (plan ruling 23).
+296. **Accepted. Re-run… on a run that ended, never a draft simulation's nor a sub-run's** (plan ruling 24).
+297. **Accepted. A re-run's kept values: never shown, sent back whole while untouched** (plan ruling 25).
+298. **Accepted. A CSV run's same rows only while its input is kept** (plan ruling 26).
+299. **Accepted. A re-run refused `input_not_retained` turns to the absent form** (plan ruling 27).
+300. **Accepted. Below 640 px: the full-screen form, Start first, lists for the columns and the problems** (plan ruling
+     28).
+301. **Accepted. The checks, and the browser specs on the owner's word** (plan ruling 29).
+302. **Accepted. The form's code loads when the Workflows list first opens it** (plan ruling 30).
