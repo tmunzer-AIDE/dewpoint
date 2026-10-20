@@ -82,6 +82,24 @@ async def test_concurrent_boundaries_share_one_build_and_an_older_one_never_repl
     assert stale.index.version == 1 and claims.SECRETS[(TENANT, root)].index.version == 2
 
 
+async def test_a_boundary_that_runs_as_a_build_ends_shares_it(builds: list[tuple[frozenset[str], int]]) -> None:
+    """A build's end reaches the boundary waiting for it a loop iteration later than its own bookkeeping: a boundary
+    that ran in between found neither the build nor its automaton cached, and built the same version again (the
+    gitleaks PR's CI, 2026-10-19: three builds where the run test counts two). It finds the automaton cached."""
+    root, index = str(uuid.uuid4()), Index(1, (SECRET,))
+    first = asyncio.create_task(claims.secrets_for(index, TENANT, root))
+    await asyncio.sleep(0)  # the first boundary missed the cache and started the build
+    (build,) = claims._BUILDING.values()
+    loop, between = asyncio.get_running_loop(), list[asyncio.Task[claims.Secrets]]()
+    # runs once the build has ended, before the first boundary resumes: a boundary that starts right then
+    build.add_done_callback(
+        lambda _: between.append(asyncio.Task(claims.secrets_for(index, TENANT, root), loop=loop, eager_start=True))
+    )
+    held = await first
+    late = await between[0]
+    assert len(builds) == 1 and late is held
+
+
 async def test_a_runs_boundaries_build_its_automaton_once_per_index_version(
     env: WorkflowEnvironment, builds: list[tuple[frozenset[str], int]]
 ) -> None:
