@@ -3569,3 +3569,14 @@ then passed, with the type check and ESLint silent:
   passed.
 
 Mid-slice rulings: none. Nothing pushed.
+
+### 4e-2b, milestone 2 (2026-10-20)
+
+The owner accepted milestone 1 ("go"). Each task's tests failed as its step says, then passed, with the type check and
+ESLint silent:
+- Task 5, 65bcf5ca: a CSV workflow's file, uploaded, its columns proposed and chosen. Red: 12 failed, 27 passed
+  (`uploadProblem`, `holds` and `staleWords` missing; no "Choose a file"); green: 39 passed.
+- Task 6, 51c5a324: a CSV file checked, its errors, its first rows, its columns saved. Red: 15 failed, 39
+  passed; green: 54 passed.
+
+Mid-slice rulings: none. Nothing pushed.
