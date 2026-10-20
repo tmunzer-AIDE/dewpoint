@@ -301,6 +301,31 @@ async def test_a_rerun_takes_the_original_rows_or_a_new_csv(csv_ready, api_sessi
     assert (await full_input(dispatch_sessionmaker, ctx, fresh.request.id))["rows"] == [{"site": "nice", "vlan": 1}]
 
 
+async def test_a_same_rows_rerun_keeps_its_originals_csv_record_and_a_rerun_of_it_finds_it(
+    csv_ready, owner_sessionmaker, api_sessionmaker, dispatch_sessionmaker
+) -> None:
+    """The run form design §4.5: a re-run that rebuilds its original's rows copies that start's CSV record, its audit
+    entry counting them, so its page shows its rows and a re-run of it finds them; a new file has its own record."""
+    ctx, wf = csv_ready
+    first = (await admit(api_sessionmaker, ctx, wf, csv=start(await staged(api_sessionmaker, ctx, wf)))).request
+    kept = await record(api_sessionmaker, ctx, first.id)
+    again = (await admit(api_sessionmaker, ctx, wf, key="r1", source="rerun", rerun=admission.Rerun(first.id),
+                         input=await full_input(dispatch_sessionmaker, ctx, first.id))).request  # fmt: skip
+    twice = (await admit(api_sessionmaker, ctx, wf, key="r2", source="rerun", rerun=admission.Rerun(again.id),
+                         input=await full_input(dispatch_sessionmaker, ctx, again.id))).request  # fmt: skip
+    assert await record(api_sessionmaker, ctx, again.id) == await record(api_sessionmaker, ctx, twice.id) == kept
+    async with owner_sessionmaker() as s:
+        found = await s.execute(text("select details from audit_log where action = 'run.request' and target_id = :i"),
+                                {"i": str(again.id)})  # fmt: skip
+        details = found.scalar_one()
+    assert (details["csv_rows"], details["csv_skipped"]) == (2, 0)
+    upload = await staged(api_sessionmaker, ctx, wf, b"Site\nnice\n")
+    fresh = (await admit(api_sessionmaker, ctx, wf, key="r3", source="rerun", input={"token": TOKEN},
+                         rerun=admission.Rerun(again.id, {"token": TOKEN}, start(upload, {"site": "Site"})),
+                         csv=start(upload, {"site": "Site"}))).request  # fmt: skip
+    assert (await record(api_sessionmaker, ctx, fresh.id))["row_count"] == 1
+
+
 WIDE = {"columns": [{"header": f"h{i}", "name": f"c{i}", "type": "string", "required": True} for i in range(200)],
         "max_rows": 10_000, "max_bytes": MAX_BYTES}  # fmt: skip
 WIDE_FILE = (",".join(f"h{i}" for i in range(200)) + "\n" + ("," * 199 + "\n") * 10_000).encode()

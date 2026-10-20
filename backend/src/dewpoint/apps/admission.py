@@ -480,6 +480,12 @@ async def _frozen(
     except InputRefusedError as e:
         raise _Refused(e.reason, e.reasons, version.id) from None
     envelope_id = await claims.write_envelope(s, ClaimCipher(keys), tenant_id, request_id=request_id, envelope=envelope)
+    if retained and rerun is not None:  # its original's rows again: their record too (the run form design §4.5)
+        kept = await claims.read_csv_record(s, ClaimCipher(keys), tenant_id, request_id=rerun.of)
+        if kept is not None:
+            await claims.write_csv_record(s, ClaimCipher(keys), tenant_id, request_id=request_id, record=kept)
+            counted = {"csv_rows": kept["row_count"], "csv_skipped": len(kept["skipped"])}
+            return _Frozen(version.id, envelope_id, counted)
     if built is None or csv is None:
         return _Frozen(version.id, envelope_id, {})
     record = {
