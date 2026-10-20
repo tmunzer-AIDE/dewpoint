@@ -161,6 +161,55 @@ export function fileWords(code: string, limits: { max_rows: number; max_bytes: n
   }
 }
 
+const FILE_HINTS: Record<string, string> = {
+  csv_encoding: "Save it as UTF-8 and choose it again.",
+  csv_duplicate_header: "Rename one and choose the file again.",
+  csv_malformed: "Fix it and choose it again.",
+  csv_too_many_rows: "Split it, or keep only the rows to run.",
+  too_large: "Split it, or keep only the rows to run.",
+  csv_too_large: "Split it, or keep only the rows to run.",
+};
+const FILE_CODES = new Set(["csv_encoding", "csv_empty", "csv_duplicate_header", "csv_malformed", "csv_too_many_rows", "too_large", "csv_too_large"]);
+const OVER = new Set(["csv_too_many_rows", "too_large", "csv_too_large"]); // read, but past a limit
+
+/** Why an upload of the file `name` gave nothing to map (§5.3; the CsvStates and MoreStates boards): what it can't be and
+ * what to do, with its code (none when the server didn't answer). */
+export function uploadProblem(name: string, e: unknown, limits: { max_rows: number; max_bytes: number }): { words: string; code: string | null } {
+  if (!(e instanceof ApiError)) return { words: `The server didn't answer: ${name} wasn't read. Choose it again.`, code: null };
+  if (e.code === "csv_busy") return { words: "The server is busy reading other files. Nothing was kept. Choose the file again in a moment.", code: e.code };
+  if (FILE_CODES.has(e.code)) {
+    const hint = FILE_HINTS[e.code] ?? "Choose another file.";
+    const what = fileWords(e.code, limits);
+    return { words: OVER.has(e.code) ? `${name} ${what}. ${hint}` : `${name} can't be read: it ${what}. ${hint}`, code: e.code };
+  }
+  return { words: `${name} wasn't read. ${refusalOf(e).words.replace(/ Nothing started\.$/, "")}`, code: e.code };
+}
+
+/** A declared column, as the form shows it: the start form's `csv.columns`. */
+export type CsvColumnForm = NonNullable<StartForm["csv"]>["columns"][number];
+
+const HOLDS: Record<string, string> = {
+  string: "Text", integer: "A whole number", number: "A number", boolean: "Yes or no", mac: "A MAC address", ip: "An IP address",
+  cidr: "A network in CIDR form",
+};  // prettier-ignore
+/** What a column holds, in words: its type, a list's first six values. */
+export function holds(c: CsvColumnForm): string {
+  if (c.type === "enum") {
+    const values = c.values ?? [];
+    return `One of a list: ${values.slice(0, 6).join(", ")}${values.length > 6 ? "…" : ""}`;
+  }
+  return Object.hasOwn(HOLDS, c.type) ? HOLDS[c.type]! : c.type;
+}
+
+/** Why the columns saved for the workflow weren't proposed (`default_mapping.status` stale), for version `n`. */
+export function staleWords(n: number, problems: { column: string; code: string }[]): string {
+  const why = problems.map((p) =>
+    p.code === "unknown_column" ? `it doesn't read ${p.column} any more` : p.code === "required_unmapped" ? `it needs ${p.column}, which they leave out` : `${p.column}: ${mappingWords(p.code)}`,
+  );  // prettier-ignore
+  const said = why.length < 2 ? (why[0] ?? "") : `${why.slice(0, -1).join(", ")}, and ${why.at(-1)!}`;
+  return `The columns saved for this workflow no longer fit version ${n}: ${said}. The file's columns with the same names are proposed instead; check them.`;
+}
+
 const CELL_WORDS: Record<string, string> = {
   required: "Missing: a value is required",
   cell_count: "Has more or fewer cells than the header",

@@ -2,8 +2,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "./client";
 import {
-  canSaveColumns, canStart, cellWords, fileWords, keptValues, keyFor, mappingWords, previewCsv, refusalOf, rerunRun, saveColumns,
-  startRun, startable, uploadCsv, type StartForm,
+  canSaveColumns, canStart, cellWords, fileWords, holds, keptValues, keyFor, mappingWords, previewCsv, refusalOf, rerunRun,
+  saveColumns, staleWords, startRun, startable, uploadCsv, uploadProblem, type StartForm,
 } from "./runForm";  // prettier-ignore
 
 let sent: Request[];
@@ -136,5 +136,35 @@ describe("a CSV file's words (§5.3)", () => {
       "Not true or false (true, yes, 1; false, no, 0)",
     ]);  // prettier-ignore
     expect(mappingWords("required_unmapped")).toBe("Required: choose the file's column for it.");
+  });
+});
+
+describe("a CSV file's columns and problems, in words (§5.3; the CsvStates and MoreStates boards)", () => {
+  const limits = { max_rows: 10_000, max_bytes: 5 * 1024 * 1024 };
+  it("says what a file can't be, by its name, and what to do", () => {
+    expect(uploadProblem("sites.csv", refused(422, { error: "csv_duplicate_header" }), limits)).toEqual({
+      words: "sites.csv can't be read: it has two columns with the same name. Rename one and choose the file again.", code: "csv_duplicate_header",
+    });  // prettier-ignore
+    expect(uploadProblem("all.csv", refused(413, { error: "too_large" }), limits).words).toBe("all.csv is over 5 MB, this workflow's limit. Split it, or keep only the rows to run.");
+    expect(uploadProblem("all.csv", refused(503, { error: "csv_busy" }), limits).words).toBe(
+      "The server is busy reading other files. Nothing was kept. Choose the file again in a moment.",
+    );
+    expect(uploadProblem("a.csv", new TypeError("Failed to fetch"), limits)).toEqual({ words: "The server didn't answer: a.csv wasn't read. Choose it again.", code: null });
+    expect(uploadProblem("a.csv", refused(409, { error: "workflow_disabled", messages: ["…"] }), limits).words).toBe("a.csv wasn't read. The workflow is disabled.");
+  });
+
+  it("says what each column holds", () => {
+    const col = (type: string, over: object = {}) => ({ header: "H", name: "h", type, required: false, sensitive: false, ...over });
+    expect(holds(col("string"))).toBe("Text");
+    expect(holds(col("integer"))).toBe("A whole number");
+    expect(holds(col("ip"))).toBe("An IP address");
+    expect(holds(col("enum", { values: ["FR", "DE", "ES", "IT", "GB", "US", "NL"] }))).toBe("One of a list: FR, DE, ES, IT, GB, US…");
+    expect(holds(col("enum", { values: ["FR", "DE"] }))).toBe("One of a list: FR, DE");
+  });
+
+  it("says why the saved columns no longer fit", () => {
+    expect(staleWords(7, [{ column: "site_ref", code: "unknown_column" }, { column: "name", code: "required_unmapped" }])).toBe(
+      "The columns saved for this workflow no longer fit version 7: it doesn't read site_ref any more, and it needs name, which they leave out. The file's columns with the same names are proposed instead; check them.",
+    );
   });
 });

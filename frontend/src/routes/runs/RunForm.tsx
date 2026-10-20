@@ -3,6 +3,7 @@
 // form, live or simulated, in the Simulate dialog's look. The version it shows is the one it starts: the start goes
 // with that version's id (B14), and a version published meanwhile is read and shown, the values that still fit kept.
 // Each submitted form goes under one key, sent again under it only when the same form is (an answer lost on the way).
+// A workflow that declares a CSV starts only with its file (§5.3, CsvPart), any other fields beside it.
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { Button } from "../../components/Button";
@@ -11,6 +12,8 @@ import { When } from "../../components/When";
 import { keptValues, keyFor, refusalOf, startRun, type Refusal, type Sent, type StartBody, type StartForm } from "../../lib/runForm";
 import { startFormQuery } from "../../lib/triggers";
 import { SimBanner } from "../editor/simulation/SimBanner";
+import { CsvPart } from "./CsvFile";
+import { csvReason, useCsvFile } from "./useCsvFile";
 import { InputControl, REQUIRED, fieldKey, fromFields, hintOf, labelOf, startValues, wholeOf } from "../editor/startInput";
 
 type Mode = StartBody["mode"];
@@ -74,6 +77,8 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, onStarted, o
   const [last, setLast] = useState<Sent | null>(null);
   const [sending, setSending] = useState(false);
   const shownJson = jsonText ?? "";
+  const csv = useCsvFile(tenantId, workflow.id);
+  const reason = form?.csv ? csvReason(csv.file, form.csv.columns) : null;
 
   // Focus goes to the first field once the form is read (§5.6); before, the dialog holds it.
   const formRead = form !== null;
@@ -93,7 +98,7 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, onStarted, o
 
   async function submit(e: FormEvent) {
     e.preventDefault();
-    if (!form || sending) return;
+    if (!form || sending || reason !== null) return;
     let input: Record<string, unknown>;
     if (asJson) {
       const whole = wholeOf(shownJson);
@@ -105,6 +110,7 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, onStarted, o
       input = made.input;
     }
     const body: StartBody = { input, mode, expected_version_id: form.version_id };
+    if (form.csv && csv.file.phase === "staged") body.csv = { upload_id: csv.file.upload.upload_id, mapping: csv.file.mapping };
     const sent = keyFor(last, body);
     setLast(sent);
     setErrors({});
@@ -166,6 +172,9 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, onStarted, o
             )}
             <ModeChoice mode={mode} onChange={setMode} />
             <div ref={fieldsRef} className="flex flex-col gap-4">
+              {form.csv && (
+                <CsvPart form={form} csv={form.csv} file={csv.file} onChoose={(f) => void csv.choose(f, form.csv!)} onMap={csv.map} />
+              )}
               {asJson ? (
                 <TextArea
                   label="The input, as JSON"
@@ -178,7 +187,7 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, onStarted, o
                 />
               ) : (
                 <>
-                  {form.fields.length === 0 && <p className="text-small text-muted">This version takes no input.</p>}
+                  {form.fields.length === 0 && !form.csv && <p className="text-small text-muted">This version takes no input.</p>}
                   {form.fields.map((f) => (
                     <InputControl
                       key={f.name} f={f} value={shownValues.get(f.name)} error={errors[fieldKey(f.name)]} label={labelOf(f)} hint={hintOf(f)}
@@ -188,11 +197,13 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, onStarted, o
                 </>
               )}
             </div>
-            <div>
-              <Button size="sm" aria-pressed={asJson} onClick={() => (asJson ? (setAsJson(false), setJsonText(null)) : toJson())}>
-                Edit as JSON
-              </Button>
-            </div>
+            {(form.fields.length > 0 || !form.csv) && (
+              <div>
+                <Button size="sm" aria-pressed={asJson} onClick={() => (asJson ? (setAsJson(false), setJsonText(null)) : toJson())}>
+                  Edit as JSON
+                </Button>
+              </div>
+            )}
           </>
         )}
         {refusal && (
@@ -201,9 +212,13 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, onStarted, o
             {CODED(refusal.code) && <> <span className="font-mono">{refusal.code}</span></>}
           </p>
         )}
-        <div className="flex flex-wrap justify-end gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {reason && <p id={`${id}-reason`} className="me-auto text-small text-muted">{reason}</p>}
           <Button onClick={() => dialog.current?.close()}>Cancel</Button>
-          <Button type="submit" variant={mode === "live" ? "live-outline" : "simulate"} disabled={form === null || sending}>
+          <Button
+            type="submit" variant={mode === "live" ? "live-outline" : "simulate"} disabled={form === null || sending || reason !== null}
+            aria-describedby={reason ? `${id}-reason` : undefined}
+          >
             {mode === "live" ? "Start the live run" : "◌ Start the simulation"}
           </Button>
         </div>
