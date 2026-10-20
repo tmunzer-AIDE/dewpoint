@@ -12,10 +12,11 @@ from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps import admission, cancels
-from dewpoint.apps.api.responses import CancelOut, StartFormOut
+from dewpoint.apps.api.responses import CancelOut, RequestOut, StartFormOut
 from dewpoint.apps.csv_slots import CsvBusyError, Slot
 from dewpoint.apps.forms import csv_form, form_fields
 from dewpoint.apps.inputs import INPUT_INVALID, TOO_DEEP
@@ -25,6 +26,7 @@ from dewpoint.core.claims.cipher import ClaimCipher
 from dewpoint.core.claims.secret_index import SECRET_INDEX_LIMIT
 from dewpoint.core.crypto.keys import KeySource, key_unreadable
 from dewpoint.core.http import TenantContext, get_db, require
+from dewpoint.core.models.identity import User
 from dewpoint.core.models.requests import RunRequest
 from dewpoint.core.models.runs import Run
 from dewpoint.core.models.workflows import Workflow, WorkflowVersion
@@ -63,6 +65,7 @@ class StartIn(BaseModel):
     input: dict[str, Any] = Field(default_factory=dict)
     mode: Literal["live", "simulate"] = "live"
     csv: CsvIn | None = None  # a workflow that declares a CSV starts only with one (§8.1)
+    expected_version_id: uuid.UUID | None = None  # the version confirmed: 409 `version_changed` once another is (B14)
 
 
 class RerunIn(BaseModel):
@@ -70,6 +73,7 @@ class RerunIn(BaseModel):
     mode: Literal["live", "simulate"] | None = None  # the old request's when not given
     input: dict[str, Any] | None = None  # new input; else the original, rebuilt while it's retained
     csv: CsvIn | None = None  # a new upload, with `input` (or none) beside it
+    expected_version_id: uuid.UUID | None = None  # as a start's (B14)
 
 
 def key_unusable(e: Exception) -> HTTPException:
@@ -135,7 +139,7 @@ async def admit(
         admitted = await admission.admit_request(
             db, keys, tenant_id=ctx.tenant_id, workflow_id=workflow_id, source=source, actor_id=ctx.user.id,
             mode=body.mode, idempotency_key=key, input=body.input, rerun=rerun,
-            csv=body.csv.start() if body.csv is not None else None,
+            csv=body.csv.start() if body.csv is not None else None, expected_version_id=body.expected_version_id,
         )  # fmt: skip
     except admission.WorkflowNotFoundError:
         raise HTTPException(404, detail={"error": "not_found"}) from None
@@ -146,7 +150,7 @@ async def admit(
             503 if e.reason in UNAVAILABLE else 422 if e.reason in INVALID else 404 if e.reason in NOT_FOUND
             else 410 if e.reason in GONE else 409
         )  # fmt: skip
-        raise HTTPException(status, detail={"error": e.reason, "messages": e.messages}) from None
+        raise HTTPException(status, detail={"error": e.reason, "messages": e.messages, **e.extra}) from None
     except Exception as e:
         raise key_unusable(e) from None
     if not admitted.new:
@@ -170,7 +174,7 @@ async def not_past_cutoff(db: AsyncSession, ctx: TenantContext, request: RunRequ
         raise HTTPException(410, detail={"error": REQUEST_NOT_RETAINED})
 
 
-@router.post("/t/{tenant_id}/workflows/{workflow_id}/runs", status_code=202)
+@router.post("/t/{tenant_id}/workflows/{workflow_id}/runs", status_code=202, response_model=RequestOut)
 async def start_run(
     workflow_id: uuid.UUID,
     body: StartIn,
@@ -202,9 +206,13 @@ async def start_form(
     version = await db.get(WorkflowVersion, workflow.active_version_id)
     if version is None:
         raise HTTPException(409, detail={"error": admission.NOT_ACTIVE})
+    published_by = (await db.execute(select(User.email).where(User.id == version.published_by))).scalar()
     return {
         "workflow_id": str(workflow.id),
         "version_id": str(version.id),
+        "version_number": version.number,
+        "published_at": version.published_at.isoformat(),
+        "published_by": published_by,  # null once the user who published it is gone
         "fields": form_fields(version.input_schema or {}),
         "csv": csv_form((version.graph.get("settings") or {}).get("csv")),
     }
@@ -238,7 +246,7 @@ async def cancel_run(
     return {"cancel": happened, "request": request_body(request)}
 
 
-@router.post("/t/{tenant_id}/runs/{request_id}/rerun", status_code=202)
+@router.post("/t/{tenant_id}/runs/{request_id}/rerun", status_code=202, response_model=RequestOut)
 async def rerun(
     request_id: uuid.UUID,
     body: RerunIn | None = None,
@@ -268,7 +276,7 @@ async def rerun(
     try:
         existing = await admission.admitted_under(
             db, keys, tenant_id=ctx.tenant_id, idempotency_key=key, source="rerun", workflow_id=workflow_id,
-            mode=mode, rerun=again, actor_id=ctx.user.id,
+            mode=mode, rerun=again, actor_id=ctx.user.id, expected_version_id=given.expected_version_id,
         )  # fmt: skip
     except admission.IdempotencyConflictError:
         raise HTTPException(409, detail={"error": "idempotency_conflict"}) from None
@@ -279,16 +287,17 @@ async def rerun(
     if existing is not None:
         await not_past_cutoff(db, ctx, existing)
         return request_body(existing)
+    expected = given.expected_version_id
     if given.csv is not None:
-        start = StartIn(input=given.input or {}, mode=mode, csv=given.csv)
+        start = StartIn(input=given.input or {}, mode=mode, csv=given.csv, expected_version_id=expected)
         return request_body(await admit(db, keys, ctx, workflow_id, "rerun", start, key, rerun=again, slot=slot))
     if given.input is not None:
-        start = StartIn(input=given.input, mode=mode)
+        start = StartIn(input=given.input, mode=mode, expected_version_id=expected)
         return request_body(await admit(db, keys, ctx, workflow_id, "rerun", start, key, rerun=again))
     if old is None or not await retention.request_kept(db, await retention.cutoff(db, ctx.tenant_id), old):
         raise HTTPException(410, detail={"error": INPUT_NOT_RETAINED})
     taken(slot)  # its original's input, a CSV's rows perhaps, read only in a slot (the fresh M3 review's I5)
-    start = StartIn(input=await original_input(db, keys, ctx.tenant_id, old), mode=mode)
+    start = StartIn(input=await original_input(db, keys, ctx.tenant_id, old), mode=mode, expected_version_id=expected)
     return request_body(await admit(db, keys, ctx, workflow_id, "rerun", start, key, rerun=again))
 
 

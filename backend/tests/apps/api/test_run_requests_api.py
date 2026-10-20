@@ -7,19 +7,22 @@ version's input, masking what's sensitive."""
 
 import json
 import uuid
+from datetime import datetime
 from typing import Any
 
 import pytest
 from sqlalchemy import text
 
 from dewpoint.apps.inputs import NOT_FINITE, TOO_DEEP
+from dewpoint.core.auth.users import create_user
 from dewpoint.core.claims import service as claims
 from dewpoint.core.claims.cipher import ClaimCipher
 from dewpoint.core.db import tenant_scope
+from dewpoint.core.http import TenantContext
 from dewpoint.core.runs import service as runs
 from dewpoint.engine.handles import ClaimRef, StoredClaim, resolve_value
-from tests.apps.api.helpers import member_client
-from tests.apps.test_admission import KEYS, OPEN_GRAPH, TOKEN, admit, count, current, published
+from tests.apps.api.helpers import PW, member_client
+from tests.apps.test_admission import KEYS, OPEN_GRAPH, TOKEN, admit, count, current, published, published_again
 from tests.apps.test_inputs import objects
 from tests.apps.test_workflow_ops import update
 from tests.support.graphs import G
@@ -585,3 +588,63 @@ async def test_an_input_holding_nan_or_an_infinity_is_422_with_the_fixed_reason(
         answer = await client.post(rerun_url(ctx, old["id"]), content=body, headers=raw(key))
         assert (answer.status_code, answer.json()) == refused, key
     assert await count(owner_sessionmaker, "run_requests") == 1
+
+
+# --- starting on the confirmed version (B14; the run form design §4.1, §4.2) -----------------------------------------
+
+
+def form_url(ctx: Any, wf: uuid.UUID) -> str:
+    return f"/api/v1/t/{ctx.tenant_id}/workflows/{wf}/start-form"
+
+
+async def test_the_start_form_names_its_version_and_who_published_it(
+    keyed_app, ready, owner_sessionmaker, api_sessionmaker, api_settings
+) -> None:
+    ctx, wf = ready
+    client = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx)
+    form = (await client.get(form_url(ctx, wf))).json()
+    assert (form["version_number"], form["published_by"]) == (1, ctx.user.email)
+    assert datetime.fromisoformat(form["published_at"]).tzinfo is not None
+    async with owner_sessionmaker() as s, s.begin():
+        leaver = await create_user(s, email=f"{uuid.uuid4().hex[:8]}@corp.test", password=PW)
+    by = TenantContext(tenant_id=ctx.tenant_id, user=leaver, role="editor", session=None)  # type: ignore[arg-type]
+    await published_again(api_sessionmaker, by, wf, api_settings)
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text("delete from users where id = :u"), {"u": leaver.id})
+    form = (await client.get(form_url(ctx, wf))).json()
+    assert (form["version_number"], form["published_by"]) == (2, None)  # a publisher who's gone
+
+
+async def test_a_start_on_the_confirmed_version_is_admitted_and_on_another_answers_409_with_the_active_one(
+    keyed_app, ready, owner_sessionmaker, api_sessionmaker, api_settings
+) -> None:
+    ctx, wf = ready
+    client = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx)
+    confirmed = {**BODY, "expected_version_id": (await client.get(form_url(ctx, wf))).json()["version_id"]}
+    answer = await client.post(runs_url(ctx, wf), json=confirmed, headers={"Idempotency-Key": "k1"})
+    assert (answer.status_code, answer.json()["version_id"]) == (202, confirmed["expected_version_id"])
+    second = await published_again(api_sessionmaker, ctx, wf, api_settings)
+    refused = await client.post(runs_url(ctx, wf), json=confirmed, headers={"Idempotency-Key": "k2"})
+    assert refused.status_code == 409, refused.text
+    body = refused.json()
+    assert (body["error"], body["active_version_id"], body["active_version_number"]) == (
+        "version_changed", str(second), 2,
+    )  # fmt: skip
+    assert body["messages"] == ["Version 2 is the active version now: confirm the start on it."]
+    again = await client.post(runs_url(ctx, wf), json=confirmed, headers={"Idempotency-Key": "k1"})
+    assert (again.status_code, again.json()["id"]) == (202, answer.json()["id"])  # an exact retry, whatever's active
+
+
+async def test_a_rerun_on_the_confirmed_version_is_admitted_and_on_another_answers_409(
+    keyed_app, ready, owner_sessionmaker, api_sessionmaker, api_settings
+) -> None:
+    ctx, wf = ready
+    client = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx)
+    old = await started_request(client, ctx, wf)
+    second = await published_again(api_sessionmaker, ctx, wf, api_settings)
+    stale = await client.post(rerun_url(ctx, old["id"]), json={"expected_version_id": old["version_id"]},
+                              headers={"Idempotency-Key": "r1"})  # fmt: skip
+    assert (stale.status_code, stale.json()["error"]) == (409, "version_changed")
+    fresh = await client.post(rerun_url(ctx, old["id"]), json={"expected_version_id": str(second)},
+                              headers={"Idempotency-Key": "r2"})  # fmt: skip
+    assert (fresh.status_code, fresh.json()["version_id"], fresh.json()["source"]) == (202, str(second), "rerun")

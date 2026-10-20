@@ -602,10 +602,14 @@ class CsvFormOut(_Answer):
 
 
 class StartFormOut(_Answer):
-    """The active version's input, as a form: what a schedule's input is entered on (4c-3a ruling 5)."""
+    """The active version's input, as a form: what a schedule's input is entered on (4c-3a ruling 5), and the run
+    form's (the run form design §4.2): the version it names, and who published it, null once they're gone."""
 
     workflow_id: str
     version_id: str
+    version_number: int
+    published_at: str
+    published_by: str | None
     fields: list[StartFieldOut]
     csv: CsvFormOut | None
 

@@ -211,6 +211,20 @@ def test_slice_4d1_routes_name_their_answer(method: str, path: str) -> None:
     assert "$ref" in body or "$ref" in body.get("items", {}), body
 
 
+SLICE_4E2 = [  # the run form's answers (the run form design §4)
+    ("post", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/runs"),
+    ("post", "/api/v1/t/{tenant_id}/runs/{request_id}/rerun"),
+]
+
+
+@pytest.mark.parametrize("method,path", SLICE_4E2)
+def test_slice_4e2_routes_name_their_answer(method: str, path: str) -> None:
+    responses = schema()["paths"][path][method]["responses"]
+    ok = next(code for code in responses if code.startswith("2"))
+    body = responses[ok]["content"]["application/json"]["schema"]
+    assert "$ref" in body or "$ref" in body.get("items", {}), body
+
+
 def test_a_schedules_uncounted_span_keeps_its_wire_names() -> None:
     """`from` and `class` are Python keywords: the model aliases them, and the schema says the names on the wire."""
     span = schema()["components"]["schemas"]["UncountedOut"]
