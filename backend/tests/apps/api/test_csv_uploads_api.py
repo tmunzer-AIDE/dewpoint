@@ -11,10 +11,12 @@ from typing import Any
 import pytest
 from sqlalchemy import text
 
+from dewpoint.apps.csv_slots import CsvSlots
 from dewpoint.engine.graph.csv import MAX_BYTES
 from tests.apps.api.helpers import member_client
 from tests.apps.api.test_run_requests_api import as_role
 from tests.apps.test_admission import KEYS, published
+from tests.apps.test_workflow_ops import publish, save
 from tests.support.graphs import G
 
 pytestmark = pytest.mark.usefixtures("development_deployment")
@@ -63,6 +65,9 @@ async def test_an_operator_uploads_a_csv_and_gets_its_mapping_preview_and_errors
     body = answer.json()
     assert body["headers"] == ["Site", "VLAN", "PSK", "Extra"]
     assert body["mapping"] == {"site": "Site", "vlan": "VLAN", "psk": "PSK"}
+    async with owner_sessionmaker() as s:
+        active = (await s.execute(text("select active_version_id from workflows where id = :w"), {"w": wf})).scalar()
+    assert (body["version_id"], body["default_mapping"]) == (str(active), {"status": "none"})  # the version it checked
     assert (body["row_count"], body["problems"], body["masked_columns"]) == (3, [], ["psk"])
     assert body["preview"] == [
         {"row": 1, "cells": {"site": "paris", "vlan": "10"}},
@@ -223,3 +228,89 @@ async def test_an_integer_cell_too_long_for_python_to_read_is_a_rows_error(
     assert answer.status_code == 201, answer.text[:200]
     body = answer.json()
     assert (body["errors"], body["error_count"]) == ([{"row": 1, "column": "vlan", "code": "out_of_range"}], 1)
+
+
+# --- a staged file checked again under other columns (B11; the run form design §4.3) --------------------------------
+
+
+def preview_url(ctx: Any, wf: uuid.UUID, upload: str) -> str:
+    return f"{uploads_url(ctx, wf)}/{upload}/preview"
+
+
+async def test_a_staged_file_is_checked_again_under_other_columns(
+    keyed_app, csv_workflow, owner_sessionmaker, api_settings
+) -> None:
+    ctx, wf = csv_workflow
+    client = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx)
+    upload = (await client.post(uploads_url(ctx, wf), content=FILE, headers=CSV_TYPE)).json()
+    url = preview_url(ctx, wf, upload["upload_id"])
+    answer = await client.post(url, json={"mapping": {"site": "Extra", "vlan": "VLAN"}})
+    assert answer.status_code == 200, answer.text
+    body = answer.json()
+    assert set(body) == {"version_id", "mapping", "problems", "masked_columns", "preview", "errors", "error_count",
+                         "error_groups", "rows_with_errors"}  # fmt: skip
+    assert (body["version_id"], body["mapping"]) == (upload["version_id"], {"site": "Extra", "vlan": "VLAN"})
+    assert (body["problems"], body["error_count"], body["error_groups"], body["rows_with_errors"]) == ([], 0, [], 0)
+    assert body["preview"][0] == {"row": 1, "cells": {"site": "x", "vlan": "10"}}  # the file's cells, as written
+    unmapped = (await client.post(url, json={"mapping": {"vlan": "VLAN"}})).json()
+    assert (unmapped["problems"], unmapped["errors"]) == ([{"column": "site", "code": "required_unmapped"}], [])
+
+
+async def test_a_preview_checks_the_file_against_the_version_active_now(
+    keyed_app, csv_workflow, owner_sessionmaker, api_sessionmaker, api_settings
+) -> None:
+    """A publish since the upload: the preview names the new version and checks the file against its declaration."""
+    ctx, wf = csv_workflow
+    client = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx)
+    upload = (await client.post(uploads_url(ctx, wf), content=FILE, headers=CSV_TYPE)).json()
+    vlan = {"header": "VLAN", "name": "vlan", "type": "integer", "required": True}  # was optional, defaulting to 1
+    stricter = {**CSV, "columns": [CSV["columns"][0], vlan, CSV["columns"][2]]}
+    changed = G().node("a", "testkit.echo@1", {"value": 2}).data() | {"settings": {"csv": stricter}}
+    await save(api_sessionmaker, ctx, wf, changed)
+    version = (await publish(api_sessionmaker, ctx, wf, api_settings)).version
+    assert version is not None
+    body = (await client.post(preview_url(ctx, wf, upload["upload_id"]), json={"mapping": upload["mapping"]})).json()
+    assert body["version_id"] == str(version.id) != upload["version_id"]
+    assert [(g["column"], g["code"], g["rows"]) for g in body["error_groups"]] == [
+        ("site", "required", [3]), ("vlan", "required", [2]),
+    ]  # fmt: skip
+
+
+async def test_a_preview_is_of_the_callers_own_upload_while_its_staged(
+    keyed_app, csv_workflow, owner_sessionmaker, api_settings
+) -> None:
+    """Another user's upload isn't found, as at start; an expired one is gone; a consumed one has started a run."""
+    ctx, wf = csv_workflow
+    mine = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx)
+    upload = (await mine.post(uploads_url(ctx, wf), content=FILE, headers=CSV_TYPE)).json()["upload_id"]
+    url, body = preview_url(ctx, wf, upload), {"mapping": {"site": "Site"}}
+    other = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx)
+    assert ((answer := await other.post(url, json=body)).status_code, answer.json()) == (
+        404, {"error": "upload_not_found"},
+    )  # fmt: skip
+    viewer = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "viewer")
+    assert (await viewer.post(url, json=body)).status_code == 403
+    for change, status, code in (
+        ("created_at = now() - interval '2 hours', expires_at = now() - interval '1 hour'", 410, "upload_expired"),
+        ("staged = null, consumed_by = gen_random_uuid(), consumed_at = now()", 409, "upload_consumed"),
+    ):
+        async with owner_sessionmaker() as s, s.begin():
+            await s.execute(text(f"update csv_uploads set {change} where id = :i"), {"i": upload})
+        assert ((answer := await mine.post(url, json=body)).status_code, answer.json()) == (status, {"error": code})
+
+
+async def test_a_preview_takes_a_csv_slot_and_records_nothing(
+    keyed_app, csv_workflow, owner_sessionmaker, api_settings
+) -> None:
+    ctx, wf = csv_workflow
+    client = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx)
+    upload = (await client.post(uploads_url(ctx, wf), content=FILE, headers=CSV_TYPE)).json()["upload_id"]
+    async with owner_sessionmaker() as s:
+        audited = (await s.execute(text("select count(*) from audit_log"))).scalar_one()
+    keyed_app.state.csv_slots = CsvSlots(1)
+    with keyed_app.state.csv_slots.held():  # another file, still being read
+        busy = await client.post(preview_url(ctx, wf, upload), json={"mapping": {"site": "Site"}})
+    assert (busy.status_code, busy.json(), busy.headers.get("retry-after")) == (503, {"error": "csv_busy"}, "1")
+    assert (await client.post(preview_url(ctx, wf, upload), json={"mapping": {"site": "Site"}})).status_code == 200
+    async with owner_sessionmaker() as s:
+        assert (await s.execute(text("select count(*) from audit_log"))).scalar_one() == audited

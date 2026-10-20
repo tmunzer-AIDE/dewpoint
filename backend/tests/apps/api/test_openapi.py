@@ -214,6 +214,9 @@ def test_slice_4d1_routes_name_their_answer(method: str, path: str) -> None:
 SLICE_4E2 = [  # the run form's answers (the run form design §4)
     ("post", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/runs"),
     ("post", "/api/v1/t/{tenant_id}/runs/{request_id}/rerun"),
+    ("post", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/csv-uploads"),
+    ("post", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/csv-uploads/{upload_id}/preview"),
+    ("put", "/api/v1/t/{tenant_id}/workflows/{workflow_id}/csv-mapping"),
 ]
 
 

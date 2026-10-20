@@ -15,10 +15,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps import admission
+from dewpoint.apps.api.responses import CsvMappingOut, CsvPreviewOut, CsvUploadOut
 from dewpoint.apps.api.routes.run_requests import csv_slot, get_keys, key_unusable, taken
 from dewpoint.apps.csv_input import CsvFileError, mapping_problems
 from dewpoint.apps.csv_slots import Slot
-from dewpoint.apps.csv_uploads import byte_cap, declaration, save_default, stage
+from dewpoint.apps.csv_uploads import UploadUnavailableError, byte_cap, declaration, previewed, save_default, stage
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.crypto.keys import KeySource
 from dewpoint.core.http import TenantContext, get_db, require
@@ -66,7 +67,12 @@ async def _read(request: Request, cap: int) -> bytes:
     return b"".join(chunks)
 
 
-@router.post("/t/{tenant_id}/workflows/{workflow_id}/csv-uploads", status_code=201)
+@router.post(
+    "/t/{tenant_id}/workflows/{workflow_id}/csv-uploads",
+    status_code=201,
+    response_model=CsvUploadOut,
+    response_model_exclude_unset=True,
+)
 async def upload_csv(
     workflow_id: uuid.UUID,
     request: Request,
@@ -78,33 +84,61 @@ async def upload_csv(
     """201 with the staged upload's id, its mapping, preview and errors."""
     if request.headers.get("content-type", "").split(";")[0].strip().lower() != "text/csv":
         raise HTTPException(415, detail={"error": "unsupported_media_type"})
-    _, csv = await _active_csv(db, workflow_id)
+    version, csv = await _active_csv(db, workflow_id)
     cap = byte_cap(csv)
     declared = request.headers.get("content-length", "")
     if declared.isdigit() and int(declared) > cap:
         raise HTTPException(413, detail=TOO_LARGE)
     taken(slot)  # before its body is read: a parse at the caps holds ~90 MiB, through its commit (2b-4b M3)
-    return await _staged(request, cap, db, keys, ctx, workflow_id, csv)
+    return await _staged(request, cap, db, keys, ctx, workflow_id, csv, version.id)
 
 
 async def _staged(
     request: Request, cap: int, db: AsyncSession, keys: KeySource, ctx: TenantContext, workflow_id: uuid.UUID,
-    csv: dict[str, Any],
+    csv: dict[str, Any], version_id: uuid.UUID,
 ) -> dict[str, object]:  # fmt: skip
     try:
         data = await _read(request, cap)
     except _TooLargeError:
         raise HTTPException(413, detail=TOO_LARGE) from None
     try:
-        return await stage(db, keys, tenant_id=ctx.tenant_id, owner_id=ctx.user.id, workflow_id=workflow_id, csv=csv,
-                           data=data)  # fmt: skip
+        staged = await stage(db, keys, tenant_id=ctx.tenant_id, owner_id=ctx.user.id, workflow_id=workflow_id,
+                             csv=csv, data=data)  # fmt: skip
+        return {"version_id": str(version_id), **staged}  # the version whose declaration it was checked against
     except CsvFileError as e:
         raise HTTPException(422, detail={"error": e.code}) from None
     except Exception as e:
         raise key_unusable(e) from None
 
 
-@router.put("/t/{tenant_id}/workflows/{workflow_id}/csv-mapping")
+@router.post("/t/{tenant_id}/workflows/{workflow_id}/csv-uploads/{upload_id}/preview", response_model=CsvPreviewOut)
+async def preview_csv(
+    workflow_id: uuid.UUID,
+    upload_id: uuid.UUID,
+    body: MappingIn,
+    slot: Slot = Depends(csv_slot, scope="function"),  # before the session: given back after its commit
+    ctx: TenantContext = Depends(require(P.RUN_START)),
+    db: AsyncSession = Depends(get_db, scope="function"),
+    keys: KeySource = Depends(get_keys),
+) -> dict[str, object]:
+    """The caller's staged upload described again under `body.mapping`, against the active version's declaration
+    (B11; the run form design §4.3): 404 `upload_not_found`, 409 `upload_consumed`, 410 `upload_expired`, as a start
+    finds them; 503 `csv_busy` with every CSV slot held."""
+    version, csv = await _active_csv(db, workflow_id)
+    taken(slot)  # before the file is opened: it's read whole, as at upload
+    try:
+        return await previewed(db, keys, tenant_id=ctx.tenant_id, owner_id=ctx.user.id, workflow_id=workflow_id,
+                               upload_id=upload_id, csv=csv, version_id=version.id, mapping=body.mapping)  # fmt: skip
+    except UploadUnavailableError as e:
+        status = {admission.UPLOAD_NOT_FOUND: 404, admission.UPLOAD_CONSUMED: 409, admission.UPLOAD_EXPIRED: 410}
+        raise HTTPException(status[e.code], detail={"error": e.code}) from None
+    except CsvFileError as e:  # the version's caps, lower than those it was uploaded under
+        raise HTTPException(422, detail={"error": e.code}) from None
+    except Exception as e:
+        raise key_unusable(e) from None
+
+
+@router.put("/t/{tenant_id}/workflows/{workflow_id}/csv-mapping", response_model=CsvMappingOut)
 async def save_csv_mapping(
     workflow_id: uuid.UUID,
     body: MappingIn,
