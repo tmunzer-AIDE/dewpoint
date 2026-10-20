@@ -3393,3 +3393,125 @@ builder's "is" and "is not" compare as text or as a number: what's typed says wh
 the person picks; the builder's pill opens its details (Replace…, Remove); Declassify takes focus and closes on Escape;
 the pills note says "/" and "＋ Data" only where they work; ← in the data tree reaches a value's group; its search asks
 a quarter second after the last key; a browser flow checks "/". The fresh review's findings are all fixed.
+
+### 4e-2: the design accepted; the 4e-2a plan accepted (2026-10-20)
+
+The owner merged 4e-1b as #118 (squash 729f94a7); its nine deferred minors are issue #126, and #127 corrected M109's
+comment once the engine recorded a waiting delay at once (#119). The owner started 4e-2 ("let's start 4e-2"). Their
+answers, in chat:
+- both start runs: the builder, from the editor, and an operator, from the Workflows list or the Runs page;
+- a CSV row is one turn of the workflow's main loop, a few rows to thousands; the form gives a quick view of the CSV's
+  validation errors; a CSV start goes ahead only when every row passes (the outline's "skip invalid" is dropped);
+- in the editor, Start warns when the draft differs from the published version;
+- re-run: the same input or a changed one, the original prefilled; a changed input asks for its sensitive values
+  again, and a same-rows CSV re-run keeps its other fields read-only, both with no backend work;
+- after Start, the new run's page.
+
+D8 was signed off ("signed off, write the spec") at the Design canvas "4e-2 Run Form Mockups", version 6; versions 7
+to 10 bring its words in line with what the backend allows.
+`docs/superpowers/specs/2026-10-19-editor-4e2-run-form-design.md` (7c737523) was committed on the owner's word ("yes,
+commit"), its §8 calls listed for them to check.
+
+`docs/superpowers/plans/2026-10-20-editor-ui-4e2a-run-form-backend.md`, revision 1: the backend of the design §4, one
+plan with milestone pauses. The owner accepted it: its rulings 1–13 join this ledger as 260–272. No migration, no ABI
+change. Mid-slice rulings start at M110.
+
+260. **Accepted. One plan with milestone pauses** (plan ruling 1).
+261. **Accepted. The version check comes after `workflow_disabled` and `not_active`, before the build's checks**
+     (plan ruling 2).
+262. **Accepted. `version_changed` keeps a refusal's shape and adds the active version** (plan ruling 3).
+263. **Accepted. The digest names the confirmed version as its id's text, a key only when given** (plan ruling 4).
+264. **Accepted. The run form's answers are typed** (plan ruling 5).
+265. **Accepted. The upload's `version_id` is added by its route** (plan ruling 6).
+266. **Accepted. The upload codes live in `csv_uploads`; a preview refuses as a start does, in its order**
+     (plan ruling 7).
+267. **Accepted. A preview reads the file under the active version's caps** (plan ruling 8).
+268. **Accepted. The error groups: their order, their first rows, every error counted** (plan ruling 9).
+269. **Accepted. A same-rows re-run's audit entry counts its rows, without a file digest** (plan ruling 10).
+270. **Accepted. The start form names its publisher by email, null once they're gone** (plan ruling 11).
+271. **Accepted. The client is regenerated; nothing else in the frontend changes** (plan ruling 12).
+272. **Accepted. The checks: each task's suites, the final tree's broad suites, and the whole backend suite on CI**
+     (plan ruling 13).
+
+### 4e-2a, milestone 1 (2026-10-20)
+
+Tasks 1–3 on `feat/editor-4e2a` (from origin/main 4d8cf8f1, the owner's choice, the plan merged in cfc40882; backend
+tests on a borrowed venv of the same `uv.lock`, the frontend's packages restored offline). Tasks 2 and 3's diffs
+applied as the plan's text has them; each task's tests failed, then passed, as its steps say; after each, ruff,
+`ruff format --check` and mypy were silent.
+- Task 1, b5930d64: the 4e-2 design and this plan accepted, rulings 260–272 (M110).
+- Task 2, b2746ba7: admission refuses a start on a version no longer active (`version_changed`), its digest naming
+  the version only when given. Red: 5 failed, 29 passed (`canonical()` and `admit_request()` take no
+  `expected_version_id`); green: 34 passed.
+- Task 3, 6f3d6593: `expected_version_id` on a start and a re-run, 409 `version_changed` with the active version, the
+  start form's version and publisher, the two answers typed. Red: 5 failed, 115 passed (no `version_number`; the
+  unknown field refused 422; untyped answers); green: 120 passed.
+
+M110. **Task 1's section follows #129's** (2026-10-20): main gained #129 and #128 after the dry run's base (00cbbad9),
+      and #129 appended "4c-2b's deferred minors" to this ledger, so Task 1's diff, whose context was the ledger's old
+      end, didn't apply. Its lines were appended as the plan has them, after that section. Tasks 2–7's diffs were
+      applied in order on 4d8cf8f1 before starting: each applies. Cost if wrong: none.
+
+Mid-slice rulings: M110 only. Nothing pushed.
+
+### 4e-2a, milestone 2 (2026-10-20)
+
+The owner, in chat: "ok, let's go". Tasks 4–6's diffs applied as the plan's text has them; each task's tests failed,
+then passed, as its steps say; after each, ruff, `ruff format --check` and mypy were silent.
+- Task 4, 455eb658: every CSV error counted by column and code (`ErrorGroup`), the upload's answer with
+  `error_groups` and `rows_with_errors`. Red: 4 failed, 33 passed (`Built` has no `groups`; no `error_groups`); green:
+  37 passed. The app quit during the first green run; on resuming, the worktree was checked to be exactly the plan's
+  two blocks on Task 3's milestone (the same tree), and the green run, run again, passed whole.
+- Task 5, b2ae9eb0: a staged file checked again under other columns (B11), the upload's `version_id`, the CSV answers
+  typed. Red: 8 failed, 101 passed (no preview route; no `version_id`; untyped answers); green: 109 passed.
+- Task 6, 652f8ed7: a same-rows re-run copies its original's CSV record. Red: 2 failed, 20 passed (no record);
+  green: 22 passed.
+
+Mid-slice rulings: none in this milestone. Nothing pushed.
+
+### 4e-2a, milestone 3 and the final checkpoint (2026-10-20)
+
+The owner, in chat: "go".
+- Task 7, 92751941: the client regenerated (`dewpoint api openapi`, `pnpm gen:api`; `check:api` passes; 434 and 188
+  lines added, 13 and 13 removed, the prototype's files byte for byte) and the runs doc: starting on a confirmed
+  version, checking a staged file again, every error counted, a same-rows re-run's record. The checks, on this tree:
+  - the frontend: the type check and ESLint silent; its suite 1328 passed (99 files);
+  - the backend: ruff, `ruff format --check` and mypy silent; `lint-imports`, 11 contracts kept;
+  - the API, admission, CSV and request digest tests: 739 passed;
+  - local CodeQL (python, CLI 2.27.2, python-queries 1.8.12, CI's filter): no finding;
+  - the whole backend suite: not run locally, on the owner's word ("leave it to CI"); CI runs it on the PR.
+
+M111. **The client is regenerated from this branch's code; the frontend's count is main's** (2026-10-20): the backend
+      tests run on a venv borrowed from another worktree, whose editable install points at that worktree's older code;
+      `uv run dewpoint api openapi` without `PYTHONPATH=src` wrote that code's schema, 2,230 lines short. With it, the
+      schema is this branch's, as the plan has it. The frontend suite has 1328 tests, not the plan's 1288: main gained
+      #129's 40 after the dry run's base; this branch changes only the generated types. Cost if wrong: none.
+
+Mid-slice rulings over the slice: M110 and M111. The final review follows. Nothing pushed.
+
+### 4e-2a, the final review (2026-10-20)
+
+A fresh reviewer (Fable) on 4d8cf8f1..fc94d458, read only: no critical finding, no important one, 6 minor; "Ready
+to merge: Yes". Each Review Focus case is pinned by an integration test it read; the version check is race-free under
+admission's lock (a publish takes it exclusively); a preview refuses before it decrypts. Re-graded by effect, the six
+stay minor: no fix pass.
+
+Deferred minors (a follow-up issue, on the owner's word): `previewed()` echoes the `version_id` it's given while the
+upload's is added by its route; a same-rows re-run on a stale version takes a CSV slot and rebuilds its input before
+admission refuses it; no test of a preview for the caller's own upload of another workflow; a preview's "nothing
+logged" pinned on the audit log only; `ErrorGroup` frozen around a mutable list; `expected_version_id` without a field
+description in the generated client.
+
+What the reviewer set aside, each ruled as it stands: the publisher's email to every `run.start` holder (§4.2, ruling
+11); a deactivated publisher still named ("gone" is deleted); a same-rows re-run once the active version declares no
+CSV (admission's behavior, which the UI never sends); `error_groups` off the run's record (§4.4); no audit of a
+`version_changed` refusal (no interactive refusal is recorded); a preview without a row lock (a read); groups tied by
+column as text (ruling 9); a re-run's refusal words "start" (the UI words its own); a key retried with and without
+`expected_version_id` is `idempotency_conflict` (§4.1).
+
+M112. **A tick's codec doesn't list `version_changed`** (CI's backend job on #130, 2026-10-20): its one failure,
+      `test_every_refusal_admission_or_a_tick_can_record_is_a_tick_outcome`, reads every code-like constant of
+      `admission` as a refusal a tick can record, and found the new `VERSION_CHANGED` missing from the tick codec's
+      outcomes. Only a start or a re-run through the API confirms a version, and their refusals are raised, never
+      recorded; a schedule's tick confirms none. The test sets it aside, as it does a draft simulation's codes. The
+      local broad suites hadn't included this file. Cost if wrong: a tick's outcome reading "refused" for that code.

@@ -145,6 +145,7 @@ def test_every_refusal_admission_or_a_tick_can_record_is_a_tick_outcome() -> Non
         v for k, v in vars(admission).items() if k.isupper() and isinstance(v, str) and re.fullmatch("[a-z_]+", v)
     } - {"live", "simulate", "production"}  # modes and environments
     reasons -= {admission.TARGET_INVALID, admission.CSV_NOT_SIMULATED}  # a draft simulation's: a tick admits no draft
+    reasons -= {admission.VERSION_CHANGED}  # a start's that confirmed a version (B14): a tick confirms none
     reasons |= {tick.SCHEDULE_PAUSED, tick.SCHEDULE_DELETED, tick.SCHEDULE_CATCHUP_EXPIRED, inputs.INPUT_INVALID,
                 inputs.SECRET_INDEX_LIMIT}  # fmt: skip
     assert {f"refused:{r}" for r in reasons} <= tick_contract.OUTCOMES

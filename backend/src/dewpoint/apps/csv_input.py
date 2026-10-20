@@ -30,6 +30,7 @@ FILE_CODES = frozenset(
 ROW_CODES = frozenset({"required", "cell_count"})  # beside a cell's conversion codes (`CELL_CODES`)
 MAPPING_CODES = frozenset({"required_unmapped", "unknown_column", "unknown_header", "header_reused"})
 LISTED_ERRORS = 100  # errors kept in detail; the count is every one
+GROUP_ROWS = 5  # each group's first record numbers
 
 csv.field_size_limit(max(csv.field_size_limit(), MAX_BYTES))
 
@@ -56,11 +57,22 @@ class RowError:
 
 
 @dataclass(frozen=True)
+class ErrorGroup:
+    """Every error of one column and one code (the run form design §4.4): how many, and the first records."""
+
+    column: str | None  # the declared column's name; None for the record as a whole
+    code: str
+    count: int
+    rows: list[int]  # the first `GROUP_ROWS` record numbers that broke it
+
+
+@dataclass(frozen=True)
 class Built:
     rows: list[dict[str, Any]]  # every record that broke no rule
     skipped: list[tuple[int, str]]  # every other record: its number and the first rule it broke
     errors: list[RowError]  # the first `LISTED_ERRORS` errors, in order
     error_count: int  # every error
+    groups: list[ErrorGroup]  # every error by column and code: the most first, then by column, then by code
 
 
 def _records(text: str, delimiter: str) -> Iterator[list[str]]:
@@ -145,16 +157,24 @@ def mapping_problems(
 
 def build_rows(table: Table, columns: Sequence[Mapping[str, Any]], mapping: Mapping[str, str]) -> Built:
     """The rows `mapping` builds from `table` (its problems checked first, `mapping_problems`); a record that breaks a
-    rule builds none, and is reported within the builder's bounds."""
+    rule builds none, and is reported within the builder's bounds: every error is counted by its column and code, a
+    group per pair, never one per error."""
     position = {header: i for i, header in enumerate(table.headers)}
     rows: list[dict[str, Any]] = []
     skipped: list[tuple[int, str]] = []
     errors: list[RowError] = []
     count = 0
+    tally: dict[tuple[str | None, str], tuple[int, list[int]]] = {}
+
+    def broken(broke: list[RowError], error: RowError) -> None:
+        seen, first = tally.get((error.column, error.code), (0, []))
+        tally[(error.column, error.code)] = (seen + 1, first if len(first) == GROUP_ROWS else [*first, error.row])
+        broke.append(error)
+
     for number, record in enumerate(table.rows, start=1):
         broke: list[RowError] = []
         if len(record) != len(table.headers):
-            broke.append(RowError(number, None, "cell_count"))
+            broken(broke, RowError(number, None, "cell_count"))
         row: dict[str, Any] = {}
         for c in columns if not broke else ():
             header = mapping.get(c["name"])
@@ -163,11 +183,11 @@ def build_rows(table: Table, columns: Sequence[Mapping[str, Any]], mapping: Mapp
                 if "default" in c:
                     row[c["name"]] = c["default"]
                 elif c.get("required"):
-                    broke.append(RowError(number, c["name"], "required"))
+                    broken(broke, RowError(number, c["name"], "required"))
                 continue
             value, code = convert(c["type"], text, c.get("values"))
             if code is not None:
-                broke.append(RowError(number, c["name"], code))
+                broken(broke, RowError(number, c["name"], code))
             else:
                 row[c["name"]] = value
             if len(broke) > LISTED_ERRORS:  # a record keeps no more detail than the whole file lists
@@ -179,4 +199,6 @@ def build_rows(table: Table, columns: Sequence[Mapping[str, Any]], mapping: Mapp
         skipped.append((number, broke[0].code))
         count += len(broke)
         errors.extend(broke[: LISTED_ERRORS - len(errors)])
-    return Built(rows, skipped, errors, count)
+    groups = [ErrorGroup(column, code, n, first) for (column, code), (n, first) in tally.items()]
+    groups.sort(key=lambda g: (-g.count, g.column or "", g.code))
+    return Built(rows, skipped, errors, count, groups)

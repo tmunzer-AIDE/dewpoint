@@ -81,15 +81,16 @@ PRODUCTION_RUNS_DISABLED = "production_runs_disabled"
 ENVIRONMENT_NOT_RECORDED = "environment_not_recorded"
 WORKFLOW_DISABLED = "workflow_disabled"
 NOT_ACTIVE = "not_active"
+VERSION_CHANGED = "version_changed"  # B14: the start confirmed a version no longer active
 NO_CURRENT_BUILD = "no_current_build"
 VERSION_UNUSABLE = "version_unusable"
 NODE_TYPE_RETIRED = "node_type_retired"
 CEL_PROFILE_RETIRED = "cel_profile_retired"
 CSV_NOT_DECLARED = "csv_not_declared"
 CSV_MAPPING_INVALID = "csv_mapping_invalid"
-UPLOAD_NOT_FOUND = "upload_not_found"
-UPLOAD_EXPIRED = "upload_expired"
-UPLOAD_CONSUMED = "upload_consumed"
+UPLOAD_NOT_FOUND = csv_uploads.UPLOAD_NOT_FOUND
+UPLOAD_EXPIRED = csv_uploads.UPLOAD_EXPIRED
+UPLOAD_CONSUMED = csv_uploads.UPLOAD_CONSUMED
 TARGET_INVALID = "target_invalid"
 CSV_NOT_SIMULATED = "csv_not_simulated"
 CSV_NOT_SIMULATED_MESSAGE = (
@@ -110,11 +111,12 @@ NO_BUILD = (
 
 
 class AdmissionRefusedError(Exception):
-    """An interactive request admission refused: its `reason` code (§9) and what to tell the caller."""
+    """An interactive request admission refused: its `reason` code (§9), what to tell the caller, and the facts its
+    answer adds (`version_changed`'s active version)."""
 
-    def __init__(self, reason: str, messages: list[str]) -> None:
+    def __init__(self, reason: str, messages: list[str], extra: dict[str, Any] | None = None) -> None:
         super().__init__("; ".join(messages))
-        self.reason, self.messages = reason, messages
+        self.reason, self.messages, self.extra = reason, messages, extra or {}
 
 
 class IdempotencyConflictError(Exception):
@@ -199,8 +201,10 @@ class Admitted:
 
 
 class _Refused(Exception):
-    def __init__(self, reason: str, messages: list[str], version_id: uuid.UUID | None = None) -> None:
-        self.reason, self.messages, self.version_id = reason, messages, version_id
+    def __init__(
+        self, reason: str, messages: list[str], version_id: uuid.UUID | None = None, extra: dict[str, Any] | None = None
+    ) -> None:
+        self.reason, self.messages, self.version_id, self.extra = reason, messages, version_id, extra
 
 
 class _Consumed(Exception):
@@ -247,11 +251,13 @@ async def admit_request(
     csv: CsvStart | None = None,
     details: dict[str, object] | None = None,
     trigger_id: uuid.UUID | None = None,
+    expected_version_id: uuid.UUID | None = None,
 ) -> Admitted:
     """The request under `idempotency_key`: an exact retry's, or a new one, frozen. A re-run's digest covers its
-    `rerun` identity in place of `input`, and a CSV start's its `csv` beside it. `trigger_id` is the schedule or webhook
-    endpoint a durable source's request came from. Raises IdempotencyConflictError, WorkflowNotFoundError, or, for an
-    interactive source, AdmissionRefusedError."""
+    `rerun` identity in place of `input`, and a CSV start's its `csv` beside it; a start that confirmed a version
+    (`expected_version_id`, B14) is refused once another is active, and its digest covers it. `trigger_id` is the
+    schedule or webhook endpoint a durable source's request came from. Raises IdempotencyConflictError,
+    WorkflowNotFoundError, or, for an interactive source, AdmissionRefusedError."""
     if source not in INTERACTIVE + DURABLE or mode not in (LIVE, SIMULATE):
         raise ValueError(f"no such source or mode: {source}, {mode}")
     if csv is not None and source not in ("manual", "rerun"):
@@ -269,6 +275,8 @@ async def admit_request(
         digested = {**fields, "input": {"input": input, "csv": csv.digested()}}
     else:
         digested = fields
+    if expected_version_id is not None:  # only then: every other request's digest keeps its bytes
+        digested = {**digested, "expected_version_id": str(expected_version_id)}
     owner = actor_id if csv is not None else None  # a CSV start's exact retry is its upload owner's only
     existing = await _by_key(s, idempotency_key)
     if existing is not None:
@@ -276,7 +284,7 @@ async def admit_request(
     request_id = uuid.uuid4()
     savepoint = await s.begin_nested()
     try:
-        frozen = await _frozen(s, keys, tenant_id, request_id, fields, actor_id, rerun, csv)
+        frozen = await _frozen(s, keys, tenant_id, request_id, fields, actor_id, rerun, csv, expected_version_id)
     except _Consumed:
         await savepoint.rollback()
         existing = await _by_key(s, idempotency_key)  # its consumer has committed: under this key, an exact retry
@@ -286,7 +294,7 @@ async def admit_request(
     except _Refused as refused:
         await savepoint.rollback()
         if source in INTERACTIVE:
-            raise AdmissionRefusedError(refused.reason, refused.messages) from None
+            raise AdmissionRefusedError(refused.reason, refused.messages, refused.extra) from None
         return await _insert(s, keys, tenant_id, request_id, actor_id, idempotency_key, digested, None, None, refused,
                              rerun, extra=details, trigger_id=trigger_id)  # fmt: skip
     await _before_insert()
@@ -369,6 +377,7 @@ async def record_refused(
 async def admitted_under(
     s: AsyncSession, keys: KeySource, *, tenant_id: uuid.UUID, idempotency_key: str, source: str,
     workflow_id: uuid.UUID, mode: str, rerun: Rerun, actor_id: uuid.UUID | None = None,
+    expected_version_id: uuid.UUID | None = None,
 ) -> RunRequest | None:  # fmt: skip
     """The request an exact retry of this re-run finds under its key, before its input is rebuilt; None when the key
     is free. Raises IdempotencyConflictError for another request under the key, or, for a re-run with a new CSV, one
@@ -383,6 +392,8 @@ async def admitted_under(
     if existing is None:
         return None
     fields = {"source": source, "workflow_id": workflow_id, "mode": mode, "input": rerun.digested()}
+    if expected_version_id is not None:
+        fields["expected_version_id"] = str(expected_version_id)
     owner = actor_id if rerun.csv is not None else None
     return (await _retry(keys, tenant_id, existing, fields, owner)).request
 
@@ -419,7 +430,7 @@ async def _retry(
 
 async def _frozen(
     s: AsyncSession, keys: KeySource, tenant_id: uuid.UUID, request_id: uuid.UUID, fields: dict[str, Any],
-    actor_id: uuid.UUID | None, rerun: Rerun | None, csv: CsvStart | None,
+    actor_id: uuid.UUID | None, rerun: Rerun | None, csv: CsvStart | None, expected_version_id: uuid.UUID | None = None,
 ) -> _Frozen:  # fmt: skip
     """The mutable checks, then the trigger claimed and its envelope stored (a CSV start's rows built and its upload
     consumed first): the frozen version, the envelope and what the audit entry adds."""
@@ -434,6 +445,10 @@ async def _frozen(
     version = await s.get(WorkflowVersion, workflow.active_version_id)
     if version is None:
         raise RuntimeError("A workflow's active version that isn't there.")
+    if expected_version_id is not None and version.id != expected_version_id:  # B14: confirmed on another version
+        message = f"Version {version.number} is the active version now: confirm the start on it."
+        active = {"active_version_id": str(version.id), "active_version_number": version.number}
+        raise _Refused(VERSION_CHANGED, [message], version.id, active)
     build = await _current_build(s)
     if build is None:
         raise _Refused(NO_CURRENT_BUILD, [NO_BUILD], version.id)
@@ -465,6 +480,12 @@ async def _frozen(
     except InputRefusedError as e:
         raise _Refused(e.reason, e.reasons, version.id) from None
     envelope_id = await claims.write_envelope(s, ClaimCipher(keys), tenant_id, request_id=request_id, envelope=envelope)
+    if retained and rerun is not None:  # its original's rows again: their record too (the run form design §4.5)
+        kept = await claims.read_csv_record(s, ClaimCipher(keys), tenant_id, request_id=rerun.of)
+        if kept is not None:
+            await claims.write_csv_record(s, ClaimCipher(keys), tenant_id, request_id=request_id, record=kept)
+            counted = {"csv_rows": kept["row_count"], "csv_skipped": len(kept["skipped"])}
+            return _Frozen(version.id, envelope_id, counted)
     if built is None or csv is None:
         return _Frozen(version.id, envelope_id, {})
     record = {

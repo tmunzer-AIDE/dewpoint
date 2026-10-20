@@ -5,6 +5,7 @@ the file's headers, each cell converted to its column's type; a row that breaks 
 column's declared name and a fixed code, never what the cell holds."""
 
 import string
+from dataclasses import asdict
 
 import pytest
 from hypothesis import given, settings
@@ -113,6 +114,21 @@ def test_a_row_that_breaks_a_rule_is_its_number_column_and_code() -> None:
     assert (built.skipped, built.error_count) == ([(1, "required"), (2, "cell_count")], 4)  # each row's first
 
 
+def test_every_error_is_counted_by_column_and_code_with_its_first_rows() -> None:
+    """The run form design §4.4: every error, not only those listed, counted by its column and its code, each with the
+    first rows that broke it: the most frequent first, then by column (a record's own error first), then by code."""
+    rows = [",x,zz", "ok,1", ",2,aa:bb:cc:dd:ee:ff", "a,y,zz", ",z,", ",3,", ",4,", ",5,", ",6,", "b,1,zz"]
+    table = read_table(("Site,VLAN,MAC\n" + "\n".join(rows) + "\n").encode(), max_rows=20, max_bytes=1000)
+    built = build_rows(table, COLUMNS, {"site": "Site", "vlan": "VLAN", "mac": "MAC"})
+    assert [asdict(g) for g in built.groups] == [
+        {"column": "site", "code": "required", "count": 7, "rows": [1, 3, 5, 6, 7]},
+        {"column": "mac", "code": "not_mac", "count": 3, "rows": [1, 4, 10]},
+        {"column": "vlan", "code": "not_integer", "count": 3, "rows": [1, 4, 5]},
+        {"column": None, "code": "cell_count", "count": 1, "rows": [2]},
+    ]
+    assert built.error_count == sum(g.count for g in built.groups) == 14
+
+
 def test_at_the_permitted_limits_the_detail_kept_is_bounded_and_the_count_exact() -> None:
     """The owner's M2 review: 200 required columns and 10,000 records of empty cells fit in a 2 MB file, and break 2
     million rules. The builder keeps the first errors in detail, each skipped record's number and first code, and
@@ -125,6 +141,11 @@ def test_at_the_permitted_limits_the_detail_kept_is_bounded_and_the_count_exact(
     assert (built.rows, built.error_count) == ([], 200 * MAX_ROWS)
     assert built.errors == [RowError(1, f"c{i}", "required") for i in range(LISTED_ERRORS)]
     assert built.skipped == [(n, "required") for n in range(1, MAX_ROWS + 1)]
+    # every column's errors counted, past the 100 each record lists: 200 groups, never one per error
+    names = sorted(f"c{i}" for i in range(200))  # all as frequent: by column, as text
+    assert [asdict(g) for g in built.groups] == [
+        {"column": name, "code": "required", "count": MAX_ROWS, "rows": [1, 2, 3, 4, 5]} for name in names
+    ]
 
 
 @pytest.mark.parametrize("length", [140_000, MAX_BYTES - 64])

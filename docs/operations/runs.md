@@ -20,6 +20,11 @@ webhook's event, by the dispatcher ([webhook ingress](ingress.md)).
 `{"input": {...}, "mode": "live" | "simulate"}`, admits a request and answers 202 with it, `queued`. The API never
 talks to Temporal.
 
+- `"expected_version_id"`, optional, names the version the person confirmed (the run form shows it): once another
+  version is active, nothing is admitted and the answer is 409 `version_changed`, naming the `active_version_id` and
+  the `active_version_number`. The key covers it: an exact retry still returns its request, whatever is active now, and
+  the same key naming another version, or none, is 409 `idempotency_conflict`.
+
 - The same key with the same body returns the same request, as it is now; another body under the key is 409
   `idempotency_conflict`. Retrying after a lost answer is safe. A key is recognized only while its request is stored:
   past the request's retention cutoff a retry admits nothing and answers 410 `request_not_retained`, and once
@@ -34,13 +39,15 @@ talks to Temporal.
 - A refusal answers with its code and fixed messages that never quote a value: 503 `production_runs_disabled`,
   `environment_not_recorded`, `no_current_build` or `key_unusable` (the tenant's data key can't be read); 422
   `input_invalid` or `secret_index_limit`, with each place and rule the input breaks; 409 `workflow_disabled`,
-  `not_active`, `version_unusable`, `node_type_retired`, `cel_profile_retired` or `tenant_erasing`; 404 for a workflow
-  that isn't the tenant's. A refused start leaves no request.
+  `not_active`, `version_changed`, `version_unusable`, `node_type_retired`, `cel_profile_retired` or
+  `tenant_erasing`; 404 for a workflow that isn't the tenant's. A refused start leaves no request.
 
 `GET /api/v1/t/{tenant}/workflows/{workflow}/start-form` (`run.start`) describes the active version's input for a
 form: its typed top-level fields, each with its `type`, whether it's `required`, its `title`, `description`, `enum`
 and `default`, and `x-dewpoint-picker` as `picker`. A sensitive field never shows a value its schema holds:
-`default_masked` and `enum_masked` say there is one. 409 `not_active` without an active version.
+`default_masked` and `enum_masked` say there is one. It names the version (`version_id`, `version_number`,
+`published_at`, and `published_by`, its publisher's email, null once they're gone). 409 `not_active` without an active
+version.
 
 ## Starting a run from a CSV
 
@@ -61,9 +68,17 @@ sees `trigger.rows` (one object per row, each column by its name) and `trigger.r
   read as data only: UTF-8 with an optional BOM, the delimiter detected among comma, semicolon and tab, strict quoting,
   unique headers, a field as long as the file allows. A file that can't be read is 422 with its code (`csv_encoding`,
   `csv_empty`, `csv_duplicate_header`, `csv_malformed`, `csv_too_many_rows`, `csv_too_large`). The file is staged,
-  encrypted, for one hour, for its uploader only. The answer gives the headers, the proposed mapping (declared names to
-  headers), what keeps it from building rows, a preview of the first rows without the sensitive columns, and the
-  first 100 errors with their count, each a row number, a column and a code, never a cell.
+  encrypted, for one hour, for its uploader only. The answer gives the version whose declaration it was checked against
+  (`version_id`), the headers, the proposed mapping (declared names to headers), what keeps it from building rows, a
+  preview of the first rows' cells as written, without the sensitive columns, and the first 100 errors with their
+  count, each a row number, a column and a code, never a cell. Every error is also counted by its column and code
+  (`error_groups`: each one's count and first five rows, the most frequent first), with how many rows broke a rule
+  (`rows_with_errors`).
+- **Checking it again:** `POST …/csv-uploads/{upload}/preview` (`run.start`) with `{"mapping": {...}}` describes the
+  staged file again under that mapping, against the active version's declaration, as the upload's answer does without
+  its id, hour, headers, row count and default. It's its uploader's only (404 `upload_not_found`), 410
+  `upload_expired` past its hour, 409 `upload_consumed` once a start used it; it takes a CSV slot (503 `csv_busy`).
+  Nothing is logged or audited.
 - **The saved default mapping:** `PUT …/workflows/{workflow}/csv-mapping` (`trigger.manage`) saves one per workflow,
   encrypted. An upload proposes it while it fits the active version's declaration; one a later version no longer fits
   is reported `stale`, with each column's code, and never applied, until a new one is saved.
@@ -80,9 +95,9 @@ sees `trigger.rows` (one object per row, each column by its name) and `trigger.r
 - **Memory, per API process:** at the platform's caps, an upload's parse peaks near 145 MiB and holds about 90 MiB
   until it answers, and a CSV start's rows about 235 MiB until its transaction commits (measured as Python's own
   allocations: `tests/probes/csv_memory.py`). So each API process takes at most `DEWPOINT_CSV_CONCURRENCY` uploads,
-  CSV starts and re-runs keeping their original's input at once (2 by default); one past it is refused at once with
-  503 `csv_busy` and `Retry-After: 1`, before an upload's body is read or a start opens its file, nothing recorded:
-  ask again. A slot is held until the request's transaction commits. Measured as the process sees it
+  previews, CSV starts and re-runs keeping their original's input at once (2 by default); one past it is refused at
+  once with 503 `csv_busy` and `Retry-After: 1`, before an upload's body is read or a start opens its file, nothing
+  recorded: ask again. A slot is held until the request's transaction commits. Measured as the process sees it
   (`tests/probes/test_csv_rss.py`, the worst shape, through the commit, on one macOS development machine, 2026-10-09):
   two worst-case jobs at once raised the process's physical footprint (its resident memory with its compressed pages,
   the allocator's overhead included) about 465 MiB above idle, one about 325 MiB, and the allocator kept most of it
@@ -429,7 +444,9 @@ optional (the old one's by default). The key covers what was asked (the request 
 checked before anything is rebuilt: an exact retry returns the request it admitted even once retention has removed the
 old input, while the re-run's own request is within its cutoff (410 `request_not_retained` past it), and another re-run
 under the key is 409 `idempotency_conflict`. The audit entry names the request re-run (`rerun_of`). A draft simulation's
-run, or any run of its tree, is never re-run: 409 `draft_run`.
+run, or any run of its tree, is never re-run: 409 `draft_run`. `{"expected_version_id": ...}` is checked as a start's
+(409 `version_changed`). A re-run that rebuilds a CSV start's rows keeps that start's record: its details show the same
+mapping, headers and rows, and its audit entry counts them.
 
 ## The worker
 

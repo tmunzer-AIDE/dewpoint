@@ -602,10 +602,14 @@ class CsvFormOut(_Answer):
 
 
 class StartFormOut(_Answer):
-    """The active version's input, as a form: what a schedule's input is entered on (4c-3a ruling 5)."""
+    """The active version's input, as a form: what a schedule's input is entered on (4c-3a ruling 5), and the run
+    form's (the run form design §4.2): the version it names, and who published it, null once they're gone."""
 
     workflow_id: str
     version_id: str
+    version_number: int
+    published_at: str
+    published_by: str | None
     fields: list[StartFieldOut]
     csv: CsvFormOut | None
 
@@ -877,6 +881,62 @@ class CsvErrorOut(_Answer):
     row: int
     column: str | None  # the declared column's name; null for the record as a whole
     code: str
+
+
+class CsvProblemOut(_Answer):
+    column: str  # the declared column's name
+    code: str  # what keeps the mapping from building rows
+
+
+class CsvPreviewRowOut(_Answer):
+    row: int
+    cells: dict[str, str]  # the file's cells as written, under the mapping; never a sensitive column's
+
+
+class CsvErrorGroupOut(_Answer):
+    column: str | None  # null for the record as a whole
+    code: str
+    count: int
+    rows: list[int]  # the first five records that broke it
+
+
+class CsvPreviewOut(_Answer):
+    """A staged CSV described under a mapping, against the active version's declaration (engine 2b spec §8.1; the run
+    form design §4.3, §4.4): what keeps the mapping from building rows, the first records' cells, the first 100 errors
+    in detail, and every error counted by column and code."""
+
+    version_id: str  # the version whose declaration it was checked against
+    mapping: dict[str, str]
+    problems: list[CsvProblemOut]
+    masked_columns: list[str]
+    preview: list[CsvPreviewRowOut]
+    errors: list[CsvErrorOut]
+    error_count: int
+    error_groups: list[CsvErrorGroupOut]
+    rows_with_errors: int
+
+
+class CsvDefaultMappingOut(_Answer):
+    status: Literal["none", "applied", "stale"]
+    problems: list[CsvProblemOut] | None = None  # a stale one's, left out otherwise
+
+
+class CsvUploadOut(CsvPreviewOut):
+    """A staged upload (engine 2b spec §8.1): its id and hour, the file's headers and records, the mapping proposed
+    (the saved default, else the exact matches), and the file described under it."""
+
+    upload_id: str
+    expires_at: str
+    headers: list[str]
+    row_count: int
+    default_mapping: CsvDefaultMappingOut
+
+
+class CsvMappingOut(_Answer):
+    """A workflow's saved default mapping, and the version it was checked against."""
+
+    mapping: dict[str, str]
+    version_id: str
 
 
 class CsvRecordOut(_Answer):

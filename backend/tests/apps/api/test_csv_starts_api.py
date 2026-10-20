@@ -116,3 +116,19 @@ async def test_a_rerun_takes_a_new_upload(keyed_app, csv_ready, owner_sessionmak
     assert details["csv"]["row_count"] == 1
     again = await client.post(rerun_url, json=body, headers={"Idempotency-Key": "r1"})
     assert (again.status_code, again.json()["id"]) == (202, answer.json()["id"])  # found by its key, upload consumed
+
+
+async def test_a_rerun_of_the_same_rows_shows_its_originals_record(
+    keyed_app, csv_ready, owner_sessionmaker, api_settings
+) -> None:
+    """The run form design §4.5: what a CSV re-run's page shows of its rows (4e-1a's I1 left it to 4e-2)."""
+    ctx, wf = csv_ready
+    client = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx)
+    first = await client.post(runs_url(ctx, wf), json=csv_body(await uploaded(client, ctx, wf)),
+                              headers={"Idempotency-Key": "c1"})  # fmt: skip
+    rerun_url = f"/api/v1/t/{ctx.tenant_id}/runs/{first.json()['id']}/rerun"
+    answer = await client.post(rerun_url, headers={"Idempotency-Key": "r1"})
+    assert answer.status_code == 202, answer.text
+    runs = f"/api/v1/t/{ctx.tenant_id}/runs"
+    original = (await client.get(f"{runs}/{first.json()['id']}")).json()["csv"]
+    assert original["row_count"] == 1 and (await client.get(f"{runs}/{answer.json()['id']}")).json()["csv"] == original

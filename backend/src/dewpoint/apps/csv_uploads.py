@@ -22,7 +22,7 @@ from dataclasses import asdict
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import func, update
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,6 +38,18 @@ PURPOSE = "csv.upload"
 MAPPING_PURPOSE = "csv.mapping"
 TTL = timedelta(hours=1)
 PREVIEW_ROWS = 5
+UPLOAD_NOT_FOUND = "upload_not_found"
+UPLOAD_EXPIRED = "upload_expired"
+UPLOAD_CONSUMED = "upload_consumed"
+
+
+class UploadUnavailableError(Exception):
+    """A staged upload the caller can't use: another's, another workflow's or none (`upload_not_found`), consumed by a
+    start (`upload_consumed`), or past its hour (`upload_expired`)."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
 
 
 def declaration(version: WorkflowVersion) -> dict[str, Any] | None:
@@ -68,6 +80,8 @@ def described(table: Table, columns: Sequence[Mapping[str, Any]], mapping: Mappi
         "preview": preview,
         "errors": [asdict(e) for e in built.errors] if built else [],
         "error_count": built.error_count if built else 0,
+        "error_groups": [asdict(g) for g in built.groups] if built else [],  # every error, by column and code
+        "rows_with_errors": len(built.skipped) if built else 0,
     }
 
 
@@ -111,6 +125,28 @@ async def stage(
         "default_mapping": default,
         **(await asyncio.to_thread(described, table, columns, mapping)),
     }
+
+
+async def previewed(
+    s: AsyncSession, keys: KeySource, *, tenant_id: uuid.UUID, owner_id: uuid.UUID, workflow_id: uuid.UUID,
+    upload_id: uuid.UUID, csv: Mapping[str, Any], version_id: uuid.UUID, mapping: Mapping[str, str],
+) -> dict[str, Any]:  # fmt: skip
+    """The staged upload described again under `mapping` (B11; the run form design §4.3), against version
+    `version_id`'s declaration `csv`: its owner's, for its workflow, unconsumed and in its hour, else
+    UploadUnavailableError, checked as a start checks it. Read and described in a thread, inside the caller's CSV slot;
+    nothing is logged or audited, as at upload."""
+    query = select(CsvUpload, CsvUpload.expires_at > func.statement_timestamp()).where(CsvUpload.id == upload_id)
+    found = (await s.execute(query)).one_or_none()  # row-level security: the caller's tenant's only
+    upload, live = found if found is not None else (None, False)
+    if upload is None or (upload.tenant_id, upload.owner_id, upload.workflow_id) != (tenant_id, owner_id, workflow_id):
+        raise UploadUnavailableError(UPLOAD_NOT_FOUND)
+    if upload.consumed_by is not None or upload.staged is None:
+        raise UploadUnavailableError(UPLOAD_CONSUMED)
+    if not live:
+        raise UploadUnavailableError(UPLOAD_EXPIRED)
+    data = await ClaimCipher(keys, purpose=PURPOSE).open(str(tenant_id), str(upload.id), upload.staged)
+    table = await asyncio.to_thread(read_table, data, max_rows=int(csv["max_rows"]), max_bytes=byte_cap(csv))
+    return {"version_id": str(version_id), **(await asyncio.to_thread(described, table, csv["columns"], mapping))}
 
 
 async def save_default(
