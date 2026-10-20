@@ -3580,3 +3580,15 @@ ESLint silent:
   passed; green: 54 passed.
 
 Mid-slice rulings: none. Nothing pushed.
+
+### 4e-2b, milestone 3 (2026-10-20)
+
+The owner accepted milestone 2 ("good"). Each task's tests failed as its step says, then passed, with the type check
+and ESLint silent:
+- Task 7, 3badb731: re-run a run, its input kept or changed. Red: 11 failed, 39 passed (no Re-run…, no `rerun`);
+  green: 50 passed.
+- Task 8, 08026623: re-run a CSV run, its same rows or another file. Red: 3 failed, 12 passed (the two pins of
+  another file only passing at once, as planned); green: 15 passed.
+- Task 9, 9c7fea59: the form at 320 px. Red: 3 failed, 53 passed; green: 56 passed.
+
+Mid-slice rulings: none. Nothing pushed.
