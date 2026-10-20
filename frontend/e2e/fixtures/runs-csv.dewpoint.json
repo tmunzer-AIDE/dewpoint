@@ -1,0 +1,24 @@
+{
+  "format": "dewpoint.workflow",
+  "format_version": 1,
+  "name": "Runs CSV",
+  "graph": {
+    "graph_format": 1,
+    "nodes": [
+      { "id": "4b8d2e6f-1a3c-4e5f-8a7b-9c0d1e2f3a01", "key": "count", "type": "flow.transform@1", "config": { "fields": { "sites": { "$value": { "kind": "cel", "expr": "trigger.row_count" } }, "region": { "$value": { "kind": "cel", "expr": "trigger.region" } } } }, "position": { "x": 0, "y": 140 } }
+    ],
+    "edges": [],
+    "settings": {
+      "input_schema": { "type": "object", "properties": { "region": { "type": "string", "title": "Region" } }, "required": ["region"] },
+      "csv": {
+        "columns": [
+          { "header": "Site", "name": "site", "type": "string", "required": true },
+          { "header": "VLAN", "name": "vlan", "type": "integer" }
+        ],
+        "max_rows": 1000,
+        "max_bytes": 100000
+      }
+    }
+  },
+  "bindings": []
+}
