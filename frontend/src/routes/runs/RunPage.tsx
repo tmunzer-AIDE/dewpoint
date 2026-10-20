@@ -5,7 +5,9 @@
 // (useRunReads). A step's result opens in the editor's drawer, read only, its Result tab first; a failed run opens on
 // its failed step (the owner's answer 6), and Close gives focus back to its card. A run past its tenant's retention, or
 // an id that never was, is said to be neither, with Back to Runs; a run read while its tenant is erased says why it
-// can't be (§5.5). Cancel, for the roles that hold run.cancel, while it waits or runs (useCancel).
+// can't be (§5.5). Cancel, for the roles that hold run.cancel, while it waits or runs (useCancel). Re-run…, once it
+// has ended (or never started), for the roles that hold run.start (4e-2; the run form design §5.1): never on a draft
+// simulation, which opens in the editor, nor on a sub-run, which has no request of its own.
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useCallback, useMemo, useState, type KeyboardEvent } from "react";
@@ -14,6 +16,7 @@ import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { When } from "../../components/When";
 import { ApiError } from "../../lib/client";
 import { START, findNode, idKey, nodesOf, portsOf, sameId } from "../../lib/graph";
+import { canStart } from "../../lib/runForm";
 import { canCancel, isEnded, runInstancesQuery, type Run, type RunStepSummary } from "../../lib/runs";
 import { reasonWords, runId } from "../../lib/runStatus";
 import { draftSnapshotQuery } from "../../lib/simulations";
@@ -33,7 +36,8 @@ import { useCanvasNav } from "../editor/useCanvasNav";
 import { RunBanner, RunBar } from "./RunBar";
 import { LoopResult, SeveralResult, StepResult } from "./RunResult";
 import { StartDrawer } from "./StartDrawer";
-import { useLanded } from "./landing";
+import { useLand, useLanded } from "./landing";
+import { RunForm } from "./RunForm";
 import { triggerOf, triggerWords } from "./trigger";
 import { useCancel } from "./useCancel";
 import { useRunReads } from "./useRunReads";
@@ -98,6 +102,8 @@ export function RunPage({ tenantId, runId: id }: { tenantId: string; runId: stri
   const tenant = useQuery(tenantQuery(tenantId));
   const cancel = useCancel(tenantId, id, r?.mode === "live");
   useLanded(id, r !== undefined); // a run just started: its name takes focus once read (4e-2)
+  const [rerunning, setRerunning] = useState(false);
+  const land = useLand(tenantId);
   // The graph it ran: its version's, or the draft a draft simulation froze for it. Neither ever changes.
   const version = useQuery({ ...versionQuery(tenantId, r?.workflow_id ?? "", r?.version_id ?? ""), enabled: !!r?.version_id });
   const snapshot = useQuery({ ...draftSnapshotQuery(tenantId, r?.workflow_id ?? "", r?.draft_snapshot_id ?? ""), enabled: !!r?.draft_snapshot_id });
@@ -180,7 +186,16 @@ export function RunPage({ tenantId, runId: id }: { tenantId: string; runId: stri
         {canCancel(tenant.data?.role) && !ended && !r.cancel_requested_at && (
           <Button size="sm" variant="danger-outline" disabled={cancel.state === "sending"} onClick={cancel.ask}>Cancel the run</Button>
         )}
+        {canStart(tenant.data?.role) && ended && r.draft_snapshot_id === null && r.parent === null && (
+          <Button size="sm" aria-haspopup="dialog" onClick={() => setRerunning(true)}>Re-run…</Button>
+        )}
       </RunBar>
+      {rerunning && (
+        <RunForm
+          tenantId={tenantId} workflow={{ id: r.workflow_id, name: r.workflow_name ?? "—" }} rerun={{ run: r, ranVersion: version.data?.number ?? null }}
+          onStarted={land} onClose={() => setRerunning(false)}
+        />
+      )}
       <div className="flex flex-col gap-2 border-b border-line bg-surface px-5 py-2.5">
         {steps.isLoadingError && (
           <p className="flex flex-wrap items-center gap-2 text-small">

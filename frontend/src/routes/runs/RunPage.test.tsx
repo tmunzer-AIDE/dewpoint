@@ -675,3 +675,40 @@ describe("runs that didn't run, and others (§5.4; the RunOther board)", () => {
     });
   });
 });
+
+describe("Re-run… (the run form design §5.1, §5.4; the EntryPoints board)", () => {
+  const FORM = { workflow_id: "w1", version_id: "v2", version_number: 2, published_at: local(8, 0, 0), published_by: null, csv: null, fields: [] };
+  beforeEach(() => {
+    answers.set("/api/v1/t/t1/workflows/w1/start-form", json(FORM));
+    answers.set(`/api/v1/t/t1/runs/${RUN.id}/input`, json({ input: {}, read_back: "kept", seeds: null }));
+  });
+
+  it("offers Re-run… once the run has ended, to the roles that hold run.start, and opens its form", async () => {
+    answers.set(`/api/v1/t/t1/runs/${RUN.id}`, json(RUN));
+    show();
+    await userEvent.click(await screen.findByRole("button", { name: "Re-run…" }));
+    expect(await screen.findByRole("dialog", { name: "Re-run 4a2b17e0" })).toBeTruthy();
+    expect(await screen.findByText("It runs version 2, the same version as run 4a2b17e0.")).toBeTruthy();
+  });
+
+  it("offers none while the run goes (Cancel instead), on a draft simulation, on a sub-run, nor to a viewer", async () => {
+    const cases: [Run, string][] = [
+      [{ ...RUN, status: "running", ended_at: null }, "operator"],
+      [{ ...RUN, draft_snapshot_id: "s1", draft_revision: 4, mode: "simulate" }, "operator"],
+      [{ ...RUN, parent: { run_id: "p1", step_id: null, iteration_key: null }, parent_run_id: "p1" }, "operator"],
+      [RUN, "viewer"],
+    ];
+    for (const [run, as] of cases) {
+      role = as;
+      answers.set(`/api/v1/t/t1/runs/${RUN.id}`, json(run));
+      show();
+      await screen.findByRole("heading", { level: 1, name: "AP offline triage" });
+      await vi.waitFor(() => expect(reads).toContain("/api/v1/t/t1")); // the role read, then drawn
+      await act(() => new Promise((r) => setTimeout(r, 0)));
+      expect(screen.queryByRole("button", { name: "Re-run…" })).toBeNull();
+      if (run.status === "running") expect(screen.getByRole("button", { name: "Cancel the run" })).toBeTruthy();
+      cleanup();
+      reads = [];
+    }
+  });
+});

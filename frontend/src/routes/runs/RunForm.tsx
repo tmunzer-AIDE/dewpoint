@@ -5,19 +5,24 @@
 // Each submitted form goes under one key, sent again under it only when the same form is (an answer lost on the way).
 // A workflow that declares a CSV starts only with its file (§5.3, CsvPart), any other fields beside it, once every row
 // passes; the columns are saved first when asked, and a failed save starts nothing. A file checked against a version
-// published since the form was read has the form read again, as a refused start does.
+// published since the form was read has the form read again, as a refused start does. A re-run (§5.4; the Rerun board)
+// is the same form on the active version, the run's own input prefilled and its mode chosen (rerun.ts).
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useId, useRef, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Button } from "../../components/Button";
 import { TextArea } from "../../components/Field";
 import { When } from "../../components/When";
 import {
-  canSaveColumns, changedWords, keptValues, keyFor, refusalOf, saveColumns, startRun, type Refusal, type Sent, type StartBody, type StartForm,
+  canSaveColumns, changedWords, keptValues, keyFor, refusalOf, rerunRun, saveColumns, startRun, type Refusal, type RerunBody, type Sent,
+  type StartBody, type StartForm,
 } from "../../lib/runForm";  // prettier-ignore
+import { runInputQuery, type Run } from "../../lib/runs";
+import { runId } from "../../lib/runStatus";
 import { startFormQuery } from "../../lib/triggers";
 import { tenantQuery } from "../../lib/workflows";
 import { SimBanner } from "../editor/simulation/SimBanner";
 import { CsvPart } from "./CsvFile";
+import { AGAIN, MARKER_WORDS, holdsMarker, prefill, versionWords } from "./rerun";
 import { ENDED, csvReason, useCsvFile } from "./useCsvFile";
 import { InputControl, REQUIRED, fieldKey, fromFields, hintOf, labelOf, startValues, wholeOf } from "../editor/startInput";
 
@@ -56,8 +61,22 @@ function ModeChoice({ mode, onChange }: { mode: Mode; onChange: (m: Mode) => voi
   );
 }
 
-export function RunForm({ tenantId, workflow, draftDiffers = false, onStarted, onClose }: {
+const NONE: ReadonlySet<string> = new Set();
+
+/** A field kept by the server, untouched: said, never shown. */
+function Kept({ label }: { label: ReactNode }) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <span className="text-small font-semibold">{label}</span>
+      <p className="text-small text-muted">Kept from the original run</p>
+    </div>
+  );
+}
+
+export function RunForm({ tenantId, workflow, draftDiffers = false, rerun, onStarted, onClose }: {
   tenantId: string; workflow: { id: string; name: string }; draftDiffers?: boolean;
+  /** A re-run of `run`, which ran version `ranVersion` (null when it never had one). */
+  rerun?: { run: Run; ranVersion: number | null };
   onStarted: (runId: string) => void; onClose: () => void;
 }) {  // prettier-ignore
   const id = useId();
@@ -72,9 +91,21 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, onStarted, o
   // The version shown is the one confirmed: a later read of the query (a refetch elsewhere) never swaps it unseen.
   const [form, setForm] = useState<StartForm | null>(null);
   if (form === null && read.data) setForm(read.data);
-  const [mode, setMode] = useState<Mode>("live");
+  const [mode, setMode] = useState<Mode>(rerun?.run.mode ?? "live");
+  // A re-run's input, read back (§5.4): kept, absent or unreadable; absent too once the server says it's gone.
+  const original = useQuery({ ...runInputQuery(tenantId, rerun?.run.id ?? ""), enabled: rerun !== undefined });
+  const [gone, setGone] = useState(false);
+  const readBack = !rerun ? null : gone ? "absent" : original.isError ? "error" : (original.data?.read_back ?? null);
+  const prefilled = form && readBack === "kept" ? prefill(form, original.data?.input ?? null) : null;
+  const [touched, setTouched] = useState(false); // a re-run's input changed: sent whole
+  const keptShown = prefilled && !touched ? prefilled.kept : NONE; // said as kept
+  const again = prefilled && touched ? prefilled.kept : NONE; // entered again
   const [values, setValues] = useState<ReadonlyMap<string, string> | null>(null);
-  const shownValues = values ?? (form ? startValues(form) : new Map<string, string>());
+  const shownValues = values ?? (!form ? new Map<string, string>() : rerun ? (prefilled?.values ?? new Map<string, string>()) : startValues(form));
+  const change = (name: string, v: string) => {
+    setValues(new Map(shownValues).set(name, v));
+    setTouched(true);
+  };
   const [asJson, setAsJson] = useState(false);
   const [jsonText, setJsonText] = useState<string | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -116,8 +147,8 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, onStarted, o
     );  // prettier-ignore
   }, [drifted]); // once per version found: the form and values of the draw that found it
 
-  // Focus goes to the first field once the form is read (§5.6); before, the dialog holds it.
-  const formRead = form !== null;
+  // Focus goes to the first field once the form is read (§5.6), a re-run's input with it; before, the dialog holds it.
+  const formRead = form !== null && (!rerun || readBack !== null);
   useEffect(() => {
     if (formRead) fieldsRef.current?.querySelector<HTMLElement>("input, select, textarea")?.focus();
   }, [formRead]);
@@ -130,22 +161,27 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, onStarted, o
     setErrors({});
     setJsonText(Object.keys(made.input).length > 0 ? JSON.stringify(made.input, null, 2) : "");
     setAsJson(true);
+    setTouched(true);
   };
 
   async function submit(e: FormEvent) {
     e.preventDefault();
     if (!form || sending || reason !== null) return;
-    let input: Record<string, unknown>;
-    if (asJson) {
-      const whole = wholeOf(shownJson);
-      if ("problem" in whole) return setErrors({ input: whole.problem });
-      input = whole.value;
-    } else {
-      const made = fromFields(form, shownValues, true, () => REQUIRED);
+    // Untouched, a re-run sends no input: the server rebuilds the original whole, its protected values too.
+    const whole = !(rerun && readBack === "kept" && !touched);
+    let input: Record<string, unknown> = {};
+    if (whole && asJson) {
+      const typed = wholeOf(shownJson);
+      if ("problem" in typed) return setErrors({ input: typed.problem });
+      if (rerun && holdsMarker(typed.value)) return setErrors({ input: MARKER_WORDS }); // never sent (§5.4)
+      input = typed.value;
+    } else if (whole) {
+      const entering = { fields: form.fields.map((f) => (again.has(f.name) ? { ...f, required: true } : f)) };
+      const made = fromFields(entering, shownValues, true, () => REQUIRED);
       if ("problems" in made) return setErrors(made.problems);
       input = made.input;
     }
-    const body: StartBody = { input, mode, expected_version_id: form.version_id };
+    const body: StartBody | RerunBody = whole ? { input, mode, expected_version_id: form.version_id } : { mode, expected_version_id: form.version_id };
     if (form.csv && csv.file.phase === "staged") body.csv = { upload_id: csv.file.upload.upload_id, mapping: csv.file.mapping };
     const sent = keyFor(last, body);
     setLast(sent);
@@ -160,11 +196,17 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, onStarted, o
           return setRefusal({ code: "columns_unsaved", words: "The columns couldn't be saved, so nothing started. Start again, or leave them unsaved.", fields: {} });
         }
       }
-      const started = await startRun(tenantId, workflow.id, body, sent.key);
+      const started = rerun ? await rerunRun(tenantId, rerun.run.id, body, sent.key) : await startRun(tenantId, workflow.id, body as StartBody, sent.key);
       onStarted(started.id);
     } catch (err) {
       let refused = refusalOf(err, new Set(asJson ? [] : form.fields.map((f) => f.name)));
       if (ENDED.has(refused.code)) return csv.drop({ words: refused.words, code: refused.code }); // chosen again
+      if (rerun && refused.code === "input_not_retained") {
+        // Retention passed meanwhile: the form is the absent one (§5.4), its fields empty.
+        setGone(true);
+        setValues(new Map());
+        return;
+      }
       if (refused.code === "version_changed") {
         const r = await reread(form, shownValues);
         if ("refused" in r) refused = r.refused;
@@ -176,6 +218,15 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, onStarted, o
     }
   }
 
+  const short = rerun ? runId(rerun.run.id) : "";
+  const INPUT_WORDS: Record<string, string> = {
+    kept: touched ? "Changed from the original run's input." : "The original run's input. Change what you need.",
+    absent: `Run ${short}'s input isn't kept, so it can't be sent again. Fill in the fields to run it again.`,
+    unreadable: `Run ${short}'s input can't be read back: it doesn't open, or the tenant's key is gone during an erasure. Fill in the fields to run it again.`,
+    error: `Run ${short}'s input couldn't be read. Fill in the fields to run it again.`,
+  };
+  const live = mode === "live";
+  const submitWords = rerun ? (live ? "Re-run live" : "◌ Re-run as a simulation") : live ? "Start the live run" : "◌ Start the simulation";
   return (
     <dialog
       ref={dialog}
@@ -185,29 +236,39 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, onStarted, o
     >
       <form onSubmit={(e) => void submit(e)} className="flex flex-col gap-4">
         <header>
-          <h2 id={`${id}-title`} className="text-h3 font-semibold">Start a run</h2>
+          <h2 id={`${id}-title`} className="text-h3 font-semibold">{rerun ? `Re-run ${short}` : "Start a run"}</h2>
           <p className="text-small text-muted">{workflow.name}</p>
         </header>
-        {read.isPending && form === null ? (
-          <p className="text-small text-muted">Loading the published version&apos;s input…</p>
+        {(read.isPending && form === null) || (form !== null && rerun && readBack === null) ? (
+          <p className="text-small text-muted">{rerun ? "Reading the run's input…" : "Loading the published version's input…"}</p>
         ) : form === null ? (
           <p role="alert" className="text-small text-danger">
             {read.isError ? "The published version's input couldn't be read. Close this and start again." : "This workflow has no published version: nothing can start."}
           </p>
         ) : (
           <>
-            <p className="text-small">
-              <span className="text-muted">Version</span>
-              {` ${form.version_number} · published `}
-              <When iso={form.published_at} />
-              {form.published_by ? ` by ${form.published_by}` : ""}
-            </p>
+            {rerun ? (
+              <p className="text-small">{versionWords(form, { id: rerun.run.version_id, number: rerun.ranVersion }, short)}</p>
+            ) : (
+              <p className="text-small">
+                <span className="text-muted">Version</span>
+                {` ${form.version_number} · published `}
+                <When iso={form.published_at} />
+                {form.published_by ? ` by ${form.published_by}` : ""}
+              </p>
+            )}
             {draftDiffers && (
               <p className="text-small text-muted">
                 {`The draft has changes that aren't published. This run uses version ${form.version_number}, not the draft.`}
               </p>
             )}
             <ModeChoice mode={mode} onChange={setMode} />
+            {rerun && readBack !== null && (
+              <div className="flex flex-col gap-1">
+                <h3 className="text-small font-semibold">Input</h3>
+                <p className="text-small">{INPUT_WORDS[readBack]}</p>
+              </div>
+            )}
             <div ref={fieldsRef} className="flex flex-col gap-4">
               {form.csv && (
                 <CsvPart
@@ -228,12 +289,17 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, onStarted, o
               ) : (
                 <>
                   {form.fields.length === 0 && !form.csv && <p className="text-small text-muted">This version takes no input.</p>}
-                  {form.fields.map((f) => (
-                    <InputControl
-                      key={f.name} f={f} value={shownValues.get(f.name)} error={errors[fieldKey(f.name)]} label={labelOf(f)} hint={hintOf(f)}
-                      onChange={(v) => setValues(new Map(shownValues).set(f.name, v))}
-                    />
-                  ))}
+                  {form.fields.map((f) =>
+                    keptShown.has(f.name) ? (
+                      <Kept key={f.name} label={labelOf(f)} />
+                    ) : (
+                      <InputControl
+                        key={f.name} f={f} value={shownValues.get(f.name)} error={errors[fieldKey(f.name)]}
+                        label={labelOf(again.has(f.name) ? { ...f, required: true } : f)} hint={again.has(f.name) ? AGAIN : hintOf(f)}
+                        onChange={(v) => change(f.name, v)}
+                      />
+                    ),
+                  )}
                 </>
               )}
             </div>
@@ -259,7 +325,7 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, onStarted, o
             type="submit" variant={mode === "live" ? "live-outline" : "simulate"} disabled={form === null || sending || reason !== null}
             aria-describedby={reason ? `${id}-reason` : undefined}
           >
-            {`${mode === "live" ? "Start the live run" : "◌ Start the simulation"}${rows === null ? "" : ` · ${rows.toLocaleString("en-US")} row${rows === 1 ? "" : "s"}`}`}
+            {`${submitWords}${rows === null ? "" : ` · ${rows.toLocaleString("en-US")} row${rows === 1 ? "" : "s"}`}`}
           </Button>
         </div>
       </form>
