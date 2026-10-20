@@ -63,12 +63,14 @@ function ModeChoice({ mode, onChange }: { mode: Mode; onChange: (m: Mode) => voi
 
 const NONE: ReadonlySet<string> = new Set();
 
-/** A field kept by the server, untouched: said, never shown. */
-function Kept({ label }: { label: ReactNode }) {
+const KEPT = "Kept from the original run";
+
+/** A field a re-run sends as the original had it: its value, or that the server kept it (never shown). */
+function ReadOnly({ label, value }: { label: ReactNode; value: string }) {
   return (
     <div className="flex flex-col gap-1.5">
       <span className="text-small font-semibold">{label}</span>
-      <p className="text-small text-muted">Kept from the original run</p>
+      <p className={`text-small ${value === KEPT ? "text-muted" : ""}`}>{value}</p>
     </div>
   );
 }
@@ -96,10 +98,17 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, rerun, onSta
   const original = useQuery({ ...runInputQuery(tenantId, rerun?.run.id ?? ""), enabled: rerun !== undefined });
   const [gone, setGone] = useState(false);
   const readBack = !rerun ? null : gone ? "absent" : original.isError ? "error" : (original.data?.read_back ?? null);
-  const prefilled = form && readBack === "kept" ? prefill(form, original.data?.input ?? null) : null;
+  // A CSV run (§5.4): its same rows, read again by the server with its input, or another file; on a version that reads
+  // no CSV, the fields alone, from empty. The same rows only while the input is kept.
+  const [source, setSource] = useState<"same" | "file">("same");
+  const csvGone = !!rerun?.run.csv && form !== null && form.csv === null;
+  const offerSame = !!rerun?.run.csv && !!form?.csv && readBack === "kept";
+  const sameRows = offerSame && source === "same";
+  const prefilled = form && readBack === "kept" && !csvGone ? prefill(form, original.data?.input ?? null) : null;
   const [touched, setTouched] = useState(false); // a re-run's input changed: sent whole
-  const keptShown = prefilled && !touched ? prefilled.kept : NONE; // said as kept
-  const again = prefilled && touched ? prefilled.kept : NONE; // entered again
+  const changed = touched || (!!rerun && !!form?.csv && !sameRows); // another file: the fields go whole beside it
+  const keptShown = prefilled && !changed ? prefilled.kept : NONE; // said as kept
+  const again = prefilled && changed ? prefilled.kept : NONE; // entered again
   const [values, setValues] = useState<ReadonlyMap<string, string> | null>(null);
   const shownValues = values ?? (!form ? new Map<string, string>() : rerun ? (prefilled?.values ?? new Map<string, string>()) : startValues(form));
   const change = (name: string, v: string) => {
@@ -114,8 +123,10 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, rerun, onSta
   const [sending, setSending] = useState(false);
   const shownJson = jsonText ?? "";
   const csv = useCsvFile(tenantId, workflow.id);
-  const reason = form?.csv ? csvReason(csv.file, form.csv.columns) : null;
-  const rows = form?.csv && csv.file.phase === "staged" && reason === null ? csv.file.upload.row_count : null;
+  const reason = form?.csv && !sameRows ? csvReason(csv.file, form.csv.columns) : null;
+  const rows = sameRows
+    ? rerun.run.csv!.row_count
+    : form?.csv && csv.file.phase === "staged" && reason === null ? csv.file.upload.row_count : null;  // prettier-ignore
   const tenant = useQuery(tenantQuery(tenantId));
   const saveable = canSaveColumns(tenant.data?.role);
   const [save, setSave] = useState(false);
@@ -168,7 +179,7 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, rerun, onSta
     e.preventDefault();
     if (!form || sending || reason !== null) return;
     // Untouched, a re-run sends no input: the server rebuilds the original whole, its protected values too.
-    const whole = !(rerun && readBack === "kept" && !touched);
+    const whole = !(rerun && readBack === "kept" && !csvGone && (sameRows || (!form.csv && !touched)));
     let input: Record<string, unknown> = {};
     if (whole && asJson) {
       const typed = wholeOf(shownJson);
@@ -182,7 +193,7 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, rerun, onSta
       input = made.input;
     }
     const body: StartBody | RerunBody = whole ? { input, mode, expected_version_id: form.version_id } : { mode, expected_version_id: form.version_id };
-    if (form.csv && csv.file.phase === "staged") body.csv = { upload_id: csv.file.upload.upload_id, mapping: csv.file.mapping };
+    if (form.csv && !sameRows && csv.file.phase === "staged") body.csv = { upload_id: csv.file.upload.upload_id, mapping: csv.file.mapping };
     const sent = keyFor(last, body);
     setLast(sent);
     setErrors({});
@@ -219,8 +230,8 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, rerun, onSta
   }
 
   const short = rerun ? runId(rerun.run.id) : "";
-  const INPUT_WORDS: Record<string, string> = {
-    kept: touched ? "Changed from the original run's input." : "The original run's input. Change what you need.",
+  const INPUT_WORDS: Record<string, string | null> = {
+    kept: form?.csv ? null : touched ? "Changed from the original run's input." : "The original run's input. Change what you need.",
     absent: `Run ${short}'s input isn't kept, so it can't be sent again. Fill in the fields to run it again.`,
     unreadable: `Run ${short}'s input can't be read back: it doesn't open, or the tenant's key is gone during an erasure. Fill in the fields to run it again.`,
     error: `Run ${short}'s input couldn't be read. Fill in the fields to run it again.`,
@@ -264,19 +275,42 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, rerun, onSta
             )}
             <ModeChoice mode={mode} onChange={setMode} />
             {rerun && readBack !== null && (
-              <div className="flex flex-col gap-1">
-                <h3 className="text-small font-semibold">Input</h3>
-                <p className="text-small">{INPUT_WORDS[readBack]}</p>
-              </div>
+              <fieldset className="flex flex-col gap-1.5">
+                <legend className="mb-1 text-small font-semibold">Input</legend>
+                {csvGone ? (
+                  <p className="text-small">{`Version ${form.version_number} doesn't read a CSV file: fill in its fields.`}</p>
+                ) : (
+                  INPUT_WORDS[readBack] && <p className="text-small">{INPUT_WORDS[readBack]}</p>
+                )}
+                {offerSame && (
+                  <>
+                    <label className="flex min-h-6 items-center gap-2 text-small">
+                      <input type="radio" name={`${id}-source`} checked={source === "same"} onChange={() => setSource("same")} className="size-[16px] accent-accent" />
+                      {`The same rows: ${rerun.run.csv!.row_count.toLocaleString("en-US")} rows, as run ${short} read them`}
+                    </label>
+                    <label className="flex min-h-6 items-center gap-2 text-small">
+                      <input type="radio" name={`${id}-source`} checked={source === "file"} onChange={() => setSource("file")} className="size-[16px] accent-accent" />
+                      Another file: it&apos;s checked here before the re-run starts, as for a new start
+                    </label>
+                  </>
+                )}
+              </fieldset>
             )}
             <div ref={fieldsRef} className="flex flex-col gap-4">
-              {form.csv && (
+              {form.csv && !sameRows && (
                 <CsvPart
                   form={form} csv={form.csv} file={csv.file} saveable={saveable} save={save} onSave={setSave}
                   onChoose={(f) => void csv.choose(f, form.csv!)} onMap={(column, header) => csv.map(column, header, form.csv!)}
                 />
               )}
-              {asJson ? (
+              {sameRows ? (
+                <>
+                  {form.fields.map((f) => (
+                    <ReadOnly key={f.name} label={labelOf(f)} value={prefilled?.kept.has(f.name) ? KEPT : (prefilled?.values.get(f.name) ?? "Not given")} />
+                  ))}
+                  {form.fields.length > 0 && <p className="text-small text-muted">To change them, choose another file.</p>}
+                </>
+              ) : asJson ? (
                 <TextArea
                   label="The input, as JSON"
                   hint='An object, like {"site": "HQ"}. Shown as typed, a sensitive value too.'
@@ -291,7 +325,7 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, rerun, onSta
                   {form.fields.length === 0 && !form.csv && <p className="text-small text-muted">This version takes no input.</p>}
                   {form.fields.map((f) =>
                     keptShown.has(f.name) ? (
-                      <Kept key={f.name} label={labelOf(f)} />
+                      <ReadOnly key={f.name} label={labelOf(f)} value={KEPT} />
                     ) : (
                       <InputControl
                         key={f.name} f={f} value={shownValues.get(f.name)} error={errors[fieldKey(f.name)]}
@@ -303,7 +337,7 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, rerun, onSta
                 </>
               )}
             </div>
-            {(form.fields.length > 0 || !form.csv) && (
+            {(form.fields.length > 0 || !form.csv) && !sameRows && (
               <div>
                 <Button size="sm" aria-pressed={asJson} onClick={() => (asJson ? (setAsJson(false), setJsonText(null)) : toJson())}>
                   Edit as JSON

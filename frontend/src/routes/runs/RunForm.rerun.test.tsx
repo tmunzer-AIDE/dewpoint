@@ -20,21 +20,43 @@ const FORM: StartForm = {
 };  // prettier-ignore
 const KEPT = { input: { site: "HQ", floor: 2, token: "[redacted]" }, read_back: "kept", seeds: null };
 
+// A CSV run (the Rerun board's third): 2,431 rows on version 7, its other fields a region and a token.
+const CSV_RUN: Run = {
+  ...FAILED_RUN, id: "77e0b9d2-0000-4000-8000-000000000005", version_id: "v7",
+  csv: { row_count: 2431, headers: ["Site name"], mapping: { name: "Site name" }, error_count: 0, errors: [], skipped: [] },
+};  // prettier-ignore
+const CSV_FORM: StartForm = {
+  workflow_id: "w1", version_id: "v7", version_number: 7, published_at: local(9, 0, 0), published_by: null,
+  fields: [
+    { name: "region", title: "Region", type: "string", required: true, sensitive: false },
+    { name: "token", title: "API token", type: "string", required: true, sensitive: true },
+  ],
+  csv: { max_rows: 10_000, max_bytes: 5 * 1024 * 1024, columns: [{ header: "Site name", name: "name", type: "string", required: true, sensitive: false }] },
+};  // prettier-ignore
+const CSV_KEPT = { input: { region: "EMEA", token: "[redacted]" }, read_back: "kept", seeds: null };
+const UPLOADED = {
+  version_id: "v7", upload_id: "u1", expires_at: local(11, 0, 0), headers: ["Site name"], row_count: 12, mapping: { name: "Site name" },
+  default_mapping: { status: "none" }, problems: [], masked_columns: [], preview: [], errors: [], error_count: 0, error_groups: [], rows_with_errors: 0,
+};  // prettier-ignore
+
 let input: unknown;
+let form: StartForm;
 let reruns: { key: string | null; body: unknown }[];
 let rerunAnswers: (() => Response)[];
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 beforeEach(() => {
   input = KEPT;
+  form = FORM;
   reruns = [];
   rerunAnswers = [];
   vi.spyOn(Date, "now").mockReturnValue(Date.parse(local(10, 0, 0)));
   vi.spyOn(globalThis, "fetch").mockImplementation(async (req) => {
     const request = req as Request;
     const path = new URL(request.url).pathname;
-    if (path === "/api/v1/t/t1/workflows/w1/start-form") return json(FORM);
-    if (path === `/api/v1/t/t1/runs/${RUN.id}/input`) return json(input);
-    if (request.method === "POST" && path === `/api/v1/t/t1/runs/${RUN.id}/rerun`) {
+    if (path === "/api/v1/t/t1/workflows/w1/start-form") return json(form);
+    if (path.endsWith("/input")) return json(input);
+    if (request.method === "POST" && path === "/api/v1/t/t1/workflows/w1/csv-uploads") return json(UPLOADED, 201);
+    if (request.method === "POST" && path.endsWith("/rerun")) {
       reruns.push({ key: request.headers.get("Idempotency-Key"), body: JSON.parse(await request.text()) as unknown });
       return (rerunAnswers.shift() ?? (() => json({ id: "r1" }, 202)))();
     }
@@ -168,5 +190,61 @@ describe("re-running a run (the run form design §5.4; the Rerun board)", () => 
     await userEvent.click(screen.getByRole("button", { name: "Re-run live" }));
     expect(await screen.findByText("Run 4a2b17e0's input isn't kept, so it can't be sent again. Fill in the fields to run it again.")).toBeTruthy();
     expect(await site()).toHaveProperty("value", "");
+  });
+});
+
+describe("re-running a CSV run (the run form design §5.4; the Rerun board)", () => {
+  beforeEach(() => {
+    form = CSV_FORM;
+    input = CSV_KEPT;
+  });
+
+  it("re-runs its same rows, sending neither input nor file, its other fields shown read only", async () => {
+    show(CSV_RUN, 7);
+    const same = await screen.findByRole("radio", { name: "The same rows: 2,431 rows, as run 77e0b9d2 read them" });
+    expect(same).toHaveProperty("checked", true);
+    expect(screen.getByText("EMEA")).toBeTruthy();
+    expect(screen.queryByRole("textbox", { name: /^Region/ })).toBeNull();
+    expect(screen.getByText("Kept from the original run")).toBeTruthy();
+    expect(screen.getByText("To change them, choose another file.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Edit as JSON" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Re-run live · 2,431 rows" }));
+    expect(reruns.map((r) => r.body)).toEqual([{ mode: "live", expected_version_id: "v7" }]);
+  });
+
+  it("re-runs another file, checked as for a new start, its other fields sent whole, protected ones entered again", async () => {
+    show(CSV_RUN, 7);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("radio", { name: "Another file: it's checked here before the re-run starts, as for a new start" }));
+    expect(screen.getByLabelText(/^Region/)).toHaveProperty("value", "EMEA");
+    expect(screen.getByLabelText(/^API token/)).toHaveProperty("value", "");
+    await user.upload(screen.getByLabelText("Choose a file"), new File(["Site name\nLyon\n"], "more.csv", { type: "text/csv" }));
+    await user.type(screen.getByLabelText(/^API token/), "t");
+    await user.click(await screen.findByRole("button", { name: "Re-run live · 12 rows" }));
+    expect(reruns.map((r) => r.body)).toEqual([
+      { input: { region: "EMEA", token: "t" }, mode: "live", expected_version_id: "v7", csv: { upload_id: "u1", mapping: { name: "Site name" } } },
+    ]);
+  });
+
+  it("offers only another file once the run's input isn't kept", async () => {
+    input = { input: null, read_back: "absent", seeds: null };
+    show(CSV_RUN, 7);
+    expect(await screen.findByLabelText("Choose a file")).toBeTruthy();
+    expect(screen.queryByRole("radio", { name: /^The same rows/ })).toBeNull();
+    expect(screen.getByText("Run 77e0b9d2's input isn't kept, so it can't be sent again. Fill in the fields to run it again.")).toBeTruthy();
+  });
+
+  it("offers only another file when the run had no rows and the version reads a CSV", async () => {
+    show({ ...CSV_RUN, csv: null }, 6);
+    expect(await screen.findByLabelText("Choose a file")).toBeTruthy();
+    expect(screen.queryByRole("radio", { name: /^The same rows/ })).toBeNull();
+  });
+
+  it("starts from empty fields when the run had rows and the version reads no CSV, saying why", async () => {
+    form = FORM;
+    show(CSV_RUN, 7);
+    expect(await screen.findByText("Version 12 doesn't read a CSV file: fill in its fields.")).toBeTruthy();
+    expect(await site()).toHaveProperty("value", "");
+    expect(screen.getByLabelText(/^API token/)).toHaveProperty("value", "");
   });
 });
