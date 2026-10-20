@@ -3468,3 +3468,23 @@ then passed, as its steps say; after each, ruff, `ruff format --check` and mypy 
   green: 22 passed.
 
 Mid-slice rulings: none in this milestone. Nothing pushed.
+
+### 4e-2a, milestone 3 and the final checkpoint (2026-10-20)
+
+The owner, in chat: "go".
+- Task 7, 92751941: the client regenerated (`dewpoint api openapi`, `pnpm gen:api`; `check:api` passes; 434 and 188
+  lines added, 13 and 13 removed, the prototype's files byte for byte) and the runs doc: starting on a confirmed
+  version, checking a staged file again, every error counted, a same-rows re-run's record. The checks, on this tree:
+  - the frontend: the type check and ESLint silent; its suite 1328 passed (99 files);
+  - the backend: ruff, `ruff format --check` and mypy silent; `lint-imports`, 11 contracts kept;
+  - the API, admission, CSV and request digest tests: 739 passed;
+  - local CodeQL (python, CLI 2.27.2, python-queries 1.8.12, CI's filter): no finding;
+  - the whole backend suite: not run locally, on the owner's word ("leave it to CI"); CI runs it on the PR.
+
+M111. **The client is regenerated from this branch's code; the frontend's count is main's** (2026-10-20): the backend
+      tests run on a venv borrowed from another worktree, whose editable install points at that worktree's older code;
+      `uv run dewpoint api openapi` without `PYTHONPATH=src` wrote that code's schema, 2,230 lines short. With it, the
+      schema is this branch's, as the plan has it. The frontend suite has 1328 tests, not the plan's 1288: main gained
+      #129's 40 after the dry run's base; this branch changes only the generated types. Cost if wrong: none.
+
+Mid-slice rulings over the slice: M110 and M111. The final review follows. Nothing pushed.
