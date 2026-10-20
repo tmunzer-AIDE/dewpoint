@@ -3488,3 +3488,23 @@ M111. **The client is regenerated from this branch's code; the frontend's count 
       #129's 40 after the dry run's base; this branch changes only the generated types. Cost if wrong: none.
 
 Mid-slice rulings over the slice: M110 and M111. The final review follows. Nothing pushed.
+
+### 4e-2a, the final review (2026-10-20)
+
+A fresh reviewer (Fable) on 4d8cf8f1..fc94d458, read only: no critical finding, no important one, 6 minor; "Ready
+to merge: Yes". Each Review Focus case is pinned by an integration test it read; the version check is race-free under
+admission's lock (a publish takes it exclusively); a preview refuses before it decrypts. Re-graded by effect, the six
+stay minor: no fix pass.
+
+Deferred minors (a follow-up issue, on the owner's word): `previewed()` echoes the `version_id` it's given while the
+upload's is added by its route; a same-rows re-run on a stale version takes a CSV slot and rebuilds its input before
+admission refuses it; no test of a preview for the caller's own upload of another workflow; a preview's "nothing
+logged" pinned on the audit log only; `ErrorGroup` frozen around a mutable list; `expected_version_id` without a field
+description in the generated client.
+
+What the reviewer set aside, each ruled as it stands: the publisher's email to every `run.start` holder (§4.2, ruling
+11); a deactivated publisher still named ("gone" is deleted); a same-rows re-run once the active version declares no
+CSV (admission's behavior, which the UI never sends); `error_groups` off the run's record (§4.4); no audit of a
+`version_changed` refusal (no interactive refusal is recorded); a preview without a row lock (a read); groups tied by
+column as text (ruling 9); a re-run's refusal words "start" (the UI words its own); a key retried with and without
+`expected_version_id` is `idempotency_conflict` (§4.1).
