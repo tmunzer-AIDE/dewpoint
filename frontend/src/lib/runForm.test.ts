@@ -180,6 +180,8 @@ describe("a checked file, in words (§5.3; the CsvStates board)", () => {
     expect(groupRows({ count: 21, rows: [7, 19, 33, 48, 52] })).toBe("21 · 7, 19, 33, 48, 52 and 16 more");
     expect(groupRows({ count: 3, rows: [7, 19, 33] })).toBe("3 · 7, 19 and 33");
     expect(groupRows({ count: 1, rows: [1204] })).toBe("1 · 1,204");
+    expect(groupRows({ count: 21, rows: [7, 19, 33, 48, 52] }, "rows")).toBe("21 rows · 7, 19, 33, 48, 52 and 16 more"); // a list's item
+    expect(groupRows({ count: 1, rows: [3] }, "rows")).toBe("1 row · 3");
   });
 
   it("says a version was published meanwhile as a refused start does", () => {

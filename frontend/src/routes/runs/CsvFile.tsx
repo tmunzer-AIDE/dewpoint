@@ -2,13 +2,15 @@
 // A CSV run's file in the run form (editor 4e-2b; the run form design §5.3; the CsvStates and MoreStates boards): what
 // the workflow reads before a file, the file being read, why one can't be, and the file's column chosen for each of the
 // workflow's, with how it was proposed. Once checked: its errors at a glance (counted by column and problem on the
-// server, every error), or, every row passing, its first rows as written, the columns folded to a line.
+// server, every error), or, every row passing, its first rows as written, the columns folded to a line. Below 640 px
+// the columns and the problems are lists, one item each (§5.6; the Narrow320 boards).
 import { useId, useState, type ChangeEvent, type DragEvent } from "react";
 import { Button, LINK_BUTTON } from "../../components/Button";
 import { controlClass } from "../../components/Field";
 import { Table, Th } from "../../components/Table";
 import { Tag } from "../../components/Tag";
 import { mbOf } from "../../lib/csv";
+import { useNarrow } from "../../lib/media";
 import { cellWords, checkedWords, groupRows, holds, mappingWords, staleWords, type CsvColumnForm, type CsvPreview, type StartForm } from "../../lib/runForm";
 import { listed } from "../editor/startInput";
 import { unmapped, type CsvFile } from "./useCsvFile";
@@ -70,44 +72,64 @@ function Reads({ csv }: { csv: Csv }) {
 
 function Columns({ csv, file, onMap }: { csv: Csv; file: Extract<CsvFile, { phase: "staged" }>; onMap: (column: string, header: string) => void }) {
   const id = useId();
+  const narrow = useNarrow();
   const missing = new Set(unmapped(csv.columns, file.mapping));
   // A problem the server found under the columns chosen now: an answer for other columns says nothing of these.
   const problem = (c: CsvColumnForm) => file.shown.problems.find((p) => p.column === c.name && file.shown.mapping[c.name] === file.mapping[c.name]);
+  /** A column's choice of the file's column, and what keeps it from building rows. */
+  const choice = (c: CsvColumnForm, i: number) => {
+    const chosen = file.mapping[c.name] ?? "";
+    const found = problem(c);
+    const error = missing.has(c.name) ? mappingWords("required_unmapped") : found ? mappingWords(found.code) : undefined;
+    const errorId = `${id}-${i}-err`;
+    return (
+      <>
+        <select
+          aria-label={`${c.header}, from the file's column`} aria-invalid={!!error} aria-describedby={error ? errorId : undefined}
+          value={chosen} onChange={(e) => onMap(c.name, e.target.value)} className={`${controlClass(!!error)} min-w-40`}
+        >
+          <option value="">{c.required ? "Choose a column" : "Not used"}</option>
+          {chosen && !file.upload.headers.includes(chosen) && <option value={chosen}>{chosen}</option>}
+          {file.upload.headers.map((h) => <option key={h} value={h}>{h}</option>)}
+        </select>
+        {error && <p id={errorId} className="mt-1 text-small text-danger">{error}</p>}
+      </>
+    );  // prettier-ignore
+  };
   return (
     <>
       <div className="flex flex-col gap-1">
         <h3 className="text-small font-semibold">Columns</h3>
         <p className="text-small text-muted">Each column the workflow reads, and the file&apos;s column it comes from.</p>
       </div>
-      <Table label="Columns">
-        <thead>
-          <tr><Th>Column</Th><Th>From the file&apos;s</Th><Th>How</Th></tr>
-        </thead>
-        <tbody>
-          {csv.columns.map((c, i) => {
-            const chosen = file.mapping[c.name] ?? "";
-            const error = missing.has(c.name) ? mappingWords("required_unmapped") : problem(c) ? mappingWords(problem(c)!.code) : undefined;
-            const errorId = `${id}-${i}-err`;
-            return (
+      {narrow ? (
+        <ul aria-label="Columns" className="flex flex-col rounded-lg border border-line">
+          {csv.columns.map((c, i) => (
+            <li key={c.name} className="flex flex-col gap-1.5 border-t border-line px-3 py-2.5 first:border-t-0">
+              <div className="flex items-start justify-between gap-2">
+                <span className="text-small"><ColumnName c={c} /></span>
+                <span className="text-small text-muted">{file.how[c.name] ?? ""}</span>
+              </div>
+              {choice(c, i)}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <Table label="Columns">
+          <thead>
+            <tr><Th>Column</Th><Th>From the file&apos;s</Th><Th>How</Th></tr>
+          </thead>
+          <tbody>
+            {csv.columns.map((c, i) => (
               <tr key={c.name}>
                 <th scope="row" className={ROW_HEAD}><ColumnName c={c} /></th>
-                <td className={CELL}>
-                  <select
-                    aria-label={`${c.header}, from the file's column`} aria-invalid={!!error} aria-describedby={error ? errorId : undefined}
-                    value={chosen} onChange={(e) => onMap(c.name, e.target.value)} className={`${controlClass(!!error)} min-w-40`}
-                  >
-                    <option value="">{c.required ? "Choose a column" : "Not used"}</option>
-                    {chosen && !file.upload.headers.includes(chosen) && <option value={chosen}>{chosen}</option>}
-                    {file.upload.headers.map((h) => <option key={h} value={h}>{h}</option>)}
-                  </select>
-                  {error && <p id={errorId} className="mt-1 text-small text-danger">{error}</p>}
-                </td>
+                <td className={CELL}>{choice(c, i)}</td>
                 <td className={`${CELL} text-small text-muted`}>{file.how[c.name] ?? ""}</td>
               </tr>
-            );  // prettier-ignore
-          })}
-        </tbody>
-      </Table>
+            ))}
+          </tbody>
+        </Table>
+      )}
       {missing.size > 0 && <p className="text-small">No row is checked until every required column is mapped.</p>}
     </>
   );
@@ -117,24 +139,36 @@ function Columns({ csv, file, onMap }: { csv: Csv; file: Extract<CsvFile, { phas
 const headerOf = (csv: Csv, name: string | null) => (name === null ? "The whole row" : (csv.columns.find((c) => c.name === name)?.header ?? name));
 
 function Errors({ csv, shown, rows }: { csv: Csv; shown: CsvPreview; rows: number }) {
+  const narrow = useNarrow();
   return (
     <div className="flex flex-col gap-2">
       <p className="text-small font-semibold text-danger">{checkedWords(shown, rows)}</p>
       <p className="text-small">The run can&apos;t start until every row passes. Fix the file, then choose it again.</p>
-      <Table label="Errors by column">
-        <thead>
-          <tr><Th>Column</Th><Th>Problem</Th><Th>Rows</Th></tr>
-        </thead>
-        <tbody>
+      {narrow ? (
+        <ul aria-label="Errors by column" className="flex flex-col rounded-lg border border-line">
           {shown.error_groups.map((g) => (
-            <tr key={`${g.column ?? ""}:${g.code}`}>
-              <td className={`${CELL} text-small`}>{headerOf(csv, g.column)}</td>
-              <td className={`${CELL} text-small`}>{cellWords(g.code)}</td>
-              <td className={`${CELL} font-mono text-small`}>{groupRows(g)}</td>
-            </tr>
+            <li key={`${g.column ?? ""}:${g.code}`} className="flex flex-col gap-0.5 border-t border-line px-3 py-2 first:border-t-0">
+              <p className="text-small">{`${headerOf(csv, g.column)} · ${cellWords(g.code)}`}</p>
+              <p className="font-mono text-small text-muted">{groupRows(g, "rows")}</p>
+            </li>
           ))}
-        </tbody>
-      </Table>
+        </ul>
+      ) : (
+        <Table label="Errors by column">
+          <thead>
+            <tr><Th>Column</Th><Th>Problem</Th><Th>Rows</Th></tr>
+          </thead>
+          <tbody>
+            {shown.error_groups.map((g) => (
+              <tr key={`${g.column ?? ""}:${g.code}`}>
+                <td className={`${CELL} text-small`}>{headerOf(csv, g.column)}</td>
+                <td className={`${CELL} text-small`}>{cellWords(g.code)}</td>
+                <td className={`${CELL} font-mono text-small`}>{groupRows(g)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </Table>
+      )}
       <details className="text-small">
         <summary className="min-h-6 cursor-pointer">{`Every error, row by row (${count(shown.error_count)})`}</summary>
         <Table label="Every error, row by row" className="mt-2">

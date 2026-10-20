@@ -243,10 +243,11 @@ export const checkedWords = (shown: Pick<CsvPreview, "error_count" | "rows_with_
     ? `All ${count(rows)} rows pass.`
     : `${plural(shown.error_count, "error")} in ${count(shown.rows_with_errors)} of ${plural(rows, "row")}`;
 
-/** A column's problem: how many rows, the first ones, and how many more (§4.4: its first five). */
-export function groupRows(g: { count: number; rows: number[] }): string {
+/** A column's problem: how many rows, the first ones, and how many more (§4.4: its first five); a list's item says
+ * "rows" after the count, with no header above it. */
+export function groupRows(g: { count: number; rows: number[] }, unit?: "rows"): string {
   const rows = g.rows.map(count);
   const more = g.count - rows.length;
   const said = more > 0 ? `${rows.join(", ")} and ${more} more` : rows.length < 2 ? (rows[0] ?? "") : `${rows.slice(0, -1).join(", ")} and ${rows.at(-1)!}`;
-  return `${count(g.count)} · ${said}`;
+  return `${unit ? plural(g.count, "row") : count(g.count)} · ${said}`;
 }

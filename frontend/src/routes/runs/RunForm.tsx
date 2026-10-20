@@ -6,7 +6,8 @@
 // A workflow that declares a CSV starts only with its file (§5.3, CsvPart), any other fields beside it, once every row
 // passes; the columns are saved first when asked, and a failed save starts nothing. A file checked against a version
 // published since the form was read has the form read again, as a refused start does. A re-run (§5.4; the Rerun board)
-// is the same form on the active version, the run's own input prefilled and its mode chosen (rerun.ts).
+// is the same form on the active version, the run's own input prefilled and its mode chosen (rerun.ts). Below 640 px
+// it fills the screen, with a Close button, its buttons stacked full width, Start first (§5.6; the Narrow320 boards).
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Button } from "../../components/Button";
@@ -19,6 +20,7 @@ import {
 import { runInputQuery, type Run } from "../../lib/runs";
 import { runId } from "../../lib/runStatus";
 import { startFormQuery } from "../../lib/triggers";
+import { useNarrow } from "../../lib/media";
 import { tenantQuery } from "../../lib/workflows";
 import { SimBanner } from "../editor/simulation/SimBanner";
 import { CsvPart } from "./CsvFile";
@@ -237,18 +239,30 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, rerun, onSta
     error: `Run ${short}'s input couldn't be read. Fill in the fields to run it again.`,
   };
   const live = mode === "live";
+  const narrow = useNarrow();
+  const close = () => dialog.current?.close(); // its close event closes the form, giving focus back to its opener
+  const cancel = <Button onClick={close} className={narrow ? "w-full" : ""}>Cancel</Button>;
   const submitWords = rerun ? (live ? "Re-run live" : "◌ Re-run as a simulation") : live ? "Start the live run" : "◌ Start the simulation";
   return (
     <dialog
       ref={dialog}
       aria-labelledby={`${id}-title`}
       onClose={onClose}
-      className="mx-auto mt-16 w-[600px] max-w-[calc(100vw-32px)] rounded-dialog border border-line bg-surface p-6 text-ink shadow-dialog backdrop:bg-overlay"
+      className={`bg-surface text-ink backdrop:bg-overlay ${narrow
+        ? "m-0 h-dvh max-h-none w-screen max-w-none overflow-y-auto p-4"
+        : "mx-auto mt-16 w-[600px] max-w-[calc(100vw-32px)] rounded-dialog border border-line p-6 shadow-dialog"}`}  // prettier-ignore
     >
       <form onSubmit={(e) => void submit(e)} className="flex flex-col gap-4">
-        <header>
-          <h2 id={`${id}-title`} className="text-h3 font-semibold">{rerun ? `Re-run ${short}` : "Start a run"}</h2>
-          <p className="text-small text-muted">{workflow.name}</p>
+        <header className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h2 id={`${id}-title`} className="text-h3 font-semibold">{rerun ? `Re-run ${short}` : "Start a run"}</h2>
+            <p className="text-small text-muted">{workflow.name}</p>
+          </div>
+          {narrow && (
+            <button type="button" aria-label="Close" onClick={close} className="inline-grid size-11 shrink-0 place-items-center rounded-lg text-body-lg text-muted hover:bg-surface-hover">
+              <span aria-hidden="true">✕</span>
+            </button>
+          )}
         </header>
         {(read.isPending && form === null) || (form !== null && rerun && readBack === null) ? (
           <p className="text-small text-muted">{rerun ? "Reading the run's input…" : "Loading the published version's input…"}</p>
@@ -352,15 +366,16 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, rerun, onSta
             {CODED(refusal.code) && <> <span className="font-mono">{refusal.code}</span></>}
           </p>
         )}
-        <div className="flex flex-wrap items-center justify-end gap-2">
-          {reason && <p id={`${id}-reason`} className="me-auto text-small text-muted">{reason}</p>}
-          <Button onClick={() => dialog.current?.close()}>Cancel</Button>
+        <div className={narrow ? "flex flex-col gap-2" : "flex flex-wrap items-center justify-end gap-2"}>
+          {reason && <p id={`${id}-reason`} className={narrow ? "text-small text-muted" : "me-auto text-small text-muted"}>{reason}</p>}
+          {!narrow && cancel}
           <Button
             type="submit" variant={mode === "live" ? "live-outline" : "simulate"} disabled={form === null || sending || reason !== null}
-            aria-describedby={reason ? `${id}-reason` : undefined}
+            aria-describedby={reason ? `${id}-reason` : undefined} className={narrow ? "w-full" : ""}
           >
             {`${submitWords}${rows === null ? "" : ` · ${rows.toLocaleString("en-US")} row${rows === 1 ? "" : "s"}`}`}
           </Button>
+          {narrow && cancel /* stacked: Start first (the Narrow320 boards) */}
         </div>
       </form>
     </dialog>

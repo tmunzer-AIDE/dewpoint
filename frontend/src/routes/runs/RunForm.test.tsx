@@ -204,3 +204,20 @@ describe("the run form (the run form design §5.2; the Main board)", () => {
     expect(posts).toEqual([]);
   });
 });
+
+describe("below 640 px (the run form design §5.6; the Narrow320 boards)", () => {
+  beforeEach(() => {
+    const wide = window.matchMedia.bind(window);
+    vi.spyOn(window, "matchMedia").mockImplementation((query) => ({ ...wide(query), matches: true }));
+  });
+
+  it("fills the screen, with a Close button, its buttons stacked, Start first", async () => {
+    const { onClose } = show();
+    await screen.findByLabelText(/Site/);
+    expect(dialog().className).toContain("h-dvh");
+    const buttons = within(dialog()).getAllByRole("button").map((b) => b.textContent);
+    expect(buttons.slice(-2)).toEqual(["Start the live run", "Cancel"]);
+    await userEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(onClose).toHaveBeenCalled();
+  });
+});

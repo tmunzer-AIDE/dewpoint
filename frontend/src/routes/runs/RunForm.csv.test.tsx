@@ -394,3 +394,26 @@ describe("a CSV file checked (the run form design §5.3; the CsvStates and MoreS
     ]);
   });
 });
+
+describe("a CSV file below 640 px (the run form design §5.6; the Narrow320 boards)", () => {
+  beforeEach(() => {
+    const wide = window.matchMedia.bind(window);
+    vi.spyOn(window, "matchMedia").mockImplementation((query) => ({ ...wide(query), matches: true }));
+  });
+
+  it("lists each column with its choice, and each problem with its rows", async () => {
+    uploadAnswer = () => Promise.resolve(json(upload(ERRORS), 201));
+    show();
+    await choose();
+    const columns = await screen.findByRole("list", { name: "Columns" });
+    expect(within(columns).getAllByRole("listitem")).toHaveLength(5);
+    expect(within(columns).getByRole("combobox", { name: "Country, from the file's column" })).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "Columns" })).toBeNull();
+    const problems = within(screen.getByRole("list", { name: "Errors by column" })).getAllByRole("listitem");
+    expect(problems.map((p) => [...p.querySelectorAll("p")].map((l) => l.textContent))).toEqual([
+      ["Country · Not one of the allowed values", "21 rows · 7, 19, 33, 48, 52 and 16 more"],
+      ["Gateway · Not an IP address", "10 rows · 12, 13, 14, 15, 16 and 5 more"],
+      ["The whole row · Has more or fewer cells than the header", "6 rows · 102, 140, 141, 150, 151 and 1 more"],
+    ]);
+  });
+});
