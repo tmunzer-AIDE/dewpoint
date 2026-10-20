@@ -3393,3 +3393,42 @@ builder's "is" and "is not" compare as text or as a number: what's typed says wh
 the person picks; the builder's pill opens its details (Replace…, Remove); Declassify takes focus and closes on Escape;
 the pills note says "/" and "＋ Data" only where they work; ← in the data tree reaches a value's group; its search asks
 a quarter second after the last key; a browser flow checks "/". The fresh review's findings are all fixed.
+
+### 4e-2: the design accepted; the 4e-2a plan accepted (2026-10-20)
+
+The owner merged 4e-1b as #118 (squash 729f94a7); its nine deferred minors are issue #126, and #127 corrected M109's
+comment once the engine recorded a waiting delay at once (#119). The owner started 4e-2 ("let's start 4e-2"). Their
+answers, in chat:
+- both start runs: the builder, from the editor, and an operator, from the Workflows list or the Runs page;
+- a CSV row is one turn of the workflow's main loop, a few rows to thousands; the form gives a quick view of the CSV's
+  validation errors; a CSV start goes ahead only when every row passes (the outline's "skip invalid" is dropped);
+- in the editor, Start warns when the draft differs from the published version;
+- re-run: the same input or a changed one, the original prefilled; a changed input asks for its sensitive values
+  again, and a same-rows CSV re-run keeps its other fields read-only, both with no backend work;
+- after Start, the new run's page.
+
+D8 was signed off ("signed off, write the spec") at the Design canvas "4e-2 Run Form Mockups", version 6; versions 7
+to 10 bring its words in line with what the backend allows.
+`docs/superpowers/specs/2026-10-19-editor-4e2-run-form-design.md` (7c737523) was committed on the owner's word ("yes,
+commit"), its §8 calls listed for them to check.
+
+`docs/superpowers/plans/2026-10-20-editor-ui-4e2a-run-form-backend.md`, revision 1: the backend of the design §4, one
+plan with milestone pauses. The owner accepted it: its rulings 1–13 join this ledger as 260–272. No migration, no ABI
+change. Mid-slice rulings start at M110.
+
+260. **Accepted. One plan with milestone pauses** (plan ruling 1).
+261. **Accepted. The version check comes after `workflow_disabled` and `not_active`, before the build's checks**
+     (plan ruling 2).
+262. **Accepted. `version_changed` keeps a refusal's shape and adds the active version** (plan ruling 3).
+263. **Accepted. The digest names the confirmed version as its id's text, a key only when given** (plan ruling 4).
+264. **Accepted. The run form's answers are typed** (plan ruling 5).
+265. **Accepted. The upload's `version_id` is added by its route** (plan ruling 6).
+266. **Accepted. The upload codes live in `csv_uploads`; a preview refuses as a start does, in its order**
+     (plan ruling 7).
+267. **Accepted. A preview reads the file under the active version's caps** (plan ruling 8).
+268. **Accepted. The error groups: their order, their first rows, every error counted** (plan ruling 9).
+269. **Accepted. A same-rows re-run's audit entry counts its rows, without a file digest** (plan ruling 10).
+270. **Accepted. The start form names its publisher by email, null once they're gone** (plan ruling 11).
+271. **Accepted. The client is regenerated; nothing else in the frontend changes** (plan ruling 12).
+272. **Accepted. The checks: each task's suites, the final tree's broad suites, and the whole backend suite on CI**
+     (plan ruling 13).
