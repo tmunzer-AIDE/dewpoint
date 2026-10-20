@@ -3606,3 +3606,30 @@ The owner accepted milestone 3 and left the browser specs to CI ("go, leave the 
   javascript-queries 2.4.7, CI's filter, 89 queries, 295 files): no finding.
 
 Mid-slice rulings over the slice: none. The final review follows. Nothing pushed.
+
+### 4e-2b, the final review (2026-10-20)
+
+A fresh reviewer (Fable) on 11647275..b90d0dd6, read only: no critical finding, 4 important, 6 minor; "With fixes".
+Each Review Focus case is pinned by the test the plan names, the `[redacted]` marker can't be sent, and the keys follow
+ruling 275. Re-graded by effect, the four important ones stand, each fixed test-first, the test failing first:
+- the Runs page's Start a run… waits for the workflows to be read: before, a click said no workflow could start;
+- the form reads the start form afresh at each opening (`refetchOnMount: "always"`) and shows a version only once read:
+  a form read before a publish showed the superseded version, then said one was published "while this was open";
+- a refusal's reason at a field shown read only (kept, or under the same rows) is said above the buttons, with where
+  it is: it was dropped;
+- a value its field can't show (a line break in one line of text) is kept as a protected one is ("Kept from the
+  original run"), and asked for again once the input changes ("Enter it again: … this form can't show the original's
+  value."): it was dropped unsaid.
+The suite after the fixes: 1415 passed in 104 files; the type check and ESLint silent; the build done; CodeQL, no
+finding.
+
+Deferred minors (a follow-up issue, on the owner's word): a check ending `upload_expired` for a file replaced since
+drops the new one with the old one's words; a header-only file reads "All 0 rows pass." and starts; no "Check again"
+after a failed check; a failed re-read after `version_changed` doesn't say a newer version exists, and one that finds
+none leaves the newer version's words; an `absent` or `unreadable` re-run starts empty, not from the defaults; stale
+saved columns' words name the new version after a re-read.
+
+What the reviewer set aside, each ruled as it stands: a dropped file of any type (the server words it); focus on a CSV
+form's file input (its first field); the editor's leave guard when landing during a save (the editor's own); the
+list's first load carrying the landing (ruling 302's count); a run failing at once focusing its failed step (4e-1's);
+4e-2a's backend behaviours; changing a lone sensitive field through Edit as JSON (ruling 297).

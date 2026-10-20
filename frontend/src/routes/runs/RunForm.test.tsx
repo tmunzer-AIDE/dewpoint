@@ -38,10 +38,11 @@ beforeEach(() => {
 });
 afterEach(() => vi.restoreAllMocks());
 
-function show(over: { draftDiffers?: boolean } = {}) {
+function show(over: { draftDiffers?: boolean; cached?: StartForm } = {}) {
   const onStarted = vi.fn();
   const onClose = vi.fn();
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  if (over.cached) qc.setQueryData(["start-form", "t1", "w1"], over.cached); // read when the form was open before
   render(
     <QueryClientProvider client={qc}>
       <RunForm tenantId="t1" workflow={{ id: "w1", name: "Site onboarding" }} draftDiffers={over.draftDiffers} onStarted={onStarted} onClose={onClose} />
@@ -59,6 +60,13 @@ describe("the run form (the run form design §5.2; the Main board)", () => {
     expect(await versionLine("Version 7 · published today 09:12:00 by nadia@corp.test")).toBeTruthy();
     expect(within(dialog()).getByText("Site onboarding")).toBeTruthy();
     expect(screen.queryByText(/The draft has changes/)).toBeNull();
+  });
+
+  it("shows the version published since the form was last read, never the one it read then (the final review)", async () => {
+    forms = [NEWER];
+    show({ cached: FORM });
+    expect(await versionLine("Version 8 · published today 09:12:00")).toBeTruthy();
+    expect(screen.queryByText(/^Version 7/)).toBeNull();
   });
 
   it("says when the draft differs from the published version, opened from the editor", async () => {

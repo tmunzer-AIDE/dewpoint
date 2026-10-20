@@ -209,7 +209,8 @@ export function RunsPage({ tenantId, filters }: { tenantId: string; filters: Run
       <div className="flex flex-wrap items-baseline justify-between gap-3">
         <div className="flex flex-wrap items-center gap-3">
           <h1 className="text-h1 font-semibold">Runs</h1>
-          {canStart(tenant.data?.role) && <Button size="md" aria-haspopup="dialog" onClick={start}>Start a run…</Button>}
+          {/* Which workflows can start is known once they're read: before, a choice would be made on nothing. */}
+          {canStart(tenant.data?.role) && <Button size="md" aria-haspopup="dialog" disabled={workflows.isPending} onClick={start}>Start a run…</Button>}
         </div>
         {first.isRefetchError ? (
           <p className="flex flex-wrap items-center gap-2 text-small text-muted">
@@ -223,7 +224,8 @@ export function RunsPage({ tenantId, filters }: { tenantId: string; filters: Run
       <Filters tenantId={tenantId} filters={filters} onChange={setFilters} />
       {starting === "choose" && (
         <Chooser
-          workflows={can} value={undefined} any={false} empty="No workflow can start: it must be published, switched on and able to run."
+          workflows={can} value={undefined} any={false}
+          empty={workflows.isError ? "The workflows couldn't be read. Close this and try again." : "No workflow can start: it must be published, switched on and able to run."}
           onPick={(id) => setStarting(can.find((w) => w.id === id) ?? null)}
           onClose={() => setStarting((s) => (s === "choose" ? null : s))}
         />

@@ -148,6 +148,26 @@ describe("re-running a run (the run form design §5.4; the Rerun board)", () => 
     expect(reruns.map((r) => r.body)).toEqual([{ input: { site: "HQ!", meta: {}, note: "n" }, mode: "live", expected_version_id: "v12" }]);
   });
 
+  it("says a reason at a field it keeps above the buttons, with where it is (the final review)", async () => {
+    rerunAnswers = [() => json({ error: "input_invalid", messages: ["The run's input doesn't match the workflow's input schema at token: it breaks `minLength`."] }, 422)];
+    show();
+    await site();
+    await userEvent.click(screen.getByRole("button", { name: "Re-run live" }));
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "The input doesn't fit the workflow's input. Nothing started. At token: it breaks `minLength`. input_invalid",
+    );
+  });
+
+  it("keeps a value its field can't show, and asks for it again once the input changes (the final review)", async () => {
+    input = { ...KEPT, input: { site: "HQ\nnorth wing", floor: 2, token: "[redacted]" } };
+    show();
+    expect(await screen.findAllByText("Kept from the original run")).toHaveLength(2);
+    expect(screen.queryByLabelText(/^Site/)).toBeNull();
+    await userEvent.type(screen.getByLabelText(/^Floor/), "0");
+    expect(screen.getByLabelText(/^Site/)).toHaveProperty("value", "");
+    expect(screen.getByText("Enter it again: a changed input is sent whole, and this form can't show the original's value.")).toBeTruthy();
+  });
+
   it("refuses the marker typed as JSON", async () => {
     show();
     const user = userEvent.setup();

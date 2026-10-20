@@ -53,15 +53,17 @@ const START_FORM = { workflow_id: "w1", version_id: "v3", version_number: 3, pub
 let answers: (() => Response)[];
 let sent: URL[];
 let role: string;
+let workflowsHeld: Promise<Response> | null; // the workflows list, answered when a test says
 
 beforeEach(() => {
   answers = [];
   sent = [];
   role = "operator";
+  workflowsHeld = null;
   vi.spyOn(Date, "now").mockReturnValue(NOW);
   vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
     const url = new URL((input as Request).url);
-    if (url.pathname === "/api/v1/t/t1/workflows") return Promise.resolve(new Response(JSON.stringify(WORKFLOWS)));
+    if (url.pathname === "/api/v1/t/t1/workflows") return workflowsHeld ?? Promise.resolve(new Response(JSON.stringify(WORKFLOWS)));
     if (url.pathname === "/api/v1/t/t1") return Promise.resolve(new Response(JSON.stringify({ id: "t1", name: "Acme", slug: "acme", require_passkey: false, role })));
     if (url.pathname === "/api/v1/t/t1/workflows/w1/start-form") return Promise.resolve(new Response(JSON.stringify(START_FORM)));
     sent.push(url);
@@ -417,6 +419,18 @@ describe("starting a run from the Runs page (the run form design §5.1; the Entr
     show("/t/t1/runs?workflow=w2");
     await userEvent.click(await screen.findByRole("button", { name: "Start a run…" }));
     expect(screen.getByRole("dialog", { name: "Choose a workflow" })).toBeTruthy();
+  });
+
+  it("waits for the workflows to be read before it starts one (the final review)", async () => {
+    let answer!: (r: Response) => void;
+    workflowsHeld = new Promise((r) => (answer = r));
+    show("/t/t1/runs?workflow=w1");
+    const start = await screen.findByRole("button", { name: "Start a run…" });
+    expect(start).toHaveProperty("disabled", true);
+    answer(new Response(JSON.stringify(WORKFLOWS)));
+    await vi.waitFor(() => expect(start).toHaveProperty("disabled", false));
+    await userEvent.click(start);
+    expect(await screen.findByRole("dialog", { name: "Start a run" })).toBeTruthy();
   });
 
   it("starts the workflow its filter has chosen already", async () => {

@@ -24,7 +24,7 @@ import { useNarrow } from "../../lib/media";
 import { tenantQuery } from "../../lib/workflows";
 import { SimBanner } from "../editor/simulation/SimBanner";
 import { CsvPart } from "./CsvFile";
-import { AGAIN, MARKER_WORDS, holdsMarker, prefill, versionWords } from "./rerun";
+import { AGAIN, MARKER_WORDS, UNSHOWN_AGAIN, holdsMarker, prefill, versionWords } from "./rerun";
 import { ENDED, csvReason, useCsvFile } from "./useCsvFile";
 import { InputControl, REQUIRED, fieldKey, fromFields, hintOf, labelOf, startValues, wholeOf } from "../editor/startInput";
 
@@ -91,10 +91,12 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, rerun, onSta
     if (d && !d.open) d.showModal();
   }, []);
   const qc = useQueryClient();
-  const read = useQuery(startFormQuery(tenantId, workflow.id));
+  // Read afresh at each opening: a form read before (cancelled, then a publish) may name a version superseded since.
+  const read = useQuery({ ...startFormQuery(tenantId, workflow.id), refetchOnMount: "always" });
+  const fresh = read.isSuccess && !read.isFetching;
   // The version shown is the one confirmed: a later read of the query (a refetch elsewhere) never swaps it unseen.
   const [form, setForm] = useState<StartForm | null>(null);
-  if (form === null && read.data) setForm(read.data);
+  if (form === null && fresh && read.data) setForm(read.data);
   const [mode, setMode] = useState<Mode>(rerun?.run.mode ?? "live");
   // A re-run's input, read back (§5.4): kept, absent or unreadable; absent too once the server says it's gone.
   const original = useQuery({ ...runInputQuery(tenantId, rerun?.run.id ?? ""), enabled: rerun !== undefined });
@@ -212,7 +214,9 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, rerun, onSta
       const started = rerun ? await rerunRun(tenantId, rerun.run.id, body, sent.key) : await startRun(tenantId, workflow.id, body as StartBody, sent.key);
       onStarted(started.id);
     } catch (err) {
-      let refused = refusalOf(err, new Set(asJson ? [] : form.fields.map((f) => f.name)));
+      // A reason is said beside a field the person can change; one at a field shown read only, above, with where it is.
+      const editable = asJson || sameRows ? [] : form.fields.filter((f) => !keptShown.has(f.name)).map((f) => f.name);
+      let refused = refusalOf(err, new Set(editable));
       if (ENDED.has(refused.code)) return csv.drop({ words: refused.words, code: refused.code }); // chosen again
       if (rerun && refused.code === "input_not_retained") {
         // Retention passed meanwhile: the form is the absent one (§5.4), its fields empty.
@@ -264,7 +268,7 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, rerun, onSta
             </button>
           )}
         </header>
-        {(read.isPending && form === null) || (form !== null && rerun && readBack === null) ? (
+        {(form === null && !fresh && !read.isError) || (form !== null && rerun && readBack === null) ? (
           <p className="text-small text-muted">{rerun ? "Reading the run's input…" : "Loading the published version's input…"}</p>
         ) : form === null ? (
           <p role="alert" className="text-small text-danger">
@@ -343,7 +347,7 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, rerun, onSta
                     ) : (
                       <InputControl
                         key={f.name} f={f} value={shownValues.get(f.name)} error={errors[fieldKey(f.name)]}
-                        label={labelOf(again.has(f.name) ? { ...f, required: true } : f)} hint={again.has(f.name) ? AGAIN : hintOf(f)}
+                        label={labelOf(again.has(f.name) ? { ...f, required: true } : f)} hint={again.has(f.name) ? (prefilled?.unshown.has(f.name) ? UNSHOWN_AGAIN : AGAIN) : hintOf(f)}
                         onChange={(v) => change(f.name, v)}
                       />
                     ),
