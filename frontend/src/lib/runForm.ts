@@ -91,7 +91,7 @@ export function keptValues(values: ReadonlyMap<string, string>, from: StartForm,
   );
 }
 
-/** A refused start, in words: its code, what the form says, each reason beside the field it names, and for
+/** A refused start, in words: its code, what the form says, each reason beside the shown field it names, and for
  * `version_changed` the version now active. */
 export interface Refusal {
   code: string;
@@ -112,7 +112,9 @@ const FORM_WORDS: Record<string, string> = {
   network: "The server didn't answer. Start again: the same form is never started twice.",
 };
 
-export function refusalOf(e: unknown): Refusal {
+/** `shown`: the fields the form shows, a reason at one of them (or inside it) said beside it, keyed as startInput's
+ * fieldKey keys a field's problem; any other's is said above the buttons with where it is (Edit as JSON shows none). */
+export function refusalOf(e: unknown, shown: ReadonlySet<string> = new Set()): Refusal {
   if (!(e instanceof ApiError)) return { code: "network", words: FORM_WORDS.network!, fields: {} };
   const body = (e.body ?? {}) as { messages?: unknown; active_version_id?: unknown; active_version_number?: unknown };
   const messages = Array.isArray(body.messages) ? body.messages.filter((m): m is string => typeof m === "string") : [];
@@ -128,8 +130,9 @@ export function refusalOf(e: unknown): Refusal {
     const rest: string[] = [];
     for (const m of messages) {
       const at = AT.exec(m);
-      if (at && at[1] !== "its root") fields[`field:${at[1]!.split(".")[0]!}`] = `Doesn't fit the input: it breaks \`${at[2]!}\`.`;
-      else rest.push(at ? `At its root: it breaks \`${at[2]!}\`.` : m);
+      const name = at && at[1] !== "its root" ? at[1]!.split(".")[0]! : null;
+      if (name !== null && shown.has(name)) fields[`field:${name}`] = `Doesn't fit the input: it breaks \`${at![2]!}\`.`;
+      else rest.push(at ? `At ${at[1]!}: it breaks \`${at[2]!}\`.` : m);
     }
     return { code: e.code, fields, words: ["The input doesn't fit the workflow's input.", NOTHING, ...rest].join(" ") };
   }

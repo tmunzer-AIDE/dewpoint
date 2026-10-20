@@ -100,13 +100,16 @@ describe("what a refused start says (§5.2, §5.3)", () => {
     );
   });
 
-  it("puts an input's reasons beside their fields, and those of no field above the buttons", () => {
-    const r = refusalOf(refused(422, { error: "input_invalid", messages: [
-      "The run's input doesn't match the workflow's input schema at floor: it breaks `type`.",
+  it("puts an input's reasons beside the fields shown, and the others above the buttons, saying where", () => {
+    const e = refused(422, { error: "input_invalid", messages: [
+      "The run's input doesn't match the workflow's input schema at floor.0: it breaks `type`.",
+      "The run's input doesn't match the workflow's input schema at vlan: it breaks `maximum`.",
       "The run's input doesn't match the workflow's input schema at its root: it breaks `required`.",
-    ] }));  // prettier-ignore
+    ] });  // prettier-ignore
+    const r = refusalOf(e, new Set(["floor", "site"]));
     expect(r.fields).toEqual({ "field:floor": "Doesn't fit the input: it breaks `type`." });
-    expect(r.words).toBe("The input doesn't fit the workflow's input. Nothing started. At its root: it breaks `required`.");
+    expect(r.words).toBe("The input doesn't fit the workflow's input. Nothing started. At vlan: it breaks `maximum`. At its root: it breaks `required`.");
+    expect(refusalOf(e).fields).toEqual({}); // as JSON: every reason above, with where it is
   });
 
   it("words a CSV upload's end, and falls back to 4e-1's words, then the server's", () => {

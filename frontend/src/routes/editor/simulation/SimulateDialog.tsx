@@ -8,33 +8,15 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { Button } from "../../../components/Button";
 import { TextArea } from "../../../components/Field";
-import { Tag } from "../../../components/Tag";
 import { inputOf, topicShaped } from "../../../lib/input";
 import { draftStartFormQuery } from "../../../lib/simulations";
 import { skeletonOf } from "../../../lib/skeleton";
-import { triggerTypesQuery, type StartField } from "../../../lib/triggers";
+import { triggerTypesQuery } from "../../../lib/triggers";
 import type { GraphDoc } from "../../../lib/workflows";
-import { InputControl, fieldKey, fieldsShow, fromFields, nameOf, startValues, wholeOf } from "../startInput";
+import { InputControl, REQUIRED, fieldKey, fieldsShow, fromFields, hintOf, labelOf, startValues, wholeOf } from "../startInput";
 import { SimBanner } from "./SimBanner";
 
-const REQUIRED = "Give a value: the input requires it.";
 const SKELETON = "A generated skeleton: every field the input declares, filled with empty values of its type. Fill it with the event you want to try.";
-
-/** A field's label, with what it is beside it, and what its hint adds: optional ones are left out when empty, sensitive
- * ones stored as protected values (the InputFields board). */
-const labelOf = (f: StartField) => (
-  <>
-    {nameOf(f)}
-    {f.required && <> <Tag>required</Tag></>}
-    {f.sensitive && <> <Tag>sensitive</Tag></>}
-  </>
-);
-const hintOf = (f: StartField) =>
-  [
-    f.description,
-    f.required ? null : "Optional: left out when empty.",
-    f.sensitive ? "Stored as a protected value: results show it as redacted." : null,
-  ].filter(Boolean).join(" ") || undefined;  // prettier-ignore
 
 export function SimulateDialog({ tenantId, workflowId, name, revision, doc, onSimulate, onClose }: {
   tenantId: string; workflowId: string; name: string; revision: number; doc: GraphDoc;
