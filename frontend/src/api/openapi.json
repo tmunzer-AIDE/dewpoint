@@ -967,6 +967,78 @@
         "title": "CsvColumnFormOut",
         "type": "object"
       },
+      "CsvDefaultMappingOut": {
+        "additionalProperties": false,
+        "properties": {
+          "problems": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/CsvProblemOut"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Problems"
+          },
+          "status": {
+            "enum": [
+              "none",
+              "applied",
+              "stale"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "CsvDefaultMappingOut",
+        "type": "object"
+      },
+      "CsvErrorGroupOut": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "column": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Column"
+          },
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "rows": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Rows",
+            "type": "array"
+          }
+        },
+        "required": [
+          "column",
+          "code",
+          "count",
+          "rows"
+        ],
+        "title": "CsvErrorGroupOut",
+        "type": "object"
+      },
       "CsvErrorOut": {
         "additionalProperties": false,
         "properties": {
@@ -1057,6 +1129,143 @@
           "mapping"
         ],
         "title": "CsvIn",
+        "type": "object"
+      },
+      "CsvMappingOut": {
+        "additionalProperties": false,
+        "description": "A workflow's saved default mapping, and the version it was checked against.",
+        "properties": {
+          "mapping": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Mapping",
+            "type": "object"
+          },
+          "version_id": {
+            "title": "Version Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mapping",
+          "version_id"
+        ],
+        "title": "CsvMappingOut",
+        "type": "object"
+      },
+      "CsvPreviewOut": {
+        "additionalProperties": false,
+        "description": "A staged CSV described under a mapping, against the active version's declaration (engine 2b spec \u00a78.1; the run\nform design \u00a74.3, \u00a74.4): what keeps the mapping from building rows, the first records' cells, the first 100 errors\nin detail, and every error counted by column and code.",
+        "properties": {
+          "error_count": {
+            "title": "Error Count",
+            "type": "integer"
+          },
+          "error_groups": {
+            "items": {
+              "$ref": "#/components/schemas/CsvErrorGroupOut"
+            },
+            "title": "Error Groups",
+            "type": "array"
+          },
+          "errors": {
+            "items": {
+              "$ref": "#/components/schemas/CsvErrorOut"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "mapping": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Mapping",
+            "type": "object"
+          },
+          "masked_columns": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Masked Columns",
+            "type": "array"
+          },
+          "preview": {
+            "items": {
+              "$ref": "#/components/schemas/CsvPreviewRowOut"
+            },
+            "title": "Preview",
+            "type": "array"
+          },
+          "problems": {
+            "items": {
+              "$ref": "#/components/schemas/CsvProblemOut"
+            },
+            "title": "Problems",
+            "type": "array"
+          },
+          "rows_with_errors": {
+            "title": "Rows With Errors",
+            "type": "integer"
+          },
+          "version_id": {
+            "title": "Version Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version_id",
+          "mapping",
+          "problems",
+          "masked_columns",
+          "preview",
+          "errors",
+          "error_count",
+          "error_groups",
+          "rows_with_errors"
+        ],
+        "title": "CsvPreviewOut",
+        "type": "object"
+      },
+      "CsvPreviewRowOut": {
+        "additionalProperties": false,
+        "properties": {
+          "cells": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Cells",
+            "type": "object"
+          },
+          "row": {
+            "title": "Row",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "row",
+          "cells"
+        ],
+        "title": "CsvPreviewRowOut",
+        "type": "object"
+      },
+      "CsvProblemOut": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "column": {
+            "title": "Column",
+            "type": "string"
+          }
+        },
+        "required": [
+          "column",
+          "code"
+        ],
+        "title": "CsvProblemOut",
         "type": "object"
       },
       "CsvRecordOut": {
@@ -1161,6 +1370,106 @@
           "code"
         ],
         "title": "CsvSkippedOut",
+        "type": "object"
+      },
+      "CsvUploadOut": {
+        "additionalProperties": false,
+        "description": "A staged upload (engine 2b spec \u00a78.1): its id and hour, the file's headers and records, the mapping proposed\n(the saved default, else the exact matches), and the file described under it.",
+        "properties": {
+          "default_mapping": {
+            "$ref": "#/components/schemas/CsvDefaultMappingOut"
+          },
+          "error_count": {
+            "title": "Error Count",
+            "type": "integer"
+          },
+          "error_groups": {
+            "items": {
+              "$ref": "#/components/schemas/CsvErrorGroupOut"
+            },
+            "title": "Error Groups",
+            "type": "array"
+          },
+          "errors": {
+            "items": {
+              "$ref": "#/components/schemas/CsvErrorOut"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "expires_at": {
+            "title": "Expires At",
+            "type": "string"
+          },
+          "headers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Headers",
+            "type": "array"
+          },
+          "mapping": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Mapping",
+            "type": "object"
+          },
+          "masked_columns": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Masked Columns",
+            "type": "array"
+          },
+          "preview": {
+            "items": {
+              "$ref": "#/components/schemas/CsvPreviewRowOut"
+            },
+            "title": "Preview",
+            "type": "array"
+          },
+          "problems": {
+            "items": {
+              "$ref": "#/components/schemas/CsvProblemOut"
+            },
+            "title": "Problems",
+            "type": "array"
+          },
+          "row_count": {
+            "title": "Row Count",
+            "type": "integer"
+          },
+          "rows_with_errors": {
+            "title": "Rows With Errors",
+            "type": "integer"
+          },
+          "upload_id": {
+            "title": "Upload Id",
+            "type": "string"
+          },
+          "version_id": {
+            "title": "Version Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version_id",
+          "mapping",
+          "problems",
+          "masked_columns",
+          "preview",
+          "errors",
+          "error_count",
+          "error_groups",
+          "rows_with_errors",
+          "upload_id",
+          "expires_at",
+          "headers",
+          "row_count",
+          "default_mapping"
+        ],
+        "title": "CsvUploadOut",
         "type": "object"
       },
       "DeclassifiedOut": {
@@ -3238,6 +3547,18 @@
                 "type": "null"
               }
             ]
+          },
+          "expected_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Version Id"
           },
           "input": {
             "anyOf": [
@@ -5768,7 +6089,7 @@
       },
       "StartFormOut": {
         "additionalProperties": false,
-        "description": "The active version's input, as a form: what a schedule's input is entered on (4c-3a ruling 5).",
+        "description": "The active version's input, as a form: what a schedule's input is entered on (4c-3a ruling 5), and the run\nform's (the run form design \u00a74.2): the version it names, and who published it, null once they're gone.",
         "properties": {
           "csv": {
             "anyOf": [
@@ -5787,9 +6108,28 @@
             "title": "Fields",
             "type": "array"
           },
+          "published_at": {
+            "title": "Published At",
+            "type": "string"
+          },
+          "published_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Published By"
+          },
           "version_id": {
             "title": "Version Id",
             "type": "string"
+          },
+          "version_number": {
+            "title": "Version Number",
+            "type": "integer"
           },
           "workflow_id": {
             "title": "Workflow Id",
@@ -5799,6 +6139,9 @@
         "required": [
           "workflow_id",
           "version_id",
+          "version_number",
+          "published_at",
+          "published_by",
           "fields",
           "csv"
         ],
@@ -5817,6 +6160,18 @@
                 "type": "null"
               }
             ]
+          },
+          "expected_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Version Id"
           },
           "input": {
             "additionalProperties": true,
@@ -10104,9 +10459,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Rerun Api V1 T  Tenant Id  Runs  Request Id  Rerun Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/RequestOut"
                 }
               }
             },
@@ -11611,9 +11964,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Save Csv Mapping Api V1 T  Tenant Id  Workflows  Workflow Id  Csv Mapping Put",
-                  "type": "object"
+                  "$ref": "#/components/schemas/CsvMappingOut"
                 }
               }
             },
@@ -11667,9 +12018,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Upload Csv Api V1 T  Tenant Id  Workflows  Workflow Id  Csv Uploads Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/CsvUploadOut"
                 }
               }
             },
@@ -11687,6 +12036,80 @@
           }
         },
         "summary": "Upload Csv",
+        "tags": [
+          "runs"
+        ]
+      }
+    },
+    "/api/v1/t/{tenant_id}/workflows/{workflow_id}/csv-uploads/{upload_id}/preview": {
+      "post": {
+        "description": "The caller's staged upload described again under `body.mapping`, against the active version's declaration\n(B11; the run form design \u00a74.3): 404 `upload_not_found`, 409 `upload_consumed`, 410 `upload_expired`, as a start\nfinds them; 503 `csv_busy` with every CSV slot held.",
+        "operationId": "preview_csv_api_v1_t__tenant_id__workflows__workflow_id__csv_uploads__upload_id__preview_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "upload_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Upload Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MappingIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CsvPreviewOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Preview Csv",
         "tags": [
           "runs"
         ]
@@ -12845,9 +13268,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Start Run Api V1 T  Tenant Id  Workflows  Workflow Id  Runs Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/RequestOut"
                 }
               }
             },

@@ -1316,6 +1316,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/t/{tenant_id}/workflows/{workflow_id}/csv-uploads/{upload_id}/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview Csv
+         * @description The caller's staged upload described again under `body.mapping`, against the active version's declaration
+         *     (B11; the run form design §4.3): 404 `upload_not_found`, 409 `upload_consumed`, 410 `upload_expired`, as a start
+         *     finds them; 503 `csv_busy` with every CSV slot held.
+         */
+        post: operations["preview_csv_api_v1_t__tenant_id__workflows__workflow_id__csv_uploads__upload_id__preview_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/t/{tenant_id}/workflows/{workflow_id}/draft": {
         parameters: {
             query?: never;
@@ -2156,6 +2178,27 @@ export interface components {
             /** Values */
             values?: string[] | null;
         };
+        /** CsvDefaultMappingOut */
+        CsvDefaultMappingOut: {
+            /** Problems */
+            problems?: components["schemas"]["CsvProblemOut"][] | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "none" | "applied" | "stale";
+        };
+        /** CsvErrorGroupOut */
+        CsvErrorGroupOut: {
+            /** Code */
+            code: string;
+            /** Column */
+            column: string | null;
+            /** Count */
+            count: number;
+            /** Rows */
+            rows: number[];
+        };
         /** CsvErrorOut */
         CsvErrorOut: {
             /** Code */
@@ -2194,6 +2237,62 @@ export interface components {
              * Format: uuid
              */
             upload_id: string;
+        };
+        /**
+         * CsvMappingOut
+         * @description A workflow's saved default mapping, and the version it was checked against.
+         */
+        CsvMappingOut: {
+            /** Mapping */
+            mapping: {
+                [key: string]: string;
+            };
+            /** Version Id */
+            version_id: string;
+        };
+        /**
+         * CsvPreviewOut
+         * @description A staged CSV described under a mapping, against the active version's declaration (engine 2b spec §8.1; the run
+         *     form design §4.3, §4.4): what keeps the mapping from building rows, the first records' cells, the first 100 errors
+         *     in detail, and every error counted by column and code.
+         */
+        CsvPreviewOut: {
+            /** Error Count */
+            error_count: number;
+            /** Error Groups */
+            error_groups: components["schemas"]["CsvErrorGroupOut"][];
+            /** Errors */
+            errors: components["schemas"]["CsvErrorOut"][];
+            /** Mapping */
+            mapping: {
+                [key: string]: string;
+            };
+            /** Masked Columns */
+            masked_columns: string[];
+            /** Preview */
+            preview: components["schemas"]["CsvPreviewRowOut"][];
+            /** Problems */
+            problems: components["schemas"]["CsvProblemOut"][];
+            /** Rows With Errors */
+            rows_with_errors: number;
+            /** Version Id */
+            version_id: string;
+        };
+        /** CsvPreviewRowOut */
+        CsvPreviewRowOut: {
+            /** Cells */
+            cells: {
+                [key: string]: string;
+            };
+            /** Row */
+            row: number;
+        };
+        /** CsvProblemOut */
+        CsvProblemOut: {
+            /** Code */
+            code: string;
+            /** Column */
+            column: string;
         };
         /**
          * CsvRecordOut
@@ -2237,6 +2336,42 @@ export interface components {
             code: string;
             /** Row */
             row: number;
+        };
+        /**
+         * CsvUploadOut
+         * @description A staged upload (engine 2b spec §8.1): its id and hour, the file's headers and records, the mapping proposed
+         *     (the saved default, else the exact matches), and the file described under it.
+         */
+        CsvUploadOut: {
+            default_mapping: components["schemas"]["CsvDefaultMappingOut"];
+            /** Error Count */
+            error_count: number;
+            /** Error Groups */
+            error_groups: components["schemas"]["CsvErrorGroupOut"][];
+            /** Errors */
+            errors: components["schemas"]["CsvErrorOut"][];
+            /** Expires At */
+            expires_at: string;
+            /** Headers */
+            headers: string[];
+            /** Mapping */
+            mapping: {
+                [key: string]: string;
+            };
+            /** Masked Columns */
+            masked_columns: string[];
+            /** Preview */
+            preview: components["schemas"]["CsvPreviewRowOut"][];
+            /** Problems */
+            problems: components["schemas"]["CsvProblemOut"][];
+            /** Row Count */
+            row_count: number;
+            /** Rows With Errors */
+            rows_with_errors: number;
+            /** Upload Id */
+            upload_id: string;
+            /** Version Id */
+            version_id: string;
         };
         /** DeclassifiedOut */
         DeclassifiedOut: {
@@ -2980,6 +3115,8 @@ export interface components {
         /** RerunIn */
         RerunIn: {
             csv?: components["schemas"]["CsvIn"] | null;
+            /** Expected Version Id */
+            expected_version_id?: string | null;
             /** Input */
             input?: {
                 [key: string]: unknown;
@@ -3807,20 +3944,29 @@ export interface components {
         };
         /**
          * StartFormOut
-         * @description The active version's input, as a form: what a schedule's input is entered on (4c-3a ruling 5).
+         * @description The active version's input, as a form: what a schedule's input is entered on (4c-3a ruling 5), and the run
+         *     form's (the run form design §4.2): the version it names, and who published it, null once they're gone.
          */
         StartFormOut: {
             csv: components["schemas"]["CsvFormOut"] | null;
             /** Fields */
             fields: components["schemas"]["StartFieldOut"][];
+            /** Published At */
+            published_at: string;
+            /** Published By */
+            published_by: string | null;
             /** Version Id */
             version_id: string;
+            /** Version Number */
+            version_number: number;
             /** Workflow Id */
             workflow_id: string;
         };
         /** StartIn */
         StartIn: {
             csv?: components["schemas"]["CsvIn"] | null;
+            /** Expected Version Id */
+            expected_version_id?: string | null;
             /** Input */
             input?: {
                 [key: string]: unknown;
@@ -6184,9 +6330,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["RequestOut"];
                 };
             };
             /** @description Validation Error */
@@ -7063,9 +7207,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["CsvMappingOut"];
                 };
             };
             /** @description Validation Error */
@@ -7097,9 +7239,44 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["CsvUploadOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    preview_csv_api_v1_t__tenant_id__workflows__workflow_id__csv_uploads__upload_id__preview_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workflow_id: string;
+                upload_id: string;
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MappingIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CsvPreviewOut"];
                 };
             };
             /** @description Validation Error */
@@ -7633,9 +7810,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["RequestOut"];
                 };
             };
             /** @description Validation Error */
