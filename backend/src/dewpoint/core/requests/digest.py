@@ -13,12 +13,18 @@ from typing import Any
 from dewpoint.core.crypto.keys import KeySource
 
 
-def canonical(*, source: str, workflow_id: uuid.UUID, mode: str, input: Any, draft: Any = None) -> bytes:
+def canonical(
+    *, source: str, workflow_id: uuid.UUID, mode: str, input: Any, draft: Any = None,
+    expected_version_id: str | None = None,
+) -> bytes:  # fmt: skip
     """Sorted keys, no whitespace, UTF-8, no NaN: equal requests always give equal bytes. A draft simulation's `draft`
-    (B8) is there only when given, so every other request's bytes stay what they were."""
+    (B8), and the version a start confirmed (B14), are there only when given, so every other request's bytes stay what
+    they were."""
     value = {"source": source, "workflow_id": str(workflow_id), "mode": mode, "input": input}
     if draft is not None:
         value["draft"] = draft
+    if expected_version_id is not None:
+        value["expected_version_id"] = expected_version_id
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
 
 
@@ -31,21 +37,23 @@ async def digest(
     mode: str,
     input: Any,
     draft: Any = None,
+    expected_version_id: str | None = None,
     version: int | None = None,
 ) -> tuple[int, bytes]:
     """The request's digest with the tenant's key of `version` (its active one when None), and that version."""
     found, key = await keys.digest_key(tenant_id, version)
-    message = canonical(source=source, workflow_id=workflow_id, mode=mode, input=input, draft=draft)
+    message = canonical(source=source, workflow_id=workflow_id, mode=mode, input=input, draft=draft,
+                        expected_version_id=expected_version_id)  # fmt: skip
     return found, hmac.new(key, message, hashlib.sha256).digest()
 
 
 async def matches(
     keys: KeySource, tenant_id: str, stored: bytes, version: int, *, source: str, workflow_id: uuid.UUID, mode: str,
-    input: Any, draft: Any = None,
+    input: Any, draft: Any = None, expected_version_id: str | None = None,
 ) -> bool:  # fmt: skip
     """Whether a request is the one `stored` was computed for, with the key version it was computed with."""
     _, fresh = await digest(keys, tenant_id, source=source, workflow_id=workflow_id, mode=mode, input=input,
-                            draft=draft, version=version)  # fmt: skip
+                            draft=draft, expected_version_id=expected_version_id, version=version)  # fmt: skip
     return hmac.compare_digest(fresh, stored)
 
 

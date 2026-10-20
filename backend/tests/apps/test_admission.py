@@ -20,7 +20,7 @@ from dewpoint.core.claims.cipher import ClaimCipher
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.plugins import lifecycle
 from dewpoint.engine import ENGINE_ABI
-from tests.apps.test_workflow_ops import ECHO_GRAPH, actor, create, publish, update
+from tests.apps.test_workflow_ops import ECHO_GRAPH, actor, create, publish, save, update
 from tests.support.graphs import G
 from tests.support.keys import FixtureKeys
 from tests.support.registry import sync_test_plugins
@@ -327,3 +327,75 @@ async def test_an_input_past_the_limit_is_refused_before_its_key_is_read(ready, 
                                            workflow_id=wf, mode="live",
                                            rerun=admission.Rerun(uuid.uuid4(), deep))  # fmt: skip
     assert (raised.value.reason, raised.value.messages) == ("input_invalid", [TOO_DEEP])
+
+
+# --- a start on the version it confirmed (B14; the run form design §4.1) ----------------------------------------------
+
+
+async def active(owner: Any, wf: uuid.UUID) -> uuid.UUID:
+    async with owner() as s:
+        found = await s.execute(text("select active_version_id from workflows where id = :w"), {"w": wf})
+        return uuid.UUID(str(found.scalar_one()))
+
+
+async def published_again(api: Any, ctx: Any, wf: uuid.UUID, settings: Any) -> uuid.UUID:
+    """A second version of the workflow, its draft changed first: the new active version's id."""
+    changed = G().node("a", "testkit.echo@1", {"value": 2}).data() | {"settings": TOKEN_GRAPH["settings"]}
+    await save(api, ctx, wf, changed)
+    version = (await publish(api, ctx, wf, settings)).version
+    assert version is not None
+    return version.id
+
+
+async def test_a_start_on_the_version_it_confirmed_is_frozen_on_it(ready, owner_sessionmaker, api_sessionmaker) -> None:
+    ctx, wf = ready
+    first = await active(owner_sessionmaker, wf)
+    admitted = await admit(api_sessionmaker, ctx, wf, expected_version_id=first)
+    assert admitted.new and admitted.request.workflow_version_id == first
+
+
+async def test_a_start_on_a_version_no_longer_active_is_refused_and_admits_nothing(
+    ready, owner_sessionmaker, api_sessionmaker, api_settings
+) -> None:
+    ctx, wf = ready
+    first = await active(owner_sessionmaker, wf)
+    second = await published_again(api_sessionmaker, ctx, wf, api_settings)
+    with pytest.raises(admission.AdmissionRefusedError) as refused:
+        await admit(api_sessionmaker, ctx, wf, expected_version_id=first)
+    assert refused.value.reason == "version_changed" and refused.value.messages
+    assert refused.value.extra == {"active_version_id": str(second), "active_version_number": 2}
+    assert (await count(owner_sessionmaker, "run_requests"), await count(owner_sessionmaker, "run_inputs")) == (0, 0)
+
+
+async def test_an_exact_retry_after_a_publish_is_its_request_and_another_version_under_its_key_a_conflict(
+    ready, owner_sessionmaker, api_sessionmaker, api_settings
+) -> None:
+    """An exact retry is resolved by its key before the version is checked; the version it confirmed is part of its
+    digest, so the same key naming another version, or none, is another request."""
+    ctx, wf = ready
+    first = await active(owner_sessionmaker, wf)
+    admitted = (await admit(api_sessionmaker, ctx, wf, expected_version_id=first)).request
+    second = await published_again(api_sessionmaker, ctx, wf, api_settings)
+    again = await admit(api_sessionmaker, ctx, wf, expected_version_id=first)
+    assert (again.new, again.request.id, again.request.workflow_version_id) == (False, admitted.id, first)
+    for other in ({"expected_version_id": second}, {}):
+        with pytest.raises(admission.IdempotencyConflictError):
+            await admit(api_sessionmaker, ctx, wf, **other)
+
+
+async def test_a_reruns_retry_is_found_under_its_key_only_with_the_version_it_confirmed(
+    ready, owner_sessionmaker, api_sessionmaker
+) -> None:
+    ctx, wf = ready
+    first = await active(owner_sessionmaker, wf)
+    original = (await admit(api_sessionmaker, ctx, wf)).request
+    rerun = admission.Rerun(original.id)
+    made = (await admit(api_sessionmaker, ctx, wf, key="r1", source="rerun", rerun=rerun,
+                        expected_version_id=first)).request  # fmt: skip
+    async with api_sessionmaker() as s, s.begin():
+        under = {"tenant_id": ctx.tenant_id, "idempotency_key": "r1", "source": "rerun", "workflow_id": wf}
+        under |= {"mode": "live"}
+        found = await admission.admitted_under(s, KEYS, **under, rerun=rerun, expected_version_id=first)
+        assert found is not None and found.id == made.id
+        with pytest.raises(admission.IdempotencyConflictError):
+            await admission.admitted_under(s, KEYS, **under, rerun=rerun)

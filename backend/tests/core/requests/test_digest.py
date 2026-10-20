@@ -55,3 +55,18 @@ async def test_a_draft_simulation_digests_its_draft_and_any_other_request_keeps_
     assert len({plain, drafted, later}) == 3
     assert await d.matches(keys, TENANT, drafted, 1, **REQUEST, draft={"draft_revision": 2})
     assert not await d.matches(keys, TENANT, drafted, 1, **REQUEST)
+
+
+async def test_a_start_on_a_confirmed_version_digests_it_and_any_other_request_keeps_its_bytes() -> None:
+    """B14 (the run form design §4.1): a start that names the version it confirmed digests it as a fifth key; one that
+    names none is digested as before, byte for byte."""
+    keys = FixtureKeys()
+    seven, eight = str(uuid.UUID(int=7)), str(uuid.UUID(int=8))
+    assert d.canonical(**REQUEST, expected_version_id=None) == d.canonical(**REQUEST)
+    _, plain = await d.digest(keys, TENANT, **REQUEST)
+    _, on_seven = await d.digest(keys, TENANT, **REQUEST, expected_version_id=seven)
+    _, on_eight = await d.digest(keys, TENANT, **REQUEST, expected_version_id=eight)
+    assert len({plain, on_seven, on_eight}) == 3
+    assert await d.matches(keys, TENANT, on_seven, 1, **REQUEST, expected_version_id=seven)
+    assert not await d.matches(keys, TENANT, on_seven, 1, **REQUEST)
+    assert not await d.matches(keys, TENANT, plain, 1, **REQUEST, expected_version_id=seven)
