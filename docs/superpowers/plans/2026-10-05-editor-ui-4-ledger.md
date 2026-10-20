@@ -3508,3 +3508,10 @@ CSV (admission's behavior, which the UI never sends); `error_groups` off the run
 `version_changed` refusal (no interactive refusal is recorded); a preview without a row lock (a read); groups tied by
 column as text (ruling 9); a re-run's refusal words "start" (the UI words its own); a key retried with and without
 `expected_version_id` is `idempotency_conflict` (§4.1).
+
+M112. **A tick's codec doesn't list `version_changed`** (CI's backend job on #130, 2026-10-20): its one failure,
+      `test_every_refusal_admission_or_a_tick_can_record_is_a_tick_outcome`, reads every code-like constant of
+      `admission` as a refusal a tick can record, and found the new `VERSION_CHANGED` missing from the tick codec's
+      outcomes. Only a start or a re-run through the API confirms a version, and their refusals are raised, never
+      recorded; a schedule's tick confirms none. The test sets it aside, as it does a draft simulation's codes. The
+      local broad suites hadn't included this file. Cost if wrong: a tick's outcome reading "refused" for that code.
