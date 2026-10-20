@@ -3,23 +3,28 @@
 // form, live or simulated, in the Simulate dialog's look. The version it shows is the one it starts: the start goes
 // with that version's id (B14), and a version published meanwhile is read and shown, the values that still fit kept.
 // Each submitted form goes under one key, sent again under it only when the same form is (an answer lost on the way).
-// A workflow that declares a CSV starts only with its file (§5.3, CsvPart), any other fields beside it.
+// A workflow that declares a CSV starts only with its file (§5.3, CsvPart), any other fields beside it, once every row
+// passes; the columns are saved first when asked, and a failed save starts nothing. A file checked against a version
+// published since the form was read has the form read again, as a refused start does.
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { Button } from "../../components/Button";
 import { TextArea } from "../../components/Field";
 import { When } from "../../components/When";
-import { keptValues, keyFor, refusalOf, startRun, type Refusal, type Sent, type StartBody, type StartForm } from "../../lib/runForm";
+import {
+  canSaveColumns, changedWords, keptValues, keyFor, refusalOf, saveColumns, startRun, type Refusal, type Sent, type StartBody, type StartForm,
+} from "../../lib/runForm";  // prettier-ignore
 import { startFormQuery } from "../../lib/triggers";
+import { tenantQuery } from "../../lib/workflows";
 import { SimBanner } from "../editor/simulation/SimBanner";
 import { CsvPart } from "./CsvFile";
-import { csvReason, useCsvFile } from "./useCsvFile";
+import { ENDED, csvReason, useCsvFile } from "./useCsvFile";
 import { InputControl, REQUIRED, fieldKey, fromFields, hintOf, labelOf, startValues, wholeOf } from "../editor/startInput";
 
 type Mode = StartBody["mode"];
 
 /** A refusal says its code beside its words (the MoreStates board), but for those the form itself words. */
-const CODED = (code: string) => !["version_changed", "network"].includes(code);
+const CODED = (code: string) => !["version_changed", "network", "columns_unsaved"].includes(code);
 
 function ModeChoice({ mode, onChange }: { mode: Mode; onChange: (m: Mode) => void }) {
   const id = useId();
@@ -79,6 +84,37 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, onStarted, o
   const shownJson = jsonText ?? "";
   const csv = useCsvFile(tenantId, workflow.id);
   const reason = form?.csv ? csvReason(csv.file, form.csv.columns) : null;
+  const rows = form?.csv && csv.file.phase === "staged" && reason === null ? csv.file.upload.row_count : null;
+  const tenant = useQuery(tenantQuery(tenantId));
+  const saveable = canSaveColumns(tenant.data?.role);
+  const [save, setSave] = useState(false);
+
+  /** The version now published, read again (§5.2, §5.3): its form shown, the values that still fit kept, a staged file
+   * checked again under it; why it couldn't be read, else null. */
+  async function reread(from: StartForm, values: ReadonlyMap<string, string>): Promise<{ fresh: StartForm | null } | { refused: Refusal }> {
+    try {
+      const fresh = await qc.query({ ...startFormQuery(tenantId, workflow.id), staleTime: 0 });
+      if (fresh) {
+        setValues(keptValues(values, from, fresh));
+        setForm(fresh);
+        csv.recheck(fresh);
+      }
+      return { fresh };
+    } catch (e) {
+      return { refused: refusalOf(e) };
+    }
+  }
+
+  // A file checked against a version the form doesn't show (§5.3): one published since the form was read. Read once.
+  const drifted = form && csv.file.phase === "staged" && !csv.file.checking && csv.file.shown.version_id !== form.version_id ? csv.file.shown.version_id : null;
+  const followed = useRef<string | null>(null);
+  useEffect(() => {
+    if (drifted === null || form === null || followed.current === drifted) return;
+    followed.current = drifted;
+    void reread(form, shownValues).then((r) =>
+      setRefusal("refused" in r ? r.refused : r.fresh ? { code: "version_changed", words: changedWords(r.fresh.version_number), fields: {} } : null),
+    );  // prettier-ignore
+  }, [drifted]); // once per version found: the form and values of the draw that found it
 
   // Focus goes to the first field once the form is read (§5.6); before, the dialog holds it.
   const formRead = form !== null;
@@ -117,20 +153,21 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, onStarted, o
     setRefusal(null);
     setSending(true);
     try {
+      if (body.csv && save && saveable) {
+        try {
+          await saveColumns(tenantId, workflow.id, body.csv.mapping);
+        } catch {
+          return setRefusal({ code: "columns_unsaved", words: "The columns couldn't be saved, so nothing started. Start again, or leave them unsaved.", fields: {} });
+        }
+      }
       const started = await startRun(tenantId, workflow.id, body, sent.key);
       onStarted(started.id);
     } catch (err) {
       let refused = refusalOf(err, new Set(asJson ? [] : form.fields.map((f) => f.name)));
+      if (ENDED.has(refused.code)) return csv.drop({ words: refused.words, code: refused.code }); // chosen again
       if (refused.code === "version_changed") {
-        try {
-          const fresh = await qc.query({ ...startFormQuery(tenantId, workflow.id), staleTime: 0 });
-          if (fresh) {
-            setValues(keptValues(shownValues, form, fresh));
-            setForm(fresh);
-          }
-        } catch (again) {
-          refused = refusalOf(again);
-        }
+        const r = await reread(form, shownValues);
+        if ("refused" in r) refused = r.refused;
       }
       setRefusal(refused);
       setErrors(refused.fields);
@@ -173,7 +210,10 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, onStarted, o
             <ModeChoice mode={mode} onChange={setMode} />
             <div ref={fieldsRef} className="flex flex-col gap-4">
               {form.csv && (
-                <CsvPart form={form} csv={form.csv} file={csv.file} onChoose={(f) => void csv.choose(f, form.csv!)} onMap={csv.map} />
+                <CsvPart
+                  form={form} csv={form.csv} file={csv.file} saveable={saveable} save={save} onSave={setSave}
+                  onChoose={(f) => void csv.choose(f, form.csv!)} onMap={(column, header) => csv.map(column, header, form.csv!)}
+                />
               )}
               {asJson ? (
                 <TextArea
@@ -219,7 +259,7 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, onStarted, o
             type="submit" variant={mode === "live" ? "live-outline" : "simulate"} disabled={form === null || sending || reason !== null}
             aria-describedby={reason ? `${id}-reason` : undefined}
           >
-            {mode === "live" ? "Start the live run" : "◌ Start the simulation"}
+            {`${mode === "live" ? "Start the live run" : "◌ Start the simulation"}${rows === null ? "" : ` · ${rows.toLocaleString("en-US")} row${rows === 1 ? "" : "s"}`}`}
           </Button>
         </div>
       </form>

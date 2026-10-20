@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "./client";
 import {
   canSaveColumns, canStart, cellWords, fileWords, holds, keptValues, keyFor, mappingWords, previewCsv, refusalOf, rerunRun,
-  saveColumns, staleWords, startRun, startable, uploadCsv, uploadProblem, type StartForm,
+  changedWords, checkedWords, groupRows, saveColumns, staleWords, startRun, startable, uploadCsv, uploadProblem, type StartForm,
 } from "./runForm";  // prettier-ignore
 
 let sent: Request[];
@@ -166,5 +166,23 @@ describe("a CSV file's columns and problems, in words (§5.3; the CsvStates and 
     expect(staleWords(7, [{ column: "site_ref", code: "unknown_column" }, { column: "name", code: "required_unmapped" }])).toBe(
       "The columns saved for this workflow no longer fit version 7: it doesn't read site_ref any more, and it needs name, which they leave out. The file's columns with the same names are proposed instead; check them.",
     );
+  });
+});
+
+describe("a checked file, in words (§5.3; the CsvStates board)", () => {
+  it("counts the errors and the rows they're in, or says every row passes", () => {
+    expect(checkedWords({ error_count: 37, rows_with_errors: 29 }, 2431)).toBe("37 errors in 29 of 2,431 rows");
+    expect(checkedWords({ error_count: 1, rows_with_errors: 1 }, 1)).toBe("1 error in 1 of 1 row");
+    expect(checkedWords({ error_count: 0, rows_with_errors: 0 }, 2431)).toBe("All 2,431 rows pass.");
+  });
+
+  it("gives a problem's count and its first rows, and how many more", () => {
+    expect(groupRows({ count: 21, rows: [7, 19, 33, 48, 52] })).toBe("21 · 7, 19, 33, 48, 52 and 16 more");
+    expect(groupRows({ count: 3, rows: [7, 19, 33] })).toBe("3 · 7, 19 and 33");
+    expect(groupRows({ count: 1, rows: [1204] })).toBe("1 · 1,204");
+  });
+
+  it("says a version was published meanwhile as a refused start does", () => {
+    expect(changedWords(8)).toBe(refusalOf(refused(409, { error: "version_changed", active_version_id: "v8", active_version_number: 8 })).words);
   });
 });
