@@ -68,6 +68,8 @@ def described(table: Table, columns: Sequence[Mapping[str, Any]], mapping: Mappi
         "preview": preview,
         "errors": [asdict(e) for e in built.errors] if built else [],
         "error_count": built.error_count if built else 0,
+        "error_groups": [asdict(g) for g in built.groups] if built else [],  # every error, by column and code
+        "rows_with_errors": len(built.skipped) if built else 0,
     }
 
 

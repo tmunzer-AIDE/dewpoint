@@ -70,6 +70,8 @@ async def test_an_operator_uploads_a_csv_and_gets_its_mapping_preview_and_errors
         {"row": 3, "cells": {"site": "", "vlan": "20"}},
     ]  # the sensitive column and the undeclared one are never shown
     assert (body["errors"], body["error_count"]) == ([{"row": 3, "column": "site", "code": "required"}], 1)
+    assert body["error_groups"] == [{"column": "site", "code": "required", "count": 1, "rows": [3]}]
+    assert body["rows_with_errors"] == 1
     row = await stored(owner_sessionmaker, body["upload_id"])
     assert (row["workflow_id"], row["size_bytes"], row["row_count"]) == (wf, len(FILE), 3)
     assert b"s3cret-psk" not in row["staged"] and b"paris" not in row["staged"]  # encrypted
@@ -190,6 +192,8 @@ async def test_an_upload_at_the_permitted_limits_lists_100_errors_and_counts_the
     assert answer.status_code == 201, answer.text[:200]
     body = answer.json()
     assert (len(body["errors"]), body["error_count"], body["row_count"]) == (100, 2_000_000, 10_000)
+    assert (len(body["error_groups"]), body["rows_with_errors"]) == (200, 10_000)
+    assert {g["count"] for g in body["error_groups"]} == {10_000}
     row = await stored(owner_sessionmaker, body["upload_id"])
     assert len(row["staged"]) <= len(WIDE_FILE) + 64  # the file's bytes, never a parsed form several times larger
 
