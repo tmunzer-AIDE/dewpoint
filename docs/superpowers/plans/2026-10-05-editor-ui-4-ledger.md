@@ -3432,3 +3432,24 @@ change. Mid-slice rulings start at M110.
 271. **Accepted. The client is regenerated; nothing else in the frontend changes** (plan ruling 12).
 272. **Accepted. The checks: each task's suites, the final tree's broad suites, and the whole backend suite on CI**
      (plan ruling 13).
+
+### 4e-2a, milestone 1 (2026-10-20)
+
+Tasks 1–3 on `feat/editor-4e2a` (from origin/main 4d8cf8f1, the owner's choice, the plan merged in cfc40882; backend
+tests on a borrowed venv of the same `uv.lock`, the frontend's packages restored offline). Tasks 2 and 3's diffs
+applied as the plan's text has them; each task's tests failed, then passed, as its steps say; after each, ruff,
+`ruff format --check` and mypy were silent.
+- Task 1, b5930d64: the 4e-2 design and this plan accepted, rulings 260–272 (M110).
+- Task 2, b2746ba7: admission refuses a start on a version no longer active (`version_changed`), its digest naming
+  the version only when given. Red: 5 failed, 29 passed (`canonical()` and `admit_request()` take no
+  `expected_version_id`); green: 34 passed.
+- Task 3, 6f3d6593: `expected_version_id` on a start and a re-run, 409 `version_changed` with the active version, the
+  start form's version and publisher, the two answers typed. Red: 5 failed, 115 passed (no `version_number`; the
+  unknown field refused 422; untyped answers); green: 120 passed.
+
+M110. **Task 1's section follows #129's** (2026-10-20): main gained #129 and #128 after the dry run's base (00cbbad9),
+      and #129 appended "4c-2b's deferred minors" to this ledger, so Task 1's diff, whose context was the ledger's old
+      end, didn't apply. Its lines were appended as the plan has them, after that section. Tasks 2–7's diffs were
+      applied in order on 4d8cf8f1 before starting: each applies. Cost if wrong: none.
+
+Mid-slice rulings: M110 only. Nothing pushed.
