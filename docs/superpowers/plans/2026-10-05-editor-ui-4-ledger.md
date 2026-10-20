@@ -3453,3 +3453,18 @@ M110. **Task 1's section follows #129's** (2026-10-20): main gained #129 and #12
       applied in order on 4d8cf8f1 before starting: each applies. Cost if wrong: none.
 
 Mid-slice rulings: M110 only. Nothing pushed.
+
+### 4e-2a, milestone 2 (2026-10-20)
+
+The owner, in chat: "ok, let's go". Tasks 4–6's diffs applied as the plan's text has them; each task's tests failed,
+then passed, as its steps say; after each, ruff, `ruff format --check` and mypy were silent.
+- Task 4, 455eb658: every CSV error counted by column and code (`ErrorGroup`), the upload's answer with
+  `error_groups` and `rows_with_errors`. Red: 4 failed, 33 passed (`Built` has no `groups`; no `error_groups`); green:
+  37 passed. The app quit during the first green run; on resuming, the worktree was checked to be exactly the plan's
+  two blocks on Task 3's milestone (the same tree), and the green run, run again, passed whole.
+- Task 5, b2ae9eb0: a staged file checked again under other columns (B11), the upload's `version_id`, the CSV answers
+  typed. Red: 8 failed, 101 passed (no preview route; no `version_id`; untyped answers); green: 109 passed.
+- Task 6, 652f8ed7: a same-rows re-run copies its original's CSV record. Red: 2 failed, 20 passed (no record);
+  green: 22 passed.
+
+Mid-slice rulings: none in this milestone. Nothing pushed.
