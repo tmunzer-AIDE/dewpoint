@@ -3592,3 +3592,17 @@ and ESLint silent:
 - Task 9, 9c7fea59: the form at 320 px. Red: 3 failed, 53 passed; green: 56 passed.
 
 Mid-slice rulings: none. Nothing pushed.
+
+### 4e-2b, milestone 4 and the final checkpoint (2026-10-20)
+
+The owner accepted milestone 3 and left the browser specs to CI ("go, leave the e2e to CI").
+- Task 10, 21111a12: the browser specs. `e2e/seed.ts` takes `runs.spec.ts`'s seeding; `runForm.spec.ts` (four specs)
+  and the "Runs CSV" fixture; the workflows project runs it. The type check and ESLint silent; `playwright test
+  --list` lists the four beside `runs.spec.ts`'s five (56 tests in 7 files). Not run locally: CI's e2e job runs them
+  on the PR.
+- Task 11, every check on 21111a12: the frontend suite, 1411 passed in 104 files (main has 1328 in 99); ESLint silent;
+  the build done, the entry 649.7 kB, the form's chunk 47.7 kB, the editor's script 146.6 kB, a run's page 19.5 kB,
+  the Runs page 11.7 kB (ruling 302); `check:api` passes; CodeQL (javascript-typescript, CLI 2.27.2,
+  javascript-queries 2.4.7, CI's filter, 89 queries, 295 files): no finding.
+
+Mid-slice rulings over the slice: none. The final review follows. Nothing pushed.
