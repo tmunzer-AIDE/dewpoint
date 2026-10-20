@@ -4,6 +4,7 @@
 // Simulate workflow dialog both enter an input this way; a sensitive field is never prefilled with what it hides.
 import type { ReactNode } from "react";
 import { Field, Select, TextArea } from "../../components/Field";
+import { Tag } from "../../components/Tag";
 import { parseJson } from "../../lib/config";
 import { isObject } from "../../lib/schemaForm";
 import type { StartField } from "../../lib/triggers";
@@ -86,6 +87,25 @@ export function fromFields(
   }
   return problems.length > 0 ? { problems: Object.fromEntries(problems) } : { input: Object.fromEntries(entries) };
 }
+
+/** What a required field left empty says (the InputFields board). */
+export const REQUIRED = "Give a value: the input requires it.";
+
+/** A field's label, with what it is beside it, and what its hint adds: optional ones are left out when empty, sensitive
+ * ones stored as protected values (the InputFields board; the run form's Main board, 4e-2). */
+export const labelOf = (f: StartField) => (
+  <>
+    {nameOf(f)}
+    {f.required && <> <Tag>required</Tag></>}
+    {f.sensitive && <> <Tag>sensitive</Tag></>}
+  </>
+);
+export const hintOf = (f: StartField) =>
+  [
+    f.description,
+    f.required ? null : "Optional: left out when empty.",
+    f.sensitive ? "Stored as a protected value: results show it as redacted." : null,
+  ].filter(Boolean).join(" ") || undefined;  // prettier-ignore
 
 export const listed = (items: string[]) => (items.length < 2 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)!}`);
 

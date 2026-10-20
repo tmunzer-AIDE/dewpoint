@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Outlet, RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter, redirect } from "@tanstack/react-router";
-import { act, render, screen, within } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { GraphDoc } from "../../lib/workflows";
@@ -2482,5 +2482,42 @@ describe("the runs, from the editor (the runs design §5.1)", () => {
     const panel = await screen.findByRole("complementary", { name: "Simulation" });
     await userEvent.click(within(panel).getByRole("link", { name: "run 7c1e9a40" }));
     await vi.waitFor(() => expect(router.state.location.pathname).toBe(`/t/t1/runs/${request.id}`));
+  });
+});
+
+// Start a run… (4e-2; the run form design §5.1; the EntryPoints board): the published version, never the draft.
+describe("Start a run from the editor", () => {
+  const PUBLISHED = { ...WORKFLOW, active_version_id: "v1", active_version_number: 1, executable: true };
+  const FORM = { workflow_id: "w1", version_id: "v1", version_number: 1, published_at: "2026-10-06T09:00:00Z", published_by: null, csv: null, fields: [] };
+  beforeEach(() => {
+    answers.set(`GET ${BASE}`, () => json(PUBLISHED));
+    answers.set("GET /api/v1/t/t1/workflows", () => json([PUBLISHED]));
+    answers.set(`GET ${BASE}/start-form`, () => json(FORM));
+    answers.set(`POST ${BASE}/runs`, () => json({ id: "r1" }, 202));
+  });
+
+  it("offers Start a run… beside Simulate once published, says the draft differs, and lands on the run", async () => {
+    const { router } = await show();
+    const start = await screen.findByRole("button", { name: "Start a run…" });
+    expect(screen.getByRole("button", { name: "◌ Simulate workflow" }).nextElementSibling).toBe(start);
+    await userEvent.click(start);
+    expect(await screen.findByText("The draft has changes that aren't published. This run uses version 1, not the draft.")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Start the live run" }));
+    await vi.waitFor(() => expect(router.state.location.pathname).toBe("/t/t1/runs/r1"));
+  });
+
+  it("offers none on a workflow never published, nor to a role without run.start", async () => {
+    answers.set(`GET ${BASE}`, () => json(WORKFLOW));
+    answers.set("GET /api/v1/t/t1/workflows", () => json([WORKFLOW]));
+    await show();
+    await screen.findByRole("button", { name: "◌ Simulate workflow" });
+    expect(screen.queryByRole("button", { name: "Start a run…" })).toBeNull();
+    cleanup();
+    answers.set(`GET ${BASE}`, () => json(PUBLISHED));
+    answers.set("GET /api/v1/t/t1/workflows", () => json([PUBLISHED]));
+    role = "viewer";
+    await show();
+    await screen.findByRole("button", { name: "Versions" });
+    expect(screen.queryByRole("button", { name: "Start a run…" })).toBeNull();
   });
 });

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { QueryClient, QueryClientProvider, focusManager } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory, createRootRoute, createRoute, createRouter, useSearch } from "@tanstack/react-router";
-import { act, render, screen, within } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { onAnnounce } from "../../lib/announce";
@@ -43,18 +43,29 @@ const BOARD: RunItem[] = [
   }),
 ];  // prettier-ignore
 
-const WORKFLOWS = [{ id: "w1", name: "AP offline triage" }, { id: "w2", name: "Bulk AP rename" }];
+// The first can start (published, switched on, executable); the second was never published.
+const WORKFLOWS = [
+  { id: "w1", name: "AP offline triage", active_version_id: "v3", enabled: true, executable: true },
+  { id: "w2", name: "Bulk AP rename", active_version_id: null, enabled: true, executable: null },
+];
+const START_FORM = { workflow_id: "w1", version_id: "v3", version_number: 3, published_at: local(9, 0, 0), published_by: null, csv: null, fields: [] };
 
 let answers: (() => Response)[];
 let sent: URL[];
+let role: string;
+let workflowsHeld: Promise<Response> | null; // the workflows list, answered when a test says
 
 beforeEach(() => {
   answers = [];
   sent = [];
+  role = "operator";
+  workflowsHeld = null;
   vi.spyOn(Date, "now").mockReturnValue(NOW);
   vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
     const url = new URL((input as Request).url);
-    if (url.pathname === "/api/v1/t/t1/workflows") return Promise.resolve(new Response(JSON.stringify(WORKFLOWS)));
+    if (url.pathname === "/api/v1/t/t1/workflows") return workflowsHeld ?? Promise.resolve(new Response(JSON.stringify(WORKFLOWS)));
+    if (url.pathname === "/api/v1/t/t1") return Promise.resolve(new Response(JSON.stringify({ id: "t1", name: "Acme", slug: "acme", require_passkey: false, role })));
+    if (url.pathname === "/api/v1/t/t1/workflows/w1/start-form") return Promise.resolve(new Response(JSON.stringify(START_FORM)));
     sent.push(url);
     return Promise.resolve(answers.shift()?.() ?? new Response(JSON.stringify(BOARD)));
   });
@@ -379,4 +390,53 @@ it("starts the list afresh when a filter changes after older runs were loaded", 
   expect(shownIds()).toHaveLength(PAGE); // none of the earlier filters' runs below them
   expect(screen.queryByText("No older runs in the last 24 hours.")).toBeNull();
   expect(screen.getByRole("button", { name: "Load more" })).toBeTruthy();
+});
+
+describe("starting a run from the Runs page (the run form design §5.1; the EntryPoints board)", () => {
+  it("offers Start a run… beside the heading to the roles that hold run.start", async () => {
+    show();
+    const start = await screen.findByRole("button", { name: "Start a run…" });
+    expect(screen.getByRole("heading", { level: 1, name: "Runs" }).nextElementSibling).toBe(start);
+    cleanup();
+    role = "viewer";
+    show();
+    await screen.findByRole("heading", { level: 1, name: "Runs" });
+    await screen.findByRole("link", { name: "a14b2e9c" }); // the tenant's role is read beside the runs
+    expect(screen.queryByRole("button", { name: "Start a run…" })).toBeNull();
+  });
+
+  it("asks for the workflow first, among those that can start, then opens its form", async () => {
+    show();
+    await userEvent.click(await screen.findByRole("button", { name: "Start a run…" }));
+    const chooser = screen.getByRole("dialog", { name: "Choose a workflow" });
+    expect(within(chooser).getAllByRole("option").map((o) => o.textContent)).toEqual(["AP offline triage"]); // no Any
+    await userEvent.click(within(chooser).getByRole("option", { name: "AP offline triage" }));
+    const form = await screen.findByRole("dialog", { name: "Start a run" });
+    expect(within(form).getByText("AP offline triage")).toBeTruthy();
+  });
+
+  it("asks for the workflow when its filter names one that can't start", async () => {
+    show("/t/t1/runs?workflow=w2");
+    await userEvent.click(await screen.findByRole("button", { name: "Start a run…" }));
+    expect(screen.getByRole("dialog", { name: "Choose a workflow" })).toBeTruthy();
+  });
+
+  it("waits for the workflows to be read before it starts one (the final review)", async () => {
+    let answer!: (r: Response) => void;
+    workflowsHeld = new Promise((r) => (answer = r));
+    show("/t/t1/runs?workflow=w1");
+    const start = await screen.findByRole("button", { name: "Start a run…" });
+    expect(start).toHaveProperty("disabled", true);
+    answer(new Response(JSON.stringify(WORKFLOWS)));
+    await vi.waitFor(() => expect(start).toHaveProperty("disabled", false));
+    await userEvent.click(start);
+    expect(await screen.findByRole("dialog", { name: "Start a run" })).toBeTruthy();
+  });
+
+  it("starts the workflow its filter has chosen already", async () => {
+    show("/t/t1/runs?workflow=w1");
+    await userEvent.click(await screen.findByRole("button", { name: "Start a run…" }));
+    expect(await screen.findByRole("dialog", { name: "Start a run" })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "Choose a workflow" })).toBeNull();
+  });
 });

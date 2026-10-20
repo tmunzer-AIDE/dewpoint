@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // The Runs page's filters (editor 4e-1; the runs design §5.2; the ListStates board): "Label · Value ▾" menus, one
 // choice each, a set one outlined in the accent. The workflow is chosen from a list that can be searched: a native
-// modal dialog around cmdk, as the palette and the step picker are (D23).
+// modal dialog around cmdk, as the palette and the step picker are (D23). Start a run… chooses its workflow there too
+// (4e-2), among those that can start, without Any.
 import * as Dropdown from "@radix-ui/react-dropdown-menu";
 import { useQuery } from "@tanstack/react-query";
 import { Command } from "cmdk";
@@ -86,8 +87,9 @@ function Menu<T extends string>({ label, choices, value, onChange }: { label: st
   );
 }
 
-function Chooser({ workflows, value, onPick, onClose }: {
-  workflows: WorkflowRow[]; value: string | undefined; onPick: (id: string | undefined) => void; onClose: () => void;
+export function Chooser({ workflows, value, any = true, empty = "No workflow matches.", onPick, onClose }: {
+  workflows: WorkflowRow[]; value: string | undefined; any?: boolean; empty?: string;
+  onPick: (id: string | undefined) => void; onClose: () => void;
 }) {  // prettier-ignore
   const dialog = useRef<HTMLDialogElement>(null);
   useEffect(() => {
@@ -119,10 +121,12 @@ function Chooser({ workflows, value, onPick, onClose }: {
           className="w-full rounded-t-dialog border-b border-line bg-transparent px-4 py-3 text-body-lg text-ink placeholder:text-muted focus-visible:-outline-offset-2"
         />
         <Command.List className="max-h-96 overflow-y-auto p-1">
-          <Command.Empty className="px-3 py-2 text-body text-muted">No workflow matches.</Command.Empty>
-          <Command.Item value="Any" onSelect={() => pick(undefined)} className={`${PALETTE_ITEM} justify-start`}>
-            {chosen(value === undefined)}Any
-          </Command.Item>
+          <Command.Empty className="px-3 py-2 text-body text-muted">{empty}</Command.Empty>
+          {any && (
+            <Command.Item value="Any" onSelect={() => pick(undefined)} className={`${PALETTE_ITEM} justify-start`}>
+              {chosen(value === undefined)}Any
+            </Command.Item>
+          )}
           {workflows.map((w) => (
             <Command.Item key={w.id} value={`${w.name} ${w.id}`} onSelect={() => pick(w.id)} className={`${PALETTE_ITEM} justify-start`}>
               {chosen(value === w.id)}

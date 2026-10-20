@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // The editor (screen 1c): the draft, on a canvas, by pointer or keyboard alone (D16), saved as it changes (D17). Task 14
-// adds problems, Task 15 publishing and versions.
+// adds problems, Task 15 publishing and versions. 4e-2 adds Start a run…: the published version, never the draft.
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useBlocker, useMatch, useRouter } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
@@ -20,6 +20,7 @@ import {
 import { begin, record, redo, undo, type History } from "../../lib/history";
 import { CARD, layout } from "../../lib/layout";
 import { guardLeaving } from "../../lib/leaving";
+import { canStart, startable } from "../../lib/runForm";
 import { runId } from "../../lib/runStatus";
 import type { Path } from "../../lib/schemaForm";
 import { ENDED, draftSnapshotQuery, freeze, type StepSummary } from "../../lib/simulations";
@@ -30,10 +31,12 @@ import {
   type Unapplied, type UnappliedKind,
 } from "../../lib/unapplied";  // prettier-ignore
 import {
-  canEdit, canPublish, nodeTypesQuery, notPortable, tenantQuery, versionsQuery, workflowQuery, type Diagnostic,
+  canEdit, canPublish, nodeTypesQuery, notPortable, tenantQuery, versionsQuery, workflowQuery, workflowsQuery, type Diagnostic,
   type GraphDoc, type GraphEdge, type GraphNode, type NodeType, type PortableProblem, type VersionDetail, type VersionRow,
   type WorkflowDetail,
 } from "../../lib/workflows";  // prettier-ignore
+import { useLand } from "../runs/landing";
+import { RunForm } from "../runs/RunForm";
 import { Canvas } from "./Canvas";
 import { NAV_KEYS, navModel, pathTo, type NavKey } from "./canvasNav";
 import { checkLabel, checkState, lastOf, type Check } from "./check";
@@ -462,6 +465,12 @@ function Editor({
   const simulation = useSimulation(tenantId, workflow.id);
   const simulator = canEdit(role) && viewing === null;
   const [simulateAt, setSimulateAt] = useState<{ revision: number; doc: GraphDoc } | null>(null); // the input, asked
+  // Starting the published version (4e-2; the run form design §5.1): where it can start, as the list says (read again
+  // after a publish), for the roles that hold run.start; the form warns when the draft differs.
+  const row = useQuery(workflowsQuery(tenantId)).data?.find((w) => w.id === workflow.id);
+  const starter = canStart(role) && viewing === null && row !== undefined && startable(row);
+  const [starting, setStarting] = useState(false);
+  const landOnRun = useLand(tenantId);
   const [saving, setSaving] = useState(false); // the save Simulate waits for
   // Its result on the canvas (§7.3): tags beside each step, under the banner, until "Hide the result", which hides this
   // simulation's only (the next one shows again).
@@ -1226,6 +1235,7 @@ function Editor({
             ◌ Simulate workflow
           </Button>
         )}
+        {starter && <Button size="md" aria-haspopup="dialog" onClick={() => setStarting(true)}>Start a run…</Button>}
         {publisher && viewing === null && (
           <Button
             ref={publishButton}
@@ -1530,6 +1540,12 @@ function Editor({
           onPick={onPick}
           onConnect={picker.kind === "after" && picker.from ? () => setConnecting(picker.from) : undefined}
           onClose={() => setPicker(null)}
+        />
+      )}
+      {starting && (
+        <RunForm
+          tenantId={tenantId} workflow={{ id: workflow.id, name: workflow.name }} draftDiffers={sync.unpublished === true}
+          onStarted={landOnRun} onClose={() => setStarting(false)}
         />
       )}
       {simulateAt && (

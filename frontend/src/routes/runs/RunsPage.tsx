@@ -6,7 +6,8 @@
 // live in its address (§5.1); an empty list says what was asked, never that no run ever ran when the window hides them.
 // The first page is read again every 5 s while the page is visible; older pages, loaded on, aren't; each run is listed
 // once (`listed`). A refresh that fails keeps the list and says since when; a change is said once, through the shell's
-// live region (§5.6).
+// live region (§5.6). Start a run… (4e-2) asks for the workflow first, among those that can start, unless the Workflow
+// filter has chosen one that can.
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
@@ -16,11 +17,15 @@ import { Table, Td, Th } from "../../components/Table";
 import { When } from "../../components/When";
 import { announce } from "../../lib/announce";
 import { useNarrow } from "../../lib/media";
+import { canStart, startable } from "../../lib/runForm";
 import { PAGE, cursorOf, isEnded, listed, runsQuery, searchOf, type RunFilters, type RunItem } from "../../lib/runs";
 import { duration, reasonWords, runId } from "../../lib/runStatus";
 import { useDocumentTitle } from "../../lib/title";
 import { timeOf } from "../../lib/when";
-import { Filters } from "./Filters";
+import { tenantQuery, workflowsQuery, type WorkflowRow } from "../../lib/workflows";
+import { Chooser, Filters } from "./Filters";
+import { useLand } from "./landing";
+import { RunForm } from "./RunForm";
 import { triggerOf } from "./trigger";
 
 const WINDOW: Record<NonNullable<RunFilters["started"]>, string> = {
@@ -192,11 +197,21 @@ export function RunsPage({ tenantId, filters }: { tenantId: string; filters: Run
     }
   }
   const setFilters = (next: RunFilters) => void navigate({ to: "/t/$tenantId/runs", params: { tenantId }, search: searchOf(next) });
+  const tenant = useQuery(tenantQuery(tenantId));
+  const workflows = useQuery(workflowsQuery(tenantId));
+  const land = useLand(tenantId);
+  const can = (workflows.data ?? []).filter(startable);
+  const [starting, setStarting] = useState<"choose" | WorkflowRow | null>(null);
+  const start = () => setStarting(can.find((w) => w.id === filters.workflow) ?? "choose");
   const started = filters.started ?? "24h";
   return (
     <section className="flex flex-col gap-4 p-6">
       <div className="flex flex-wrap items-baseline justify-between gap-3">
-        <h1 className="text-h1 font-semibold">Runs</h1>
+        <div className="flex flex-wrap items-center gap-3">
+          <h1 className="text-h1 font-semibold">Runs</h1>
+          {/* Which workflows can start is known once they're read: before, a choice would be made on nothing. */}
+          {canStart(tenant.data?.role) && <Button size="md" aria-haspopup="dialog" disabled={workflows.isPending} onClick={start}>Start a run…</Button>}
+        </div>
         {first.isRefetchError ? (
           <p className="flex flex-wrap items-center gap-2 text-small text-muted">
             {`Couldn't be refreshed · as of ${timeOf(first.dataUpdatedAt)}`}
@@ -207,6 +222,17 @@ export function RunsPage({ tenantId, filters }: { tenantId: string; filters: Run
         )}
       </div>
       <Filters tenantId={tenantId} filters={filters} onChange={setFilters} />
+      {starting === "choose" && (
+        <Chooser
+          workflows={can} value={undefined} any={false}
+          empty={workflows.isError ? "The workflows couldn't be read. Close this and try again." : "No workflow can start: it must be published, switched on and able to run."}
+          onPick={(id) => setStarting(can.find((w) => w.id === id) ?? null)}
+          onClose={() => setStarting((s) => (s === "choose" ? null : s))}
+        />
+      )}
+      {starting !== null && starting !== "choose" && (
+        <RunForm tenantId={tenantId} workflow={starting} onStarted={land} onClose={() => setStarting(null)} />
+      )}
       {first.isPending ? (
         <p role="status" className="text-body text-muted">Reading the runs…</p>
       ) : first.isLoadingError ? (

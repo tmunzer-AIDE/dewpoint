@@ -3515,3 +3515,121 @@ M112. **A tick's codec doesn't list `version_changed`** (CI's backend job on #13
       outcomes. Only a start or a re-run through the API confirms a version, and their refusals are raised, never
       recorded; a schedule's tick confirms none. The test sets it aside, as it does a draft simulation's codes. The
       local broad suites hadn't included this file. Cost if wrong: a tick's outcome reading "refused" for that code.
+
+### 4e-2a merged; the 4e-2b plan accepted (2026-10-20)
+
+The owner merged 4e-2a as #130 (squash 11647275), every check green ("green and merged"); its six deferred minors are
+issue #131. `docs/superpowers/plans/2026-10-20-editor-ui-4e2b-run-form-ui.md`, revision 1: the UI of the run form
+design §5, against the boards "4e-2 Run Form Mockups" v10, one plan with milestone pauses. The owner accepted it: its
+rulings 1–30 join this ledger as 273–302. The frontend only: no backend change, no migration, no ABI change.
+Mid-slice rulings start at M113.
+
+273. **Accepted. One plan with milestone pauses** (plan ruling 1).
+274. **Accepted. One module for the form's calls and words; the CSV file sent as its bytes** (plan ruling 2).
+275. **Accepted. One key per submitted form** (plan ruling 3).
+276. **Accepted. The version shown is the version started** (plan ruling 4).
+277. **Accepted. A newer version keeps what still fits** (plan ruling 5).
+278. **Accepted. The version line: the time to the second, the publisher's email** (plan ruling 6).
+279. **Accepted. A refusal in the form's words, its code beside them** (plan ruling 7).
+280. **Accepted. An input's reasons beside the field they name** (plan ruling 8).
+281. **Accepted. The Simulate dialog's field labels and hints are shared** (plan ruling 9).
+282. **Accepted. Focus on the first field; Cancel and Close give it back to the opener** (plan ruling 10).
+283. **Accepted. Landing on the new run: a mark the run's page takes once its run is read** (plan ruling 11).
+284. **Accepted. The ways in: a Workflows row, the Runs page's chooser, the editor** (plan ruling 12).
+285. **Accepted. How a column's choice was proposed comes from the upload's default** (plan ruling 13).
+286. **Accepted. A column is named by its header** (plan ruling 14).
+287. **Accepted. What a column holds, in words** (plan ruling 15).
+288. **Accepted. A file's problems in words, with their codes** (plan ruling 16).
+289. **Accepted. A file checked again: one check at a time, the last change's** (plan ruling 17).
+290. **Accepted. The errors at a glance, then every error row by row** (plan ruling 18).
+291. **Accepted. Every row passing: the first rows, the columns folded, the count on Start** (plan ruling 19).
+292. **Accepted. Saving the columns before the start; a failed save starts nothing** (plan ruling 20).
+293. **Accepted. Why Start waits, beside it** (plan ruling 21).
+294. **Accepted. Reading and checking are announced** (plan ruling 22).
+295. **Accepted. A file checked against a version published since is checked again under it** (plan ruling 23).
+296. **Accepted. Re-run… on a run that ended, never a draft simulation's nor a sub-run's** (plan ruling 24).
+297. **Accepted. A re-run's kept values: never shown, sent back whole while untouched** (plan ruling 25).
+298. **Accepted. A CSV run's same rows only while its input is kept** (plan ruling 26).
+299. **Accepted. A re-run refused `input_not_retained` turns to the absent form** (plan ruling 27).
+300. **Accepted. Below 640 px: the full-screen form, Start first, lists for the columns and the problems** (plan ruling
+     28).
+301. **Accepted. The checks, and the browser specs on the owner's word** (plan ruling 29).
+302. **Accepted. The form's code loads when the Workflows list first opens it** (plan ruling 30).
+
+### 4e-2b, milestone 1 (2026-10-20)
+
+The owner chose inline execution ("yes, inline, commit the plan"); the plan is 6ca74c49 on `docs/editor-ui-4e2b-plan`,
+merged into `feat/editor-4e2b` (from origin/main 11647275) as 9d1fa361. Each task's tests failed as its step says,
+then passed, with the type check and ESLint silent:
+- Task 1, c828cc94: the plan accepted, rulings 273–302.
+- Task 2, 5acf6d38: the form's calls and words. Red: `runForm.test.ts` can't import its module; green: 13 passed.
+- Task 3, b9820b4e: the form for typed input. Red: 1 failed, 18 passed (`RunForm.test.tsx` can't import its module);
+  green: 33 passed.
+- Task 4, ab658c8b: the ways in, the landing. Red: 7 failed, 217 passed (`./landing` unresolved twice); green: 263
+  passed.
+
+Mid-slice rulings: none. Nothing pushed.
+
+### 4e-2b, milestone 2 (2026-10-20)
+
+The owner accepted milestone 1 ("go"). Each task's tests failed as its step says, then passed, with the type check and
+ESLint silent:
+- Task 5, 65bcf5ca: a CSV workflow's file, uploaded, its columns proposed and chosen. Red: 12 failed, 27 passed
+  (`uploadProblem`, `holds` and `staleWords` missing; no "Choose a file"); green: 39 passed.
+- Task 6, 51c5a324: a CSV file checked, its errors, its first rows, its columns saved. Red: 15 failed, 39
+  passed; green: 54 passed.
+
+Mid-slice rulings: none. Nothing pushed.
+
+### 4e-2b, milestone 3 (2026-10-20)
+
+The owner accepted milestone 2 ("good"). Each task's tests failed as its step says, then passed, with the type check
+and ESLint silent:
+- Task 7, 3badb731: re-run a run, its input kept or changed. Red: 11 failed, 39 passed (no Re-run…, no `rerun`);
+  green: 50 passed.
+- Task 8, 08026623: re-run a CSV run, its same rows or another file. Red: 3 failed, 12 passed (the two pins of
+  another file only passing at once, as planned); green: 15 passed.
+- Task 9, 9c7fea59: the form at 320 px. Red: 3 failed, 53 passed; green: 56 passed.
+
+Mid-slice rulings: none. Nothing pushed.
+
+### 4e-2b, milestone 4 and the final checkpoint (2026-10-20)
+
+The owner accepted milestone 3 and left the browser specs to CI ("go, leave the e2e to CI").
+- Task 10, 21111a12: the browser specs. `e2e/seed.ts` takes `runs.spec.ts`'s seeding; `runForm.spec.ts` (four specs)
+  and the "Runs CSV" fixture; the workflows project runs it. The type check and ESLint silent; `playwright test
+  --list` lists the four beside `runs.spec.ts`'s five (56 tests in 7 files). Not run locally: CI's e2e job runs them
+  on the PR.
+- Task 11, every check on 21111a12: the frontend suite, 1411 passed in 104 files (main has 1328 in 99); ESLint silent;
+  the build done, the entry 649.7 kB, the form's chunk 47.7 kB, the editor's script 146.6 kB, a run's page 19.5 kB,
+  the Runs page 11.7 kB (ruling 302); `check:api` passes; CodeQL (javascript-typescript, CLI 2.27.2,
+  javascript-queries 2.4.7, CI's filter, 89 queries, 295 files): no finding.
+
+Mid-slice rulings over the slice: none. The final review follows. Nothing pushed.
+
+### 4e-2b, the final review (2026-10-20)
+
+A fresh reviewer (Fable) on 11647275..b90d0dd6, read only: no critical finding, 4 important, 6 minor; "With fixes".
+Each Review Focus case is pinned by the test the plan names, the `[redacted]` marker can't be sent, and the keys follow
+ruling 275. Re-graded by effect, the four important ones stand, each fixed test-first, the test failing first:
+- the Runs page's Start a run… waits for the workflows to be read: before, a click said no workflow could start;
+- the form reads the start form afresh at each opening (`refetchOnMount: "always"`) and shows a version only once read:
+  a form read before a publish showed the superseded version, then said one was published "while this was open";
+- a refusal's reason at a field shown read only (kept, or under the same rows) is said above the buttons, with where
+  it is: it was dropped;
+- a value its field can't show (a line break in one line of text) is kept as a protected one is ("Kept from the
+  original run"), and asked for again once the input changes ("Enter it again: … this form can't show the original's
+  value."): it was dropped unsaid.
+The suite after the fixes: 1415 passed in 104 files; the type check and ESLint silent; the build done; CodeQL, no
+finding.
+
+Deferred minors (a follow-up issue, on the owner's word): a check ending `upload_expired` for a file replaced since
+drops the new one with the old one's words; a header-only file reads "All 0 rows pass." and starts; no "Check again"
+after a failed check; a failed re-read after `version_changed` doesn't say a newer version exists, and one that finds
+none leaves the newer version's words; an `absent` or `unreadable` re-run starts empty, not from the defaults; stale
+saved columns' words name the new version after a re-read.
+
+What the reviewer set aside, each ruled as it stands: a dropped file of any type (the server words it); focus on a CSV
+form's file input (its first field); the editor's leave guard when landing during a save (the editor's own); the
+list's first load carrying the landing (ruling 302's count); a run failing at once focusing its failed step (4e-1's);
+4e-2a's backend behaviours; changing a lone sensitive field through Edit as JSON (ruling 297).
