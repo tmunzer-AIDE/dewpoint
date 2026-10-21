@@ -39,6 +39,7 @@ function SeverityControl({ spec, value, id, describedBy, invalid, disabled, onCh
 }
 
 const asList = (v: unknown): unknown[] => (Array.isArray(v) ? [...(v as unknown[])] : []);
+const NARROW = "max-sm:min-h-11"; // 44 px targets at 320 (§5.8)
 
 /** The fields' or the links' rows (§5.3): how many of the most, each row's label and value (or address) taking values,
  * its Move up, Move down and Remove named by its number, and Add, disabled at the most with why. */
@@ -85,11 +86,11 @@ function Rows({ spec, value, noun }: { spec: FieldSpec; value: unknown; noun: "f
             </div>
             {drawer.editable && (
               <div className="flex flex-wrap gap-2">
-                <Button size="sm" aria-label={`Move up: ${row}`} disabled={i === 0} onClick={() => move(i, i - 1)}>Move up</Button>
-                <Button size="sm" aria-label={`Move down: ${row}`} disabled={i === items.length - 1} onClick={() => move(i, i + 1)}>
+                <Button size="sm" className={NARROW} aria-label={`Move up: ${row}`} disabled={i === 0} onClick={() => move(i, i - 1)}>Move up</Button>
+                <Button size="sm" className={NARROW} aria-label={`Move down: ${row}`} disabled={i === items.length - 1} onClick={() => move(i, i + 1)}>
                   Move down
                 </Button>
-                <Button size="sm" variant="danger-outline" aria-label={`Remove ${row}`} onClick={() => remove(i)}>Remove</Button>
+                <Button size="sm" variant="danger-outline" className={NARROW} aria-label={`Remove ${row}`} onClick={() => remove(i)}>Remove</Button>
               </div>
             )}
           </div>
@@ -97,7 +98,7 @@ function Rows({ spec, value, noun }: { spec: FieldSpec; value: unknown; noun: "f
       })}
       {drawer.editable && (
         <>
-          <Button ref={add} data-add size="sm" className="self-start" disabled={full} aria-describedby={full ? capId : undefined} onClick={append}>
+          <Button ref={add} data-add size="sm" className={`self-start ${NARROW}`} disabled={full} aria-describedby={full ? capId : undefined} onClick={append}>
             ＋ Add a {noun}
           </Button>
           {full && <p id={capId} className="text-small text-muted">{capWords(noun, max)}</p>}
