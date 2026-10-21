@@ -3864,3 +3864,126 @@ line (the boards'); the catalogue's growth (spec §4.2); a step's middle words (
 331); the hints without a drawer yet (4f-2b); the e2e left to CI (ruling 340); the key before the label loads (ruling
 335); the choices' hint for a viewer whose button is disabled (as before); "a Email"-style articles (4f-1's); hover not
 moving the list's active row.
+
+### 4f-2a merged; the 4f-2b plan accepted (2026-10-21)
+
+The owner merged 4f-2a as #137 (squash a4b677ab), every check green, the browser spec included ("green and merged");
+its eight deferred minors are issue #138. Two CI fixes went in with it: the workflows spec picks a Mist step by its ref
+(Mist's steps sit behind their resources now), and the data tree's quick-search test waits for its request (a race on a
+slow runner, reproduced with a slowed fake server).
+
+`docs/superpowers/plans/2026-10-21-editor-ui-4f2b-changes.md`, revision 1, with milestone pauses: the second half of
+the Mist step design (§5.3–§5.11). The owner accepted it: its rulings 1–21 join this ledger as 341–361. It amends ruling
+98 for an update's and a create's body (on Setup, optional or not). No route, migration, ABI change or step version.
+The design's §5.4 figures for settings reached through maps and lists (1,746 and 568) don't hold: by the drawer's own
+rules they're 1,678 (site settings) and 538 (gateway templates); through objects only, 656 and 97 (R6 §9). Mid-slice
+rulings start at M114.
+
+341. **Accepted. Milestone pauses after the form's foundations, the changes' list and its parts** (plan ruling 1).
+342. **Accepted. An update's or a create's body on Setup, when the config has what it needs** (plan ruling 2).
+343. **Accepted. A union's branches, its own title, its kind; what's offered** (plan ruling 3).
+344. **Accepted. A body never sends an empty object: pruned where writes land** (plan ruling 4).
+345. **Accepted. What the drawer's own fields are told: a group of parts, a name beside, own actions** (plan ruling 5).
+346. **Accepted. Rows, and Set, Clear and Keep as one write** (plan ruling 6).
+347. **Accepted. What the changes remember until the drawer closes, above the tabs** (plan ruling 7).
+348. **Accepted. The changes are the body's own field: List or Formula** (plan ruling 8).
+349. **Accepted. How they're sent: two choices, their words** (plan ruling 9).
+350. **Accepted. A row's controls and words** (plan ruling 10).
+351. **Accepted. How many change; nothing to change, a warning** (plan ruling 11).
+352. **Accepted. Find a setting** (plan ruling 12).
+353. **Accepted. An object's parts given, and another found** (plan ruling 13).
+354. **Accepted. A map's entries by key, a new one's key first** (plan ruling 14).
+355. **Accepted. A list's items by number, an item added written empty** (plan ruling 15).
+356. **Accepted. A secret one field; a union as JSON in its row** (plan ruling 16).
+357. **Accepted. A device's kind** (plan ruling 17).
+358. **Accepted. A create's required settings first** (plan ruling 18).
+359. **Accepted. Read only: the changes summed up** (plan ruling 19).
+360. **Accepted. A `clear` the list can't draw: today's control** (plan ruling 20).
+361. **Accepted. The checks; the browser spec in CI, or locally on the owner's word** (plan ruling 21).
+
+### 4f-2b, milestone 1 (2026-10-21)
+
+Inline, on `feat/editor-4f2b` from origin/main a4b677ab (the owner: "approved, inline"); the frontend's packages
+restored offline. The plan sits in the worktree uncommitted: the owner approved it without a commit word.
+- Task 1 (ef22053e): this ledger's acceptance section.
+- Task 2 (cb6d72b2): the changes on Setup; a union's branches, title and kind; what's offered. Red: 7 failed, 22
+  passed. Green: 29 passed; the type check and ESLint silent.
+- Task 3 (61cbba95): a body never sends an empty object. Red: 2 failed, 41 passed. Green: 43 passed; static silent.
+- Task 4 (4eefc5c7): what the drawer's own fields are told. Red: 3 failed, 50 passed. Green: 53 passed; static silent.
+
+Mid-slice rulings: none. Nothing pushed.
+
+### 4f-2b, milestone 2 (2026-10-21)
+
+The owner approved milestone 1 ("approved").
+- Task 5 (71f8515c): the rows' model. Red: its module missing (no test ran). Green: 11 passed; static silent.
+- Task 6 (80198f91): the Changes widget. Red: 14 failed, 4 passed (no "Changes" group). Green: 18 passed; static silent.
+- Task 7 (929e741e): Find a setting. Red: 3 failed, 14 passed (the index's module missing; no search). Green: 22
+  passed; static silent.
+
+The whole frontend suite: 1565 passed in 113 files. Mid-slice rulings: none. Nothing pushed.
+
+### 4f-2b, milestone 3 (2026-10-21)
+
+The owner approved milestone 2 ("approved").
+- Task 8 (373f2a15): only the parts given; a map's entries by key; a list's items by number. Red: 5 failed, 2 passed
+  (every part drawn; no entry or list controls); "adds a nested setting from Find…" and "keeps a secret one field…"
+  pass at once (Task 7 already adds; a secret was already one field). Green: 7 passed; static silent.
+- Task 9 (09999e79): a create's required settings first; a device's kind. Red: 5 failed, 28 passed. Green: 33 passed;
+  static silent.
+
+The whole frontend suite: 1577 passed in 114 files on its second run. Its first run timed out one test outside this
+slice, the composer's "adds fields up to 25…" (5,274 ms against vitest's 5,000), under the full suite's load: alone it
+takes 1.17 s on this branch and 1.13 s on main a4b677ab, and passed three runs in three. Noted, not changed. Mid-slice
+rulings: none. Nothing pushed.
+
+### 4f-2b, milestone 4 and the final checkpoint (2026-10-21)
+
+The owner approved milestone 3 ("approved").
+- Task 10 (d98bce84): the browser spec, `e2e/changes.spec.ts`, its fixture and the workflows project's match.
+  Type-checked and linted, not run: it needs the Compose stack; CI's e2e job runs it on the PR.
+- Task 11, every check on d98bce84: the frontend suite 1577 passed in 114 files (on an idle machine; main has 1518 in
+  110); ESLint silent; the build done (the entry 651.7 kB, the editor's script 149.2 kB); `check:api` passes; CodeQL
+  (CLI 2.27.2, CI's filter; python-queries 1.8.13, javascript-queries 2.4.8): no finding.
+
+The composer's "adds fields up to 25…" (4f-1's) timed out twice in five full runs here (5,274 ms; 6,608 ms beside
+CodeQL), and took 4,880 ms in the run that passed: alone it takes 1.17 s. It isn't this slice's: main a4b677ab's own
+full suite timed it out too (5,856 ms) on this machine. Left as it is; a follow-up on the owner's word. Mid-slice
+rulings: none. Nothing pushed. Next: the final review.
+
+### 4f-2b, the final review (2026-10-22)
+
+A fresh reviewer (Fable) read the branch against the plan, its Review Focus and the spec: no critical finding, six
+important, sixteen minor. It confirmed the one-write changes, the pruning in the write path, the memory above the tabs,
+the cached index, and the e2e spec's assumptions against the real manifest (93 offered, "Remote syslog", the WLAN's
+`ssid` required, the device's kinds and its AP-only height). Fixed, each test-first (cfd9cfdf):
+- a Set under a body a formula gives overwrote it with `{}`: no Set there, and no action writes into such a body;
+- a `clear` held as a formula was rewritten by every row action and a change of kind: left as it is; a change of kind
+  keeps the names no kind offers;
+- finding a setting through a list or a map from "＋ Another setting of …" did nothing: one path for both searches;
+- a kind chosen here outlived an Undo that brought back a setting it lacks (hidden, still sent): it counts only while
+  it fits the rows;
+- a problem at a part no row draws (a list item's read-only `id`) was lost: it stays on the part that holds it; "Nothing
+  to change" now only when nothing is sent;
+- focus was dropped after Set, Clear, Keep and Remove: it goes to the row's control, its pressed choice, or the "＋ …"
+  that adds another (WCAG 2.4.3).
+The frontend suite after the pass: 1588 passed in 114 files; static silent.
+
+Mid-slice ruling:
+- M114. **The composer's "adds fields up to 25…" (4f-1's) gets 15 s** (409b422c): it timed out in three of six full runs
+  here (5.27 to 6.61 s; main a4b677ab's own suite too, 5.86 s), 1.1 s alone. Cost: a real hang there takes 15 s to say.
+
+Deferred minors (a follow-up issue, on the owner's word): a Set object row's description replaced by the merge or
+replace words (both belong); the merge/replace radio group's name doesn't hold its visible label; the kind's status
+region mounted with its text; the new entry's key refusal not linked to its input, the typed key surviving Escape,
+`$value` not refused as a key; items keyed by index (not `lineageKey`); "Move up: item 2" without the list's name; a
+nested object emptied by Remove vanishing from its parent; an emptied list sent as `[]` without saying so; "· In
+Changes" on every nested hit of a listed setting; a union without a kind drawing an empty list (no such Mist type);
+branches and offered settings rebuilt on every render (memoize on the body); Set on an already-pressed pending row
+making an empty Undo step; read only not saying a device's kind or showing a `clear` the list can't draw; a union body
+held as a literal drawing the list and its formula words together; `in` where `Object.hasOwn` belongs (changes.ts).
+
+What the reviewer set aside, each ruled as it stands: a body switched to Formula starting empty when it holds a
+sensitive part (M25's rule); Find matching substrings and its path words (ruling 352); an update's kind not saved
+(ruling 357); a map entry opening only its first part for a deeper hit (ruling 354); `/` or `~` in a setting's name
+(none in Mist); the composer's timeout (now M114); the listbox's height at 320 px (unspecified).

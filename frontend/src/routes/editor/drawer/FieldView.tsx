@@ -87,12 +87,12 @@ const keepFocus = (e: MouseEvent) => e.preventDefault();
 /** A condition the builder writes (4c-2b): a formula field that gives true or false. */
 const builds = (spec: FieldSpec): boolean => spec.widget === "formula" && spec.base === "boolean" && canFormula(spec);
 
-const startMode = (spec: FieldSpec, value: unknown): Mode =>
+const startMode = (spec: FieldSpec, value: unknown, fixed = false): Mode =>
   builds(spec) ? (conditionOf(value) !== null || typeof value === "boolean" ? "fixed" : "formula")
   : kindOf(value) === "cel" ? "formula"
   : takesPills(spec) && segmentsOf(value) !== null && value !== undefined && value !== null ? "fixed"
   : value !== undefined && value !== null ? "fixed"
-  : startsAsFormula(spec) ? "formula" : "fixed";  // prettier-ignore
+  : startsAsFormula(spec) && !fixed ? "formula" : "fixed";  // prettier-ignore
 
 /** How the message composer draws one of its parts (4f-1, the message composer design §5): its own control (the
  * severity's choices) or its own rows (the fields', the links'), the text on several lines, a check said as it's typed
@@ -109,6 +109,17 @@ export interface Drawn {
   missing?: string; // said in place of "Required"
   warn?: string | null;
   below?: ReactNode;
+  // An update's changes and a create's settings (4f-2b): drawn as a group of `parts` even when it's a union (`group`),
+  // empty in Fixed (`startFixed`: a union is Set as JSON), its fixed side named ("List"), the parts it draws (`shown`:
+  // a problem at another stays on the group), its setting's name beside its label, its own actions, no Clear.
+  group?: boolean;
+  startFixed?: boolean;
+  fixedName?: string;
+  shown?: string[];
+  name?: string;
+  actions?: ReactNode;
+  hideClear?: boolean;
+  switchLabel?: string; // what its Fixed | Formula switch says it sets, when its label doesn't read well there
 }
 
 export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn }) {
@@ -116,7 +127,7 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
   const value = valueAt(drawer.node.config ?? {}, spec.path);
   const kind = kindOf(value);
   const empty = value === undefined || value === null;
-  const [chosen, setChosen] = useState<Mode>(() => startMode(spec, value));
+  const [chosen, setChosen] = useState<Mode>(() => startMode(spec, value, drawn.startFixed));
   const [local, setLocal] = useState<string | null>(null); // why the last write didn't happen
   const [touched, setTouched] = useState(false);
   const [asJson, setAsJson] = useState(false);
@@ -192,8 +203,8 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
   const fixed = fixedOf(value);
   // A literal's or an unreadable envelope's parts aren't where a form writes them: shown as JSON.
   const json = asJson || held?.kind === "json" || kind === "unknown" || (kind === "literal" && isContainer(spec.base));
-  const container = mode === "fixed" && fixedOk && !computed && !hidden && !json && isContainer(spec.base);
-  const problems = problemsAt(drawer.problems, spec.pointer, container ? new Set(partNames(spec, fixed)) : null);
+  const container = mode === "fixed" && fixedOk && !computed && !hidden && !json && (isContainer(spec.base) || drawn.group === true);
+  const problems = problemsAt(drawer.problems, spec.pointer, container ? new Set(drawn.shown ?? partNames(spec, fixed)) : null);
   const required = spec.required && !spec.entry && (spec.path.length > 1 || drawn.marked === true);
   const hint = drawn.hint !== undefined ? drawn.hint : spec.hint;
   const checked = drawn.check?.(value) ?? null; // said where a refusal would be, after it
@@ -234,7 +245,7 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
     <>
       {fixedOk && formulaOk && !computed && !hidden && (
         <ModeSwitch
-          label={spec.label} mode={mode} disabled={disabled} onChange={switchTo} fixedName={pills ? "Text" : builder ? "Builder" : "Fixed"}
+          label={drawn.switchLabel ?? spec.label} mode={mode} disabled={disabled} onChange={switchTo} fixedName={drawn.fixedName ?? (pills ? "Text" : builder ? "Builder" : "Fixed")}
           fixedWhyNot={builder && !buildable && held?.kind !== "condition" ? { id: whyNotId } : null}
         />
       )}
@@ -289,13 +300,14 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
           Discard
         </Button>
       )}
-      {!disabled && !spec.required && !spec.entry && value !== undefined && (
+      {!disabled && !spec.required && !spec.entry && value !== undefined && drawn.hideClear !== true && (
         <Button size="sm" aria-label={`Clear ${spec.label}`} onMouseDown={keepFocus} onClick={clear}>Clear</Button>
       )}
+      {drawn.actions}
     </>
   );
   const frame = (control: (c: Described) => ReactNode, said: string | null = hint, below: ReactNode = drawn.below) => (
-    <FieldFrame label={spec.label} required={required} hint={said} warn={drawn.warn} local={stale ? STALE : (held?.why ?? local ?? missing ?? checked)} problems={problems} actions={actions} below={below}>
+    <FieldFrame label={spec.label} name={drawn.name} required={required} hint={said} warn={drawn.warn} local={stale ? STALE : (held?.why ?? local ?? missing ?? checked)} problems={problems} actions={actions} below={below}>
       {control}
     </FieldFrame>
   );
@@ -413,11 +425,12 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
       <>
         {runs && <p className="text-small text-muted">{runs}</p>}
         {declassifiable}
+        {drawn.below}
       </>,
     );
   } else if (container) {
     body = (
-      <GroupFrame label={spec.label} required={required} hint={hint} local={local ?? missing} problems={problems} actions={actions}>
+      <GroupFrame label={spec.label} name={drawn.name} required={required} hint={hint} warn={drawn.warn} local={local ?? missing} problems={problems} actions={actions} below={drawn.below}>
         {drawn.parts ? drawn.parts(spec, fixed) : <ContainerParts spec={spec} value={fixed} />}
       </GroupFrame>
     );

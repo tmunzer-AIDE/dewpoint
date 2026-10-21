@@ -84,7 +84,7 @@ describe("the message composer (4f-1, the message composer design §5)", () => {
     expect(addButton().getAttribute("aria-describedby")).toBe(cap.id);
     expect(within(message()).getByLabelText("Field 25 label")).toBeTruthy();
     expect(within(message()).queryByText("Edit as JSON")).toBeNull();
-  });
+  }, 15_000); // 1.1 s alone; 25 adds over a growing list took 5–7 s under the whole suite's parallel load (4f-2b, M114)
 
   it("moves a link's row and removes one, each control named by its row", async () => {
     const links = [{ label: "One", url: "https://a.test" }, { label: "Two", url: "https://b.test" }];

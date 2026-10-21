@@ -138,3 +138,140 @@ export const messageStep = (type: string, more: Record<string, unknown> = {}, re
       ...more,
     },
   }, { ref: `${type}@1`, type, title: "Send a message", credentials: [type.split(".")[0]!] });  // prettier-ignore
+
+/** A made-up service's update and create steps (4f-2b), shaped as Mist's are: the body a `$defs` component, settings
+ * titled on their own entries, a read-only one, objects, a map and a list of objects, a union, sensitive parts; an
+ * update's `mode` and `clear` (D24: never Mist's own). */
+const SETTING_DEFS = {
+  thing: {
+    type: "object",
+    properties: {
+      id: { $ref: "#/$defs/id", title: "ID", description: "Unique ID of the object" },
+      name: { type: "string", title: "Name", description: "The thing's name" },
+      enabled: { type: "boolean", title: "Enabled", description: "Whether the thing runs" },
+      rogue: { $ref: "#/$defs/rogue", title: "Rogue", description: "AP threat detection settings for the site" },
+      auto_upgrade: { $ref: "#/$defs/auto_upgrade", title: "Auto upgrade", description: "Automatic upgrade settings" },
+      port_usages: { type: "object", title: "Port usages", description: "Port profiles by name", additionalProperties: { $ref: "#/$defs/port_usage" } },
+      networks: { type: "array", title: "Networks", description: "The networks served", items: { $ref: "#/$defs/network" } },
+      tags: { type: "array", title: "Tags", description: "Free tags", items: { type: "string" } },
+      vlan_id: { anyOf: [{ type: "integer", minimum: 1, maximum: 4094 }, { type: "string" }], title: "VLAN ID", description: "A number or a variable" },
+      api_secret: { type: "string", title: "API secret", description: "The service's secret", "x-sensitive": true },
+      radius: { $ref: "#/$defs/radius", title: "RADIUS", description: "The RADIUS server" },
+    },
+  },
+  id: { type: "string", format: "uuid", readOnly: true },
+  rogue: {
+    type: "object",
+    description: "Rogue AP detection settings for a site",
+    properties: {
+      enabled: { type: "boolean", title: "Enabled", description: "Whether rogue detection is enabled" },
+      min_rogue_rssi: { type: "integer", minimum: -85, title: "Min rogue RSSI", description: "Minimum RSSI for an AP to be considered rogue" },
+      whitelisted_ssids: { type: "array", items: { type: "string" }, title: "Whitelisted SSIDs", description: "SSID names excluded from rogue detection" },
+    },
+  },
+  auto_upgrade: {
+    type: "object",
+    properties: {
+      enabled: { type: "boolean", title: "Enabled", description: "Whether auto upgrade should happen" },
+      version: { type: "string", enum: ["beta", "custom", "stable"], title: "Version", description: "Desired version" },
+      time_of_day: { type: "string", title: "Time of day", description: "HH:MM, 24-hour" },
+      custom: { type: "object", title: "Custom versions", description: "A version per model", properties: { ap41: { type: "string", title: "AP41", description: "The AP41's version" } } },
+      schedules: { type: "array", title: "Schedules", description: "When to upgrade", items: { type: "object", properties: { day: { type: "string", title: "Day", description: "The day" } } } },
+      profiles: { type: "object", title: "Profiles", description: "A profile per radio", additionalProperties: { type: "object", properties: { channel: { type: "string", title: "Channel", description: "Its channel" } } } },
+    },
+  },
+  port_usage: {
+    type: "object",
+    properties: {
+      mode: { type: "string", enum: ["access", "trunk"], title: "Mode", description: "How the port is used" },
+      port_vlan: { type: "integer", title: "Port VLAN", description: "The port's native VLAN" },
+    },
+  },
+  network: {
+    type: "object",
+    properties: {
+      id: { $ref: "#/$defs/id", title: "ID", description: "Set by the service" },
+      name: { type: "string", title: "Name", description: "The network's name" },
+      subnet: { type: "string", title: "Subnet", description: "The network's subnet" },
+    },
+  },
+  radius: {
+    type: "object",
+    properties: {
+      host: { type: "string", title: "Host", description: "The server's host" },
+      secret: { type: "string", title: "Secret", description: "The shared secret", "x-sensitive": true },
+    },
+  },
+};
+const CONNECTION = { type: "string", format: "uuid", title: "Connection", "x-dewpoint-literal": true, "x-dewpoint-connection": "acme" };
+const THING_ID = { title: "Thing ID", type: "string", format: "uuid", "x-dewpoint-options": true };
+const NAMES = ["api_secret", "auto_upgrade", "enabled", "id", "name", "networks", "port_usages", "radius", "rogue", "tags", "vlan_id"];
+
+/** An update: its body, merge or replace, and the settings to clear (`x-widget: "update"`). */
+export const UPDATE = typeWith({
+  type: "object", additionalProperties: false, required: ["connection", "thing_id"], "x-widget": "update",
+  "x-group": { plugin: "Acme", title: "Things" },
+  properties: {
+    connection: CONNECTION,
+    thing_id: THING_ID,
+    body: { title: "Body", $ref: "#/$defs/thing" },
+    mode: { enum: ["merge", "replace"], default: "merge", title: "Mode" },
+    clear: { type: "array", title: "Fields to clear", uniqueItems: true, items: { enum: NAMES } },
+  },
+  $defs: SETTING_DEFS,
+}, { ref: "acme.things.update@1", type: "acme.things.update", title: "Update thing", options: ["thing_id"], credentials: ["acme"], side_effect: "idempotent" });  // prettier-ignore
+
+/** A create: its body, its name required (`x-widget: "create"`). */
+export const CREATE = typeWith({
+  type: "object", additionalProperties: false, required: ["connection", "body"], "x-widget": "create",
+  "x-group": { plugin: "Acme", title: "Things" },
+  properties: { connection: CONNECTION, body: { title: "Body", $ref: "#/$defs/new_thing" } },
+  $defs: { ...SETTING_DEFS, new_thing: { ...SETTING_DEFS.thing, required: ["name"] } },
+}, { ref: "acme.things.create@1", type: "acme.things.create", title: "Create thing", credentials: ["acme"], side_effect: "ambiguous" });  // prettier-ignore
+
+const KIND_DEFS = {
+  device: { description: "A device: a camera or a sensor", anyOf: [{ $ref: "#/$defs/camera", title: "Camera" }, { $ref: "#/$defs/sensor", title: "Sensor" }], title: "Device" },
+  camera: {
+    type: "object",
+    properties: {
+      type: { $ref: "#/$defs/kind_camera", title: "Type" },
+      name: { type: "string", title: "Name", description: "The device's name" },
+      notes: { type: "string", title: "Notes", description: "Any notes" },
+      zoom: { type: "integer", title: "Zoom", description: "The camera's zoom" },
+    },
+  },
+  sensor: {
+    type: "object",
+    properties: {
+      type: { $ref: "#/$defs/kind_sensor", title: "Type" },
+      name: { type: "string", title: "Name", description: "The device's name" },
+      notes: { type: "string", title: "Notes", description: "Any notes" },
+      range: { type: "integer", title: "Range", description: "The sensor's range" },
+    },
+  },
+};
+
+/** A device update whose body is a union of kinds, each allowing one `type`, read only (as Mist's devices). */
+export const DEVICE_UPDATE = typeWith({
+  type: "object", additionalProperties: false, required: ["connection"], "x-widget": "update",
+  properties: {
+    connection: CONNECTION,
+    body: { title: "Body", $ref: "#/$defs/device" },
+    mode: { enum: ["merge", "replace"], default: "merge", title: "Mode" },
+    clear: { type: "array", title: "Fields to clear", uniqueItems: true, items: { enum: ["name", "notes", "range", "type", "zoom"] } },
+  },
+  $defs: { ...KIND_DEFS, kind_camera: { enum: ["camera"], type: "string", readOnly: true }, kind_sensor: { enum: ["sensor"], type: "string", readOnly: true } },
+}, { ref: "acme.devices.update@1", type: "acme.devices.update", title: "Update device", credentials: ["acme"], side_effect: "idempotent" });  // prettier-ignore
+
+/** A device create: the kind's `type` required (as Mist's device profiles). */
+export const DEVICE_CREATE = typeWith({
+  type: "object", additionalProperties: false, required: ["connection", "body"], "x-widget": "create",
+  properties: { connection: CONNECTION, body: { title: "Body", $ref: "#/$defs/device" } },
+  $defs: {
+    ...KIND_DEFS,
+    camera: { ...KIND_DEFS.camera, required: ["type"] },
+    sensor: { ...KIND_DEFS.sensor, required: ["type", "name"] },
+    kind_camera: { enum: ["camera"], type: "string" },
+    kind_sensor: { enum: ["sensor"], type: "string", readOnly: true },
+  },
+}, { ref: "acme.devices.create@1", type: "acme.devices.create", title: "Create device", credentials: ["acme"], side_effect: "ambiguous" });  // prettier-ignore

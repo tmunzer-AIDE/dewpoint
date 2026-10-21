@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from "vitest";
-import { IF, SWITCH } from "../test/nodeTypes";
+import { IF, REMOTE, SWITCH, UPDATE } from "../test/nodeTypes";
 import {
   CEL_WORDS, admission, declassify, fixedOf, formula, formulaOf, freePort, isPlainRef, keyProblem, kindOf, parseJson, referenceText,
-  renameEntry, renameKey, renamePort, rootOf, setAt, setConfig, setOptions, undeclassify, valueAt,
+  pruned, renameEntry, renameKey, renamePort, rootOf, setAt, setConfig, setOptions, undeclassify, valueAt,
 } from "./config";  // prettier-ignore
 import type { GraphDoc } from "./workflows";
 
@@ -418,5 +418,31 @@ describe("declassify entries (4c-2b)", () => {
     expect(undeclassify(doc([a, b]), 0).settings).toEqual({ input_schema: { type: "object" }, declassify: [b] });
     expect(undeclassify(doc([a]), 0).settings).toEqual({ input_schema: { type: "object" } });
     expect(undeclassify(doc([a]), 3)).toEqual(doc([a]));
+  });
+});
+
+describe("an update's body sends no empty object (4f-2b)", () => {
+  const doc = (config: Record<string, unknown>): GraphDoc => ({ graph_format: 1, nodes: [{ id: A, key: "update", type: "acme.things.update@1", config }], edges: [] });
+  const after = (d: GraphDoc) => d.nodes![0]!.config;
+
+  it("removes each object a write empties, up to the body's setting", () => {
+    const start = doc({ body: { auto_upgrade: { custom: { ap41: "1.2" }, enabled: true } } });
+    const once = setConfig(start, A, ["body", "auto_upgrade", "custom", "ap41"], undefined, UPDATE).doc;
+    expect(after(once)).toEqual({ body: { auto_upgrade: { enabled: true } } });
+    const twice = setConfig(once, A, ["body", "auto_upgrade", "enabled"], undefined, UPDATE).doc;
+    expect(after(twice)).toEqual({ body: {} });
+    expect(after(setConfig(start, A, ["body", "auto_upgrade"], {}, UPDATE).doc)).toEqual({ body: {} });
+  });
+
+  it("keeps an object still holding a part, a list's item, and anything outside a body or another type's", () => {
+    const start = doc({ body: { rogue: { enabled: true, min_rogue_rssi: -80 }, networks: [{ name: "a" }] } });
+    expect(after(setConfig(start, A, ["body", "rogue", "enabled"], undefined, UPDATE).doc)).toEqual({ body: { rogue: { min_rogue_rssi: -80 }, networks: [{ name: "a" }] } });
+    expect(after(setConfig(start, A, ["body", "networks", 0, "name"], undefined, UPDATE).doc)).toEqual({ body: { rogue: { enabled: true, min_rogue_rssi: -80 }, networks: [{}] } });
+    expect(after(setConfig(doc({ query: { limit: 5 } }), A, ["query", "limit"], undefined, UPDATE).doc)).toEqual({ query: {} });
+    expect(after(setConfig(doc({ body: { x: { y: 1 } } }), A, ["body", "x", "y"], undefined, REMOTE).doc)).toEqual({ body: { x: {} } });
+  });
+
+  it("stops at a value that isn't an empty object", () => {
+    expect(pruned({ body: { a: { b: { $value: { kind: "cel", expr: "{}" } } } } }, ["body", "a", "b"])).toEqual({ body: { a: { b: { $value: { kind: "cel", expr: "{}" } } } } });
   });
 });

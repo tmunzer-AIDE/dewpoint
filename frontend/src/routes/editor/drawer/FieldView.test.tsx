@@ -3,9 +3,10 @@ import { cleanup, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { formula, literal } from "../../../lib/config";
-import { FILTER, IF, REMOTE, RUN_WORKFLOW, SWITCH, TRANSFORM, typeWith } from "../../../test/nodeTypes";
+import { DEVICE_UPDATE, FILTER, IF, REMOTE, RUN_WORKFLOW, SWITCH, TRANSFORM, typeWith, UPDATE } from "../../../test/nodeTypes";
+import { fieldsOf, propertiesOf } from "../../../lib/schemaForm";
 import { STALE } from "../../../lib/unapplied";
-import { PILLS_NOTE } from "./FieldView";
+import { FieldView, PILLS_NOTE } from "./FieldView";
 import { NODE_ID, fakeApi, problem, showFields } from "./harness";
 
 beforeEach(() => {
@@ -582,4 +583,35 @@ it("lands on Add after a list is cleared", async () => {
   showFields(REMOTE, { config: { tags: ["a"] } });
   await userEvent.click(screen.getByRole("button", { name: "Clear Tags" }));
   await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Add to Tags" })));
+});
+
+// 4f-2b: how an update's changes draw the drawer's own fields.
+const bodyOf = (type: typeof UPDATE) => fieldsOf(type).find((f) => f.name === "body")!;
+
+it("draws a union as a group of the parts it's given, in Fixed when empty, its fixed side named (4f-2b)", () => {
+  const body = bodyOf(DEVICE_UPDATE);
+  showFields(DEVICE_UPDATE, {}, <FieldView spec={body} drawn={{ group: true, startFixed: true, fixedName: "List", parts: () => <p>the rows</p> }} />);
+  expect(screen.getByText("the rows")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "List" }).getAttribute("aria-pressed")).toBe("true");
+});
+
+it("names a setting beside its label, adds its own actions and hides its Clear (4f-2b)", () => {
+  const name = propertiesOf(bodyOf(UPDATE)).find((p) => p.name === "name")!;
+  showFields(UPDATE, { config: { body: { name: "hq" } } }, <FieldView spec={name} drawn={{ name: "name", hideClear: true, actions: <button type="button">Keep Name as it is</button> }} />);
+  const field = document.querySelector<HTMLElement>('[data-pointer="/body/name"]')!;
+  expect(within(field).getByText("name").className).toContain("font-mono");
+  expect(within(field).getByRole("button", { name: "Keep Name as it is" })).toBeTruthy();
+  expect(within(field).queryByRole("button", { name: "Clear Name" })).toBeNull();
+});
+
+it("keeps a problem at a part it doesn't draw on the group, says its warning and what's under it (4f-2b)", () => {
+  const body = bodyOf(UPDATE);
+  const problems = [problem("/body/rogue/enabled", "Not a yes or no."), problem("/body/name", "Too long.")];
+  showFields(UPDATE, { config: { body: { name: "x", rogue: { enabled: 3 } } }, problems },
+    <FieldView spec={body} drawn={{ shown: ["name"], warn: "Replace resets the parts not given.", below: <p>the count</p>, parts: () => <p>the rows</p> }} />);  // prettier-ignore
+  const group = screen.getByRole("group", { name: "Body" });
+  expect(within(group).getByText("Not a yes or no.")).toBeTruthy(); // at a part not drawn: on the group
+  expect(within(group).queryByText("Too long.")).toBeNull(); // at a part drawn: its own
+  expect(within(group).getByText("Replace resets the parts not given.")).toBeTruthy();
+  expect(within(group).getByText("the count")).toBeTruthy();
 });
