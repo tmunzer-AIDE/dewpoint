@@ -3912,3 +3912,13 @@ restored offline. The plan sits in the worktree uncommitted: the owner approved 
 - Task 4 (4eefc5c7): what the drawer's own fields are told. Red: 3 failed, 50 passed. Green: 53 passed; static silent.
 
 Mid-slice rulings: none. Nothing pushed.
+
+### 4f-2b, milestone 2 (2026-10-21)
+
+The owner approved milestone 1 ("approved").
+- Task 5 (71f8515c): the rows' model. Red: its module missing (no test ran). Green: 11 passed; static silent.
+- Task 6 (80198f91): the Changes widget. Red: 14 failed, 4 passed (no "Changes" group). Green: 18 passed; static silent.
+- Task 7 (929e741e): Find a setting. Red: 3 failed, 14 passed (the index's module missing; no search). Green: 22
+  passed; static silent.
+
+The whole frontend suite: 1565 passed in 113 files. Mid-slice rulings: none. Nothing pushed.
