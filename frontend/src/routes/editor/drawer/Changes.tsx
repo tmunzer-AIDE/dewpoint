@@ -8,31 +8,19 @@
 import { useRef, type ReactNode } from "react";
 import { Button } from "../../../components/Button";
 import {
-  WORDS, bodyObject, changedCount, clearIn, clearNames, keepIn, rowsOf, setIn, summaryOf, type Memory, type Row,
+  WORDS, bodyObject, changedCount, clearIn, clearNames, keepIn, rowsOf, setIn, showing, summaryOf, type Memory, type Row,
 } from "../../../lib/changes";  // prettier-ignore
 import { fixedOf, valueAt } from "../../../lib/config";
 import { isObject, offeredOf, pointerOf, propertiesOf, type Changes as Parts, type FieldSpec } from "../../../lib/schemaForm";
 import { settingsOf, type Setting } from "../../../lib/settingsIndex";
 import { problemsAt, useDrawer } from "./context";
 import { FindSetting } from "./FindSetting";
+import { PartsContext, focusLater, opening, partsOf } from "./GivenParts";
 import { FieldView } from "./FieldView";
 import type { ControlProps } from "./scalars";
 
 const NARROW = "max-sm:min-h-[44px]"; // 44 px targets at 320 (§5.11), in pixels: a rem is 14 px here
 
-/** Focus, once drawn, the control at `pointer`, else its nearest drawn holder's first: a setting just added. */
-function focusAt(pointer: string) {
-  requestAnimationFrame(() => {
-    for (let at = pointer; at !== ""; at = at.slice(0, at.lastIndexOf("/"))) {
-      const holder = [...document.querySelectorAll<HTMLElement>("[data-pointer]")].find((e) => e.dataset.pointer === at);
-      if (!holder) continue;
-      const label = holder.querySelector<HTMLLabelElement>("label[for]");
-      const control = (label && document.getElementById(label.htmlFor)) ?? holder.querySelector<HTMLElement>("input, select, textarea, button");
-      control?.focus();
-      return;
-    }
-  });
-}
 
 /** How they're sent: merge or replace, a radio pair, merge when unset (`mode`'s default); stacked at 320 px. */
 function ModeControl({ value, id, describedBy, invalid, disabled, onChange }: ControlProps) {
@@ -91,7 +79,7 @@ function SaidRow({ row, actions, said }: { row: Row; actions: ReactNode; said: s
   );
 }
 
-export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Memory; onMemory: (next: Memory) => void }) {
+export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Memory; onMemory: (update: (memory: Memory) => Memory) => void }) {
   const drawer = useDrawer();
   const config = drawer.node.config ?? {};
   const update = parts.widget === "update";
@@ -113,7 +101,8 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
     if (drop) drawer.discard(row.spec.pointer);
     return drawer.restructure(row.spec.pointer, { path: [], make: (cfg) => make(isObject(cfg) ? cfg : {}) });
   };
-  const remember = (next: Partial<Memory>) => onMemory({ ...memory, ...next });
+  // Merged into the memory as it is then: two in one handler both land.
+  const remember = (next: Partial<Memory>) => onMemory((now) => ({ ...now, ...next }));
   const set = (row: Row) => {
     if (row.state === "set") return;
     const value = row.state === "both" ? (body ?? {})[row.name] : memory.cleared[row.name];
@@ -135,11 +124,32 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
     }
   };
 
-  // Added from Find: a setting not listed yet is Set, nothing given until a value is (§5.4); focus goes to it.
+  // Added from Find (§5.4): a setting not listed yet is Set, nothing given until a value is; a nested one opens each
+  // object on its way, a map's new entry asks its key first, a list gets a new item (written: its place is the
+  // person's); focus goes to it.
   const add = (s: Setting) => {
     const top = s.steps[0]!.name;
-    if (!rows.some((r) => r.name === top)) remember({ pending: [...memory.pending, top] });
-    focusAt(pointerOf([...parts.body.path, ...s.steps.map((step) => step.name)]));
+    const next: Partial<Memory> = opening(memory, parts.body, s);
+    if (!rows.some((r) => r.name === top)) next.pending = [...memory.pending, top];
+    const at = s.steps.findIndex((step) => step.kind === "item");
+    let names: (string | number)[] = s.steps.map((step) => step.name);
+    if (at >= 0) {
+      const list = [...parts.body.path, ...names.slice(0, at)];
+      const held = valueAt(config, list);
+      const index = Array.isArray(held) ? held.length : 0;
+      if (drawer.restructure(pointerOf(list), { path: list, make: (l) => [...(Array.isArray(l) ? (l as unknown[]) : []), {}] }) !== null) return;
+      names = [...names.slice(0, at), index, ...names.slice(at + 1)];
+      const part = s.steps[at + 1]?.name;
+      if (part !== undefined) next.shown = showing(next.shown ?? memory.shown, pointerOf([...list, index]), [part]);
+    }
+    if (s.spec.base === "group" && at < 0 && next.adding == null) next.open = pointerOf([...parts.body.path, ...names]);
+    remember(next);
+    if (next.adding == null) focusLater(pointerOf([...parts.body.path, ...names]));
+  };
+  // A setting emptied by a Remove inside it keeps its row, nothing given yet.
+  const top = (pointer: string) => {
+    const name = pointer.split("/")[parts.body.path.length + 1];
+    if (name !== undefined && !memory.pending.includes(name)) remember({ pending: [...memory.pending, name] });
   };
 
   const rowView = (row: Row) => {
@@ -147,11 +157,13 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
     if (row.state === "clear") return <SaidRow key={row.name} row={row} actions={actions} said={WORDS.cleared} />;
     if (row.state === "both") return <SaidRow key={row.name} row={row} actions={actions} said={WORDS.both} />;
     const json = row.spec.widget === "json" && !row.spec.holdsSensitive;
+    const drawnParts = partsOf(row.spec);
+    const said = json ? WORDS.json : drawnParts && update && row.spec.base !== "list" ? (replace ? WORDS.partsReplace : WORDS.partsMerge) : undefined;
     return (
       <FieldView
         key={row.name} spec={row.spec}
         drawn={{
-          name: row.name, hideClear: true, actions, startFixed: json, hint: json ? WORDS.json : undefined,
+          name: row.name, hideClear: true, actions, startFixed: json, hint: said, parts: drawnParts,
           below: row.state === "pending" && drawer.editable ? <p className="text-small text-muted">{WORDS.pending}</p> : undefined,
         }}
       />
@@ -215,6 +227,7 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
   );
 
   return (
+    <PartsContext.Provider value={{ memory, remember, top, where: label }}>
     <FieldView
       spec={{ ...parts.body, label } satisfies FieldSpec}
       drawn={{
@@ -222,5 +235,6 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
         shown: rows.map((r) => r.name), warn: nothing ? WORDS.nothing : null, parts: list, below: computed || undefined,
       }}
     />
+    </PartsContext.Provider>
   );  // prettier-ignore
 }

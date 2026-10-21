@@ -22,8 +22,16 @@ export interface Memory {
   shown: Record<string, string[]>; // an object's parts added, nothing given yet, by the object's pointer
   entries: Record<string, string[]>; // a map's entries opened, nothing given yet, by the map's pointer
   kind: string | null; // an update's kind, chosen here
+  open: string | null; // the object whose own settings' list is open ("＋ Another setting of …")
+  adding: { pointer: string; parts: string[] } | null; // a map's new entry: its key first, then these parts
 }
-export const NO_MEMORY: Memory = { cleared: {}, pending: [], shown: {}, entries: {}, kind: null };
+export const NO_MEMORY: Memory = { cleared: {}, pending: [], shown: {}, entries: {}, kind: null, open: null, adding: null };
+
+/** `names` added to what `pointer`'s object shows, each once. */
+export const showing = (shown: Memory["shown"], pointer: string, names: string[]): Memory["shown"] => ({
+  ...shown,
+  [pointer]: [...new Set([...(shown[pointer] ?? []), ...names])],
+});
 
 type Config = Record<string, unknown>;
 
