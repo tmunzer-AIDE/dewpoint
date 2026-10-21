@@ -110,6 +110,32 @@ describe("the message composer (4f-1, the message composer design §5)", () => {
     expect(within(message()).queryByText("A link's address starts with http:// or https://.")).toBeNull();
   });
 
+  it("asks for the text in the composer's words once it's left empty", async () => {
+    showDrawer(SLACK, { config: { text: "x" } });
+    await userEvent.clear(within(message()).getByLabelText("Text"));
+    const said = within(message()).getByText("Give the text: a message needs it.");
+    expect(within(message()).getByLabelText("Text").getAttribute("aria-describedby")).toContain(said.id);
+  });
+
+  it("shows a version or a viewer the message as written, the rest summed up, and its preview", () => {
+    const config = {
+      text: template({ text: "Access point " }, { ref: "steps.check.output.name" }),
+      fields: [{ label: "Site", value: "HQ" }, { label: "Model", value: "AP45" }], links: [{ label: "Open", url: "https://a.test" }],
+      severity: "warning",
+    };  // prettier-ignore
+    showDrawer(SLACK, { editable: false, config });
+    expect(within(message()).getByText("Severity: warning · 2 fields · 1 link")).toBeTruthy();
+    expect(within(message()).getByRole("button", { name: /^check › name/ })).toBeTruthy();
+    expect(within(message()).queryByRole("radiogroup")).toBeNull();
+    expect(within(message()).queryByText("2 of 25")).toBeNull();
+    expect(screen.getByRole("region", { name: "Preview in Slack" })).toBeTruthy();
+  });
+
+  it("sums up a part a formula computes, and no fields or links", () => {
+    showDrawer(SLACK, { editable: false, config: { text: "x", severity: formula("'critical'") } });
+    expect(within(message()).getByText("Severity: computed when the step runs · no fields · no links")).toBeTruthy();
+  });
+
   it("keeps a list a formula computes as a formula, and one it can't draw as today's control", () => {
     showDrawer(SLACK, { config: { text: "x", fields: formula("steps.check.output.fields"), links: { $value: { kind: "literal", value: [] } } } });
     expect(within(message()).getByRole("textbox", { name: "Fields" })).toBeTruthy();

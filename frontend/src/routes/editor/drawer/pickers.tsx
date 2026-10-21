@@ -26,6 +26,10 @@ export const connectionsQuery = (tenantId: string) =>
     queryFn: () => ok(client.GET("/api/v1/t/{tenant_id}/connections", { params: { path: { tenant_id: tenantId } } })),
   });
 
+/** The connection types the plugins declare, under Connections' own key: a type is said by its label (4f-1). */
+export const connectionTypesQuery = () =>
+  queryOptions({ queryKey: ["connection-types"], queryFn: () => ok(client.GET("/api/v1/connection-types")) });
+
 /** What a picker says in place of its list (loading, failed, nothing to choose): an `<output>` with the field's control
  * id, so the field's label names it (#73), as the drawer shows a value it doesn't edit. A list on its way is marked, so
  * a Go to waits for it. */
@@ -55,6 +59,9 @@ export function ConnectionControl({ spec, value, id, describedBy, invalid, disab
   const list = useQuery(connectionsQuery(tenantId));
   const said = { id, describedBy };
   const current = typeof value === "string" ? value : "";
+  // Read only when there's none to choose: the words then name the type.
+  const none = list.isSuccess && current === "" && kind !== "" && kind !== "mist" && !list.data.some((c) => c.type === kind);
+  const types = useQuery({ ...connectionTypesQuery(), enabled: none });
   // Without its kind, no connection is the field's: none is listed, so none can be chosen. A value it has stays shown,
   // and can be cleared (the review).
   if (kind === "" && current === "") return <Said {...said}>This field doesn&apos;t say which kind of connection it takes.</Said>;
@@ -63,6 +70,9 @@ export function ConnectionControl({ spec, value, id, describedBy, invalid, disab
   const mine = list.data.filter((c) => c.type === kind);
   const known = current !== "" && mine.some((c) => sameId(c.id, current));
   if (mine.length === 0 && current === "") {
+    // Named by its label ("Slack", "Microsoft Teams"), never its key (4f-1, the message composer design §5.6).
+    const label = types.data?.find((t) => t.key === kind)?.label;
+    if (kind !== "mist" && types.isPending) return <Said {...said} loading className="block text-small text-muted">Loading connections…</Said>;
     return kind === "mist" ? (
       <Said {...said}>
         No Mist connection yet.{" "}
@@ -72,7 +82,7 @@ export function ConnectionControl({ spec, value, id, describedBy, invalid, disab
         .
       </Said>
     ) : (
-      <Said {...said}>No {kind} connection yet: an admin adds one.</Said>
+      <Said {...said}>{label ? `No ${label} connection yet: an admin adds one.` : "No connection of its type yet: an admin adds one."}</Said>
     );
   }
   return (

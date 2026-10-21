@@ -104,6 +104,7 @@ export interface Drawn {
   hint?: string | null;
   quiet?: boolean;
   marked?: boolean;
+  missing?: string; // said in place of "Required"
   warn?: string | null;
   below?: ReactNode;
 }
@@ -195,7 +196,7 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
   const hint = drawn.hint !== undefined ? drawn.hint : spec.hint;
   const checked = drawn.check?.(value) ?? null; // said where a refusal would be, after it
   // A list's item or a map's entry, emptied, keeps its place, blank: never missing on its own (the final review).
-  const missing = spec.required && !spec.entry && touched && (empty || value === "") ? "Required" : null;
+  const missing = spec.required && !spec.entry && touched && (empty || value === "") ? (drawn.missing ?? "Required") : null;
   const switchTo = (next: Mode) =>
     builder
       ? reshape((current) => current, () => setChosen(next)) // the same formula, shown the other way

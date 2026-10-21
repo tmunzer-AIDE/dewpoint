@@ -6,7 +6,9 @@
 // Then its preview, which follows every edit (§5.5).
 import { useId, useMemo, useRef, type ReactNode } from "react";
 import { Button } from "../../../components/Button";
-import { capWords, cutsText, cutWords, draftOf, linkProblem, slackCount, targetOf, titleHint } from "../../../lib/composer";
+import {
+  capWords, cutsText, cutWords, draftOf, linkProblem, slackCount, summaryOf, targetOf, TEXT_MISSING, titleHint,
+} from "../../../lib/composer";  // prettier-ignore
 import { itemOf, propertiesOf, type FieldSpec } from "../../../lib/schemaForm";
 import { useDrawer } from "./context";
 import { FieldView, type Drawn } from "./FieldView";
@@ -125,7 +127,7 @@ export function MessageComposer({ parts }: { parts: FieldSpec[] }) {
       case "title":
         return { hint: titleHint(target), quiet: true, marked: true };
       case "text":
-        return { lines: true, marked: true, ...textDrawn(target, draft) };
+        return { lines: true, marked: true, missing: TEXT_MISSING, ...textDrawn(target, draft) };
       case "fields":
         return { parts: (spec, value): ReactNode => <Rows spec={spec} value={value} noun="field" />, marked: true };
       case "links":
@@ -138,9 +140,13 @@ export function MessageComposer({ parts }: { parts: FieldSpec[] }) {
     <>
       <fieldset className="flex min-w-0 flex-col gap-4">
         <legend className="mb-1 text-body font-semibold">Message</legend>
-        {parts.map((part) => (
-          <FieldView key={part.pointer} spec={part} drawn={drawnFor(part.name)} />
-        ))}
+        {/* Read only, the message as written, the rest summed up (§5.6): its preview shows them. */}
+        {parts
+          .filter((part) => drawer.editable || part.name === "title" || part.name === "text")
+          .map((part) => (
+            <FieldView key={part.pointer} spec={part} drawn={drawnFor(part.name)} />
+          ))}
+        {!drawer.editable && <p className="text-small">{summaryOf(config ?? {})}</p>}
       </fieldset>
       {target && <MessagePreview target={target} draft={draft} />}
     </>

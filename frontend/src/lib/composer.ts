@@ -186,3 +186,39 @@ export function cutsText(target: Target, draft: Draft): boolean {
   const render = target === "slack" ? slack : target === "teams" ? teams : target === "google_chat" ? googleChat : null;
   return render !== null && render(draft.bare).truncated.includes("text");
 }
+
+/** The drawer's "Required" under the text, in the composer's words (§5.6). */
+export const TEXT_MISSING = "Give the text: a message needs it.";
+
+/** What a read-only composer says of the parts it doesn't draw: "Severity: warning · 2 fields · 1 link" (§5.6). */
+export function summaryOf(config: Record<string, unknown>): string {
+  const fixed = fixedOf(config.severity);
+  const severity = isComputed(config.severity) ? "computed when the step runs" : typeof fixed === "string" ? fixed : "info";
+  const count = (value: unknown, one: string, many: string) => {
+    if (isComputed(value)) return `${many} computed when the step runs`;
+    const items = fixedOf(value);
+    const n = Array.isArray(items) ? items.length : 0;
+    return n === 0 ? `no ${many}` : n === 1 ? `1 ${one}` : `${n} ${many}`;
+  };
+  return `Severity: ${severity} · ${count(config.fields, "field", "fields")} · ${count(config.links, "link", "links")}`;
+}
+
+const listed = (words: string[]): string => (words.length < 2 ? (words[0] ?? "") : `${words.slice(0, -1).join(", ")} and ${words.at(-1)!}`);
+
+/** A simulated message step's cut, from its output's `truncated`, in words (§5.6): the output names the values cut,
+ * never their size or the level used, so a limit is said only where it's fixed. Null for a step that isn't a message's,
+ * or when nothing was cut. */
+export function simulatedCut(ref: string, output: unknown): string | null {
+  const target = STEPS.get(ref.split("@")[0] ?? "");
+  const truncated = isObject(output) && Array.isArray(output.truncated) ? output.truncated.filter((n): n is string => typeof n === "string") : [];
+  if (!target || truncated.length === 0) return null;
+  if (target === "teams" || target === "google_chat") {
+    return `${NAMES[target]} would shorten ${listed(truncated.map(cutName))} to fit its ${counted(target === "teams" ? TEAMS_BUDGET : CHAT_BUDGET)} bytes.`;
+  }
+  if (target === "slack") {
+    const said = truncated.map((name) => (/^fields\[\d+\]\.value$/.test(name) ? cutName(name) : `${cutName(name)} at ${counted(slackLimit(name, { text: "" }))} characters`));
+    return `Slack would cut ${listed(said)}.`;
+  }
+  const name = NAMES[target];
+  return `${name[0]!.toUpperCase()}${name.slice(1)} would cut ${listed(truncated.map(cutName))}.`;
+}
