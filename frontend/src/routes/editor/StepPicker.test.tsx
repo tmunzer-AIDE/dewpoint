@@ -105,6 +105,17 @@ it("leaves out a group mid-edge when none of its steps continues the flow", () =
   expect(screen.queryByRole("option", { name: /^Org alarms/ })).toBeNull();
 });
 
+it("lists a grouped step itself when its ref is typed", async () => {
+  fakeApi({});
+  const onPick = vi.fn();
+  show(AFTER, [IF, ...GROUPED], { onPick });
+  await userEvent.type(screen.getByRole("combobox"), "acme.org_wlans.update");
+  const step = within(screen.getByRole("group", { name: "Acme step" })).getByRole("option");
+  expect(step.textContent).toContain("acme.org_wlans.update@1");
+  await userEvent.click(step);
+  expect(onPick).toHaveBeenCalledWith(GROUPED[2]);
+});
+
 it("opens a group's steps by title, and goes back with Back or Backspace", async () => {
   fakeApi({});
   const onPick = vi.fn();
