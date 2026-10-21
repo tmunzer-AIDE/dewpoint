@@ -3703,3 +3703,17 @@ The owner approved milestone 1 ("approved").
   lib's suites after it: 951 passed in 72 files.
 
 Mid-slice rulings: none. Nothing pushed.
+
+### 4f-1, milestone 3 (2026-10-21)
+
+The owner approved milestone 2 ("approved").
+- Task 7 (9cdc5753): the composer on a message step's Setup (`settingsOf`, `MessageComposer`, `FieldView`'s `drawn`).
+  Red: 9 failed, 62 passed (no "Message" group, Setup's order, Options' line; the generic-form fallback passes before
+  and after, as do `FieldView`'s and `structured`'s own tests). Green: 71 passed; static silent.
+- Task 8 (ae84e16d): the previews and what a target would cut (`draftOf`, `cutWords`, `MessagePreview`, the frame's
+  warning). Red: 18 failed, 11 passed (as the plan says). Green: 29 passed; static silent.
+- Task 9 (2e379f0c): the connection's type by its label, the text's words, read only, Simulate's words. Red: 9 failed,
+  26 passed. Green: 35 passed; static silent.
+- The whole frontend suite after it: 1496 passed in 108 files (main: 1415 in 104).
+
+Mid-slice rulings: none. Nothing pushed.
