@@ -8,16 +8,16 @@
 import { useId, useRef, useState, type ReactNode } from "react";
 import { Button } from "../../../components/Button";
 import {
-  WORDS, bodyObject, changedCount, clearIn, clearNames, keepIn, kindIn, kindIndex, rowsOf, setIn, showing, summaryOf, type Memory, type Row,
+  WORDS, bodyObject, changedCount, clearIn, clearNames, keepIn, kindIn, kindIndex, rowsOf, setIn, summaryOf, type Memory, type Row,
 } from "../../../lib/changes";  // prettier-ignore
 import { fixedOf, valueAt } from "../../../lib/config";
 import {
-  branchesOf, isObject, kindOf, offeredOf, pointerOf, propertiesOf, unionTitle, type Changes as Parts, type FieldSpec,
+  branchesOf, isObject, kindOf, offeredOf, propertiesOf, unionTitle, type Changes as Parts, type FieldSpec,
 } from "../../../lib/schemaForm";  // prettier-ignore
 import { settingsOf, type Setting } from "../../../lib/settingsIndex";
 import { problemsAt, useDrawer } from "./context";
 import { FindSetting } from "./FindSetting";
-import { PartsContext, focusLater, opening, partsOf } from "./GivenParts";
+import { PartsContext, drawnNames, focusLater, found, partsOf } from "./GivenParts";
 import { FieldView } from "./FieldView";
 import type { ControlProps } from "./scalars";
 
@@ -43,8 +43,8 @@ function ModeControl({ value, id, describedBy, invalid, disabled, onChange }: Co
 }
 
 /** A row's Set | Clear and Keep (an update's), or Remove (a create's, unless the setting is required). */
-function RowActions({ row, update, onSet, onClear, onKeep }: {
-  row: Row; update: boolean; onSet: () => void; onClear: () => void; onKeep: () => void;
+function RowActions({ row, update, canSet, canClear, onSet, onClear, onKeep }: {
+  row: Row; update: boolean; canSet: boolean; canClear: boolean; onSet: () => void; onClear: () => void; onKeep: () => void;
 }) {  // prettier-ignore
   const drawer = useDrawer();
   if (!drawer.editable) return null;
@@ -57,8 +57,9 @@ function RowActions({ row, update, onSet, onClear, onKeep }: {
   return (
     <span className="flex flex-wrap items-center gap-2">
       <span role="group" aria-label={`What happens to ${row.spec.label}`} className="inline-flex overflow-hidden rounded-md border border-line-strong">
-        <button type="button" aria-pressed={row.state === "set" || row.state === "pending"} className={choice} onClick={onSet}>Set</button>
-        <button type="button" aria-pressed={row.state === "clear"} className={`${choice} border-l border-line-strong`} onClick={onClear}>Clear</button>
+        {/* Under a body a formula gives, nothing is set; a `clear` it can't read takes nothing more (the final review). */}
+        {canSet && <button type="button" aria-pressed={row.state === "set" || row.state === "pending"} className={choice} onClick={onSet}>Set</button>}
+        {canClear && <button type="button" aria-pressed={row.state === "clear"} className={`${choice} ${canSet ? "border-l border-line-strong" : ""}`} onClick={onClear}>Clear</button>}
       </span>
       <Button size="sm" aria-label={`Keep ${row.spec.label} as it is`} className={NARROW} onClick={onKeep}>Keep</Button>
     </span>
@@ -105,7 +106,8 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
   const clearDrawn = parts.clear !== null && names !== null && names.every((n) => offered.some((s) => s.name === n));
   const rows = rowsOf(offered, body ?? {}, clearDrawn ? names : [], memory.pending, required);
   const replace = fixedOf(valueAt(config, ["mode"])) === "replace";
-  const nothing = update && body !== null && rows.every((r) => r.state === "pending");
+  // Nothing sent: the body empty and `clear` too, a setting the list doesn't draw counted (the final review).
+  const nothing = update && body !== null && Object.keys(body).length === 0 && names !== null && names.length === 0;
   const settings = scope ? settingsOf(scope, kind?.name ?? null) : [];
   const find = useRef<HTMLInputElement>(null);
 
@@ -120,21 +122,23 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
   const set = (row: Row) => {
     if (row.state === "set") return;
     const value = row.state === "both" ? (body ?? {})[row.name] : memory.cleared[row.name];
-    if (change(row, (cfg) => setIn(cfg, row.name, value), false) === null && value === undefined) {
-      remember({ pending: [...memory.pending.filter((n) => n !== row.name), row.name] });
-    }
+    if (change(row, (cfg) => setIn(cfg, row.name, value), false) !== null) return;
+    if (value === undefined) remember({ pending: [...memory.pending.filter((n) => n !== row.name), row.name] });
+    focusLater(row.spec.pointer);
   };
   const clear = (row: Row) => {
     if (row.state === "clear") return;
     const value = (body ?? {})[row.name];
     if (change(row, (cfg) => clearIn(cfg, row.name), true) === null) {
       remember({ cleared: value === undefined ? memory.cleared : { ...memory.cleared, [row.name]: value }, pending: memory.pending.filter((n) => n !== row.name) });
+      focusLater(row.spec.pointer, "pressed");
     }
   };
   const keep = (row: Row) => {
     if (change(row, (cfg) => keepIn(cfg, row.name), true) === null) {
       const cleared = Object.fromEntries(Object.entries(memory.cleared).filter(([n]) => n !== row.name));
       remember({ cleared, pending: memory.pending.filter((n) => n !== row.name) });
+      focusLater(parts.body.pointer, "add");
     }
   };
 
@@ -143,22 +147,10 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
   // person's); focus goes to it.
   const add = (s: Setting) => {
     const top = s.steps[0]!.name;
-    const next: Partial<Memory> = opening(memory, parts.body, s);
-    if (!rows.some((r) => r.name === top)) next.pending = [...memory.pending, top];
-    const at = s.steps.findIndex((step) => step.kind === "item");
-    let names: (string | number)[] = s.steps.map((step) => step.name);
-    if (at >= 0) {
-      const list = [...parts.body.path, ...names.slice(0, at)];
-      const held = valueAt(config, list);
-      const index = Array.isArray(held) ? held.length : 0;
-      if (drawer.restructure(pointerOf(list), { path: list, make: (l) => [...(Array.isArray(l) ? (l as unknown[]) : []), {}] }) !== null) return;
-      names = [...names.slice(0, at), index, ...names.slice(at + 1)];
-      const part = s.steps[at + 1]?.name;
-      if (part !== undefined) next.shown = showing(next.shown ?? memory.shown, pointerOf([...list, index]), [part]);
-    }
-    if (s.spec.base === "group" && at < 0 && next.adding == null) next.open = pointerOf([...parts.body.path, ...names]);
-    remember(next);
-    if (next.adding == null) focusLater(pointerOf([...parts.body.path, ...names]));
+    const done = found(drawer, config, memory, parts.body, s);
+    if (done === null) return;
+    remember(rows.some((r) => r.name === top) ? done.next : { ...done.next, pending: [...memory.pending, top] });
+    if (done.focus !== null) focusLater(done.focus);
   };
   // Another kind: the changes it has too are kept, the others dropped, said; its value written where it's held.
   const toKind = (to: number) => {
@@ -167,7 +159,7 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
     const names = kindNames[to]!;
     const out: { done?: ReturnType<typeof kindIn> } = {};
     const write = !update || (body ?? {})[kind.name] !== undefined;
-    const why = drawer.restructure(parts.body.pointer, { path: [], make: (cfg) => (out.done = kindIn(isObject(cfg) ? cfg : {}, kind, to, names, write)).config });
+    const why = drawer.restructure(parts.body.pointer, { path: [], make: (cfg) => (out.done = kindIn(isObject(cfg) ? cfg : {}, kind, to, names, write, kindNames.flat())).config });
     if (why !== null || out.done === undefined) return;
     const { kept, dropped } = out.done;
     const titled = (n: string) => branches.flatMap((b) => propertiesOf(b)).find((p) => p.name === n)?.label ?? n;
@@ -197,7 +189,12 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
   };
 
   const rowView = (row: Row) => {
-    const actions = <RowActions row={row} update={update} onSet={() => set(row)} onClear={() => clear(row)} onKeep={() => keep(row)} />;
+    const actions = (
+      <RowActions
+        row={row} update={update} canSet={body !== null} canClear={names !== null}
+        onSet={() => set(row)} onClear={() => clear(row)} onKeep={() => keep(row)}
+      />
+    );  // prettier-ignore
     if (row.state === "clear") return <SaidRow key={row.name} row={row} actions={actions} said={WORDS.cleared} />;
     if (row.state === "both") return <SaidRow key={row.name} row={row} actions={actions} said={WORDS.both} />;
     const json = row.spec.widget === "json" && !row.spec.holdsSensitive;
@@ -209,6 +206,7 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
         key={row.name} spec={row.spec}
         drawn={{
           name: row.name, hideClear: true, actions, startFixed: json, hint: said, parts: drawnParts,
+          shown: drawnNames(row.spec, (body ?? {})[row.name], memory),
           below: pendingSaid ? <p className="text-small text-muted">{WORDS.pending}</p> : undefined,
         }}
       />
@@ -255,7 +253,7 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
           ))}
         </div>
         {clearControl}
-        <button type="button" className={`self-start text-small font-semibold text-accent-ink ${NARROW}`} onClick={() => find.current?.focus()}>
+        <button type="button" data-add-for={parts.body.pointer} className={`self-start text-small font-semibold text-accent-ink ${NARROW}`} onClick={() => find.current?.focus()}>
           ＋ Add a setting
         </button>
         <p className="text-small text-muted">{WORDS.count(parts.widget, changedCount(rows), offered.length)}</p>

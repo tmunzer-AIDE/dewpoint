@@ -98,3 +98,29 @@ describe("words", () => {
     expect([brief(undefined, false), brief(undefined, [1, 2]), brief(undefined, formula("1"))]).toEqual(["no", "2 items", "computed when the step runs"]);
   });
 });
+
+describe("what the list can't read stays as it is (the final review)", () => {
+  const device = fieldsOf(DEVICE_UPDATE).find((f) => f.name === "body")!;
+  const branches = branchesOf(device);
+  const kind = kindOf(branches)!;
+  const names = branches.map((b) => offeredOf(b, kind.name).map((p) => p.name));
+
+  it("never writes into a body a formula gives", () => {
+    const start = { body: formula("steps.x.output"), clear: ["tags"] };
+    expect(setIn(start, "tags", undefined)).toEqual(start);
+    expect(setIn(start, "tags", ["a"])).toEqual(start);
+  });
+  it("leaves a `clear` it can't read as it is, whatever the action", () => {
+    const clear = formula("[]");
+    expect(setIn({ body: { name: "hq" }, clear }, "enabled", true)).toEqual({ body: { name: "hq", enabled: true }, clear });
+    expect(keepIn({ body: { name: "hq" }, clear }, "name")).toEqual({ body: {}, clear });
+    expect(clearIn({ body: { name: "hq" }, clear }, "name")).toEqual({ body: { name: "hq" }, clear });
+    expect(kindIn({ body: { name: "a" }, clear }, kind, 1, names[1]!, false).config).toEqual({ body: { name: "a" }, clear });
+  });
+  it("keeps, on a change of kind, the names no kind offers", () => {
+    expect(kindIn({ body: { name: "a" }, clear: ["type", "zoom"] }, kind, 1, names[1]!, false, names.flat()).config).toEqual({ body: { name: "a" }, clear: ["type"] });
+  });
+  it("reads an update's kind from its settings when the one chosen here no longer fits them (an Undo)", () => {
+    expect(kindIndex("update", { name: "a", zoom: 2 }, ["name", "zoom"], kind, names, "sensor")).toBe(0);
+  });
+});

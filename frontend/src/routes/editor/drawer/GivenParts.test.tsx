@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { WORDS } from "../../../lib/changes";
 import { UPDATE } from "../../../test/nodeTypes";
-import { fakeApi, json, showDrawer } from "./harness";
+import { fakeApi, json, problem, showDrawer } from "./harness";
 
 beforeEach(() => {
   fakeApi({ "GET /api/v1/t/t1/connections": () => json([]), "GET /api/v1/connection-types": () => json([]) });
@@ -88,4 +88,34 @@ it("keeps a secret one field, never its parts", () => {
   showDrawer(UPDATE, { config: { body: { api_secret: "x", radius: { host: "h" } } } });
   expect(within(at("/body/api_secret")).queryByRole("button", { name: /Another setting/ })).toBeNull();
   expect(within(at("/body/radius")).getByLabelText("Host")).toBeTruthy(); // a part is a secret, not the whole
+});
+
+// The final review's findings.
+it("finds a setting through a list or a map from ＋ Another setting of …", async () => {
+  const { config } = showDrawer(UPDATE, { config: { body: { auto_upgrade: { enabled: true } } } });
+  const another = async (word: string, option: RegExp) => {
+    await userEvent.click(within(at("/body/auto_upgrade")).getByRole("button", { name: "＋ Another setting of Auto upgrade" }));
+    await userEvent.type(within(at("/body/auto_upgrade")).getByRole("combobox", { name: "Find a setting of Auto upgrade" }), word);
+    await userEvent.click(within(at("/body/auto_upgrade")).getByRole("option", { name: option }));
+  };
+  await another("day", /Schedules › an item › Day/);
+  expect(config()).toEqual({ body: { auto_upgrade: { enabled: true, schedules: [{}] } } }); // the item's place is written
+  const day = within(at("/body/auto_upgrade/schedules/0")).getByLabelText("Day");
+  await vi.waitFor(() => expect(document.activeElement).toBe(day));
+  await userEvent.type(day, "sun");
+  await another("channel", /Profiles › an entry › Channel/);
+  await userEvent.type(screen.getByLabelText("Name of the new entry"), "ap{Enter}");
+  await userEvent.type(within(at("/body/auto_upgrade/profiles/ap")).getByLabelText("Channel"), "6");
+  expect(config()).toEqual({ body: { auto_upgrade: { enabled: true, schedules: [{ day: "sun" }], profiles: { ap: { channel: "6" } } } } });
+});
+
+it("shows a problem at a part it doesn't draw on the part that holds it", () => {
+  showDrawer(UPDATE, { config: { body: { networks: [{ id: "n1", name: "a" }] } }, problems: [problem("/body/networks/0/id", "Mist sets it.")] });
+  expect(within(at("/body/networks/0")).getByText("Mist sets it.")).toBeTruthy();
+});
+
+it("keeps focus after a Remove, on ＋ Another setting of …", async () => {
+  showDrawer(UPDATE, { config: { body: { rogue: { enabled: true, min_rogue_rssi: -80 } } } });
+  await userEvent.click(within(at("/body/rogue")).getByRole("button", { name: "Remove Enabled" }));
+  await vi.waitFor(() => expect(document.activeElement).toBe(within(at("/body/rogue")).getByRole("button", { name: "＋ Another setting of Rogue" })));
 });

@@ -71,16 +71,22 @@ const withClear = (config: Config, names: string[]): Config => {
 const withBody = (config: Config, body: Record<string, unknown>): Config => ({ ...config, body });
 const without = (body: Record<string, unknown>, name: string) => Object.fromEntries(Object.entries(body).filter(([k]) => k !== name));
 
+// A body or a `clear` held as a formula, a reference or a literal is never written into: it stays as it is (the final
+// review; ledger 102).
+
 /** Set: in the body (with `value`, when one is given), out of `clear`. */
 export function setIn(config: Config, name: string, value: unknown): Config {
-  const body = bodyObject(config) ?? {};
-  const next = value === undefined ? body : { ...body, [name]: value };
-  return withClear(withBody(config, next), (clearNames(config) ?? []).filter((n) => n !== name));
+  const body = bodyObject(config);
+  if (body === null) return config;
+  const next = withBody(config, value === undefined ? body : { ...body, [name]: value });
+  const names = clearNames(config);
+  return names === null ? next : withClear(next, names.filter((n) => n !== name));
 }
 
 /** Clear: out of the body, named in `clear`. */
 export function clearIn(config: Config, name: string): Config {
-  const names = clearNames(config) ?? [];
+  const names = clearNames(config);
+  if (names === null) return config;
   const body = bodyObject(config);
   const next = body === null ? config : withBody(config, without(body, name));
   return withClear(next, names.includes(name) ? names : [...names, name]);
@@ -90,7 +96,8 @@ export function clearIn(config: Config, name: string): Config {
 export function keepIn(config: Config, name: string): Config {
   const body = bodyObject(config);
   const next = body === null ? config : withBody(config, without(body, name));
-  return withClear(next, (clearNames(config) ?? []).filter((n) => n !== name));
+  const names = clearNames(config);
+  return names === null ? next : withClear(next, names.filter((n) => n !== name));
 }
 
 /** How many settings change: set with a value, or cleared. */
@@ -105,25 +112,33 @@ export function kindIndex(
   const held = kind.values.indexOf(String(fixedOf(body[kind.name])));
   if (held >= 0) return held;
   if (widget === "create") return null;
+  // The one chosen here, while it has every setting listed: an Undo can bring back one it lacks.
   const picked = chosen === null ? -1 : kind.values.indexOf(chosen);
-  if (picked >= 0) return picked;
+  if (picked >= 0 && listed.every((n) => offered[picked]!.includes(n))) return picked;
   const fits = offered.findIndex((names) => listed.every((n) => names.includes(n)));
   return fits >= 0 ? fits : 0;
 }
 
-/** Another kind: the changes it has too are kept, the others dropped; the kind's value written where it's held (a
- * draft that has it, a create's). */
+/** Another kind: the changes it has too are kept, the others dropped (what no kind offers stays: the list doesn't draw
+ * it); the kind's value written where it's held (a draft that has it, a create's). `known`: what any kind offers
+ * (all listed, when not given). */
 export function kindIn(
-  config: Config, kind: { name: string; values: string[] }, to: number, offered: string[], write: boolean,
+  config: Config, kind: { name: string; values: string[] }, to: number, offered: string[], write: boolean, known?: string[],
 ): { config: Config; kept: string[]; dropped: string[] } {  // prettier-ignore
-  const body = bodyObject(config) ?? {};
-  const clear = clearNames(config) ?? [];
-  const listed = [...new Set([...Object.keys(body).filter((n) => n !== kind.name), ...clear])];
+  const body = bodyObject(config);
+  const clear = clearNames(config);
+  const isKnown = (n: string) => known === undefined || known.includes(n);
+  const stays = (n: string) => offered.includes(n) || !isKnown(n);
+  const listed = [...new Set([...Object.keys(body ?? {}).filter((n) => n !== kind.name), ...(clear ?? [])])].filter(isKnown);
   const kept = listed.filter((n) => offered.includes(n));
   const dropped = listed.filter((n) => !offered.includes(n));
-  const nextBody = Object.fromEntries(Object.entries(body).filter(([k]) => k === kind.name || offered.includes(k)));
-  const written = write ? { ...nextBody, [kind.name]: kind.values[to] } : nextBody;
-  return { config: withClear(withBody(config, written), clear.filter((n) => offered.includes(n))), kept, dropped };
+  let next = config;
+  if (body !== null) {
+    const kept = Object.fromEntries(Object.entries(body).filter(([k]) => k === kind.name || stays(k)));
+    next = withBody(next, write ? { ...kept, [kind.name]: kind.values[to] } : kept);
+  }
+  if (clear !== null) next = withClear(next, clear.filter(stays));
+  return { config: next, kept, dropped };
 }
 
 const joinedWords = (words: string[]): string =>

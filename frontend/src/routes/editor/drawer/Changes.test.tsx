@@ -202,3 +202,36 @@ it("lists a create's required settings first, given or not", () => {
   showDrawer(CREATE, { config: { body: { enabled: true } } });
   expect(rows(screen.getByRole("group", { name: "Settings" }))).toEqual(["/body/name", "/body/enabled"]);
 });
+
+// The final review's findings.
+it("offers no Set under a body a formula gives, and Keep leaves the formula", async () => {
+  const { config } = showDrawer(UPDATE, { config: { body: formula("steps.build.output"), clear: ["tags"] } });
+  const tags = screen.getByRole("group", { name: "What happens to Tags" });
+  expect(within(tags).queryByRole("button", { name: "Set" })).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "Keep Tags as it is" }));
+  expect(config()).toEqual({ body: formula("steps.build.output") });
+});
+
+it("reads the kind again when an Undo brings back a setting the kind chosen lacks", async () => {
+  const { replace } = showDrawer(DEVICE_UPDATE, { config: { body: { name: "cam", zoom: 2 } } });
+  await userEvent.click(within(kindOfDevice()).getByRole("radio", { name: "Sensor" }));
+  replace({ body: { name: "cam", zoom: 2 } }); // as an Undo
+  await vi.waitFor(() => expect(within(kindOfDevice()).getByRole("radio", { name: "Camera" })).toHaveProperty("checked", true));
+  expect(rows(changes())).toEqual(["/body/name", "/body/zoom"]);
+});
+
+it("says nothing to change only when nothing is sent, a setting it doesn't draw included", () => {
+  showDrawer(UPDATE, { config: { body: { id: "x" } } });
+  expect(within(changes()).queryByText(WORDS.nothing)).toBeNull();
+});
+
+it("keeps focus after each row action: Set on its control, Clear on Clear, Keep on ＋ Add a setting", async () => {
+  showDrawer(UPDATE, { config: { body: { name: "hq", rogue: { enabled: true } } } });
+  const name = () => within(changes()).getByRole("group", { name: "What happens to Name" });
+  await userEvent.click(within(name()).getByRole("button", { name: "Clear" }));
+  await vi.waitFor(() => expect(document.activeElement).toBe(within(name()).getByRole("button", { name: "Clear" })));
+  await userEvent.click(within(name()).getByRole("button", { name: "Set" }));
+  await vi.waitFor(() => expect(document.activeElement).toBe(within(changes()).getByLabelText("Name")));
+  await userEvent.click(within(changes()).getByRole("button", { name: "Keep Rogue as it is" }));
+  await vi.waitFor(() => expect(document.activeElement).toBe(within(changes()).getByRole("button", { name: "＋ Add a setting" })));
+});
