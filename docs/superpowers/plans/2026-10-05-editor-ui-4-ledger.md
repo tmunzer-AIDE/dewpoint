@@ -3827,3 +3827,15 @@ The owner approved milestone 1 ("approved").
 
 The whole frontend suite: 1517 passed in 110 files (main has 1498 in 108). Mid-slice rulings: none beyond M113. Nothing
 pushed.
+
+### 4f-2a, milestone 3 and the final checkpoint (2026-10-21)
+
+The owner approved milestone 2 ("approved").
+- Task 6 (d38cc9c7): the browser spec, `e2e/mist.spec.ts`, with its fixture and the workflows project's match; it
+  expects "Uses a Juniper Mist connection" (M113). Type-checked and linted, not run: it needs the Compose stack; CI's
+  e2e job runs it on the PR. (Its first commit went in before the string's edit applied; amended, unpushed.)
+- Task 7, every check on d38cc9c7: the frontend suite 1517 passed in 110 files; ESLint silent; the build done (the
+  entry 650.0 kB, the editor's script 149.1 kB); `check:api` passes; the Mist suite 565 passed; ruff, the format check
+  and mypy clean; CodeQL (CLI 2.27.2, CI's filter; python-queries 1.8.13, javascript-queries 2.4.8): no finding.
+
+Mid-slice rulings: M113 only. Nothing pushed. Next: the final review.
