@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { WORDS } from "../../../lib/changes";
 import { formula } from "../../../lib/config";
-import { CREATE, UPDATE } from "../../../test/nodeTypes";
+import { CREATE, DEVICE_CREATE, DEVICE_UPDATE, UPDATE } from "../../../test/nodeTypes";
 import { fakeApi, json, problem, showDrawer } from "./harness";
 
 beforeEach(() => {
@@ -161,4 +161,44 @@ it("lists the top-level settings from ＋ Add a setting, and adds the one Enter 
   expect(within(changes()).getAllByRole("option")).toHaveLength(10);
   await userEvent.keyboard("{ArrowDown}{Enter}"); // the second: Auto upgrade
   expect(changes().querySelector('[data-pointer="/body/auto_upgrade"]')).not.toBeNull();
+});
+
+// A device's kind (§5.7), a create's required settings (§5.6).
+const kindOfDevice = () => screen.getByRole("radiogroup", { name: "Kind of device" });
+
+it("reads an update's kind from its settings, offers that kind's, and says what a change of kind keeps and drops", async () => {
+  const { config } = showDrawer(DEVICE_UPDATE, { config: { body: { name: "cam", zoom: 2 }, clear: ["notes"] } });
+  expect(within(kindOfDevice()).getByRole("radio", { name: "Camera" })).toHaveProperty("checked", true);
+  expect(screen.getByText("Its settings are the Camera's.")).toBeTruthy();
+  expect(rows(changes())).toEqual(["/body/name", "/body/notes", "/body/zoom"]);
+  await userEvent.click(within(kindOfDevice()).getByRole("radio", { name: "Sensor" }));
+  expect(screen.getByRole("status", { name: "" }).textContent).toBe("Kind changed to Sensor: Name and Notes are kept; Zoom is dropped, as a Sensor doesn't have it.");
+  expect(config()).toEqual({ body: { name: "cam" }, clear: ["notes"] }); // its kind isn't sent: Mist knows it
+  expect(within(kindOfDevice()).getByRole("radio", { name: "Sensor" })).toHaveProperty("checked", true);
+  await userEvent.type(within(changes()).getByRole("combobox", { name: "Find a setting" }), "zoom");
+  expect(within(changes()).getByText('No setting matches "zoom", by name or description.')).toBeTruthy();
+});
+
+it("reads an update's kind from its value when the draft holds it, and writes the new one", async () => {
+  const { config } = showDrawer(DEVICE_UPDATE, { config: { body: { type: "sensor", range: 3 } } });
+  expect(within(kindOfDevice()).getByRole("radio", { name: "Sensor" })).toHaveProperty("checked", true);
+  await userEvent.click(within(kindOfDevice()).getByRole("radio", { name: "Camera" }));
+  expect(config()).toEqual({ body: { type: "camera" } });
+});
+
+it("asks a create for its kind first, then writes it, its required settings first", async () => {
+  const { config } = showDrawer(DEVICE_CREATE, { config: {} });
+  expect(screen.getByText(WORDS.chooseKind)).toBeTruthy();
+  expect(screen.queryByRole("combobox", { name: "Find a setting" })).toBeNull();
+  await userEvent.click(within(kindOfDevice()).getByRole("radio", { name: "Sensor" }));
+  expect(config()).toEqual({ body: { type: "sensor" } });
+  const group = screen.getByRole("group", { name: "Settings" });
+  expect(rows(group)).toEqual(["/body/name"]);
+  expect(within(group).queryByRole("button", { name: "Remove Name" })).toBeNull();
+  expect(within(group).queryByText(WORDS.pending)).toBeNull(); // required: not "isn't sent"
+});
+
+it("lists a create's required settings first, given or not", () => {
+  showDrawer(CREATE, { config: { body: { enabled: true } } });
+  expect(rows(screen.getByRole("group", { name: "Settings" }))).toEqual(["/body/name", "/body/enabled"]);
 });

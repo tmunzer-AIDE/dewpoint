@@ -5,13 +5,15 @@
 // today's control (ledger 102). Each row's setting is the drawer's own field too, its name beside its title; Set, Clear
 // and Keep change `body` and `clear` together, one step of Undo. What it remembers until the drawer closes (a value set
 // before it was cleared, a setting added with nothing given) lives above the tabs, which unmount what they hide.
-import { useRef, type ReactNode } from "react";
+import { useId, useRef, useState, type ReactNode } from "react";
 import { Button } from "../../../components/Button";
 import {
-  WORDS, bodyObject, changedCount, clearIn, clearNames, keepIn, rowsOf, setIn, showing, summaryOf, type Memory, type Row,
+  WORDS, bodyObject, changedCount, clearIn, clearNames, keepIn, kindIn, kindIndex, rowsOf, setIn, showing, summaryOf, type Memory, type Row,
 } from "../../../lib/changes";  // prettier-ignore
 import { fixedOf, valueAt } from "../../../lib/config";
-import { isObject, offeredOf, pointerOf, propertiesOf, type Changes as Parts, type FieldSpec } from "../../../lib/schemaForm";
+import {
+  branchesOf, isObject, kindOf, offeredOf, pointerOf, propertiesOf, unionTitle, type Changes as Parts, type FieldSpec,
+} from "../../../lib/schemaForm";  // prettier-ignore
 import { settingsOf, type Setting } from "../../../lib/settingsIndex";
 import { problemsAt, useDrawer } from "./context";
 import { FindSetting } from "./FindSetting";
@@ -86,13 +88,25 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
   const label = update ? "Changes" : "Settings";
   const body = bodyObject(config);
   const names = clearNames(config);
-  const offered = offeredOf(parts.body);
+  // A union of kinds (a device's): its kind first, the settings offered the chosen kind's (§5.7); an update's read
+  // from its value, the one chosen here, or the settings listed; a create's only from its value, written when picked.
+  const branches = branchesOf(parts.body);
+  const kind = kindOf(branches);
+  const kindNames = kind ? branches.map((b) => offeredOf(b, kind.name).map((p) => p.name)) : [];
+  const listed = [...Object.keys(body ?? {}), ...(names ?? [])].filter((n) => n !== kind?.name);
+  const index = kind ? kindIndex(parts.widget, body ?? {}, listed, kind, kindNames, memory.kind) : null;
+  const scope = kind ? (index === null ? null : branches[index]!) : parts.body;
+  const offered = scope ? offeredOf(scope, kind?.name ?? null) : [];
+  const required = update || scope === null || !Array.isArray(scope.schema.required) ? [] :
+    (scope.schema.required as unknown[]).filter((n): n is string => typeof n === "string" && offered.some((o) => o.name === n));  // prettier-ignore
+  const kindId = useId();
+  const [said, setSaid] = useState<string | null>(null);
   // A `clear` naming what the list doesn't offer is a draft from elsewhere: today's control, unchanged (§5.8).
   const clearDrawn = parts.clear !== null && names !== null && names.every((n) => offered.some((s) => s.name === n));
-  const rows = rowsOf(offered, body ?? {}, clearDrawn ? names : [], memory.pending);
+  const rows = rowsOf(offered, body ?? {}, clearDrawn ? names : [], memory.pending, required);
   const replace = fixedOf(valueAt(config, ["mode"])) === "replace";
   const nothing = update && body !== null && rows.every((r) => r.state === "pending");
-  const settings = settingsOf(parts.body);
+  const settings = scope ? settingsOf(scope, kind?.name ?? null) : [];
   const find = useRef<HTMLInputElement>(null);
 
   // One write of the whole config: `body` and `clear` together, one step of Undo. What's typed under the row is
@@ -146,6 +160,36 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
     remember(next);
     if (next.adding == null) focusLater(pointerOf([...parts.body.path, ...names]));
   };
+  // Another kind: the changes it has too are kept, the others dropped, said; its value written where it's held.
+  const toKind = (to: number) => {
+    if (!kind || to === index) return;
+    const target = branches[to]!;
+    const names = kindNames[to]!;
+    const out: { done?: ReturnType<typeof kindIn> } = {};
+    const write = !update || (body ?? {})[kind.name] !== undefined;
+    const why = drawer.restructure(parts.body.pointer, { path: [], make: (cfg) => (out.done = kindIn(isObject(cfg) ? cfg : {}, kind, to, names, write)).config });
+    if (why !== null || out.done === undefined) return;
+    const { kept, dropped } = out.done;
+    const titled = (n: string) => branches.flatMap((b) => propertiesOf(b)).find((p) => p.name === n)?.label ?? n;
+    remember({ kind: kind.values[to]!, pending: memory.pending.filter((n) => names.includes(n)) });
+    setSaid(kept.length + dropped.length > 0 ? WORDS.kindChanged(target.label, kept.map(titled), dropped.map(titled)) : null);
+  };
+  const kindControl = kind && (
+    <div className="flex min-w-0 flex-col gap-1.5">
+      <span id={kindId} className="text-small font-semibold">Kind of {(unionTitle(parts.body) ?? "it").replace(/^./, (c) => c.toLowerCase())}</span>
+      <div role="radiogroup" aria-labelledby={kindId} className="grid grid-cols-1 gap-2 sm:flex sm:flex-wrap">
+        {branches.map((b, i) => (
+          <label key={b.label} className={`flex min-h-[24px] items-center gap-2 rounded-lg border border-line-control px-3 text-body ${NARROW}`}>
+            <input type="radio" name={kindId} checked={index === i} disabled={!drawer.editable} onChange={() => toKind(i)} />
+            {b.label}
+          </label>
+        ))}
+      </div>
+      <p className="text-small text-muted">{index === null ? WORDS.chooseKind : `Its settings are the ${branches[index]!.label}'s.`}</p>
+      {said && <p role="status" className="text-small">{said}</p>}
+    </div>
+  );  // prettier-ignore
+
   // A setting emptied by a Remove inside it keeps its row, nothing given yet.
   const top = (pointer: string) => {
     const name = pointer.split("/")[parts.body.path.length + 1];
@@ -158,13 +202,14 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
     if (row.state === "both") return <SaidRow key={row.name} row={row} actions={actions} said={WORDS.both} />;
     const json = row.spec.widget === "json" && !row.spec.holdsSensitive;
     const drawnParts = partsOf(row.spec);
+    const pendingSaid = row.state === "pending" && drawer.editable && !required.includes(row.name);
     const said = json ? WORDS.json : drawnParts && update && row.spec.base !== "list" ? (replace ? WORDS.partsReplace : WORDS.partsMerge) : undefined;
     return (
       <FieldView
         key={row.name} spec={row.spec}
         drawn={{
           name: row.name, hideClear: true, actions, startFixed: json, hint: said, parts: drawnParts,
-          below: row.state === "pending" && drawer.editable ? <p className="text-small text-muted">{WORDS.pending}</p> : undefined,
+          below: pendingSaid ? <p className="text-small text-muted">{WORDS.pending}</p> : undefined,
         }}
       />
     );  // prettier-ignore
@@ -197,8 +242,10 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
     }
     // The rows hold `clear` too: a Go to or a problem there lands on them.
     const atClear = parts.clear && clearDrawn ? problemsAt(drawer.problems, parts.clear.pointer, null) : [];
+    if (scope === null) return kindControl; // a create's kind not chosen yet: nothing else to give
     return (
       <>
+        {kindControl}
         {mode}
         <FindSetting ref={find} settings={settings} listed={new Set(rows.map((r) => r.name))} where={label} onAdd={add} />
         <div data-pointer={parts.clear && clearDrawn ? parts.clear.pointer : undefined} className="flex min-w-0 flex-col gap-4">

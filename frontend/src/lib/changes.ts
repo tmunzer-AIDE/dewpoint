@@ -49,9 +49,11 @@ export function clearNames(config: Config): string[] | null {
   return Array.isArray(clear) && clear.every((n): n is string => typeof n === "string") ? clear : null;
 }
 
-/** A row per setting given, cleared or added, of the ones the schema describes; by title. */
-export function rowsOf(specs: FieldSpec[], body: Record<string, unknown>, clear: string[], pending: string[]): Row[] {
-  const names = new Set([...Object.keys(body), ...clear, ...pending]);
+/** A row per setting given, cleared or added, of the ones the schema describes; `first` (a create's required
+ * settings, given or not) in their order, then the others by title. */
+export function rowsOf(specs: FieldSpec[], body: Record<string, unknown>, clear: string[], pending: string[], first: string[] = []): Row[] {
+  const names = new Set([...Object.keys(body), ...clear, ...pending, ...first]);
+  const rank = (name: string) => (first.includes(name) ? first.indexOf(name) : first.length);
   return specs
     .filter((s) => names.has(s.name))
     .map((spec): Row => {
@@ -59,7 +61,7 @@ export function rowsOf(specs: FieldSpec[], body: Record<string, unknown>, clear:
       const cleared = clear.includes(spec.name);
       return { name: spec.name, spec, state: set && cleared ? "both" : set ? "set" : cleared ? "clear" : "pending" };
     })
-    .sort((a, b) => a.spec.label.localeCompare(b.spec.label) || a.name.localeCompare(b.name));
+    .sort((a, b) => rank(a.name) - rank(b.name) || a.spec.label.localeCompare(b.spec.label) || a.name.localeCompare(b.name));
 }
 
 const withClear = (config: Config, names: string[]): Config => {

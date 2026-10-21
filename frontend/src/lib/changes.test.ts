@@ -16,6 +16,10 @@ describe("rows", () => {
     expect(rows.map((r) => [r.spec.label, r.state])).toEqual([["Name", "set"], ["Rogue", "set"], ["Tags", "clear"], ["VLAN ID", "pending"]]);
     expect(changedCount(rows)).toBe(3);
   });
+  it("puts a create's required settings first, given or not, in their order", () => {
+    const rows = rowsOf(offered, { enabled: true, tags: [] }, [], [], ["vlan_id", "name"]);
+    expect(rows.map((r) => [r.name, r.state])).toEqual([["vlan_id", "pending"], ["name", "pending"], ["enabled", "set"], ["tags", "set"]]);
+  });
   it("says a setting both set and cleared, and leaves out what the schema doesn't describe or Mist sets", () => {
     const rows = rowsOf(offered, { name: "hq", id: "x", nope: 1 }, ["name"], []);
     expect(rows.map((r) => [r.name, r.state])).toEqual([["name", "both"]]);
