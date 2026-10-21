@@ -18,7 +18,8 @@ import { lineageKey } from "./structured";
 
 const SEVERITIES: Record<string, string> = { info: "Info", success: "Success", warning: "Warning", critical: "Critical" };
 
-/** The severity as four choices in a row, two rows of two at 320 px (§5.4); unset, the model's default is chosen. */
+/** The severity as four choices in a row, two rows of two at 320 px (§5.4), 44 px tall there and 24 px at least
+ * beside (§5.8; in pixels, as a rem is 14 px here); unset, the model's default is chosen. */
 function SeverityControl({ spec, value, id, describedBy, invalid, disabled, onChange }: ControlProps) {
   const choices = Array.isArray(spec.schema.enum) ? (spec.schema.enum as unknown[]).filter((c): c is string => typeof c === "string") : [];
   const current = typeof value === "string" ? value : typeof spec.schema.default === "string" ? spec.schema.default : "";
@@ -29,7 +30,7 @@ function SeverityControl({ spec, value, id, describedBy, invalid, disabled, onCh
       className="grid grid-cols-2 gap-2 sm:grid-cols-4"
     >
       {choices.map((choice) => (
-        <label key={choice} className="flex min-h-11 items-center gap-2 rounded-lg border border-line-control px-3 text-body sm:min-h-6">
+        <label key={choice} className="flex min-h-[44px] items-center gap-2 rounded-lg border border-line-control px-3 text-body sm:min-h-[24px]">
           <input type="radio" name={id} value={choice} checked={current === choice} disabled={disabled} onChange={() => onChange(choice, false)} />
           {SEVERITIES[choice] ?? choice}
         </label>
@@ -39,7 +40,7 @@ function SeverityControl({ spec, value, id, describedBy, invalid, disabled, onCh
 }
 
 const asList = (v: unknown): unknown[] => (Array.isArray(v) ? [...(v as unknown[])] : []);
-const NARROW = "max-sm:min-h-11"; // 44 px targets at 320 (§5.8)
+const NARROW = "max-sm:min-h-[44px]"; // 44 px targets at 320 (§5.8), in pixels: a rem is 14 px here, so min-h-11 is 38.5
 
 /** The fields' or the links' rows (§5.3): how many of the most, each row's label and value (or address) taking values,
  * its Move up, Move down and Remove named by its number, and Add, disabled at the most with why. */
