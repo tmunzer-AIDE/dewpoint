@@ -3675,3 +3675,16 @@ Mid-slice rulings start at M113.
 321. **Accepted. No connection yet: the type named by its label** (plan ruling 19).
 322. **Accepted. Simulate's words in the result's banner** (plan ruling 20).
 323. **Accepted. The checks; the browser spec in CI, or locally on the owner's word** (plan ruling 21).
+
+### 4f-1, milestone 1 (2026-10-21)
+
+Inline, on `feat/editor-4f1` from origin/main b9549821, the docs branch (the spec, the plan: 7a354edd) fast-forwarded
+in; the frontend's packages restored offline, the backend on a borrowed environment whose `uv.lock` matches main's.
+- Task 1 (739cdbad): this ledger's acceptance section and the plugins-3 ledger's 3b-1 sign-off.
+- Task 2 (fa85f1da): the SDK's `Message` carries `x-widget: "message"`. Red: 2 failed, 1 passed (no step's config
+  carried the hint; `KeyError: 'x-widget'` for a config built on it; the hashes' test passes before and after). Green:
+  3 passed; ruff, the format check and mypy clean.
+- Task 3 (543e5b5d): the shared cases and `dewpoint plugins message-cases`. Red: the module missing (1 error during
+  collection). The command wrote `frontend/src/test/messageCases.json`, 251,225 bytes. Green: 3 passed; static clean.
+
+Mid-slice rulings: none. Nothing pushed.
