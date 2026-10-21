@@ -3936,3 +3936,17 @@ The whole frontend suite: 1577 passed in 114 files on its second run. Its first 
 slice, the composer's "adds fields up to 25…" (5,274 ms against vitest's 5,000), under the full suite's load: alone it
 takes 1.17 s on this branch and 1.13 s on main a4b677ab, and passed three runs in three. Noted, not changed. Mid-slice
 rulings: none. Nothing pushed.
+
+### 4f-2b, milestone 4 and the final checkpoint (2026-10-21)
+
+The owner approved milestone 3 ("approved").
+- Task 10 (d98bce84): the browser spec, `e2e/changes.spec.ts`, its fixture and the workflows project's match.
+  Type-checked and linted, not run: it needs the Compose stack; CI's e2e job runs it on the PR.
+- Task 11, every check on d98bce84: the frontend suite 1577 passed in 114 files (on an idle machine; main has 1518 in
+  110); ESLint silent; the build done (the entry 651.7 kB, the editor's script 149.2 kB); `check:api` passes; CodeQL
+  (CLI 2.27.2, CI's filter; python-queries 1.8.13, javascript-queries 2.4.8): no finding.
+
+The composer's "adds fields up to 25…" (4f-1's) timed out twice in five full runs here (5,274 ms; 6,608 ms beside
+CodeQL), and took 4,880 ms in the run that passed: alone it takes 1.17 s. It isn't this slice's: main a4b677ab's own
+full suite timed it out too (5,856 ms) on this machine. Left as it is; a follow-up on the owner's word. Mid-slice
+rulings: none. Nothing pushed. Next: the final review.
