@@ -3633,3 +3633,45 @@ What the reviewer set aside, each ruled as it stands: a dropped file of any type
 form's file input (its first field); the editor's leave guard when landing during a save (the editor's own); the
 list's first load carrying the landing (ruling 302's count); a run failing at once focusing its failed step (4e-1's);
 4e-2a's backend behaviours; changing a lone sensitive field through Edit as JSON (ruling 297).
+
+### 4e-2b merged; 4f split in three; the 4f-1 design and plan accepted (2026-10-21)
+
+The owner merged 4e-2b as #132 (squash b9549821), every check green ("green and merged"); its six deferred minors are
+issue #133. 4e is done.
+
+4f was researched, then proposed ("research first, then propose"; notes R1 to R3 in `~/4_dev/mist_dewpoint-4f-notes`).
+The owner's answers (2026-10-20): 4f in three slices, in this order: 4f-1 the message composer, 4f-2 the Mist step,
+4f-3 the run form's pickers; previews rendered in the browser, held to the plugins' renderers by shared cases; the
+plugins say which steps get which widget (display hints), never the editor recognising a config's shape; the plugins'
+3b-1 rulings signed off as merged (recorded in the plugins-3 ledger). The 4f-1 boards ("4f-1 Message Composer
+Mockups") were approved at round 1 and signed off at v9 (D8). The design,
+`docs/superpowers/specs/2026-10-20-editor-4f1-message-composer-design.md` (d5dc43e8), keeps the Fixed / Formula switch
+on the severity, the fields and the links ("Keep them where useful"); it amends ruling 98 for a message (its parts
+together on Setup) and ruling 125 in that the message's text takes newlines.
+
+`docs/superpowers/plans/2026-10-21-editor-ui-4f1-message-composer.md`, revision 1: one plan, the backend's two tasks
+first, with milestone pauses. The owner accepted it: its rulings 1–21 join this ledger as 303–323. No step changes
+version (the hint is a display annotation, outside the contract hash); no route, no migration, no ABI change.
+Mid-slice rulings start at M113.
+
+303. **Accepted. One plan with milestone pauses** (plan ruling 1).
+304. **Accepted. The shared cases: eleven made-up messages, the webhook's body left out** (plan ruling 2).
+305. **Accepted. The mirror counts code points, and gives Teams' and Google Chat's uncut size** (plan ruling 3).
+306. **Accepted. A long run of text split at 4,096 code points, in the template branch only** (plan ruling 4).
+307. **Accepted. Every pill editor lays its text out in lines; Enter adds one where the composer asks** (plan ruling 5).
+308. **Accepted. The composer is the drawer's fields, each told how to draw its part** (plan ruling 6).
+309. **Accepted. Setup with a message: each field says "(required)"; Options says where the message is** (plan ruling 7).
+310. **Accepted. Targets by step type; a third party's message step gets no preview** (plan ruling 8).
+311. **Accepted. The title's hint says what it becomes** (plan ruling 9).
+312. **Accepted. The severity: a radio group, Info shown and nothing written by default** (plan ruling 10).
+313. **Accepted. Rows: labelled fields, their buttons under them, "2 of 25"** (plan ruling 11).
+314. **Accepted. A link's address checked as it's typed** (plan ruling 12).
+315. **Accepted. A value in a preview is written `check.site`** (plan ruling 13).
+316. **Accepted. Placeholders from plane 15's private use area** (plan ruling 14).
+317. **Accepted. What's said where: Slack's count, each cut, Teams' and Google Chat's size** (plan ruling 15).
+318. **Accepted. The previews draw what the mirror sends, in the app's tokens** (plan ruling 16).
+319. **Accepted. The text left empty, in the composer's words, once touched** (plan ruling 17).
+320. **Accepted. Read only: the message as written, the rest summed up** (plan ruling 18).
+321. **Accepted. No connection yet: the type named by its label** (plan ruling 19).
+322. **Accepted. Simulate's words in the result's banner** (plan ruling 20).
+323. **Accepted. The checks; the browser spec in CI, or locally on the owner's word** (plan ruling 21).
