@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Button } from "../../../components/Button";
 import { Tabs } from "../../../components/Tabs";
+import { NO_MEMORY, type Memory } from "../../../lib/changes";
 import { optionsLine, targetOf } from "../../../lib/composer";
 import { changeParts, fieldsOf, settingsOf, type FieldSpec } from "../../../lib/schemaForm";
 import { groupOf } from "../../../lib/stepGroups";
@@ -19,6 +20,7 @@ import { DrawerContext, problemsAt, segment, type DrawerActions } from "./contex
 import { ErrorHandling, chipText } from "./ErrorHandling";
 import { FieldView } from "./FieldView";
 import { KeyField } from "./KeyField";
+import { Changes } from "./Changes";
 import { MessageComposer } from "./MessageComposer";
 
 const EFFECTS: Record<NodeType["side_effect"], string> = {
@@ -116,6 +118,8 @@ export function StepDrawer({
   const { setup, message, changes, options } = type ? settingsOf(type, fields) : { setup: [], message: null, changes: null, options: [] };
   const changing = changes ? changeParts(changes) : [];
   const onSetup = [...setup, ...(message ?? []), ...changing]; // what Setup shows: a message's parts, an update's changes
+  // What the changes remember until the drawer closes: the tabs unmount what they hide (4f-2b).
+  const [memory, setMemory] = useState<Memory>(NO_MEMORY);
   const [tab, setTab] = useState<Tab>(result ? "result" : test && testAt ? "test" : onSetup.length > 0 ? "setup" : "options");
   useEffect(() => {
     if (test && testAt) setTab("test");
@@ -264,7 +268,7 @@ export function StepDrawer({
                   <>
                     {setup.map((f) => <FieldView key={f.pointer} spec={f} />)}
                     {message && <MessageComposer parts={message} />}
-                    {changing.map((f) => <FieldView key={f.pointer} spec={f} />)}
+                    {changes && <Changes parts={changes} memory={memory} onMemory={setMemory} />}
                     {options.map((f) => <FieldView key={f.pointer} spec={f} />)}
                   </>
                 ) : (
@@ -296,7 +300,7 @@ export function StepDrawer({
                   // An update's changes or a create's settings follow its required fields, optional or not (4f-2b).
                   <>
                     {setup.map((f) => <FieldView key={f.pointer} spec={f} drawn={{ marked: true }} />)}
-                    {changing.map((f) => <FieldView key={f.pointer} spec={f} />)}
+                    <Changes parts={changes} memory={memory} onMemory={setMemory} />
                   </>
                 ) : setup.length > 0 ? (
                   <>

@@ -425,6 +425,7 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
       <>
         {runs && <p className="text-small text-muted">{runs}</p>}
         {declassifiable}
+        {drawn.below}
       </>,
     );
   } else if (container) {
