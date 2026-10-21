@@ -3717,3 +3717,17 @@ The owner approved milestone 2 ("approved").
 - The whole frontend suite after it: 1496 passed in 108 files (main: 1415 in 104).
 
 Mid-slice rulings: none. Nothing pushed.
+
+### 4f-1, milestone 4 and the final checkpoint (2026-10-21)
+
+The owner approved milestone 3 and left the e2e spec to CI ("approved, leave the e2e to CI").
+- Task 10 (6e64659a): `e2e/composer.spec.ts` with its fixture (a Slack step without a connection; nothing published or
+  sent), the workflows project running it; the composer's own buttons 44 px below 640 px. Type-checked and linted;
+  not run locally, on the owner's word: it runs in CI's e2e job.
+- The checks at 6e64659a, as run: the frontend suite, 1496 passed in 108 files (main: 1415 in 104); ESLint silent; the
+  build done (the entry 649.9 kB, main 649.7; the editor's shared chunk 361.9 kB, main 341.9; the editor's script
+  146.6 kB); `check:api` passes; the backend's `tests/plugins`, `tests/engine/graph` and `tests/sdk`, 1953 passed;
+  ruff, the format check and mypy clean; CodeQL (CLI 2.27.2, CI's filter; python-queries 1.8.13, javascript-queries
+  2.4.8): no finding in either language.
+
+Mid-slice rulings over the slice: none. The final review follows. Nothing pushed.
