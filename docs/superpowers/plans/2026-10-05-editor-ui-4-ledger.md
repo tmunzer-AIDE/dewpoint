@@ -3864,3 +3864,39 @@ line (the boards'); the catalogue's growth (spec §4.2); a step's middle words (
 331); the hints without a drawer yet (4f-2b); the e2e left to CI (ruling 340); the key before the label loads (ruling
 335); the choices' hint for a viewer whose button is disabled (as before); "a Email"-style articles (4f-1's); hover not
 moving the list's active row.
+
+### 4f-2a merged; the 4f-2b plan accepted (2026-10-21)
+
+The owner merged 4f-2a as #137 (squash a4b677ab), every check green, the browser spec included ("green and merged");
+its eight deferred minors are issue #138. Two CI fixes went in with it: the workflows spec picks a Mist step by its ref
+(Mist's steps sit behind their resources now), and the data tree's quick-search test waits for its request (a race on a
+slow runner, reproduced with a slowed fake server).
+
+`docs/superpowers/plans/2026-10-21-editor-ui-4f2b-changes.md`, revision 1, with milestone pauses: the second half of
+the Mist step design (§5.3–§5.11). The owner accepted it: its rulings 1–21 join this ledger as 341–361. It amends ruling
+98 for an update's and a create's body (on Setup, optional or not). No route, migration, ABI change or step version.
+The design's §5.4 figures for settings reached through maps and lists (1,746 and 568) don't hold: by the drawer's own
+rules they're 1,678 (site settings) and 538 (gateway templates); through objects only, 656 and 97 (R6 §9). Mid-slice
+rulings start at M114.
+
+341. **Accepted. Milestone pauses after the form's foundations, the changes' list and its parts** (plan ruling 1).
+342. **Accepted. An update's or a create's body on Setup, when the config has what it needs** (plan ruling 2).
+343. **Accepted. A union's branches, its own title, its kind; what's offered** (plan ruling 3).
+344. **Accepted. A body never sends an empty object: pruned where writes land** (plan ruling 4).
+345. **Accepted. What the drawer's own fields are told: a group of parts, a name beside, own actions** (plan ruling 5).
+346. **Accepted. Rows, and Set, Clear and Keep as one write** (plan ruling 6).
+347. **Accepted. What the changes remember until the drawer closes, above the tabs** (plan ruling 7).
+348. **Accepted. The changes are the body's own field: List or Formula** (plan ruling 8).
+349. **Accepted. How they're sent: two choices, their words** (plan ruling 9).
+350. **Accepted. A row's controls and words** (plan ruling 10).
+351. **Accepted. How many change; nothing to change, a warning** (plan ruling 11).
+352. **Accepted. Find a setting** (plan ruling 12).
+353. **Accepted. An object's parts given, and another found** (plan ruling 13).
+354. **Accepted. A map's entries by key, a new one's key first** (plan ruling 14).
+355. **Accepted. A list's items by number, an item added written empty** (plan ruling 15).
+356. **Accepted. A secret one field; a union as JSON in its row** (plan ruling 16).
+357. **Accepted. A device's kind** (plan ruling 17).
+358. **Accepted. A create's required settings first** (plan ruling 18).
+359. **Accepted. Read only: the changes summed up** (plan ruling 19).
+360. **Accepted. A `clear` the list can't draw: today's control** (plan ruling 20).
+361. **Accepted. The checks; the browser spec in CI, or locally on the owner's word** (plan ruling 21).
