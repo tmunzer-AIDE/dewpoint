@@ -47,6 +47,18 @@ describe("text and pills", () => {
     );
   });
 
+  it("writes a long text as parts of the engine's 4,096 characters, counted as Python counts, read back as one", () => {
+    const long = "x".repeat(4096) + "𝄞".repeat(5000);
+    const s: Segments = { texts: [long, ""], pills: [{ ref: "run.id" }] };
+    const written = valueOf(s, false);
+    expect(written).toEqual(template({ text: "x".repeat(4096) }, { text: "𝄞".repeat(4096) }, { text: "𝄞".repeat(904) }, { ref: "run.id" }));
+    expect(sameSegments(segmentsOf(written)!, s)).toBe(true);
+    // Where the engine takes no fixed value, text alone is a template too: split the same way.
+    expect(valueOf({ texts: ["y".repeat(5000)], pills: [] }, false, false)).toEqual(template({ text: "y".repeat(4096) }, { text: "y".repeat(904) }));
+    // A fixed text isn't a template: the engine takes it whole.
+    expect(valueOf({ texts: ["y".repeat(5000)], pills: [] }, false)).toBe("y".repeat(5000));
+  });
+
   it("reads back what it writes", () => {
     const s: Segments = { texts: ["AP ", " at ", ""], pills: [{ ref: "trigger.ap", default: "AP" }, { ref: "run.now" }] };
     expect(sameSegments(segmentsOf(valueOf(s, false))!, s)).toBe(true);

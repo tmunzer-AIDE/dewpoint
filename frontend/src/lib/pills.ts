@@ -25,6 +25,18 @@ export interface Caret {
 
 const EMPTY: Segments = { texts: [""], pills: [] };
 
+/** The engine's longest written part of a template (engine/graph/values.py's MAX_TEXT), in characters as Python counts
+ * them: a longer run is written as several parts in a row, which read back as one (4f-1, the message composer design
+ * §5.2). */
+export const MAX_TEXT = 4096;
+
+const runsOf = (text: string): { text: string }[] => {
+  const chars = [...text];
+  const runs: { text: string }[] = [];
+  for (let start = 0; start < chars.length; start += MAX_TEXT) runs.push({ text: chars.slice(start, start + MAX_TEXT).join("") });
+  return runs;
+};
+
 const bodyOf = (value: unknown): Record<string, unknown> =>
   isObject(value) && isObject(value[ENVELOPE]) ? value[ENVELOPE] : {};
 
@@ -68,19 +80,19 @@ export function segmentsOf(value: unknown): Segments | null {
 }
 
 /** What the draft holds for text and pills: nothing, when it's empty; the text, when there are no pills (a literal's
- * payload written back as one); else a template, its empty texts left out. A lone pill is a template too: text, as
- * the field takes it, never the value it reads (which may not be text). */
+ * payload written back as one); else a template, its empty texts left out, a long one in runs of MAX_TEXT. A lone pill
+ * is a template too: text, as the field takes it, never the value it reads (which may not be text). */
 export function valueOf(s: Segments, asLiteral: boolean, literalOk = true): unknown {
   if (s.pills.length === 0) {
     const text = s.texts.join("");
     if (text === "") return undefined;
     // Where the engine takes no fixed value, text alone is a template of one text part (x-dewpoint-kinds).
-    if (!literalOk) return { [ENVELOPE]: { kind: "template", parts: [{ text }] } };
+    if (!literalOk) return { [ENVELOPE]: { kind: "template", parts: runsOf(text) } };
     return asLiteral ? literal(text) : text;
   }
   const parts: Record<string, unknown>[] = [];
   s.texts.forEach((text, i) => {
-    if (text !== "") parts.push({ text });
+    parts.push(...runsOf(text));
     const pill = s.pills[i];
     if (pill) parts.push("default" in pill ? { ref: pill.ref, default: pill.default } : { ref: pill.ref });
   });
