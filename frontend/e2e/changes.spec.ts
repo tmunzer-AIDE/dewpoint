@@ -48,7 +48,7 @@ test("an update's changes: found, set, cleared, sent by merge or replace", async
   await changes.getByRole("button", { name: "＋ Another setting of Rogue" }).click();
   await changes.getByRole("combobox", { name: "Find a setting of Rogue" }).fill("rssi");
   await changes.getByRole("option", { name: /Min rogue RSSI/ }).click();
-  await changes.getByLabel("Min rogue RSSI").fill("-80");
+  await changes.getByLabel("Min rogue RSSI", { exact: true }).fill("-80"); // not its switch nor its Remove
   // Remote syslog, found by its name, then cleared.
   await changes.getByRole("combobox", { name: "Find a setting" }).fill("remote syslog");
   await changes.getByRole("option", { name: /^Remote syslog/ }).first().click(); // the setting itself: top-level first
@@ -65,7 +65,7 @@ test("a create's settings, a union setting as JSON, a device's kind", async ({ p
   await openChanges(page, "Settings");
   const create = await drawerOf(page, "create_wlan");
   const settings = create.getByRole("group", { name: "Settings" });
-  await expect(settings.getByLabel("SSID")).toBeVisible(); // required: first, given or not
+  await expect(settings.getByLabel("SSID", { exact: true })).toBeVisible(); // required: first, given or not
   await expect(settings.getByRole("button", { name: "Remove SSID" })).toHaveCount(0);
   await settings.getByRole("combobox", { name: "Find a setting" }).fill("vlan id");
   await settings.getByRole("option", { name: /^VLAN ID/ }).first().click();
