@@ -3900,3 +3900,15 @@ rulings start at M114.
 359. **Accepted. Read only: the changes summed up** (plan ruling 19).
 360. **Accepted. A `clear` the list can't draw: today's control** (plan ruling 20).
 361. **Accepted. The checks; the browser spec in CI, or locally on the owner's word** (plan ruling 21).
+
+### 4f-2b, milestone 1 (2026-10-21)
+
+Inline, on `feat/editor-4f2b` from origin/main a4b677ab (the owner: "approved, inline"); the frontend's packages
+restored offline. The plan sits in the worktree uncommitted: the owner approved it without a commit word.
+- Task 1 (ef22053e): this ledger's acceptance section.
+- Task 2 (cb6d72b2): the changes on Setup; a union's branches, title and kind; what's offered. Red: 7 failed, 22
+  passed. Green: 29 passed; the type check and ESLint silent.
+- Task 3 (61cbba95): a body never sends an empty object. Red: 2 failed, 41 passed. Green: 43 passed; static silent.
+- Task 4 (4eefc5c7): what the drawer's own fields are told. Red: 3 failed, 50 passed. Green: 53 passed; static silent.
+
+Mid-slice rulings: none. Nothing pushed.
