@@ -68,6 +68,9 @@ test("a message is written in the composer and previewed as Slack lays it out", 
 test("at 320 px the composer stacks a row's parts, its targets 44 px, and stays AA", async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 720 });
   const { drawer, message } = await openMessage(page, "Composer narrow");
+  // Measured once the drawer has settled: the connection's words replace "Loading connections…" and take two lines
+  // here, moving everything under them.
+  await expect(drawer.getByText("No Slack connection yet: an admin adds one.")).toBeVisible({ timeout: 10_000 });
   const box = async (name: string) => (await message.getByText(name, { exact: true }).boundingBox())!;
   const [info, success, warning] = [await box("Info"), await box("Success"), await box("Warning")];
   expect(success.y).toBe(info.y); // the severity in two rows of two
