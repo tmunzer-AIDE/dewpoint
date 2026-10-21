@@ -5,18 +5,34 @@
 // today's control (ledger 102). Each row's setting is the drawer's own field too, its name beside its title; Set, Clear
 // and Keep change `body` and `clear` together, one step of Undo. What it remembers until the drawer closes (a value set
 // before it was cleared, a setting added with nothing given) lives above the tabs, which unmount what they hide.
-import { type ReactNode } from "react";
+import { useRef, type ReactNode } from "react";
 import { Button } from "../../../components/Button";
 import {
   WORDS, bodyObject, changedCount, clearIn, clearNames, keepIn, rowsOf, setIn, summaryOf, type Memory, type Row,
 } from "../../../lib/changes";  // prettier-ignore
 import { fixedOf, valueAt } from "../../../lib/config";
-import { isObject, offeredOf, propertiesOf, type Changes as Parts, type FieldSpec } from "../../../lib/schemaForm";
+import { isObject, offeredOf, pointerOf, propertiesOf, type Changes as Parts, type FieldSpec } from "../../../lib/schemaForm";
+import { settingsOf, type Setting } from "../../../lib/settingsIndex";
 import { problemsAt, useDrawer } from "./context";
+import { FindSetting } from "./FindSetting";
 import { FieldView } from "./FieldView";
 import type { ControlProps } from "./scalars";
 
 const NARROW = "max-sm:min-h-[44px]"; // 44 px targets at 320 (§5.11), in pixels: a rem is 14 px here
+
+/** Focus, once drawn, the control at `pointer`, else its nearest drawn holder's first: a setting just added. */
+function focusAt(pointer: string) {
+  requestAnimationFrame(() => {
+    for (let at = pointer; at !== ""; at = at.slice(0, at.lastIndexOf("/"))) {
+      const holder = [...document.querySelectorAll<HTMLElement>("[data-pointer]")].find((e) => e.dataset.pointer === at);
+      if (!holder) continue;
+      const label = holder.querySelector<HTMLLabelElement>("label[for]");
+      const control = (label && document.getElementById(label.htmlFor)) ?? holder.querySelector<HTMLElement>("input, select, textarea, button");
+      control?.focus();
+      return;
+    }
+  });
+}
 
 /** How they're sent: merge or replace, a radio pair, merge when unset (`mode`'s default); stacked at 320 px. */
 function ModeControl({ value, id, describedBy, invalid, disabled, onChange }: ControlProps) {
@@ -88,6 +104,8 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
   const rows = rowsOf(offered, body ?? {}, clearDrawn ? names : [], memory.pending);
   const replace = fixedOf(valueAt(config, ["mode"])) === "replace";
   const nothing = update && body !== null && rows.every((r) => r.state === "pending");
+  const settings = settingsOf(parts.body);
+  const find = useRef<HTMLInputElement>(null);
 
   // One write of the whole config: `body` and `clear` together, one step of Undo. What's typed under the row is
   // dropped first by Clear and Keep (what it would write goes with the row), applied first by Set.
@@ -115,6 +133,13 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
       const cleared = Object.fromEntries(Object.entries(memory.cleared).filter(([n]) => n !== row.name));
       remember({ cleared, pending: memory.pending.filter((n) => n !== row.name) });
     }
+  };
+
+  // Added from Find: a setting not listed yet is Set, nothing given until a value is (§5.4); focus goes to it.
+  const add = (s: Setting) => {
+    const top = s.steps[0]!.name;
+    if (!rows.some((r) => r.name === top)) remember({ pending: [...memory.pending, top] });
+    focusAt(pointerOf([...parts.body.path, ...s.steps.map((step) => step.name)]));
   };
 
   const rowView = (row: Row) => {
@@ -163,6 +188,7 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
     return (
       <>
         {mode}
+        <FindSetting ref={find} settings={settings} listed={new Set(rows.map((r) => r.name))} where={label} onAdd={add} />
         <div data-pointer={parts.clear && clearDrawn ? parts.clear.pointer : undefined} className="flex min-w-0 flex-col gap-4">
           {rows.map(rowView)}
           {atClear.map((d, i) => (
@@ -170,6 +196,9 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
           ))}
         </div>
         {clearControl}
+        <button type="button" className={`self-start text-small font-semibold text-accent-ink ${NARROW}`} onClick={() => find.current?.focus()}>
+          ＋ Add a setting
+        </button>
         <p className="text-small text-muted">{WORDS.count(parts.widget, changedCount(rows), offered.length)}</p>
       </>
     );

@@ -128,3 +128,37 @@ it("shows a problem at `clear` with the rows that hold it", () => {
   showDrawer(UPDATE, { config: { clear: ["name"] }, problems: [problem("/clear", "Not a list of names.")] });
   expect(within(changes().querySelector<HTMLElement>('[data-pointer="/clear"]')!).getByText("Not a list of names.")).toBeTruthy();
 });
+
+// Find a setting (§5.4).
+const finder = () => within(changes()).getByRole("combobox", { name: "Find a setting" });
+
+it("finds a setting and adds it, Set with nothing given until a value is, focus on it", async () => {
+  const { config } = showDrawer(UPDATE, { config: { mode: "merge" } });
+  await userEvent.type(finder(), "name");
+  await userEvent.click(within(changes()).getByRole("option", { name: /^Name/ }));
+  const row = changes().querySelector<HTMLElement>('[data-pointer="/body/name"]')!;
+  expect(within(row).getByText(WORDS.pending)).toBeTruthy();
+  expect(config()).toEqual({ mode: "merge" }); // nothing given, nothing sent
+  await vi.waitFor(() => expect(document.activeElement).toBe(within(row).getByLabelText("Name")));
+  await userEvent.type(within(row).getByLabelText("Name"), "hq");
+  expect(config()).toEqual({ mode: "merge", body: { name: "hq" } });
+  expect(within(row).queryByText(WORDS.pending)).toBeNull();
+});
+
+it("marks a setting already listed, and says when nothing matches", async () => {
+  showDrawer(UPDATE, { config: { body: { name: "hq" } } });
+  await userEvent.type(finder(), "name");
+  expect(within(changes()).getByRole("option", { name: /^Name/ }).textContent).toContain("· In Changes");
+  await userEvent.clear(finder());
+  await userEvent.type(finder(), "firewall");
+  expect(within(changes()).getByText('No setting matches "firewall", by name or description.')).toBeTruthy();
+});
+
+it("lists the top-level settings from ＋ Add a setting, and adds the one Enter picks", async () => {
+  showDrawer(UPDATE, { config: {} });
+  await userEvent.click(within(changes()).getByRole("button", { name: "＋ Add a setting" }));
+  expect(within(changes()).getByText("10 settings; the list scrolls.")).toBeTruthy();
+  expect(within(changes()).getAllByRole("option")).toHaveLength(10);
+  await userEvent.keyboard("{ArrowDown}{Enter}"); // the second: Auto upgrade
+  expect(changes().querySelector('[data-pointer="/body/auto_upgrade"]')).not.toBeNull();
+});
