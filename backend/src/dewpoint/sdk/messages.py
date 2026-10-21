@@ -42,7 +42,9 @@ class Link(BaseModel):
 
 
 class Message(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # Display only (editor 4f-1, the message composer design §4.1): every config built on the message is shown as one
+    # composer. An annotation, outside the contract hash: no step needs a new version.
+    model_config = ConfigDict(extra="forbid", json_schema_extra={"x-widget": "message"})
     title: str | None = Field(default=None, max_length=1000)
     text: str = Field(min_length=1, max_length=40_000)
     fields: list[MessageField] = Field(default_factory=list, max_length=25)
