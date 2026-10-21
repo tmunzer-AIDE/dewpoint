@@ -3796,3 +3796,21 @@ rulings start at M113.
 338. **Accepted. The choices as a list under the field** (plan ruling 15).
 339. **Accepted. A pick written as text, named while the field holds it** (plan ruling 16).
 340. **Accepted. The checks; the browser spec in CI, or locally on the owner's word** (plan ruling 17).
+
+### 4f-2a, milestone 1 (2026-10-21)
+
+Inline, on `feat/editor-4f2a` from origin/main 5882c682, the docs branch (the spec, 615a43eb; the plan, 9bf7343e)
+fast-forwarded in; the frontend's packages restored offline, the backend on a borrowed environment whose `uv.lock`
+matches main's but for certifi.
+- Task 1 (d025aed5): this ledger's acceptance section.
+- Task 2 (3e9d63e8): the Mist plugin's display metadata. The hashes command wrote 296 lines from the base, the same
+  bytes as the prototype's. Red: 1 error during collection (`No module named 'dewpoint.plugins.mist.display'`).
+  Green: 57 passed; ruff, the format check and mypy clean; the whole Mist suite 565 passed.
+
+Mid-slice rulings:
+- M113. **The browser spec expects "Uses a Juniper Mist connection"**: the picker names a connection by its type's
+  label (ruling 335), and the Mist type's label is "Juniper Mist"; the plan's "Uses a Mist connection" was an example.
+  Cost: one string in the spec (Task 6).
+
+The plan's Expected for the hashes file named its last key wrongly ("mist.site_wxrules.update@1"; sorted, the file
+ends at "mist.site_zone_stats.list@1"): the file is right. Nothing pushed.
