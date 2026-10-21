@@ -6,6 +6,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from dewpoint.engine.graph.values import (
+    MAX_TEXT,
     CelValue,
     LiteralValue,
     RefSyntaxError,
@@ -98,6 +99,16 @@ def test_iter_values_finds_nested_envelopes_in_order() -> None:
 def test_envelope_errors_are_reported_in_place(body: dict[str, Any]) -> None:
     [(pointer, value)] = list(iter_values({"f": body}))
     assert pointer == ("f",) and isinstance(value, ValueSyntaxError)
+
+
+def test_a_template_takes_written_parts_in_a_row() -> None:
+    """The editor writes a long run of text as parts of `MAX_TEXT` each (4f-1, the message composer design §5.2)."""
+    parts = [{"text": "x" * MAX_TEXT}, {"text": "x" * MAX_TEXT}, {"ref": "vars.name"}]
+    [(_, value)] = list(iter_values({"t": {"$value": {"kind": "template", "parts": parts}}}))
+    assert isinstance(value, TemplateValue) and value.parts[:2] == ("x" * MAX_TEXT, "x" * MAX_TEXT)
+    too_long = {"$value": {"kind": "template", "parts": [{"text": "x" * (MAX_TEXT + 1)}]}}
+    [(_, longer)] = list(iter_values({"t": too_long}))
+    assert isinstance(longer, ValueSyntaxError)
 
 
 def test_strip_values_replaces_envelopes_with_null() -> None:

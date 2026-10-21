@@ -12,6 +12,8 @@ afterEach(() => {
 const C1 = "00000000-0000-4000-8000-0000000000c1";
 const C2 = "00000000-0000-4000-8000-0000000000c2";
 const CONNECTIONS = "GET /api/v1/t/t1/connections";
+const TYPES = "GET /api/v1/connection-types";
+const acmeType = { key: "acme", label: "Acme Cloud", config_schema: {}, secret_fields: [], clouds: null };
 const connection = (id: string, name: string, type: string, status: "ok" | "unverified" | "error") => ({
   id, name, type, status, revision: 1, config: {}, secret_set: true, status_detail: "", privilege: null, last_verified_at: null,
 });  // prettier-ignore
@@ -38,10 +40,16 @@ it("links to Connections when there's no Mist connection yet", async () => {
   expect(link.getAttribute("href")).toBe("/t/t1/connections");
 });
 
-it("says an admin adds a connection of any other type", async () => {
-  fakeApi({ [CONNECTIONS]: () => json([]) });
+it("says an admin adds a connection of any other type, the type named by its label (4f-1)", async () => {
+  fakeApi({ [CONNECTIONS]: () => json([]), [TYPES]: () => json([acmeType]) });
   showFields(REMOTE);
-  expect(await screen.findByText("No acme connection yet: an admin adds one.")).toBeTruthy();
+  expect(await screen.findByText("No Acme Cloud connection yet: an admin adds one.")).toBeTruthy();
+});
+
+it("never names a connection's type by its key, even when its label can't be read", async () => {
+  fakeApi({ [CONNECTIONS]: () => json([]), [TYPES]: () => json({ error: "internal" }, 500) });
+  showFields(REMOTE);
+  expect(await screen.findByText("No connection of its type yet: an admin adds one.")).toBeTruthy();
 });
 
 it("shows a connection that isn't in this tenant until it's changed", async () => {
@@ -76,10 +84,10 @@ it("names the connection field's control after its list failed, its Try again in
 });
 
 it("names the connection field's control with nothing to choose", async () => {
-  fakeApi({ [CONNECTIONS]: () => json([]) });
+  fakeApi({ [CONNECTIONS]: () => json([]), [TYPES]: () => json([acmeType]) });
   showFields(REMOTE);
-  await screen.findByText("No acme connection yet: an admin adds one.");
-  expect(screen.getByLabelText("Connection").textContent).toBe("No acme connection yet: an admin adds one.");
+  await screen.findByText("No Acme Cloud connection yet: an admin adds one.");
+  expect(screen.getByLabelText("Connection").textContent).toBe("No Acme Cloud connection yet: an admin adds one.");
 });
 
 it("names the workflow field's control while its list loads and with nothing to choose", async () => {

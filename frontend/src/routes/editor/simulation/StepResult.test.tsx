@@ -27,6 +27,32 @@ function session(phase: SimulationSession["phase"], s: StepSummary | null, state
 }
 const show = (s: SimulationSession) => render(<StepResult session={s} stepKey="notify" attemptsOf={() => 3} />);
 
+describe("a message step's result says what it would cut (4f-1, the message composer design §5.6)", () => {
+  const banner = () => screen.getByText("Simulated.").parentElement!.textContent;
+  const sent = (type: string, truncated: string[]) =>
+    summary({ type, final: { attempt: 1, status: "succeeded", output: { sent: true, truncated }, effect: null } });
+
+  it("says Slack's cut with its limit where the output tells it", () => {
+    show(session("succeeded", sent("slack.send_message@1", ["text", "fields[1].value"])));
+    expect(banner()).toBe("Simulated. Nothing was sent. Slack would cut the text at 3,000 characters and field 2's value. Results don't prove the live call will succeed.");
+  });
+
+  it("says what Teams would shorten to fit its bytes, a link left out by its number", () => {
+    show(session("succeeded", sent("teams.send_message@1", ["text", "links[5]"])));
+    expect(banner()).toContain("Teams would shorten the text and link 6 (left out) to fit its 24,000 bytes.");
+  });
+
+  it("says what the other targets would cut, named as the composer names them", () => {
+    show(session("succeeded", sent("servicenow.create_incident@1", ["title", "description", "fields[0].label"])));
+    expect(banner()).toContain("ServiceNow would cut the title, the description and field 1's label.");
+  });
+
+  it("says nothing more when nothing was cut, or the step isn't a message's", () => {
+    show(session("succeeded", sent("slack.send_message@1", [])));
+    expect(banner()).toBe("Simulated. Nothing was sent. Results don't prove the live call will succeed.");
+  });
+});
+
 describe("a step test's result in its Test tab (§7.6; the TestResult board)", () => {
   it("says what it proves, its status and origin, its attempt, revision and run", () => {
     show(session("succeeded", summary()));

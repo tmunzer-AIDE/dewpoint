@@ -39,7 +39,7 @@ const asList = (v: unknown): unknown[] => (Array.isArray(v) ? [...(v as unknown[
 // (as JSON, "Required", its mode) never passes to the item that takes its place (#73).
 const lineages = new WeakMap<object, number>();
 let lineageCount = 0;
-function lineageKey(list: unknown): string {
+export function lineageKey(list: unknown): string {
   if (!Array.isArray(list)) return "none";
   const root = rootOf(list);
   let n = lineages.get(root);

@@ -95,3 +95,31 @@ export const REMOTE = typeWith({
     note: { anyOf: [{ type: "string" }, { type: "null" }], default: null, title: "Note" },
   },
 }, { ref: "acme.sites@1", type: "acme.sites", title: "Sites", options: ["site_id"], credentials: ["acme"] });  // prettier-ignore
+
+const MESSAGE_DEFS = {
+  MessageField: {
+    type: "object", additionalProperties: false, title: "MessageField", required: ["label", "value"],
+    properties: { label: { type: "string", title: "Label", minLength: 1, maxLength: 200 }, value: { type: "string", title: "Value", maxLength: 10_000 } },
+  },
+  Link: {
+    type: "object", additionalProperties: false, title: "Link", required: ["label", "url"],
+    properties: { label: { type: "string", title: "Label", minLength: 1, maxLength: 200 }, url: { type: "string", title: "Url", maxLength: 2000 } },
+  },
+  Severity: { type: "string", title: "Severity", enum: ["info", "success", "warning", "critical"] },
+};  // prettier-ignore
+
+/** A step that sends a message (4f-1): its config the SDK's message as `class SendConfig(Message)` makes it, the
+ * composer's hint at its root, with a connection and `more`. Made up (D24), named as the target to preview. */
+export const messageStep = (type: string, more: Record<string, unknown> = {}, required: string[] = []): NodeType =>
+  typeWith({
+    type: "object", additionalProperties: false, "x-widget": "message", $defs: MESSAGE_DEFS, required: ["text", "connection", ...required],
+    properties: {
+      title: { anyOf: [{ type: "string", maxLength: 1000 }, { type: "null" }], default: null, title: "Title" },
+      text: { type: "string", title: "Text", minLength: 1, maxLength: 40_000 },
+      fields: { type: "array", title: "Fields", maxItems: 25, items: { $ref: "#/$defs/MessageField" } },
+      links: { type: "array", title: "Links", maxItems: 10, items: { $ref: "#/$defs/Link" } },
+      severity: { $ref: "#/$defs/Severity", default: "info" },
+      connection: { type: "string", format: "uuid", title: "Connection", "x-dewpoint-literal": true, "x-dewpoint-connection": type.split(".")[0] },
+      ...more,
+    },
+  }, { ref: `${type}@1`, type, title: "Send a message", credentials: [type.split(".")[0]!] });  // prettier-ignore

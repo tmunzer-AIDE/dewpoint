@@ -3633,3 +3633,124 @@ What the reviewer set aside, each ruled as it stands: a dropped file of any type
 form's file input (its first field); the editor's leave guard when landing during a save (the editor's own); the
 list's first load carrying the landing (ruling 302's count); a run failing at once focusing its failed step (4e-1's);
 4e-2a's backend behaviours; changing a lone sensitive field through Edit as JSON (ruling 297).
+
+### 4e-2b merged; 4f split in three; the 4f-1 design and plan accepted (2026-10-21)
+
+The owner merged 4e-2b as #132 (squash b9549821), every check green ("green and merged"); its six deferred minors are
+issue #133. 4e is done.
+
+4f was researched, then proposed ("research first, then propose"; notes R1 to R3 in `~/4_dev/mist_dewpoint-4f-notes`).
+The owner's answers (2026-10-20): 4f in three slices, in this order: 4f-1 the message composer, 4f-2 the Mist step,
+4f-3 the run form's pickers; previews rendered in the browser, held to the plugins' renderers by shared cases; the
+plugins say which steps get which widget (display hints), never the editor recognising a config's shape; the plugins'
+3b-1 rulings signed off as merged (recorded in the plugins-3 ledger). The 4f-1 boards ("4f-1 Message Composer
+Mockups") were approved at round 1 and signed off at v9 (D8). The design,
+`docs/superpowers/specs/2026-10-20-editor-4f1-message-composer-design.md` (d5dc43e8), keeps the Fixed / Formula switch
+on the severity, the fields and the links ("Keep them where useful"); it amends ruling 98 for a message (its parts
+together on Setup) and ruling 125 in that the message's text takes newlines.
+
+`docs/superpowers/plans/2026-10-21-editor-ui-4f1-message-composer.md`, revision 1: one plan, the backend's two tasks
+first, with milestone pauses. The owner accepted it: its rulings 1–21 join this ledger as 303–323. No step changes
+version (the hint is a display annotation, outside the contract hash); no route, no migration, no ABI change.
+Mid-slice rulings start at M113.
+
+303. **Accepted. One plan with milestone pauses** (plan ruling 1).
+304. **Accepted. The shared cases: eleven made-up messages, the webhook's body left out** (plan ruling 2).
+305. **Accepted. The mirror counts code points, and gives Teams' and Google Chat's uncut size** (plan ruling 3).
+306. **Accepted. A long run of text split at 4,096 code points, in the template branch only** (plan ruling 4).
+307. **Accepted. Every pill editor lays its text out in lines; Enter adds one where the composer asks** (plan ruling 5).
+308. **Accepted. The composer is the drawer's fields, each told how to draw its part** (plan ruling 6).
+309. **Accepted. Setup with a message: each field says "(required)"; Options says where the message is** (plan ruling 7).
+310. **Accepted. Targets by step type; a third party's message step gets no preview** (plan ruling 8).
+311. **Accepted. The title's hint says what it becomes** (plan ruling 9).
+312. **Accepted. The severity: a radio group, Info shown and nothing written by default** (plan ruling 10).
+313. **Accepted. Rows: labelled fields, their buttons under them, "2 of 25"** (plan ruling 11).
+314. **Accepted. A link's address checked as it's typed** (plan ruling 12).
+315. **Accepted. A value in a preview is written `check.site`** (plan ruling 13).
+316. **Accepted. Placeholders from plane 15's private use area** (plan ruling 14).
+317. **Accepted. What's said where: Slack's count, each cut, Teams' and Google Chat's size** (plan ruling 15).
+318. **Accepted. The previews draw what the mirror sends, in the app's tokens** (plan ruling 16).
+319. **Accepted. The text left empty, in the composer's words, once touched** (plan ruling 17).
+320. **Accepted. Read only: the message as written, the rest summed up** (plan ruling 18).
+321. **Accepted. No connection yet: the type named by its label** (plan ruling 19).
+322. **Accepted. Simulate's words in the result's banner** (plan ruling 20).
+323. **Accepted. The checks; the browser spec in CI, or locally on the owner's word** (plan ruling 21).
+
+### 4f-1, milestone 1 (2026-10-21)
+
+Inline, on `feat/editor-4f1` from origin/main b9549821, the docs branch (the spec, the plan: 7a354edd) fast-forwarded
+in; the frontend's packages restored offline, the backend on a borrowed environment whose `uv.lock` matches main's.
+- Task 1 (739cdbad): this ledger's acceptance section and the plugins-3 ledger's 3b-1 sign-off.
+- Task 2 (fa85f1da): the SDK's `Message` carries `x-widget: "message"`. Red: 2 failed, 1 passed (no step's config
+  carried the hint; `KeyError: 'x-widget'` for a config built on it; the hashes' test passes before and after). Green:
+  3 passed; ruff, the format check and mypy clean.
+- Task 3 (543e5b5d): the shared cases and `dewpoint plugins message-cases`. Red: the module missing (1 error during
+  collection). The command wrote `frontend/src/test/messageCases.json`, 251,225 bytes. Green: 3 passed; static clean.
+
+Mid-slice rulings: none. Nothing pushed.
+
+### 4f-1, milestone 2 (2026-10-21)
+
+The owner approved milestone 1 ("approved").
+- Task 4 (1eafb0f6): `lib/messages.ts`, the renderers mirrored. Red: the module missing (no test ran). Green: 36 passed,
+  each of the eleven shared cases for Slack, Teams and Google Chat, and three of its own; the type check and ESLint
+  silent.
+- Task 5 (31b1580d): a template's text written in runs of 4,096 code points. Red: 1 failed, 10 passed (one part of
+  9,096 characters); the backend's 39 passed, the new one pinning that the engine takes parts in a row. Green: 11
+  passed and 39 passed; both sides' static checks clean.
+- Task 6 (148a32bb): text and pills as lines, Enter, Backspace and the caret's moves. Red: 6 failed, 28 passed (as the
+  plan says; Enter in a one-line field passes before and after). Green: 34 passed; static silent. The editor's and
+  lib's suites after it: 951 passed in 72 files.
+
+Mid-slice rulings: none. Nothing pushed.
+
+### 4f-1, milestone 3 (2026-10-21)
+
+The owner approved milestone 2 ("approved").
+- Task 7 (9cdc5753): the composer on a message step's Setup (`settingsOf`, `MessageComposer`, `FieldView`'s `drawn`).
+  Red: 9 failed, 62 passed (no "Message" group, Setup's order, Options' line; the generic-form fallback passes before
+  and after, as do `FieldView`'s and `structured`'s own tests). Green: 71 passed; static silent.
+- Task 8 (ae84e16d): the previews and what a target would cut (`draftOf`, `cutWords`, `MessagePreview`, the frame's
+  warning). Red: 18 failed, 11 passed (as the plan says). Green: 29 passed; static silent.
+- Task 9 (2e379f0c): the connection's type by its label, the text's words, read only, Simulate's words. Red: 9 failed,
+  26 passed. Green: 35 passed; static silent.
+- The whole frontend suite after it: 1496 passed in 108 files (main: 1415 in 104).
+
+Mid-slice rulings: none. Nothing pushed.
+
+### 4f-1, milestone 4 and the final checkpoint (2026-10-21)
+
+The owner approved milestone 3 and left the e2e spec to CI ("approved, leave the e2e to CI").
+- Task 10 (6e64659a): `e2e/composer.spec.ts` with its fixture (a Slack step without a connection; nothing published or
+  sent), the workflows project running it; the composer's own buttons 44 px below 640 px. Type-checked and linted;
+  not run locally, on the owner's word: it runs in CI's e2e job.
+- The checks at 6e64659a, as run: the frontend suite, 1496 passed in 108 files (main: 1415 in 104); ESLint silent; the
+  build done (the entry 649.9 kB, main 649.7; the editor's shared chunk 361.9 kB, main 341.9; the editor's script
+  146.6 kB); `check:api` passes; the backend's `tests/plugins`, `tests/engine/graph` and `tests/sdk`, 1953 passed;
+  ruff, the format check and mypy clean; CodeQL (CLI 2.27.2, CI's filter; python-queries 1.8.13, javascript-queries
+  2.4.8): no finding in either language.
+
+Mid-slice rulings over the slice: none. The final review follows. Nothing pushed.
+
+### 4f-1, the final review (2026-10-21)
+
+The owner had the branch pushed and PR #134 opened while the review ran ("commit, push and pr"). A fresh reviewer
+(Fable) on b9549821..47d866b2, read only: no critical finding, 2 important, 6 minor; "With fixes". Each Review Focus
+case is pinned by the test the plan names; the mirror matches the renderers branch by branch; the hint reaches a synced
+deployment in place. Re-graded by effect, the two important ones stand, fixed test-first, each test failing first
+(ea599f23):
+- a text pasted where several lines are typed keeps its line breaks (an input strips them: a pasted log became one
+  line);
+- an input method's Enter and arrows are its own while it composes (Firefox and Safari report them as themselves:
+  Enter split the line, ↑ and ↓ left the input).
+The frontend suite after the fixes: 1498 passed in 108 files; the type check and ESLint silent.
+
+Deferred minors (a follow-up issue, on the owner's word): "If empty: info." under the severity's choices; Slack's
+count under the text not described to it; the mirror rendered three or four times per keystroke; `Rows` repeating
+`ListItems`' list edits; Remove sending focus to Add at the list's end; "(required)" beside each row's label and value.
+
+What the reviewer set aside, each ruled as it stands: a long line scrolling in its input (ruling 125); the link check
+reading the scheme only (§5.3); a computed title or text quoted in the webhook's JSON; "Loading connections…" while the
+types are read (ruling 321); a field value's Slack limit against a computed label (§5.5); ↑ and ↓ keeping the offset
+within a text, and Home and End passing pills (ruling 307); a private-use character of a person's own drawn as a value
+(ruling 316); "shortened first" when both tighten at once (ruling 317); the e2e spec proved in CI's job on #134.

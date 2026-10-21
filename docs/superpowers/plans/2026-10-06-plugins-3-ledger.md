@@ -780,6 +780,10 @@ integers; a port usage's `reauth_interval` null.
   13 skipped as before (9 with nothing in the test org to read their id from, 4 insight reads needing a `metrics`
   query). Every curated read the probe could reach runs as shipped against this org.
 
+**Signed off** (2026-10-20, in chat, while the editor's 4f was proposed): the owner signed off this section's rulings
+as merged (#49, `bc4c840`), among them the Mist pickers for site and organisation ids only, and the update contract (a
+top-level `body`, merge or replace, `clear`). Recorded by the editor's 4f-1 plan, Task 1.
+
 ## 3b-2 Mist device utilities
 
 Branch `feat/plugins-3b2` from `origin/main` 5e79a10 (#51, after 3b-1's #49 and its follow-up #50), started 2026-10-07:

@@ -2,9 +2,10 @@
 // A step test's result in its Test tab (4d-1c; the simulation design §7.6; the TestResult board): where it is while it
 // runs; once ended, what a simulation proves, its status and where its data came from, its attempt, revision and run,
 // a failure's code and message, the port a branch took or what a step set, the values used ("seeded", sensitive ones
-// redacted) and its output.
+// redacted) and its output. A message step's says what it would cut (4f-1, the message composer design §5.6).
 import type { ReactNode } from "react";
 import { Button } from "../../../components/Button";
+import { simulatedCut } from "../../../lib/composer";
 import { runId } from "../../../lib/runStatus";
 import { ENDED, type StepSummary } from "../../../lib/simulations";
 import { StatusChip } from "./chips";
@@ -55,6 +56,7 @@ export function StepResult({ session, stepKey, attemptsOf }: {
   const final = s?.final;
   const max = s ? attemptsOf(s) : null;
   const attempt = field(final, "attempt");
+  const cut = s ? simulatedCut(s.type, field(final, "output")) : null;
   const facts = state
     ? [typeof attempt === "number" && max ? `attempt ${attempt} of ${max}` : null, `revision ${state.request.draft_revision}`, `run ${runId(state.request.id)}`]
     : [];  // prettier-ignore
@@ -69,7 +71,7 @@ export function StepResult({ session, stepKey, attemptsOf }: {
       {ended && state && phase !== "refused" && phase !== "dead" && (
         <>
           <SimBanner>
-            <p><strong>Simulated.</strong> Nothing was sent. Results don&apos;t prove the live call will succeed.</p>
+            <p><strong>Simulated.</strong> Nothing was sent.{cut && ` ${cut}`} Results don&apos;t prove the live call will succeed.</p>
           </SimBanner>
           <p className="flex flex-wrap items-center gap-2">
             <StatusChip phase={phase} />

@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // A step's drawer (4c-1, §10.3; it replaces 4b's panel, ruling 2). At the top: its key, its type, how it runs and what
 // a failure does. Then the problems that belong to no field. Then its settings on two tabs, generated from its type's
-// schema, the required ones on Setup and the rest on Options (ruling 3). Then how its formulas run, and, for an
+// schema, the required ones on Setup and the rest on Options (ruling 3); a message, written in the composer on Setup
+// (4f-1). Then how its formulas run, and, for an
 // editor, 4b's actions: its "+" twins (WCAG 2.5.8), where it sits (2.5.7), its edges. Escape closes it as Close does
 // and gives focus back to the step. What its fields do to the draft goes through `actions`, the editor's (ruling 18).
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Button } from "../../../components/Button";
 import { Tabs } from "../../../components/Tabs";
-import { fieldsOf, tabsOf, type FieldSpec } from "../../../lib/schemaForm";
+import { optionsLine, targetOf } from "../../../lib/composer";
+import { fieldsOf, settingsOf, type FieldSpec } from "../../../lib/schemaForm";
 import type { UnappliedKind } from "../../../lib/unapplied";
 import type { Diagnostic, Expression, GraphNode, NodeType } from "../../../lib/workflows";
 import type { ItemAction } from "../items";
@@ -16,6 +18,7 @@ import { DrawerContext, problemsAt, segment, type DrawerActions } from "./contex
 import { ErrorHandling, chipText } from "./ErrorHandling";
 import { FieldView } from "./FieldView";
 import { KeyField } from "./KeyField";
+import { MessageComposer } from "./MessageComposer";
 
 const EFFECTS: Record<NodeType["side_effect"], string> = {
   none: "Changes nothing",
@@ -108,8 +111,9 @@ export function StepDrawer({
     if (!focusField) heading.current?.focus();
   }, [node.id]);
   const fields = useMemo(() => (type ? fieldsOf(type) : []), [type]);
-  const { setup, options } = tabsOf(fields);
-  const [tab, setTab] = useState<Tab>(result ? "result" : test && testAt ? "test" : setup.length > 0 ? "setup" : "options");
+  const { setup, message, options } = type ? settingsOf(type, fields) : { setup: [], message: null, options: [] };
+  const onSetup = [...setup, ...(message ?? [])]; // what Setup shows: a message's parts too
+  const [tab, setTab] = useState<Tab>(result ? "result" : test && testAt ? "test" : onSetup.length > 0 ? "setup" : "options");
   useEffect(() => {
     if (test && testAt) setTab("test");
   }, [testAt]);
@@ -124,7 +128,7 @@ export function StepDrawer({
     if (focusField.kind === "limit") setHandling(true);
     else if (focusField.kind !== "key") {
       const first = focusField.pointer.split("/")[1] ?? "";
-      if (setup.some((f) => segment(f.name) === first)) setTab("setup");
+      if (onSetup.some((f) => segment(f.name) === first)) setTab("setup");
       else if (options.some((f) => segment(f.name) === first)) setTab("options");
     }
     pending.current = { pointer: focusField.pointer, kind: focusField.kind };
@@ -253,7 +257,11 @@ export function StepDrawer({
                 content: !type ? (
                   UNKNOWN
                 ) : fields.length > 0 ? (
-                  [...setup, ...options].map((f) => <FieldView key={f.pointer} spec={f} />)
+                  <>
+                    {setup.map((f) => <FieldView key={f.pointer} spec={f} />)}
+                    {message && <MessageComposer parts={message} />}
+                    {options.map((f) => <FieldView key={f.pointer} spec={f} />)}
+                  </>
                 ) : (
                   <p className="text-small text-muted">This step has nothing to set up.</p>
                 ),
@@ -272,8 +280,14 @@ export function StepDrawer({
             tabs={[
               {
                 value: "setup",
-                label: tabLabel("Setup", counted(mine, setup)),
-                content: setup.length > 0 ? (
+                label: tabLabel("Setup", counted(mine, onSetup)),
+                content: message ? (
+                  // Each says whether it's required: Setup holds the message's optional parts too (4f-1).
+                  <>
+                    {setup.map((f) => <FieldView key={f.pointer} spec={f} drawn={{ marked: true }} />)}
+                    <MessageComposer parts={message} />
+                  </>
+                ) : setup.length > 0 ? (
                   <>
                     <p className="text-small text-muted">Each of these is required.</p>
                     {setup.map((f) => <FieldView key={f.pointer} spec={f} />)}
@@ -285,9 +299,14 @@ export function StepDrawer({
               {
                 value: "options",
                 label: tabLabel("Options", counted(mine, options)),
-                content: options.length > 0
-                  ? options.map((f) => <FieldView key={f.pointer} spec={f} />)
-                  : <p className="text-small text-muted">Nothing else to set.</p>,
+                content: (
+                  <>
+                    {message && <p className="text-small text-muted">{optionsLine(targetOf(type))}</p>}
+                    {options.length > 0
+                      ? options.map((f) => <FieldView key={f.pointer} spec={f} />)
+                      : <p className="text-small text-muted">Nothing else to set.</p>}
+                  </>
+                ),
               },
               ...(test ? [{ value: "test" as const, label: "Test", content: test }] : []),
             ]}

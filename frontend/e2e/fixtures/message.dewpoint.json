@@ -1,0 +1,32 @@
+{
+  "format": "dewpoint.workflow",
+  "format_version": 1,
+  "name": "Message",
+  "graph": {
+    "graph_format": 1,
+    "nodes": [
+      {
+        "id": "4f100001-0000-4000-8000-000000000001",
+        "key": "notify",
+        "type": "slack.send_message@1",
+        "config": {
+          "title": { "$value": { "kind": "template", "parts": [{ "text": "AP offline at " }, { "ref": "trigger.site" }] } },
+          "text": "Access point stopped reporting.",
+          "fields": [{ "label": "Site", "value": { "$value": { "kind": "ref", "path": "trigger.site" } } }],
+          "severity": "warning"
+        },
+        "position": { "x": 0, "y": 140 }
+      }
+    ],
+    "edges": [],
+    "settings": {
+      "input_schema": {
+        "type": "object",
+        "properties": { "site": { "type": "string" } },
+        "required": ["site"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "bindings": []
+}

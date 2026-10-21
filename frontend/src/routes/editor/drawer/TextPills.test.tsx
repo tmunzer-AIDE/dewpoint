@@ -3,7 +3,9 @@ import { act, fireEvent, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ScopeEntry } from "../../../lib/data";
+import { fieldsOf } from "../../../lib/schemaForm";
 import { typeWith } from "../../../test/nodeTypes";
+import { FieldView } from "./FieldView";
 import { fakeApi, json, NODE_ID, showFields } from "./harness";
 
 const NOTE = typeWith(
@@ -223,5 +225,99 @@ describe("text with data pills", () => {
     showFields(NOTE, { steps, revision: null, editable: false, config: { message: template({ ref: "run.now" }) } });
     expect(screen.getByRole("button", { name: /^run › now/ })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "＋ Data" })).toBeNull();
+  });
+});
+
+describe("text on several lines (4f-1, the message composer design §5.2)", () => {
+  const lines = (config: Record<string, unknown>) =>
+    showFields(NOTE, { steps, config }, <FieldView spec={fieldsOf(NOTE)[0]!} drawn={{ lines: true }} />);
+  const caretIn = (input: HTMLElement, at: number) => {
+    expect(document.activeElement).toBe(input);
+    expect((input as HTMLInputElement).selectionStart).toBe(at);
+  };
+
+  it("starts a new line with Enter at the caret, each line its own row", async () => {
+    const f = lines({ message: "AP down" });
+    const first = screen.getByLabelText<HTMLInputElement>("Message");
+    await userEvent.click(first);
+    first.setSelectionRange(2, 2);
+    await userEvent.keyboard("{Enter}");
+    expect(f.config()).toEqual({ message: "AP\n down" });
+    await waitFor(() => caretIn(screen.getByRole("textbox", { name: "Message, line 2" }), 0));
+    expect(screen.getByText("Press / or ＋ Data to add a value; Enter starts a new line.")).toBeTruthy();
+  });
+
+  it("joins a line to the one above with Backspace at its start", async () => {
+    const f = lines({ message: "AP\ndown" });
+    const second = screen.getByRole<HTMLInputElement>("textbox", { name: "Message, line 2" });
+    await userEvent.click(second);
+    second.setSelectionRange(0, 0);
+    await userEvent.keyboard("{Backspace}");
+    expect(f.config()).toEqual({ message: "APdown" });
+    await waitFor(() => caretIn(screen.getByLabelText("Message"), 2));
+  });
+
+  it("keeps the lines of a text with values, and writes what's typed on a line back into its part", async () => {
+    const value = template({ text: "Access point " }, { ref: "steps.get_site.output.name" }, { text: " stopped.\nLast seen " }, { ref: "run.now" });
+    const f = lines({ message: value });
+    expect(screen.getAllByRole("textbox").map((t) => t.getAttribute("aria-label"))).toEqual([
+      null, "Message, text after get_site › name", "Message, line 2", "Message, text after run › now",
+    ]);  // prettier-ignore
+    await userEvent.type(screen.getByRole("textbox", { name: "Message, line 2" }), "at");
+    expect(f.config()).toEqual({
+      message: template({ text: "Access point " }, { ref: "steps.get_site.output.name" }, { text: " stopped.\nLast seen at" }, { ref: "run.now" }),
+    });
+  });
+
+  it("moves between lines with ↑ and ↓, across a line's end with ← and →, and to its ends with Home and End", async () => {
+    lines({ message: "first line\nsecond" });
+    const [first, second] = [screen.getByLabelText("Message"), screen.getByRole("textbox", { name: "Message, line 2" })];
+    await userEvent.click(second);
+    (second as HTMLInputElement).setSelectionRange(3, 3);
+    await userEvent.keyboard("{ArrowUp}");
+    caretIn(first, 3);
+    await userEvent.keyboard("{ArrowDown}");
+    caretIn(second, 3);
+    await userEvent.keyboard("{End}");
+    caretIn(second, 6);
+    await userEvent.keyboard("{Home}");
+    caretIn(second, 0);
+    await userEvent.keyboard("{ArrowLeft}");
+    caretIn(first, 10);
+    await userEvent.keyboard("{ArrowRight}");
+    caretIn(second, 0);
+  });
+
+  it("shows a newline already in a one-line field's value on its own row, and keeps it", async () => {
+    const f = showFields(NOTE, { steps, config: { message: "AP\ndown" } });
+    await userEvent.type(screen.getByRole("textbox", { name: "Message, line 2" }), "!");
+    expect(f.config()).toEqual({ message: "AP\ndown!" });
+  });
+
+  it("keeps the line breaks of a text pasted where several lines are typed (the final review)", async () => {
+    const f = lines({ message: "AP down" });
+    const first = screen.getByLabelText<HTMLInputElement>("Message");
+    await userEvent.click(first);
+    first.setSelectionRange(2, 2);
+    await userEvent.paste("\nline 2\r\nline 3");
+    expect(f.config()).toEqual({ message: "AP\nline 2\nline 3 down" });
+    await waitFor(() => caretIn(screen.getByRole("textbox", { name: "Message, line 3" }), 6));
+  });
+
+  it("leaves Enter and the arrows to a composition in progress, as an IME types (the final review)", () => {
+    const f = lines({ message: "AP\ndown" });
+    const first = screen.getByLabelText<HTMLInputElement>("Message");
+    first.focus();
+    first.setSelectionRange(2, 2);
+    fireEvent.keyDown(first, { key: "Enter", isComposing: true });
+    fireEvent.keyDown(first, { key: "ArrowDown", isComposing: true });
+    expect(f.config()).toEqual({ message: "AP\ndown" });
+    expect(document.activeElement).toBe(first);
+  });
+
+  it("keeps a one-line field on one line: Enter adds nothing", async () => {
+    const f = showFields(NOTE, { steps, config: { message: "AP" } });
+    await userEvent.type(screen.getByLabelText("Message"), "{Enter}");
+    expect(f.config()).toEqual({ message: "AP" });
   });
 });
