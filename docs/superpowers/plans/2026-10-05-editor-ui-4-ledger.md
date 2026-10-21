@@ -3950,3 +3950,40 @@ The composer's "adds fields up to 25…" (4f-1's) timed out twice in five full r
 CodeQL), and took 4,880 ms in the run that passed: alone it takes 1.17 s. It isn't this slice's: main a4b677ab's own
 full suite timed it out too (5,856 ms) on this machine. Left as it is; a follow-up on the owner's word. Mid-slice
 rulings: none. Nothing pushed. Next: the final review.
+
+### 4f-2b, the final review (2026-10-22)
+
+A fresh reviewer (Fable) read the branch against the plan, its Review Focus and the spec: no critical finding, six
+important, sixteen minor. It confirmed the one-write changes, the pruning in the write path, the memory above the tabs,
+the cached index, and the e2e spec's assumptions against the real manifest (93 offered, "Remote syslog", the WLAN's
+`ssid` required, the device's kinds and its AP-only height). Fixed, each test-first (cfd9cfdf):
+- a Set under a body a formula gives overwrote it with `{}`: no Set there, and no action writes into such a body;
+- a `clear` held as a formula was rewritten by every row action and a change of kind: left as it is; a change of kind
+  keeps the names no kind offers;
+- finding a setting through a list or a map from "＋ Another setting of …" did nothing: one path for both searches;
+- a kind chosen here outlived an Undo that brought back a setting it lacks (hidden, still sent): it counts only while
+  it fits the rows;
+- a problem at a part no row draws (a list item's read-only `id`) was lost: it stays on the part that holds it; "Nothing
+  to change" now only when nothing is sent;
+- focus was dropped after Set, Clear, Keep and Remove: it goes to the row's control, its pressed choice, or the "＋ …"
+  that adds another (WCAG 2.4.3).
+The frontend suite after the pass: 1588 passed in 114 files; static silent.
+
+Mid-slice ruling:
+- M114. **The composer's "adds fields up to 25…" (4f-1's) gets 15 s** (409b422c): it timed out in three of six full runs
+  here (5.27 to 6.61 s; main a4b677ab's own suite too, 5.86 s), 1.1 s alone. Cost: a real hang there takes 15 s to say.
+
+Deferred minors (a follow-up issue, on the owner's word): a Set object row's description replaced by the merge or
+replace words (both belong); the merge/replace radio group's name doesn't hold its visible label; the kind's status
+region mounted with its text; the new entry's key refusal not linked to its input, the typed key surviving Escape,
+`$value` not refused as a key; items keyed by index (not `lineageKey`); "Move up: item 2" without the list's name; a
+nested object emptied by Remove vanishing from its parent; an emptied list sent as `[]` without saying so; "· In
+Changes" on every nested hit of a listed setting; a union without a kind drawing an empty list (no such Mist type);
+branches and offered settings rebuilt on every render (memoize on the body); Set on an already-pressed pending row
+making an empty Undo step; read only not saying a device's kind or showing a `clear` the list can't draw; a union body
+held as a literal drawing the list and its formula words together; `in` where `Object.hasOwn` belongs (changes.ts).
+
+What the reviewer set aside, each ruled as it stands: a body switched to Formula starting empty when it holds a
+sensitive part (M25's rule); Find matching substrings and its path words (ruling 352); an update's kind not saved
+(ruling 357); a map entry opening only its first part for a deeper hit (ruling 354); `/` or `~` in a setting's name
+(none in Mist); the composer's timeout (now M114); the listbox's height at 320 px (unspecified).
