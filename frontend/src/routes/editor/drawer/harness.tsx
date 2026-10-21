@@ -15,8 +15,9 @@ import {
   applyAll, applyUnapplied, baseOf, droppedWhy, isStale, lineageOf, unappliedId, within, type Unapplied, type UnappliedKind,
 } from "../../../lib/unapplied";  // prettier-ignore
 import type { Diagnostic, Expression, GraphDoc, NodeType } from "../../../lib/workflows";
-import { DrawerContext, type Drawer } from "./context";
+import { DrawerContext, useDrawer, type Drawer } from "./context";
 import { FieldView } from "./FieldView";
+import { StepDrawer } from "./StepDrawer";
 
 export const NODE_ID = "00000000-0000-4000-8000-000000000001";
 export type Edit = { path: Path; value: unknown; mark: string | undefined };
@@ -180,6 +181,21 @@ export function showFields(type: NodeType, options: Options = {}, children?: Rea
     },
     client,
   };
+}
+
+/** The step's whole drawer, its settings on their tabs, over the same one-step draft (4f-1: where the composer shows). */
+export const showDrawer = (type: NodeType, options: Options = {}) => showFields(type, options, <InDrawer />);
+
+function InDrawer() {
+  const d = useDrawer();
+  const none = () => undefined;
+  return (
+    <StepDrawer
+      node={d.node} type={d.type} tenantId={d.tenantId} workflowId={d.workflowId} revision={d.revision} steps={d.steps} ports={[]}
+      problems={d.problems} expressions={d.expressions} editable={d.editable} adds={[]} actions={d} note={null} focusField={null}
+      onAdd={none} onDelete={none} onConnectPort={none} onPlace={none} onNudge={none} onClose={none}
+    />
+  );  // prettier-ignore
 }
 
 /** A problem the server found at a field of the step. */

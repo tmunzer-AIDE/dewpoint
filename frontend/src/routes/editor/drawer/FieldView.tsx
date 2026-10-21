@@ -92,9 +92,19 @@ const startMode = (spec: FieldSpec, value: unknown): Mode =>
   : value !== undefined && value !== null ? "fixed"
   : startsAsFormula(spec) ? "formula" : "fixed";  // prettier-ignore
 
-/** How the message composer draws one of its parts (4f-1, the message composer design §5): the text on several lines. */
+/** How the message composer draws one of its parts (4f-1, the message composer design §5): its own control (the
+ * severity's choices) or its own rows (the fields', the links'), the text on several lines, a check said as it's typed
+ * (a link's address), its hint in place of the schema's, without the note on pills (`quiet`), "(required)" said at the
+ * top level (`marked`: Setup holds optional parts too), and what's said under it. */
 export interface Drawn {
+  control?: Control;
+  parts?: (spec: FieldSpec, value: unknown) => ReactNode;
   lines?: boolean;
+  check?: (value: unknown) => string | null;
+  hint?: string | null;
+  quiet?: boolean;
+  marked?: boolean;
+  below?: ReactNode;
 }
 
 export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn }) {
@@ -180,7 +190,9 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
   const json = asJson || held?.kind === "json" || kind === "unknown" || (kind === "literal" && isContainer(spec.base));
   const container = mode === "fixed" && fixedOk && !computed && !hidden && !json && isContainer(spec.base);
   const problems = problemsAt(drawer.problems, spec.pointer, container ? new Set(partNames(spec, fixed)) : null);
-  const required = spec.required && !spec.entry && spec.path.length > 1;
+  const required = spec.required && !spec.entry && (spec.path.length > 1 || drawn.marked === true);
+  const hint = drawn.hint !== undefined ? drawn.hint : spec.hint;
+  const checked = drawn.check?.(value) ?? null; // said where a refusal would be, after it
   // A list's item or a map's entry, emptied, keeps its place, blank: never missing on its own (the final review).
   const missing = spec.required && !spec.entry && touched && (empty || value === "") ? "Required" : null;
   const switchTo = (next: Mode) =>
@@ -236,7 +248,7 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
           ＋ Data
         </Button>
       )}
-      {mode === "fixed" && fixedOk && !computed && !hidden && kind === null && isContainer(spec.base) && !spec.holdsSensitive && (
+      {mode === "fixed" && fixedOk && !computed && !hidden && kind === null && isContainer(spec.base) && !spec.holdsSensitive && !drawn.parts && (
         // Pressed as Segmented's options are, by weight and fill from its tokens, while it's on (the owner's ruling O1).
         <Button
           size="sm" aria-pressed={json} onClick={toggleJson}
@@ -278,8 +290,8 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
       )}
     </>
   );
-  const frame = (control: (c: Described) => ReactNode, hint: string | null = spec.hint, below?: ReactNode) => (
-    <FieldFrame label={spec.label} required={required} hint={hint} local={stale ? STALE : (held?.why ?? local ?? missing)} problems={problems} actions={actions} below={below}>
+  const frame = (control: (c: Described) => ReactNode, said: string | null = hint, below: ReactNode = drawn.below) => (
+    <FieldFrame label={spec.label} required={required} hint={said} local={stale ? STALE : (held?.why ?? local ?? missing ?? checked)} problems={problems} actions={actions} below={below}>
       {control}
     </FieldFrame>
   );
@@ -287,7 +299,7 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
     ? JsonControl
     : spec.port
       ? PortControl
-      : (controlFor(spec.widget === "formula" ? spec.base : spec.widget) ?? controlFor(spec.base) ?? JsonControl);
+      : (drawn.control ?? controlFor(spec.widget === "formula" ? spec.base : spec.widget) ?? controlFor(spec.base) ?? JsonControl);
   const Held = held && held.kind !== "template" ? heldControl(held.kind, spec) : null;
   // A decision that reads sensitive data (the server's taint.undeclassified, under its field): the list where it's
   // declassified is a click away (4c-2b, the builder's and the formula's boards).
@@ -309,7 +321,7 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
     says = runs !== null;
     body = (
       <GroupFrame
-        label={spec.label} required={required} hint={spec.hint} local={held?.why ?? local ?? missing} problems={problems} actions={actions}
+        label={spec.label} required={required} hint={hint} local={held?.why ?? local ?? missing} problems={problems} actions={actions}
         below={<>{runs && <p className="text-small text-muted">{runs}</p>}{declassifiable}</>}
       >
         <ConditionBuilder key={generation} spec={spec} value={value} disabled={disabled} onChange={write} />
@@ -318,8 +330,8 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
   } else if (held?.kind === "template" || (mode === "fixed" && asText && !hidden && !(held && Held))) {
     // Text with data pills: what's held, or the value, as text and pills (4c-2b).
     // "/" and "＋ Data" work where the person may edit the draft: the note says them only there (#85).
-    const pillsNote = disabled || drawer.revision === null ? PILLS_SEEN : drawn.lines ? LINES_NOTE : PILLS_NOTE;
-    body = frame(textPills, joined(spec.hint, (held?.literal ?? kind === "literal") ? LITERAL_NOTE : null, pillsNote));
+    const pillsNote = drawn.quiet ? null : disabled || drawer.revision === null ? PILLS_SEEN : drawn.lines ? LINES_NOTE : PILLS_NOTE;
+    body = frame(textPills, joined(hint, (held?.literal ?? kind === "literal") ? LITERAL_NOTE : null, pillsNote));
   } else if (held && Held) {
     // What's held shows first, before what the value under it has become (a reference, a hidden secret, another
     // mode): it stays visible, and recoverable, until it's applied or discarded (the review of revision 3).
@@ -330,7 +342,7 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
           literal={held.literal ?? false} disabled={disabled} onChange={held.kind === "formula" ? write : writeFixed}
         />
       ),
-      joined(spec.hint, held.literal ? LITERAL_NOTE : held.kind === "json" ? JSON_NOTE : null),
+      joined(hint, held.literal ? LITERAL_NOTE : held.kind === "json" ? JSON_NOTE : null),
     );  // prettier-ignore
   } else if (hidden) {
     body = frame((c) => (
@@ -351,7 +363,7 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
           {computed ? referenceText(value) : empty ? "Not set" : "A value this field doesn't take"}
         </output>
       ),
-      joined(spec.hint, NEITHER),
+      joined(hint, NEITHER),
     );
   } else if (computed) {
     body = frame((c) => (
@@ -372,7 +384,7 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
     says = runs !== null;
     body = frame(
       (c) => <FormulaControl key={generation} {...c} spec={spec} value={value} literal={false} disabled={disabled} onChange={write} />,
-      spec.hint,
+      hint,
       <>
         {runs && <p className="text-small text-muted">{runs}</p>}
         {declassifiable}
@@ -380,8 +392,8 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
     );
   } else if (container) {
     body = (
-      <GroupFrame label={spec.label} required={required} hint={spec.hint} local={local ?? missing} problems={problems} actions={actions}>
-        <ContainerParts spec={spec} value={fixed} />
+      <GroupFrame label={spec.label} required={required} hint={hint} local={local ?? missing} problems={problems} actions={actions}>
+        {drawn.parts ? drawn.parts(spec, fixed) : <ContainerParts spec={spec} value={fixed} />}
       </GroupFrame>
     );
   } else if (spec.holdsSensitive && Control === JsonControl) {
@@ -396,7 +408,7 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
       (c) => (
         <Control key={generation} {...c} spec={spec} value={fixed} literal={kind === "literal"} disabled={disabled} onChange={writeFixed} />
       ),
-      joined(spec.hint, note),
+      joined(hint, note),
     );
   }
   // Said here, so the drawer's list of how its formulas run leaves it out (the owner's ruling O4).

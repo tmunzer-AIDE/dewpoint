@@ -198,6 +198,20 @@ export const tabsOf = (fields: FieldSpec[]) => ({
   options: fields.filter((f) => !f.required),
 });
 
+/** The message's parts, in the composer's order (4f-1, the message composer design §5.1). */
+export const MESSAGE_PARTS = ["severity", "title", "text", "fields", "links"];
+
+/** A step's settings on their tabs. With the composer's hint at its config's root (`x-widget: "message"`) and the
+ * message's text, the message's parts are drawn together on Setup, after its required fields, optional ones included
+ * (ruling 98, amended for a message); without its text, the generic form (ruling 100). */
+export function settingsOf(type: NodeType, fields: FieldSpec[]): { setup: FieldSpec[]; message: FieldSpec[] | null; options: FieldSpec[] } {
+  const message =
+    type.config_schema["x-widget"] === "message" && fields.some((f) => f.name === "text")
+      ? MESSAGE_PARTS.flatMap((name) => fields.filter((f) => f.name === name))
+      : null;
+  return { ...tabsOf(message ? fields.filter((f) => !message.includes(f)) : fields), message };
+}
+
 /** Where the engine takes a fixed value: not in a sensitive field (sensitive.literal), and `literal` among its kinds. */
 export const canFixed = (f: FieldSpec): boolean => !f.sensitive && (f.kinds === null || f.kinds.includes("literal"));
 
