@@ -12,7 +12,7 @@ import { STALE, type UnappliedKind } from "../../../lib/unapplied";
 import { problemsAt, useDrawer, useSession } from "./context";
 import { FieldFrame, GroupFrame, type Described } from "./FieldFrame";
 import { FormulaControl, ModeSwitch, ReferenceView, SensitiveView, runsText, type Mode } from "./Formula";
-import { OptionsControl } from "./LiveOptions";
+import { ChoicesBelow, OptionsControl } from "./LiveOptions";
 import { ConnectionControl, WorkflowControl } from "./pickers";
 import {
   BooleanControl, CUT_NOTE, EnumControl, JSON_NOTE, JsonControl, LITERAL_NOTE, NumberControl, TextControl,
@@ -28,6 +28,8 @@ const NEITHER = "This field takes only references or text with references, which
 export const PILLS_NOTE = "Press / or ＋ Data to insert data from earlier steps. A dashed pill may be missing when this runs: give it a default.";
 /** What a text on several lines says, under the message's text (4f-1). */
 export const LINES_NOTE = "Press / or ＋ Data to add a value; Enter starts a new line.";
+/** Under a field that takes values and has choices (4f-2, ruling 127 amended). */
+export const CHOICES_NOTE = "A value from an earlier step, or one of the connection's choices: Show choices lists them.";
 /** What a viewer and a version's view are told: they can't insert data or give a default (#85). */
 export const PILLS_SEEN = "A dashed pill may be missing when this runs.";
 
@@ -333,7 +335,28 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
     // Text with data pills: what's held, or the value, as text and pills (4c-2b).
     // "/" and "＋ Data" work where the person may edit the draft: the note says them only there (#85).
     const pillsNote = drawn.quiet ? null : disabled || drawer.revision === null ? PILLS_SEEN : drawn.lines ? LINES_NOTE : PILLS_NOTE;
-    body = frame(textPills, joined(hint, (held?.literal ?? kind === "literal") ? LITERAL_NOTE : null, pillsNote));
+    const choosing = spec.widget === "options";
+    // Its choices under it: a pick replaces what's there, as text (4f-2). The query is its written text, if it's only that.
+    const written = segmentsOf(value);
+    const choices = choosing && (
+      <ChoicesBelow
+        spec={spec} query={written !== null && written.pills.length === 0 ? written.texts.join("") : ""} current={value} disabled={disabled}
+        onDone={refocus}
+        onPick={(choice) => {
+          const why = writeFixed(choice, false);
+          if (why === null) {
+            drawer.release("template", spec.pointer);
+            setGeneration((g) => g + 1);
+          }
+          return why;
+        }}
+      />
+    );  // prettier-ignore
+    body = frame(
+      textPills,
+      joined(hint, (held?.literal ?? kind === "literal") ? LITERAL_NOTE : null, choosing ? CHOICES_NOTE : null, pillsNote),
+      choices ? <>{drawn.below}{choices}</> : drawn.below,
+    );
   } else if (held && Held) {
     // What's held shows first, before what the value under it has become (a reference, a hidden secret, another
     // mode): it stays visible, and recoverable, until it's applied or discarded (the review of revision 3).
