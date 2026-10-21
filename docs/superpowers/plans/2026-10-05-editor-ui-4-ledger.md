@@ -3814,3 +3814,16 @@ Mid-slice rulings:
 
 The plan's Expected for the hashes file named its last key wrongly ("mist.site_wxrules.update@1"; sorted, the file
 ends at "mist.site_zone_stats.list@1"): the file is right. Nothing pushed.
+
+### 4f-2a, milestone 2 (2026-10-21)
+
+The owner approved milestone 1 ("approved").
+- Task 3 (c5fd617c): `lib/stepGroups.ts`, and the drawer's group line. Red: 1 failed, 1 passed (`stepGroups.test.ts`
+  couldn't import its module; no "Acme · Org WLANs" in the drawer). Green: 9 passed; the type check and ESLint silent.
+- Task 4 (d7cc30ad): the picker by group. Red: 5 failed, 3 passed (no group shown; "wlan" listed the steps; the
+  connection named by its key). Green: 8 passed; the editor's 169 passed; static silent.
+- Task 5 (d43e009a): a path id with choices takes values; the choices a list under it. Red: 7 failed, 28 passed (no
+  pills in an options field; a select, not a list). Green: 35 passed; static silent.
+
+The whole frontend suite: 1517 passed in 110 files (main has 1498 in 108). Mid-slice rulings: none beyond M113. Nothing
+pushed.
