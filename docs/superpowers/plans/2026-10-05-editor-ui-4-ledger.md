@@ -3922,3 +3922,17 @@ The owner approved milestone 1 ("approved").
   passed; static silent.
 
 The whole frontend suite: 1565 passed in 113 files. Mid-slice rulings: none. Nothing pushed.
+
+### 4f-2b, milestone 3 (2026-10-21)
+
+The owner approved milestone 2 ("approved").
+- Task 8 (373f2a15): only the parts given; a map's entries by key; a list's items by number. Red: 5 failed, 2 passed
+  (every part drawn; no entry or list controls); "adds a nested setting from Find…" and "keeps a secret one field…"
+  pass at once (Task 7 already adds; a secret was already one field). Green: 7 passed; static silent.
+- Task 9 (09999e79): a create's required settings first; a device's kind. Red: 5 failed, 28 passed. Green: 33 passed;
+  static silent.
+
+The whole frontend suite: 1577 passed in 114 files on its second run. Its first run timed out one test outside this
+slice, the composer's "adds fields up to 25…" (5,274 ms against vitest's 5,000), under the full suite's load: alone it
+takes 1.17 s on this branch and 1.13 s on main a4b677ab, and passed three runs in three. Noted, not changed. Mid-slice
+rulings: none. Nothing pushed.
