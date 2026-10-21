@@ -10,6 +10,7 @@ import { Button } from "../../../components/Button";
 import { Tabs } from "../../../components/Tabs";
 import { optionsLine, targetOf } from "../../../lib/composer";
 import { fieldsOf, settingsOf, type FieldSpec } from "../../../lib/schemaForm";
+import { groupOf } from "../../../lib/stepGroups";
 import type { UnappliedKind } from "../../../lib/unapplied";
 import type { Diagnostic, Expression, GraphNode, NodeType } from "../../../lib/workflows";
 import type { ItemAction } from "../items";
@@ -111,6 +112,7 @@ export function StepDrawer({
     if (!focusField) heading.current?.focus();
   }, [node.id]);
   const fields = useMemo(() => (type ? fieldsOf(type) : []), [type]);
+  const group = type ? groupOf(type) : null; // its plugin's group: "Mist · Site settings" (4f-2)
   const { setup, message, options } = type ? settingsOf(type, fields) : { setup: [], message: null, options: [] };
   const onSetup = [...setup, ...(message ?? [])]; // what Setup shows: a message's parts too
   const [tab, setTab] = useState<Tab>(result ? "result" : test && testAt ? "test" : onSetup.length > 0 ? "setup" : "options");
@@ -211,6 +213,7 @@ export function StepDrawer({
             <KeyField onRenamed={() => requestAnimationFrame(() => heading.current?.focus())} />
             {note !== null && <p role="status" className="text-small">{note}</p>}
             <p className="text-small text-muted">{type ? `${type.title} · ${type.ref}` : `Unknown step type ${node.type}`}</p>
+            {group && <p className="text-small text-muted">{`${group.plugin} · ${group.title}`}</p>}
             {type && (
               <p className="text-small text-muted">
                 {type.kind === "control" ? "Runs in the engine" : `Runs as its own step · ${EFFECTS[type.side_effect]}`}

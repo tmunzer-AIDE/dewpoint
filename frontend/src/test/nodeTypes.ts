@@ -96,6 +96,21 @@ export const REMOTE = typeWith({
   },
 }, { ref: "acme.sites@1", type: "acme.sites", title: "Sites", options: ["site_id"], credentials: ["acme"] });  // prettier-ignore
 
+/** A made-up plugin's steps in groups (4f-2: `x-group` at the config's root), as Mist's are by resource. */
+const inGroup = (ref: string, title: string, group: string, more: Partial<NodeType> = {}) =>
+  typeWith(
+    { type: "object", additionalProperties: false, properties: {}, "x-group": { plugin: "Acme", title: group } },
+    { ref, type: ref.split("@")[0], title, credentials: ["acme"], side_effect: "idempotent", ...more },
+  );
+export const GROUPED = [
+  inGroup("acme.org_wlans.list@1", "List org WLANs", "Org WLANs", { side_effect: "none" }),
+  inGroup("acme.org_wlans.create@1", "Create org WLAN", "Org WLANs", { side_effect: "ambiguous" }),
+  inGroup("acme.org_wlans.update@1", "Update org WLAN", "Org WLANs"),
+  inGroup("acme.org_wlans.delete@1", "Delete org WLAN", "Org WLANs"),
+  inGroup("acme.site_wlans.list@1", "List site WLANs", "Site WLANs", { side_effect: "none" }),
+  inGroup("acme.site_settings.update@1", "Update site settings", "Site settings"),
+];
+
 const MESSAGE_DEFS = {
   MessageField: {
     type: "object", additionalProperties: false, title: "MessageField", required: ["label", "value"],
