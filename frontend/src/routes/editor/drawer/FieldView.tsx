@@ -95,7 +95,7 @@ const startMode = (spec: FieldSpec, value: unknown): Mode =>
 /** How the message composer draws one of its parts (4f-1, the message composer design §5): its own control (the
  * severity's choices) or its own rows (the fields', the links'), the text on several lines, a check said as it's typed
  * (a link's address), its hint in place of the schema's, without the note on pills (`quiet`), "(required)" said at the
- * top level (`marked`: Setup holds optional parts too), and what's said under it. */
+ * top level (`marked`: Setup holds optional parts too), a warning (what its target would cut) and what's said under it. */
 export interface Drawn {
   control?: Control;
   parts?: (spec: FieldSpec, value: unknown) => ReactNode;
@@ -104,6 +104,7 @@ export interface Drawn {
   hint?: string | null;
   quiet?: boolean;
   marked?: boolean;
+  warn?: string | null;
   below?: ReactNode;
 }
 
@@ -291,7 +292,7 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
     </>
   );
   const frame = (control: (c: Described) => ReactNode, said: string | null = hint, below: ReactNode = drawn.below) => (
-    <FieldFrame label={spec.label} required={required} hint={said} local={stale ? STALE : (held?.why ?? local ?? missing ?? checked)} problems={problems} actions={actions} below={below}>
+    <FieldFrame label={spec.label} required={required} hint={said} warn={drawn.warn} local={stale ? STALE : (held?.why ?? local ?? missing ?? checked)} problems={problems} actions={actions} below={below}>
       {control}
     </FieldFrame>
   );

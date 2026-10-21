@@ -3,13 +3,15 @@
 // place on Setup, the "Message" fieldset: its severity as four choices, its title, its text on several lines, its fields
 // and links as numbered rows. Each part is the drawer's own field (FieldView): what's typed, held, refused or computed by
 // a formula behaves as everywhere in the drawer, and a part it can't draw as its own shows today's control (ledger 102).
-import { useId, useRef, type ReactNode } from "react";
+// Then its preview, which follows every edit (§5.5).
+import { useId, useMemo, useRef, type ReactNode } from "react";
 import { Button } from "../../../components/Button";
-import { capWords, linkProblem, targetOf, titleHint } from "../../../lib/composer";
+import { capWords, cutsText, cutWords, draftOf, linkProblem, slackCount, targetOf, titleHint } from "../../../lib/composer";
 import { itemOf, propertiesOf, type FieldSpec } from "../../../lib/schemaForm";
 import { useDrawer } from "./context";
 import { FieldView, type Drawn } from "./FieldView";
 import type { ControlProps } from "./scalars";
+import { MessagePreview } from "./MessagePreview";
 import { lineageKey } from "./structured";
 
 const SEVERITIES: Record<string, string> = { info: "Info", success: "Success", warning: "Warning", critical: "Critical" };
@@ -103,9 +105,19 @@ function Rows({ spec, value, noun }: { spec: FieldSpec; value: unknown; noun: "f
   );  // prettier-ignore
 }
 
+/** Under the text: Slack's count, or what its target would cut of it, a warning linked to it (§5.2, §5.5). */
+function textDrawn(target: ReturnType<typeof targetOf>, draft: ReturnType<typeof draftOf>): Drawn {
+  if (target === null) return {};
+  const cuts = cutsText(target, draft);
+  if (target === "slack") return cuts ? { warn: slackCount(draft) } : { below: <p className="text-small text-muted">{slackCount(draft)}</p> };
+  return cuts ? { warn: cutWords(target, draft)[0] ?? null } : {};
+}
+
 export function MessageComposer({ parts }: { parts: FieldSpec[] }) {
   const drawer = useDrawer();
   const target = targetOf(drawer.type);
+  const config = drawer.node.config;
+  const draft = useMemo(() => draftOf(config ?? {}), [config]);
   const drawnFor = (name: string): Drawn => {
     switch (name) {
       case "severity":
@@ -113,7 +125,7 @@ export function MessageComposer({ parts }: { parts: FieldSpec[] }) {
       case "title":
         return { hint: titleHint(target), quiet: true, marked: true };
       case "text":
-        return { lines: true, marked: true };
+        return { lines: true, marked: true, ...textDrawn(target, draft) };
       case "fields":
         return { parts: (spec, value): ReactNode => <Rows spec={spec} value={value} noun="field" />, marked: true };
       case "links":
@@ -123,11 +135,14 @@ export function MessageComposer({ parts }: { parts: FieldSpec[] }) {
     }
   };
   return (
-    <fieldset className="flex min-w-0 flex-col gap-4">
-      <legend className="mb-1 text-body font-semibold">Message</legend>
-      {parts.map((part) => (
-        <FieldView key={part.pointer} spec={part} drawn={drawnFor(part.name)} />
-      ))}
-    </fieldset>
+    <>
+      <fieldset className="flex min-w-0 flex-col gap-4">
+        <legend className="mb-1 text-body font-semibold">Message</legend>
+        {parts.map((part) => (
+          <FieldView key={part.pointer} spec={part} drawn={drawnFor(part.name)} />
+        ))}
+      </fieldset>
+      {target && <MessagePreview target={target} draft={draft} />}
+    </>
   );
 }
