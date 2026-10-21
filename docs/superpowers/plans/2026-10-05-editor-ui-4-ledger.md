@@ -3688,3 +3688,18 @@ in; the frontend's packages restored offline, the backend on a borrowed environm
   collection). The command wrote `frontend/src/test/messageCases.json`, 251,225 bytes. Green: 3 passed; static clean.
 
 Mid-slice rulings: none. Nothing pushed.
+
+### 4f-1, milestone 2 (2026-10-21)
+
+The owner approved milestone 1 ("approved").
+- Task 4 (1eafb0f6): `lib/messages.ts`, the renderers mirrored. Red: the module missing (no test ran). Green: 36 passed,
+  each of the eleven shared cases for Slack, Teams and Google Chat, and three of its own; the type check and ESLint
+  silent.
+- Task 5 (31b1580d): a template's text written in runs of 4,096 code points. Red: 1 failed, 10 passed (one part of
+  9,096 characters); the backend's 39 passed, the new one pinning that the engine takes parts in a row. Green: 11
+  passed and 39 passed; both sides' static checks clean.
+- Task 6 (148a32bb): text and pills as lines, Enter, Backspace and the caret's moves. Red: 6 failed, 28 passed (as the
+  plan says; Enter in a one-line field passes before and after). Green: 34 passed; static silent. The editor's and
+  lib's suites after it: 951 passed in 72 files.
+
+Mid-slice rulings: none. Nothing pushed.
