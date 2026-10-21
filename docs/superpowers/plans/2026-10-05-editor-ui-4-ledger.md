@@ -3754,3 +3754,45 @@ reading the scheme only (§5.3); a computed title or text quoted in the webhook'
 types are read (ruling 321); a field value's Slack limit against a computed label (§5.5); ↑ and ↓ keeping the offset
 within a text, and Home and End passing pills (ruling 307); a private-use character of a person's own drawn as a value
 (ruling 316); "shortened first" when both tighten at once (ruling 317); the e2e spec proved in CI's job on #134.
+
+### 4f-1 merged; 4f-2 designed; the 4f-2a plan accepted (2026-10-21)
+
+The owner merged the certifi fix as #135 (squash 795d9896) and 4f-1 as #134 (squash 5882c682), every check green
+("green and merged"); its six deferred minors are issue #136.
+
+4f-2 was researched (notes R4 and R5 in `~/4_dev/mist_dewpoint-4f-notes`), then proposed. The owner's answers
+(2026-10-21): the add-step picker chooses a Mist step, never a change of type in the drawer; a create's body is the
+same list as an update's, Set only, its required settings first; settings are labelled in the plugin's words, their
+name beside; a device's body asks for its kind first. The boards ("4f-2 Mist Step Mockups") were approved at round 1
+("looks good") and signed off at v7 (D8); v8 put the drawer's own descriptions back on two boards. The design,
+`docs/superpowers/specs/2026-10-21-editor-4f2-mist-step-design.md` (615a43eb), corrects some of the boards' words
+(§3: replace keeps the settings not listed; read-only settings aren't offered; no object is named); it amends ruling
+127 (a field with live choices takes values from earlier steps: 4f-2a) and ruling 98 for an update's and a create's
+body (4f-2b). Two plans: 4f-2a, the plugin's display metadata, the picker and the path ids; then 4f-2b, Changes,
+Settings and a device's kind.
+
+`docs/superpowers/plans/2026-10-21-editor-ui-4f2a-mist-picker.md`, revision 1, with milestone pauses. The owner
+accepted it: its rulings 1–17 join this ledger as 324–340. No step changes version: everything the plugin adds is
+display metadata, outside the contract hash (the 294 hashes pinned); no route, no migration, no ABI change. Mid-slice
+rulings start at M113.
+
+324. **Accepted. Milestone pauses after the backend and after the UI** (plan ruling 1).
+325. **Accepted. A step's group at its config's root: `x-group`, its plugin and its resource's title** (plan ruling 2).
+326. **Accepted. Every setting of a body titled, on its own entry** (plan ruling 3).
+327. **Accepted. A body's own terms, which node and path titles don't take** (plan ruling 4).
+328. **Accepted. A device's kinds titled on the union's branches; two unions titled** (plan ruling 5).
+329. **Accepted. `x-widget`: "update" where a config has a body, a mode and a clear; "create" where a create requires
+     a body** (plan ruling 6).
+330. **Accepted. The 294 hashes pinned in a file a command writes from the base** (plan ruling 7).
+331. **Accepted. The picker: Flow, each plugin's groups, then Actions; groups and their steps by title** (plan
+     ruling 8).
+332. **Accepted. The picker's own search: a group by each word, a grouped step by its title's start or a typed ref**
+     (plan ruling 9).
+333. **Accepted. A group's row: its title, how many actions, their first words** (plan ruling 10).
+334. **Accepted. A group's view, and Back** (plan ruling 11).
+335. **Accepted. A connection named by its type's label in the picker** (plan ruling 12).
+336. **Accepted. The drawer names a step's group under its title** (plan ruling 13).
+337. **Accepted. A path id with choices takes values: Text, ＋ Data, Show choices under it** (plan ruling 14).
+338. **Accepted. The choices as a list under the field** (plan ruling 15).
+339. **Accepted. A pick written as text, named while the field holds it** (plan ruling 16).
+340. **Accepted. The checks; the browser spec in CI, or locally on the owner's word** (plan ruling 17).
