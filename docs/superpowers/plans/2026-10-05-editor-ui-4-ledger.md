@@ -3839,3 +3839,28 @@ The owner approved milestone 2 ("approved").
   and mypy clean; CodeQL (CLI 2.27.2, CI's filter; python-queries 1.8.13, javascript-queries 2.4.8): no finding.
 
 Mid-slice rulings: M113 only. Nothing pushed. Next: the final review.
+
+### 4f-2a, the final review (2026-10-21)
+
+A fresh reviewer (Fable) read the branch against the plan, its Review Focus and the spec: no critical finding, one
+important, eight minor. It confirmed the hashes hold (the contract's `$defs` keep no title), the picker's filtering on
+cmdk 1.1.1, the listbox, and the e2e spec's assumptions against the real manifest (85 groups, "Site ID", the key
+"update", "Juniper Mist").
+- Fixed: going back from a group's view selected Flow's first row, not the group's (ruling 334), after typing there
+  and also from the empty search: cmdk selects its first row when the selected one unmounts and when the search
+  empties, after the render that set the group's row. The group's row is selected again a task later. Test "selects
+  the group's row again after Back, with or without text typed in its view (the final review)": red, then green; the
+  frontend suite 1518 passed in 110 files; static silent.
+
+Deferred minors (a follow-up issue, on the owner's word): a refused pick isn't held with Apply here and Discard, as a
+refused typed edit is; the pick's name doesn't show when the field's value reads as a literal (compare the fixed
+value); the list takes focus when an answer lands while the person types in the field; "a Acme resource" (an article
+before a plugin's name); the search box keeps the accessible name "Add a step" in a group's view (its placeholder says
+where); a literal-only field's Show choices isn't 44 px below 640 px; the connection types refetched on each open (no
+`staleTime`); tests for the plural heading, a typed ref, Home and End, and the 404 settling.
+
+What the reviewer set aside, each ruled as it stands: the group's title repeated as the list's heading under the Back
+line (the boards'); the catalogue's growth (spec §4.2); a step's middle words (ruling 332); actions by title (ruling
+331); the hints without a drawer yet (4f-2b); the e2e left to CI (ruling 340); the key before the label loads (ruling
+335); the choices' hint for a viewer whose button is disabled (as before); "a Email"-style articles (4f-1's); hover not
+moving the list's active row.

@@ -99,10 +99,13 @@ export function StepPicker({
     input.current?.focus();
   };
   const back = () => {
-    if (open !== null) setSelected(`group ${open.plugin} ${open.title}`);
+    const row = open === null ? null : `group ${open.plugin} ${open.title}`;
     setOpen(null);
     setQuery("");
     input.current?.focus();
+    // cmdk selects its first row when the selected one unmounts and when the search empties, once this has rendered;
+    // the group's row is selected again after that (the final review).
+    if (row !== null) window.setTimeout(() => setSelected(row), 0);
   };
   const typed = query.trim() !== "";
   const flow = ranked(loose.filter((t) => t.kind === "control"), query);

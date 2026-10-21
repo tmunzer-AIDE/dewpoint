@@ -123,3 +123,20 @@ it("opens a group's steps by title, and goes back with Back or Backspace", async
   await userEvent.type(screen.getByRole("combobox"), "upd{Enter}");
   expect(onPick).toHaveBeenCalledWith(GROUPED[2]);
 });
+
+it("selects the group's row again after Back, with or without text typed in its view (the final review)", async () => {
+  fakeApi({});
+  const onPick = vi.fn();
+  show(AFTER, [IF, ...GROUPED], { onPick });
+  const row = () => screen.getByRole("option", { name: /^Site WLANs/ });
+  await userEvent.click(row());
+  await userEvent.keyboard("{Backspace}");
+  await vi.waitFor(() => expect(row().getAttribute("aria-selected")).toBe("true"));
+  await userEvent.click(row());
+  await userEvent.type(screen.getByRole("combobox"), "lis");
+  await userEvent.click(screen.getByRole("button", { name: "Back to every step" }));
+  await vi.waitFor(() => expect(row().getAttribute("aria-selected")).toBe("true")); // not Flow's first step
+  await userEvent.keyboard("{Enter}");
+  expect(screen.getByRole("dialog", { name: "Add a step: Site WLANs" })).toBeTruthy();
+  expect(onPick).not.toHaveBeenCalled();
+});
