@@ -155,6 +155,32 @@ export const withText = (s: Segments, segment: number, text: string): Segments =
   pills: s.pills,
 });
 
+/** A piece of a text one input shows (4f-1): its segment, where it starts in that segment's text, and its text, with
+ * no newline. */
+export interface Piece {
+  segment: number;
+  start: number;
+  text: string;
+}
+
+/** A line of text and pills: its pieces, each with the pill after it on the line (its index), or null. */
+export type Line = { piece: Piece; pill: number | null }[];
+
+/** Text and pills as lines, split at each newline in the texts: a line starts and ends with a piece, maybe empty. */
+export function linesOf(s: Segments): Line[] {
+  const lines: Line[] = [[]];
+  s.texts.forEach((text, segment) => {
+    let start = 0;
+    const parts = text.split("\n");
+    parts.forEach((part, i) => {
+      if (i > 0) lines.push([]);
+      lines.at(-1)!.push({ piece: { segment, start, text: part }, pill: i === parts.length - 1 && segment < s.pills.length ? segment : null });
+      start += part.length + 1;
+    });
+  });
+  return lines;
+}
+
 /** Text and pills as a person reads them back (the recovery file, the list of edits not applied): each pill in braces,
  * as the read-only view writes a template (config.ts's referenceText). */
 export const segmentsText = (s: Segments): string =>

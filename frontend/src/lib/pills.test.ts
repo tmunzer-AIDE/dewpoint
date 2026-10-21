@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { formula, literal } from "./config";
 import {
-  headOf, insertPill, parsePath, pillText, removePill, replacePill, sameSegments, segmentsOf, segmentsText, valueOf,
+  headOf, insertPill, linesOf, parsePath, pillText, removePill, replacePill, sameSegments, segmentsOf, segmentsText, valueOf,
   withDefault, withText, type Segments,
 } from "./pills";  // prettier-ignore
 
@@ -57,6 +57,25 @@ describe("text and pills", () => {
     expect(valueOf({ texts: ["y".repeat(5000)], pills: [] }, false, false)).toEqual(template({ text: "y".repeat(4096) }, { text: "y".repeat(904) }));
     // A fixed text isn't a template: the engine takes it whole.
     expect(valueOf({ texts: ["y".repeat(5000)], pills: [] }, false)).toBe("y".repeat(5000));
+  });
+
+  it("lays text and pills out as lines: each line's pieces of text, each with the pill after it on that line", () => {
+    const s: Segments = { texts: ["Access point ", " stopped.\nLast seen ", ""], pills: [{ ref: "a.name" }, { ref: "run.now" }] };
+    expect(linesOf(s)).toEqual([
+      [
+        { piece: { segment: 0, start: 0, text: "Access point " }, pill: 0 },
+        { piece: { segment: 1, start: 0, text: " stopped." }, pill: null },
+      ],
+      [
+        { piece: { segment: 1, start: 10, text: "Last seen " }, pill: 1 },
+        { piece: { segment: 2, start: 0, text: "" }, pill: null },
+      ],
+    ]);
+    expect(linesOf({ texts: ["a\n\nb"], pills: [] }).map((line) => line[0]!.piece)).toEqual([
+      { segment: 0, start: 0, text: "a" },
+      { segment: 0, start: 2, text: "" },
+      { segment: 0, start: 3, text: "b" },
+    ]);
   });
 
   it("reads back what it writes", () => {

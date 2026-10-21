@@ -26,6 +26,8 @@ type Control = (props: ControlProps) => ReactNode;
 const OWN: UnappliedKind[] = ["text", "template", "condition", "json", "number", "formula", "port"]; // what a field's own control may hold
 const NEITHER = "This field takes only references or text with references, which can't be set in this drawer.";
 export const PILLS_NOTE = "Press / or ＋ Data to insert data from earlier steps. A dashed pill may be missing when this runs: give it a default.";
+/** What a text on several lines says, under the message's text (4f-1). */
+export const LINES_NOTE = "Press / or ＋ Data to add a value; Enter starts a new line.";
 /** What a viewer and a version's view are told: they can't insert data or give a default (#85). */
 export const PILLS_SEEN = "A dashed pill may be missing when this runs.";
 
@@ -90,7 +92,12 @@ const startMode = (spec: FieldSpec, value: unknown): Mode =>
   : value !== undefined && value !== null ? "fixed"
   : startsAsFormula(spec) ? "formula" : "fixed";  // prettier-ignore
 
-export function FieldView({ spec }: { spec: FieldSpec }) {
+/** How the message composer draws one of its parts (4f-1, the message composer design §5): the text on several lines. */
+export interface Drawn {
+  lines?: boolean;
+}
+
+export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn }) {
   const drawer = useDrawer();
   const value = valueAt(drawer.node.config ?? {}, spec.path);
   const kind = kindOf(value);
@@ -291,7 +298,7 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
   const textPills = (c: Described) => (
     <TextPills
       key={generation} {...c} spec={spec} value={hidden ? undefined : fixed} literal={held?.literal ?? kind === "literal"}
-      disabled={disabled} onChange={write} panel={panel} // it writes a literal back as one itself, never a template as data
+      disabled={disabled} onChange={write} panel={panel} lines={drawn.lines} // it writes a literal back as one itself, never a template as data
     />
   );  // prettier-ignore
   let body: ReactNode;
@@ -311,7 +318,7 @@ export function FieldView({ spec }: { spec: FieldSpec }) {
   } else if (held?.kind === "template" || (mode === "fixed" && asText && !hidden && !(held && Held))) {
     // Text with data pills: what's held, or the value, as text and pills (4c-2b).
     // "/" and "＋ Data" work where the person may edit the draft: the note says them only there (#85).
-    const pillsNote = !disabled && drawer.revision !== null ? PILLS_NOTE : PILLS_SEEN;
+    const pillsNote = disabled || drawer.revision === null ? PILLS_SEEN : drawn.lines ? LINES_NOTE : PILLS_NOTE;
     body = frame(textPills, joined(spec.hint, (held?.literal ?? kind === "literal") ? LITERAL_NOTE : null, pillsNote));
   } else if (held && Held) {
     // What's held shows first, before what the value under it has become (a reference, a hidden secret, another

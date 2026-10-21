@@ -3,13 +3,15 @@
 // the references between it (the owner's ruling: one text and pill editor). Its texts are inputs, each pill a button
 // between them, in one box: the text is typed as any text field's is, and a pill is a whole that's moved past, opened
 // or removed, never half edited. A pill says what it reads, and is dashed when its value may be missing (ruling 115).
+// Its text is laid out in lines, an input for each piece of text between pills and newlines; a field that takes several
+// lines (the message's text, 4f-1) starts one with Enter and joins one to the line above with Backspace at its start.
 import { useEffect, useRef, type KeyboardEvent } from "react";
 import { DataTree } from "./DataTree";
 import { PillButton, usePillEntry } from "./Pill";
 import { PillDetails } from "./PillDetails";
 import {
-  insertPill, pillText, removePill, replacePill, segmentsOf, segmentsText, valueOf, withDefault, withText, type Caret, type Pill,
-  type Segments,
+  insertPill, linesOf, pillText, removePill, replacePill, segmentsOf, segmentsText, valueOf, withDefault, withText, type Caret,
+  type Pill, type Segments,
 } from "../../../lib/pills";  // prettier-ignore
 import { useDrawer } from "./context";
 import type { ControlProps } from "./scalars";
@@ -38,27 +40,39 @@ export interface PillsPanel {
   focus: { current: { segment: number; offset: number } | { pill: number } | null };
 }
 
-export function TextPills({ spec, value, literal, id, describedBy, invalid, disabled, onChange, panel }: ControlProps & { panel: PillsPanel }) {
+/** Keys that move the caret, pressed without a modifier: a modified one is the browser's (a selection, a shortcut). */
+const plain = (e: KeyboardEvent) => !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey;
+
+export function TextPills({ spec, value, literal, id, describedBy, invalid, disabled, onChange, panel, lines = false }: ControlProps & {
+  panel: PillsPanel; lines?: boolean;
+}) {  // prettier-ignore
   const drawer = useDrawer();
   const held = drawer.held("template", spec.pointer);
   const segments: Segments = held?.segments ?? segmentsOf(value) ?? { texts: [""], pills: [] };
   const literalOk = spec.kinds === null || spec.kinds.includes("literal");
+  const rows = linesOf(segments);
+  const pieces = rows.flat().map((item) => item.piece);
   const inputs = useRef<(HTMLInputElement | null)[]>([]);
   const pills = useRef<(HTMLButtonElement | null)[]>([]);
   const asLiteral = held?.literal ?? literal;
+
+  /** Focus at a place of a segment's text: the input holding it. A place past the end ("＋ Data" pressed before the
+   * text was ever focused asks for it) is the end of the last text (the final review). */
+  const focusAt = (segment: number, offset: number) => {
+    let index = pieces.findIndex((p) => p.segment === segment && offset >= p.start && offset <= p.start + p.text.length);
+    if (index < 0) index = Math.max(0, pieces.findLastIndex((p) => p.segment === Math.min(segment, segments.texts.length - 1)));
+    const piece = pieces[index]!;
+    const at = Math.max(0, Math.min(offset - piece.start, piece.text.length));
+    inputs.current[index]?.focus();
+    inputs.current[index]?.setSelectionRange(at, at);
+  };
 
   useEffect(() => {
     const want = panel.focus.current;
     if (!want) return;
     panel.focus.current = null;
     if ("pill" in want) pills.current[want.pill]?.focus();
-    else {
-      // "＋ Data" pressed before the text was ever focused asks for the end: the last text's (the final review).
-      const input = inputs.current[Math.min(want.segment, inputs.current.length - 1)];
-      const offset = Math.min(want.offset, input?.value.length ?? 0);
-      input?.focus();
-      input?.setSelectionRange(offset, offset);
-    }
+    else focusAt(want.segment, want.offset);
   });
 
   /** Writes text and pills as one change; refused, it's held with why, whole (ruling 18). */
@@ -68,18 +82,39 @@ export function TextPills({ spec, value, literal, id, describedBy, invalid, disa
     else drawer.hold("template", spec.pointer, { path: spec.path, label: spec.label, text: segmentsText(next), segments: next, why, literal: asLiteral, literalOk, entry: spec.entry });
   };  // prettier-ignore
 
-  const caretOf = (segment: number, input: HTMLInputElement): Caret => ({ segment, offset: input.selectionStart ?? input.value.length });
+  const caretOf = (index: number, input: HTMLInputElement): Caret => ({
+    segment: pieces[index]!.segment, offset: pieces[index]!.start + (input.selectionStart ?? input.value.length),
+  });  // prettier-ignore
+  const rowOf = (index: number) => rows.findIndex((row) => row.some((item) => item.piece === pieces[index]));
 
-  const onTextKey = (segment: number) => (e: KeyboardEvent<HTMLInputElement>) => {
+  const onTextKey = (index: number) => (e: KeyboardEvent<HTMLInputElement>) => {
+    const { segment, start } = pieces[index]!;
+    const text = segments.texts[segment]!;
     const input = e.currentTarget;
     const at = input.selectionStart ?? 0;
-    const collapsed = at === (input.selectionEnd ?? at);
+    const end = input.selectionEnd ?? at;
+    const collapsed = at === end;
+    const offset = start + at; // in the segment's text, its newlines counted
     if (e.key === "/" && collapsed && asksForData(input.value, at) && !disabled) {
       // The "/" is typed as text: the tree opens over it, and a pick replaces it (Escape keeps it, as typed). It opens in
       // the next task, once the browser has typed the "/": opened in a microtask, React draws it with the keydown, and
       // the tree's search takes focus, and the "/", first (seen in a browser, #85).
-      panel.caret.current = { segment, offset: at + 1 };
-      setTimeout(() => panel.open({ kind: "tree", at: { segment, offset: at + 1 }, slash: true }), 0);
+      panel.caret.current = { segment, offset: offset + 1 };
+      setTimeout(() => panel.open({ kind: "tree", at: { segment, offset: offset + 1 }, slash: true }), 0);
+    } else if (lines && e.key === "Enter" && !e.altKey && !e.metaKey && !e.ctrlKey && !disabled) {
+      e.preventDefault(); // a new line at the caret, what's selected replaced
+      panel.focus.current = { segment, offset: offset + 1 };
+      write(withText(segments, segment, `${text.slice(0, offset)}\n${text.slice(start + end)}`), true);
+    } else if (e.key === "Backspace" && collapsed && at === 0 && start > 0 && !disabled) {
+      e.preventDefault(); // at a line's start: joined to the line above
+      panel.focus.current = { segment, offset: offset - 1 };
+      write(withText(segments, segment, text.slice(0, offset - 1) + text.slice(offset)), true);
+    } else if (e.key === "ArrowLeft" && collapsed && at === 0 && start > 0 && plain(e)) {
+      e.preventDefault();
+      focusAt(segment, offset - 1); // the end of the line above
+    } else if (e.key === "ArrowRight" && collapsed && at === input.value.length && offset < text.length && plain(e)) {
+      e.preventDefault();
+      focusAt(segment, offset + 1); // the start of the line below
     } else if (e.key === "ArrowLeft" && collapsed && at === 0 && segment > 0) {
       e.preventDefault();
       pills.current[segment - 1]?.focus();
@@ -89,18 +124,29 @@ export function TextPills({ spec, value, literal, id, describedBy, invalid, disa
     } else if (e.key === "Backspace" && collapsed && at === 0 && segment > 0) {
       e.preventDefault(); // the pill before is focused first: a second Backspace removes it
       pills.current[segment - 1]?.focus();
+    } else if ((e.key === "ArrowUp" || e.key === "ArrowDown") && plain(e)) {
+      // To the line above or below, its first text, as far in as the caret was in this one.
+      const row = rows[rowOf(index) + (e.key === "ArrowUp" ? -1 : 1)];
+      if (!row) return;
+      e.preventDefault();
+      const first = row[0]!.piece;
+      focusAt(first.segment, first.start + Math.min(at, first.text.length));
+    } else if ((e.key === "Home" || e.key === "End") && plain(e)) {
+      // To the line's start or end, past its pills: an input's own Home stops at the pill before it.
+      const row = rows[rowOf(index)]!;
+      const piece = e.key === "Home" ? row[0]!.piece : row.at(-1)!.piece;
+      e.preventDefault();
+      focusAt(piece.segment, piece.start + (e.key === "Home" ? 0 : piece.text.length));
     }
   };
 
   const onPillKey = (index: number) => (e: KeyboardEvent<HTMLButtonElement>) => {
     if (e.key === "ArrowLeft") {
       e.preventDefault(); // focused now, as → does: a focus request left for later would move the caret back as one types
-      inputs.current[index]?.focus();
-      inputs.current[index]?.setSelectionRange(segments.texts[index]!.length, segments.texts[index]!.length);
+      focusAt(index, segments.texts[index]!.length);
     } else if (e.key === "ArrowRight") {
       e.preventDefault();
-      inputs.current[index + 1]?.focus();
-      inputs.current[index + 1]?.setSelectionRange(0, 0);
+      focusAt(index + 1, 0);
     } else if ((e.key === "Backspace" || e.key === "Delete") && !disabled) {
       e.preventDefault();
       const { segments: next, caret } = removePill(segments, index);
@@ -112,39 +158,55 @@ export function TextPills({ spec, value, literal, id, describedBy, invalid, disa
     }
   };
 
-  const labelled = (segment: number) => (segment === 0 ? undefined : `${spec.label}, text after ${pillText(segments.pills[segment - 1]!.ref)}`);
+  /** The first input is the field's, its label naming it; one after a pill says the pill, one on a later line its line. */
+  const labelled = (index: number, row: number) => {
+    const { segment, start } = pieces[index]!;
+    if (segment === 0 && start === 0) return undefined;
+    return start === 0 ? `${spec.label}, text after ${pillText(segments.pills[segment - 1]!.ref)}` : `${spec.label}, line ${row + 1}`;
+  };
 
   const opened = panel.opened;
+  let index = -1; // each piece's input, in the order they're drawn
   const box = (
     <div
-      className={`flex min-h-11 w-full flex-wrap items-center gap-x-1 gap-y-1.5 rounded-lg border bg-surface px-3 py-2 text-body-lg ${
+      className={`flex min-h-11 w-full flex-col justify-center gap-y-1.5 rounded-lg border bg-surface px-3 py-2 text-body-lg ${
         invalid ? "border-danger" : "border-line-control"} focus-within:outline focus-within:outline-2 focus-within:outline-focus`}
     >
-      {segments.texts.map((text, segment) => (
-        <span key={`t${segment}`} className="contents">
-          <input
-            ref={(el) => void (inputs.current[segment] = el)}
-            id={segment === 0 ? id : undefined}
-            type="text" value={text} disabled={disabled} spellCheck={false}
-            aria-label={labelled(segment)} aria-describedby={segment === 0 ? describedBy : undefined}
-            aria-invalid={invalid} aria-required={segment === 0 ? spec.required && !spec.entry : undefined}
-            size={Math.max(1, text.length)}
-            onKeyDown={onTextKey(segment)}
-            onSelect={(e) => void (panel.caret.current = caretOf(segment, e.currentTarget))}
-            onChange={(e) => {
-              panel.caret.current = caretOf(segment, e.currentTarget);
-              write(withText(segments, segment, e.target.value), true);
-            }}
-            // 24 px at least, empty too: a target a pointer can take (WCAG 2.5.8; the gate found an empty one at 1 ch)
-            className={`min-h-[24px] min-w-[24px] max-w-full bg-transparent outline-none [field-sizing:content] ${segments.pills.length === 0 ? "flex-1" : ""}`}
-          />
-          {segments.pills[segment] && (
-            <Pills
-              pill={segments.pills[segment]} field={spec.pointer} index={segment} onKeyDown={onPillKey(segment)}
-              onOpen={() => panel.open({ kind: "details", index: segment })} buttonRef={(el) => void (pills.current[segment] = el)}
-            />
-          )}
-        </span>
+      {rows.map((row, r) => (
+        <div key={r} className="flex min-w-0 flex-wrap items-center gap-x-1 gap-y-1.5">
+          {row.map(({ piece, pill }, k) => {
+            const i = ++index;
+            return (
+              <span key={i} className="contents">
+                <input
+                  ref={(el) => void (inputs.current[i] = el)}
+                  id={i === 0 ? id : undefined}
+                  type="text" value={piece.text} disabled={disabled} spellCheck={false}
+                  aria-label={labelled(i, r)} aria-describedby={i === 0 ? describedBy : undefined}
+                  aria-invalid={invalid} aria-required={i === 0 ? spec.required && !spec.entry : undefined}
+                  size={Math.max(1, piece.text.length)}
+                  onKeyDown={onTextKey(i)}
+                  onSelect={(e) => void (panel.caret.current = caretOf(i, e.currentTarget))}
+                  onChange={(e) => {
+                    panel.caret.current = caretOf(i, e.currentTarget);
+                    const text = segments.texts[piece.segment]!;
+                    write(withText(segments, piece.segment, text.slice(0, piece.start) + e.target.value + text.slice(piece.start + piece.text.length)), true);
+                  }}
+                  // 24 px at least, empty too: a target a pointer can take (WCAG 2.5.8; the gate found an empty one at 1 ch).
+                  // A line's last text takes the rest of the line, where several lines are typed.
+                  className={`min-h-[24px] min-w-[24px] max-w-full bg-transparent outline-none [field-sizing:content] ${
+                    (lines ? k === row.length - 1 : segments.pills.length === 0) ? "flex-1" : ""}`}
+                />
+                {pill !== null && (
+                  <Pills
+                    pill={segments.pills[pill]!} field={spec.pointer} index={pill} onKeyDown={onPillKey(pill)}
+                    onOpen={() => panel.open({ kind: "details", index: pill })} buttonRef={(el) => void (pills.current[pill] = el)}
+                  />
+                )}
+              </span>
+            );
+          })}
+        </div>
       ))}
     </div>
   );
