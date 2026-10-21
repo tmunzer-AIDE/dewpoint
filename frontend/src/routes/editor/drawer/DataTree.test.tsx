@@ -252,8 +252,10 @@ describe("the data tree's ← and search (#85)", () => {
     const box = await screen.findByRole("searchbox", { name: "Find data" });
     await screen.findByRole("tree");
     for (const typed of ["t", "to", "tot", "tota"]) fireEvent.change(box, { target: { value: typed } }); // one key each
+    // Asked once, for what was typed last: waited for itself, as the tree drops its groups while the answer loads,
+    // before the server has the request on a slow runner.
+    await waitFor(() => expect(finds).toEqual(["tota"]));
     await waitFor(() => expect(screen.queryByText("This run")).toBeNull());
-    expect(finds).toEqual(["tota"]);
     await new Promise((r) => setTimeout(r, 300));
     expect(finds).toEqual(["tota"]);
     fireEvent.change(box, { target: { value: "" } });

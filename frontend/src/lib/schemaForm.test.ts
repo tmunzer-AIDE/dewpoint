@@ -159,6 +159,13 @@ describe("4c-2b's field kinds", () => {
     });
     expect([text, secret, choice, cel, refs, plain].map((f) => takesPills(f!))).toEqual([true, false, false, false, true, false]);
   });
+  it("takes data pills in a field with live choices (4f-2), never a literal-only one", () => {
+    const type = typeWith(
+      { type: "object", properties: { site: { type: "string" }, fixed: { type: "string", "x-dewpoint-literal": true } } },
+      { options: ["site", "fixed"] },
+    );
+    expect(fieldsOf(type).map((f) => [f.widget, takesPills(f)])).toEqual([["options", true], ["options", false]]);
+  });
   it("labels a field by its parts' labels", () => {
     expect(fieldLabel(SWITCH, "/cases/1/when")).toBe("Cases, item 2 › Condition");
     expect(fieldLabel(IF, "/condition")).toBe("Condition");

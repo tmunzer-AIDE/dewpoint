@@ -1,0 +1,22 @@
+{
+  "format": "dewpoint.workflow",
+  "format_version": 1,
+  "name": "Mist",
+  "graph": {
+    "graph_format": 1,
+    "nodes": [
+      {
+        "id": "4f200001-0000-4000-8000-000000000001",
+        "key": "get_site",
+        "type": "mist.site_settings.get@1",
+        "config": {},
+        "position": { "x": 0, "y": 140 }
+      }
+    ],
+    "edges": [],
+    "settings": {
+      "input_schema": { "type": "object", "properties": {}, "additionalProperties": false }
+    }
+  },
+  "bindings": []
+}

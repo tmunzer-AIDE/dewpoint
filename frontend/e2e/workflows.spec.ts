@@ -667,6 +667,8 @@ test("a Mist step's connection is chosen from the tenant's, and its choices neve
   });
   await newWorkflow(page, "Mist flow");
   await page.getByRole("button", { name: "Add the first step" }).click();
+  // Mist's steps are behind its resources (4f-2a); a ref typed lists the step itself.
+  await page.getByRole("dialog", { name: "Add a step" }).getByRole("combobox").fill("mist.site_devices.list");
   await page.getByRole("option", { name: /mist\.site_devices\.list@1/ }).click();
   await page.getByRole("button", { name: /^list, / }).click();
   const drawer = page.getByRole("complementary", { name: "list" });

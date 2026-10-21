@@ -19,7 +19,7 @@ from typing import Any, ClassVar
 
 from pydantic import BaseModel
 
-from dewpoint.plugins.mist import fixtures, oas, policy, routing
+from dewpoint.plugins.mist import display, fixtures, oas, policy, routing
 from dewpoint.plugins.mist.client import SEGMENT, InvalidAnswer, InvalidPathValue, MistClient, NotFound, may_have_more
 from dewpoint.plugins.mist.schemas import converted, resolved, top_properties, with_defs
 from dewpoint.plugins.mist.titles import title
@@ -393,6 +393,16 @@ def _class_name(type_: str) -> str:
     return "".join(part.title() for part in re.split(r"[._]", type_))
 
 
+def _widget(op: oas.Operation, config: Mapping[str, Any]) -> str | None:
+    """The editor's widget for a config (4f-2): an update's changes (`body`, `mode`, `clear`), a create's settings (a
+    required `body`)."""
+    if {"body", "mode", "clear"} <= set(config["properties"]):
+        return "update"
+    if op.method == "POST" and op.id.startswith("create") and "body" in config["required"]:
+        return "create"
+    return None
+
+
 def build() -> tuple[type[Node], ...]:
     """Every allowed operation's curated node, in the map's order; a device utility's node is its own (`utilities`)."""
     doc, ops, entries = oas.document(), oas.operations(), policy.load().entries
@@ -410,6 +420,7 @@ def build() -> tuple[type[Node], ...]:
         merge_with = merge_with if merge_with in entry.reads else None  # the map lists every read (O2)
         pickers = {f: o for f, o in routing.pickers(op.path, entry.scope, lists).items() if o in entry.reads}
         name = _class_name(type_)
+        config = display.titled(config_schema(doc, op, shape, paging, merge_with is not None, pickers))
         attrs: dict[str, Any] = {
             "__module__": __name__,
             "__qualname__": name,
@@ -418,10 +429,7 @@ def build() -> tuple[type[Node], ...]:
             "title": title(op_id),
             "description": _description(op) + (RACE if merge_with is not None else ""),
             "Config": declared_model(
-                f"{name}Config",
-                config_schema(doc, op, shape, paging, merge_with is not None, pickers),
-                formats=(),
-                checked=False,
+                f"{name}Config", display.displayed(type_, config, _widget(op, config)), formats=(), checked=False
             ),
             "Output": declared_model(f"{name}Output", output_schema(doc, answer, shape), formats=(), checked=False),
             "side_effect": SideEffect(entry.side_effect),

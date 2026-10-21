@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { act, screen } from "@testing-library/react";
+import { act, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { literal } from "../../../lib/config";
@@ -42,9 +42,9 @@ it("loads the choices on request, with the connection and the text typed, and se
   await screen.findByRole("option", { name: "Prod · verified" }); // its revision known: the scope is settled
   await userEvent.type(screen.getByLabelText("Site"), "h");
   await userEvent.click(screen.getByRole("button", { name: "Show choices: Site" }));
-  const choices = await screen.findByLabelText<HTMLSelectElement>("Choices for Site");
+  const choices = await screen.findByRole("listbox", { name: "Choices for Site" });
   expect(sent.find((r) => r.path.endsWith("/options"))!.body).toEqual({ field: "site_id", connection_id: C1, query: "h" });
-  await userEvent.selectOptions(choices, "HQ (s1)");
+  await userEvent.click(within(choices).getByRole("option", { name: /^HQ/ }));
   expect(config().site_id).toBe("s1");
 });
 
@@ -113,7 +113,7 @@ it("releases text a write turned away once a choice is written", async () => {
   await userEvent.type(screen.getByLabelText("Site"), "old-text"); // held, never written
   refuse(null);
   await userEvent.click(screen.getByRole("button", { name: "Show choices: Site" }));
-  await userEvent.selectOptions(await screen.findByLabelText("Choices for Site"), "HQ (s1)");
+  await userEvent.click(within(await screen.findByRole("listbox", { name: "Choices for Site" })).getByRole("option", { name: /^HQ/ }));
   expect(config().site_id).toBe("s1");
   expect(screen.getByLabelText<HTMLInputElement>("Site").value).toBe("s1");
   expect(held()).toEqual([]);
@@ -147,4 +147,68 @@ it("names each Show choices button by its field, its visible text first (#73)", 
   const buttons = screen.getAllByRole("button", { name: /^Show choices/ });
   expect(buttons.map((b) => b.getAttribute("aria-label"))).toEqual(["Show choices: Site", "Show choices: Device"]);
   expect(buttons.map((b) => b.textContent)).toEqual(["Show choices", "Show choices"]);
+});
+
+const ID = "5c1e0b1a-3f7d-4a1e-9b8c-2d4e6f8a0b1c";
+const sites = () => json({ options: [{ value: ID, label: "HQ Paris" }, { value: "s2", label: "Lab" }] });
+
+it("takes a value from an earlier step, and then asks for every choice", async () => {
+  const sent = fakeApi({ [CONNECTIONS]: both, [OPTIONS]: sites });
+  const site = { $value: { kind: "template", parts: [{ ref: "steps.get_site.output.id" }] } };
+  const { config } = showFields(REMOTE, { config: { connection: C1, site_id: site } });
+  await screen.findByRole("option", { name: "Prod · verified" });
+  const field = within(document.querySelector<HTMLElement>('[data-pointer="/site_id"]')!);
+  expect(field.getByRole("button", { name: "Text" }).getAttribute("aria-pressed")).toBe("true");
+  expect(field.getByRole("button", { name: "＋ Data" })).toBeTruthy();
+  expect(screen.getByText(/A value from an earlier step, or one of the connection's choices: Show choices lists them\./)).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Show choices: Site" }));
+  const list = await screen.findByRole("listbox", { name: "Choices for Site" });
+  expect(sent.find((r) => r.path.endsWith("/options"))!.body).toEqual({ field: "site_id", connection_id: C1, query: "" });
+  await userEvent.click(within(list).getByRole("option", { name: /^HQ Paris/ }));
+  expect(config().site_id).toBe(ID); // the pick replaces the value from the step
+});
+
+it("shows a choice known only by its id once", async () => {
+  fakeApi({ [CONNECTIONS]: both, [OPTIONS]: () => json({ options: [{ value: "s9", label: "s9" }] }) });
+  showFields(REMOTE, { config: { connection: C1 } });
+  await screen.findByRole("option", { name: "Prod · verified" });
+  await userEvent.click(screen.getByRole("button", { name: "Show choices: Site" }));
+  const list = await screen.findByRole("listbox", { name: "Choices for Site" });
+  expect(within(list).getByRole("option").textContent).toBe("s9");
+  expect(screen.getByRole("status").textContent).toBe("1 choice");
+});
+
+it("shows each choice's name and the start of its id, and names a pick until the value changes", async () => {
+  fakeApi({ [CONNECTIONS]: both, [OPTIONS]: sites });
+  const { config } = showFields(REMOTE, { config: { connection: C1 } });
+  await screen.findByRole("option", { name: "Prod · verified" });
+  await userEvent.click(screen.getByRole("button", { name: "Show choices: Site" }));
+  const list = await screen.findByRole("listbox", { name: "Choices for Site" });
+  expect(screen.getByRole("status").textContent).toBe("2 choices");
+  const hq = within(list).getByRole("option", { name: /^HQ Paris/ });
+  expect(hq.textContent).toBe("HQ Paris5c1e0b1a…");
+  await userEvent.click(hq);
+  expect(config().site_id).toBe(ID);
+  expect(screen.queryByRole("listbox")).toBeNull();
+  expect(screen.getByText("HQ Paris, picked from the choices.")).toBeTruthy();
+  await userEvent.type(screen.getByLabelText("Site"), "x");
+  expect(screen.queryByText("HQ Paris, picked from the choices.")).toBeNull();
+});
+
+it("moves through the choices by keyboard, and Escape closes them without a pick", async () => {
+  fakeApi({ [CONNECTIONS]: both, [OPTIONS]: sites });
+  const { config } = showFields(REMOTE, { config: { connection: C1 } });
+  await screen.findByRole("option", { name: "Prod · verified" });
+  await userEvent.click(screen.getByRole("button", { name: "Show choices: Site" }));
+  const list = await screen.findByRole("listbox", { name: "Choices for Site" });
+  expect(document.activeElement).toBe(list);
+  await userEvent.keyboard("{Escape}");
+  expect(screen.queryByRole("listbox")).toBeNull();
+  expect(config().site_id).toBeUndefined();
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Site")));
+  await userEvent.click(screen.getByRole("button", { name: "Show choices: Site" }));
+  await screen.findByRole("listbox", { name: "Choices for Site" });
+  await userEvent.keyboard("{ArrowDown}{Enter}");
+  expect(config().site_id).toBe("s2");
+  expect(screen.getByText("Lab, picked from the choices.")).toBeTruthy();
 });

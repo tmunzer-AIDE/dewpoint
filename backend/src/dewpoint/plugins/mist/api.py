@@ -27,6 +27,7 @@ from pydantic import BaseModel
 
 from dewpoint.plugins.mist import fixtures, oas, policy, routing
 from dewpoint.plugins.mist.client import SEGMENT, InvalidPathValue, MistClient
+from dewpoint.plugins.mist.display import displayed
 from dewpoint.plugins.mist.nodes import OperationUnavailable, _example
 from dewpoint.plugins.mist.routing import UUID, Route, filled, matched, reaches, value_pattern
 from dewpoint.plugins.mist.schemas import converted, resolved, secret_fields, with_defs
@@ -219,7 +220,7 @@ def build() -> tuple[type[Node], ...]:
         {
             "__module__": __name__, "__qualname__": "MistApiRead", "type": READ, "version": 1, "title": "Mist API read",
             "description": "A GET of any operation the policy map allows, inside the connection's org.",
-            "Config": declared_model("MistApiReadConfig", _config(READ, write=False), formats=()),
+            "Config": declared_model("MistApiReadConfig", displayed(READ, _config(READ, write=False)), formats=()),
             "Output": declared_model("MistApiReadOutput", OUTPUT, formats=()),
             "side_effect": SideEffect.NONE, "capabilities": frozenset({"mist.read"}), "fixed_method": "GET",
             "timeout": timedelta(minutes=1),
@@ -233,7 +234,7 @@ def build() -> tuple[type[Node], ...]:
             "title": "Mist API write",
             "description": "A POST, PUT or DELETE of any operation the policy map allows, inside the connection's org; "
             "never retried once sent.",
-            "Config": declared_model("MistApiWriteConfig", _config(WRITE, write=True), formats=()),
+            "Config": declared_model("MistApiWriteConfig", displayed(WRITE, _config(WRITE, write=True)), formats=()),
             "Output": declared_model("MistApiWriteOutput", OUTPUT, formats=()),
             "side_effect": SideEffect.AMBIGUOUS, "capabilities": frozenset({"mist.write"}),
             "timeout": timedelta(minutes=1),

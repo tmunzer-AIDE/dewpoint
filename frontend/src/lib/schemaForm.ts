@@ -216,9 +216,10 @@ export function settingsOf(type: NodeType, fields: FieldSpec[]): { setup: FieldS
 export const canFixed = (f: FieldSpec): boolean => !f.sensitive && (f.kinds === null || f.kinds.includes("literal"));
 
 /** Where text with data pills is its fixed value (4c-2b): text the engine takes as a template, never a sensitive
- * field's (a secret is never typed, M25), a port's name or one written only as a literal. */
+ * field's (a secret is never typed, M25), a port's name or one written only as a literal. A field with live choices
+ * takes them too, its choices under it (4f-2: ruling 127 amended). */
 export const takesPills = (f: FieldSpec): boolean =>
-  (f.widget === "text" || f.widget === "datetime") && !f.sensitive && !f.port && !f.literalOnly &&
+  (f.widget === "text" || f.widget === "datetime" || f.widget === "options") && !f.sensitive && !f.port && !f.literalOnly &&
   !f.holdsLiteral && (f.kinds === null || f.kinds.includes("template"));
 
 /** Where it takes a formula: no literal-only marker on the path or inside (value.literal_only), `cel` among its kinds. */

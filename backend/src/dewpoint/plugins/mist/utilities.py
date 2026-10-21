@@ -18,7 +18,7 @@ from typing import Any, ClassVar
 
 from pydantic import BaseModel
 
-from dewpoint.plugins.mist import oas, policy, routing, stream
+from dewpoint.plugins.mist import display, oas, policy, routing, stream
 from dewpoint.plugins.mist.client import InvalidAnswer, MistClient
 from dewpoint.plugins.mist.nodes import MistOperation, OperationUnavailable, _class_name, _description
 from dewpoint.plugins.mist.schemas import converted, with_defs
@@ -282,7 +282,10 @@ def build() -> tuple[type[Node], ...]:
             "title": title(op_id),
             "description": _description(op) + CONTRACT_TEXT[review.contract],
             "Config": declared_model(
-                f"{name}Config", config_schema(doc, op, review, pickers, default), formats=(), checked=False
+                f"{name}Config",
+                display.displayed(type_, display.titled(config_schema(doc, op, review, pickers, default))),
+                formats=(),
+                checked=False,
             ),
             "Output": declared_model(f"{name}Output", output_schema(review, answers), formats=(), checked=False),
             "side_effect": SideEffect(entry.side_effect),

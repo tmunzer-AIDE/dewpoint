@@ -3754,3 +3754,113 @@ reading the scheme only (§5.3); a computed title or text quoted in the webhook'
 types are read (ruling 321); a field value's Slack limit against a computed label (§5.5); ↑ and ↓ keeping the offset
 within a text, and Home and End passing pills (ruling 307); a private-use character of a person's own drawn as a value
 (ruling 316); "shortened first" when both tighten at once (ruling 317); the e2e spec proved in CI's job on #134.
+
+### 4f-1 merged; 4f-2 designed; the 4f-2a plan accepted (2026-10-21)
+
+The owner merged the certifi fix as #135 (squash 795d9896) and 4f-1 as #134 (squash 5882c682), every check green
+("green and merged"); its six deferred minors are issue #136.
+
+4f-2 was researched (notes R4 and R5 in `~/4_dev/mist_dewpoint-4f-notes`), then proposed. The owner's answers
+(2026-10-21): the add-step picker chooses a Mist step, never a change of type in the drawer; a create's body is the
+same list as an update's, Set only, its required settings first; settings are labelled in the plugin's words, their
+name beside; a device's body asks for its kind first. The boards ("4f-2 Mist Step Mockups") were approved at round 1
+("looks good") and signed off at v7 (D8); v8 put the drawer's own descriptions back on two boards. The design,
+`docs/superpowers/specs/2026-10-21-editor-4f2-mist-step-design.md` (615a43eb), corrects some of the boards' words
+(§3: replace keeps the settings not listed; read-only settings aren't offered; no object is named); it amends ruling
+127 (a field with live choices takes values from earlier steps: 4f-2a) and ruling 98 for an update's and a create's
+body (4f-2b). Two plans: 4f-2a, the plugin's display metadata, the picker and the path ids; then 4f-2b, Changes,
+Settings and a device's kind.
+
+`docs/superpowers/plans/2026-10-21-editor-ui-4f2a-mist-picker.md`, revision 1, with milestone pauses. The owner
+accepted it: its rulings 1–17 join this ledger as 324–340. No step changes version: everything the plugin adds is
+display metadata, outside the contract hash (the 294 hashes pinned); no route, no migration, no ABI change. Mid-slice
+rulings start at M113.
+
+324. **Accepted. Milestone pauses after the backend and after the UI** (plan ruling 1).
+325. **Accepted. A step's group at its config's root: `x-group`, its plugin and its resource's title** (plan ruling 2).
+326. **Accepted. Every setting of a body titled, on its own entry** (plan ruling 3).
+327. **Accepted. A body's own terms, which node and path titles don't take** (plan ruling 4).
+328. **Accepted. A device's kinds titled on the union's branches; two unions titled** (plan ruling 5).
+329. **Accepted. `x-widget`: "update" where a config has a body, a mode and a clear; "create" where a create requires
+     a body** (plan ruling 6).
+330. **Accepted. The 294 hashes pinned in a file a command writes from the base** (plan ruling 7).
+331. **Accepted. The picker: Flow, each plugin's groups, then Actions; groups and their steps by title** (plan
+     ruling 8).
+332. **Accepted. The picker's own search: a group by each word, a grouped step by its title's start or a typed ref**
+     (plan ruling 9).
+333. **Accepted. A group's row: its title, how many actions, their first words** (plan ruling 10).
+334. **Accepted. A group's view, and Back** (plan ruling 11).
+335. **Accepted. A connection named by its type's label in the picker** (plan ruling 12).
+336. **Accepted. The drawer names a step's group under its title** (plan ruling 13).
+337. **Accepted. A path id with choices takes values: Text, ＋ Data, Show choices under it** (plan ruling 14).
+338. **Accepted. The choices as a list under the field** (plan ruling 15).
+339. **Accepted. A pick written as text, named while the field holds it** (plan ruling 16).
+340. **Accepted. The checks; the browser spec in CI, or locally on the owner's word** (plan ruling 17).
+
+### 4f-2a, milestone 1 (2026-10-21)
+
+Inline, on `feat/editor-4f2a` from origin/main 5882c682, the docs branch (the spec, 615a43eb; the plan, 9bf7343e)
+fast-forwarded in; the frontend's packages restored offline, the backend on a borrowed environment whose `uv.lock`
+matches main's but for certifi.
+- Task 1 (d025aed5): this ledger's acceptance section.
+- Task 2 (3e9d63e8): the Mist plugin's display metadata. The hashes command wrote 296 lines from the base, the same
+  bytes as the prototype's. Red: 1 error during collection (`No module named 'dewpoint.plugins.mist.display'`).
+  Green: 57 passed; ruff, the format check and mypy clean; the whole Mist suite 565 passed.
+
+Mid-slice rulings:
+- M113. **The browser spec expects "Uses a Juniper Mist connection"**: the picker names a connection by its type's
+  label (ruling 335), and the Mist type's label is "Juniper Mist"; the plan's "Uses a Mist connection" was an example.
+  Cost: one string in the spec (Task 6).
+
+The plan's Expected for the hashes file named its last key wrongly ("mist.site_wxrules.update@1"; sorted, the file
+ends at "mist.site_zone_stats.list@1"): the file is right. Nothing pushed.
+
+### 4f-2a, milestone 2 (2026-10-21)
+
+The owner approved milestone 1 ("approved").
+- Task 3 (c5fd617c): `lib/stepGroups.ts`, and the drawer's group line. Red: 1 failed, 1 passed (`stepGroups.test.ts`
+  couldn't import its module; no "Acme · Org WLANs" in the drawer). Green: 9 passed; the type check and ESLint silent.
+- Task 4 (d7cc30ad): the picker by group. Red: 5 failed, 3 passed (no group shown; "wlan" listed the steps; the
+  connection named by its key). Green: 8 passed; the editor's 169 passed; static silent.
+- Task 5 (d43e009a): a path id with choices takes values; the choices a list under it. Red: 7 failed, 28 passed (no
+  pills in an options field; a select, not a list). Green: 35 passed; static silent.
+
+The whole frontend suite: 1517 passed in 110 files (main has 1498 in 108). Mid-slice rulings: none beyond M113. Nothing
+pushed.
+
+### 4f-2a, milestone 3 and the final checkpoint (2026-10-21)
+
+The owner approved milestone 2 ("approved").
+- Task 6 (d38cc9c7): the browser spec, `e2e/mist.spec.ts`, with its fixture and the workflows project's match; it
+  expects "Uses a Juniper Mist connection" (M113). Type-checked and linted, not run: it needs the Compose stack; CI's
+  e2e job runs it on the PR. (Its first commit went in before the string's edit applied; amended, unpushed.)
+- Task 7, every check on d38cc9c7: the frontend suite 1517 passed in 110 files; ESLint silent; the build done (the
+  entry 650.0 kB, the editor's script 149.1 kB); `check:api` passes; the Mist suite 565 passed; ruff, the format check
+  and mypy clean; CodeQL (CLI 2.27.2, CI's filter; python-queries 1.8.13, javascript-queries 2.4.8): no finding.
+
+Mid-slice rulings: M113 only. Nothing pushed. Next: the final review.
+
+### 4f-2a, the final review (2026-10-21)
+
+A fresh reviewer (Fable) read the branch against the plan, its Review Focus and the spec: no critical finding, one
+important, eight minor. It confirmed the hashes hold (the contract's `$defs` keep no title), the picker's filtering on
+cmdk 1.1.1, the listbox, and the e2e spec's assumptions against the real manifest (85 groups, "Site ID", the key
+"update", "Juniper Mist").
+- Fixed: going back from a group's view selected Flow's first row, not the group's (ruling 334), after typing there
+  and also from the empty search: cmdk selects its first row when the selected one unmounts and when the search
+  empties, after the render that set the group's row. The group's row is selected again a task later. Test "selects
+  the group's row again after Back, with or without text typed in its view (the final review)": red, then green; the
+  frontend suite 1518 passed in 110 files; static silent.
+
+Deferred minors (a follow-up issue, on the owner's word): a refused pick isn't held with Apply here and Discard, as a
+refused typed edit is; the pick's name doesn't show when the field's value reads as a literal (compare the fixed
+value); the list takes focus when an answer lands while the person types in the field; "a Acme resource" (an article
+before a plugin's name); the search box keeps the accessible name "Add a step" in a group's view (its placeholder says
+where); a literal-only field's Show choices isn't 44 px below 640 px; the connection types refetched on each open (no
+`staleTime`); tests for the plural heading, a typed ref, Home and End, and the 404 settling.
+
+What the reviewer set aside, each ruled as it stands: the group's title repeated as the list's heading under the Back
+line (the boards'); the catalogue's growth (spec §4.2); a step's middle words (ruling 332); actions by title (ruling
+331); the hints without a drawer yet (4f-2b); the e2e left to CI (ruling 340); the key before the label loads (ruling
+335); the choices' hint for a viewer whose button is disabled (as before); "a Email"-style articles (4f-1's); hover not
+moving the list's active row.

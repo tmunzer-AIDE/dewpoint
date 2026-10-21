@@ -4,6 +4,7 @@ through reviewed Mist terminology (the plugins-3 ruling): a term the id writes a
 Mist writes it ("NAC", "wxtag"); any other word keeps the id's acronym ("WLAN") or is lowercase."""
 
 import re
+from collections.abc import Mapping
 
 ACRONYMS = (
     "ap api arp atp ble bgp bpdu bssid crl dhcp dns esl evpn fips fpc0 fpga gbp gw ha id idp jse jsi led mac ml msp nac"
@@ -50,14 +51,14 @@ def words(name: str) -> list[str]:
     return re.findall(r"[A-Z]{2,}s?(?![a-z])|[A-Z]?[a-z0-9]+|[A-Z]", name)
 
 
-def title(name: str) -> str:
+def title(name: str, terms: Mapping[str, str] = TERMS) -> str:
     split = words(name)
     lower = [w.lower() for w in split]
     out: list[str] = []
     i = 0
     while i < len(split):
         for n in (2, 1):
-            term = _term(" ".join(lower[i : i + n])) if i + n <= len(split) else None
+            term = _term(" ".join(lower[i : i + n]), terms) if i + n <= len(split) else None
             if term is not None:
                 out.append(term)
                 i += n
@@ -69,10 +70,10 @@ def title(name: str) -> str:
     return text[:1].upper() + text[1:]
 
 
-def _term(key: str) -> str | None:
+def _term(key: str, terms: Mapping[str, str]) -> str | None:
     """How Mist writes these words, the last one maybe plural ("psks": "PSKs")."""
-    if key in TERMS:
-        return TERMS[key]
-    if key.endswith("s") and key[:-1] in TERMS:
-        return TERMS[key[:-1]] + "s"
+    if key in terms:
+        return terms[key]
+    if key.endswith("s") and key[:-1] in terms:
+        return terms[key[:-1]] + "s"
     return None
