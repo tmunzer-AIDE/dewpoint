@@ -20,7 +20,10 @@ interface Frame {
   local: string | null; // what the browser found: the control's text isn't saved
   problems: Diagnostic[];
   actions?: ReactNode;
+  name?: string; // the setting's own name, beside its label (4f-2b: a row of an update's changes)
 }
+
+const Name = ({ name }: { name: string | undefined }) => (name ? <span className="block font-mono text-meta text-muted">{name}</span> : null);
 
 const describing = (id: string, { hint, warn, local, problems }: Pick<Frame, "hint" | "warn" | "local" | "problems">) =>
   [hint !== null ? `${id}-hint` : null, warn ? `${id}-warn` : null, local !== null ? `${id}-local` : null, ...problems.map((_, i) => `${id}-p${i}`)]
@@ -45,7 +48,7 @@ function Notes({ id, hint, warn, local, problems }: { id: string } & Pick<Frame,
 
 const Required = () => <span className="text-small text-muted">(required)</span>;
 
-export function FieldFrame({ label, required, hint, warn = null, local, problems, actions, below, children }: Frame & {
+export function FieldFrame({ label, name, required, hint, warn = null, local, problems, actions, below, children }: Frame & {
   below?: ReactNode;
   children: (control: Described) => ReactNode;
 }) {  // prettier-ignore
@@ -54,9 +57,10 @@ export function FieldFrame({ label, required, hint, warn = null, local, problems
   return (
     <div className="flex min-w-0 flex-col gap-1.5">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className="flex items-baseline gap-1">
+        <span className="flex flex-wrap items-baseline gap-x-1">
           <label htmlFor={id} className="text-small font-semibold">{label}</label>
           {required && <Required />}
+          {name && <span className="w-full"><Name name={name} /></span>}
         </span>
         {actions}
       </div>
@@ -67,17 +71,18 @@ export function FieldFrame({ label, required, hint, warn = null, local, problems
   );
 }
 
-export function GroupFrame({ label, required, hint, local, problems, actions, below, children }: Frame & {
+export function GroupFrame({ label, name, required, hint, warn = null, local, problems, actions, below, children }: Frame & {
   below?: ReactNode;
   children: ReactNode;
 }) {  // prettier-ignore
   const id = useId();
   return (
-    <fieldset aria-describedby={describing(id, { hint, local, problems })} className="flex min-w-0 flex-col gap-3">
+    <fieldset aria-describedby={describing(id, { hint, warn, local, problems })} className="flex min-w-0 flex-col gap-3">
       <legend className="text-small font-semibold">{label}</legend>
+      <Name name={name} />
       {required && <Required />}
       {actions && <div className="flex flex-wrap gap-2">{actions}</div>}
-      <Notes id={id} hint={hint} local={local} problems={problems} />
+      <Notes id={id} hint={hint} warn={warn} local={local} problems={problems} />
       <div className="flex min-w-0 flex-col gap-4 pl-3">{children}</div>
       {below}
     </fieldset>
