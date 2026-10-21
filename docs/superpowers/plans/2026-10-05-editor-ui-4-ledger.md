@@ -3731,3 +3731,26 @@ The owner approved milestone 3 and left the e2e spec to CI ("approved, leave the
   2.4.8): no finding in either language.
 
 Mid-slice rulings over the slice: none. The final review follows. Nothing pushed.
+
+### 4f-1, the final review (2026-10-21)
+
+The owner had the branch pushed and PR #134 opened while the review ran ("commit, push and pr"). A fresh reviewer
+(Fable) on b9549821..47d866b2, read only: no critical finding, 2 important, 6 minor; "With fixes". Each Review Focus
+case is pinned by the test the plan names; the mirror matches the renderers branch by branch; the hint reaches a synced
+deployment in place. Re-graded by effect, the two important ones stand, fixed test-first, each test failing first
+(ea599f23):
+- a text pasted where several lines are typed keeps its line breaks (an input strips them: a pasted log became one
+  line);
+- an input method's Enter and arrows are its own while it composes (Firefox and Safari report them as themselves:
+  Enter split the line, ↑ and ↓ left the input).
+The frontend suite after the fixes: 1498 passed in 108 files; the type check and ESLint silent.
+
+Deferred minors (a follow-up issue, on the owner's word): "If empty: info." under the severity's choices; Slack's
+count under the text not described to it; the mirror rendered three or four times per keystroke; `Rows` repeating
+`ListItems`' list edits; Remove sending focus to Add at the list's end; "(required)" beside each row's label and value.
+
+What the reviewer set aside, each ruled as it stands: a long line scrolling in its input (ruling 125); the link check
+reading the scheme only (§5.3); a computed title or text quoted in the webhook's JSON; "Loading connections…" while the
+types are read (ruling 321); a field value's Slack limit against a computed label (§5.5); ↑ and ↓ keeping the offset
+within a text, and Home and End passing pills (ruling 307); a private-use character of a person's own drawn as a value
+(ruling 316); "shortened first" when both tighten at once (ruling 317); the e2e spec proved in CI's job on #134.
