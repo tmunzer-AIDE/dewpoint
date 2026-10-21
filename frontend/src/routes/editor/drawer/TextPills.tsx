@@ -88,6 +88,9 @@ export function TextPills({ spec, value, literal, id, describedBy, invalid, disa
   const rowOf = (index: number) => rows.findIndex((row) => row.some((item) => item.piece === pieces[index]));
 
   const onTextKey = (index: number) => (e: KeyboardEvent<HTMLInputElement>) => {
+    // An input method's keys are its own while it composes: Enter confirms a conversion, the arrows pick a candidate
+    // (Firefox and Safari report them as themselves; the final review).
+    if (e.nativeEvent.isComposing) return;
     const { segment, start } = pieces[index]!;
     const text = segments.texts[segment]!;
     const input = e.currentTarget;
@@ -192,6 +195,18 @@ export function TextPills({ spec, value, literal, id, describedBy, invalid, disa
                     const text = segments.texts[piece.segment]!;
                     write(withText(segments, piece.segment, text.slice(0, piece.start) + e.target.value + text.slice(piece.start + piece.text.length)), true);
                   }}
+                  // Where several lines are typed, a pasted text keeps its line breaks, which an input would strip: it's
+                  // put at the caret whole (the final review). One line is pasted as the browser pastes it.
+                  onPaste={lines ? (e) => {
+                    const pasted = e.clipboardData.getData("text/plain").replace(/\r\n?/g, "\n");
+                    if (disabled || !pasted.includes("\n")) return;
+                    e.preventDefault();
+                    const at = e.currentTarget.selectionStart ?? 0;
+                    const end = e.currentTarget.selectionEnd ?? at;
+                    const text = segments.texts[piece.segment]!;
+                    panel.focus.current = { segment: piece.segment, offset: piece.start + at + pasted.length };
+                    write(withText(segments, piece.segment, text.slice(0, piece.start + at) + pasted + text.slice(piece.start + end)), true);
+                  } : undefined}
                   // 24 px at least, empty too: a target a pointer can take (WCAG 2.5.8; the gate found an empty one at 1 ch).
                   // A line's last text takes the rest of the line, where several lines are typed.
                   className={`min-h-[24px] min-w-[24px] max-w-full bg-transparent outline-none [field-sizing:content] ${

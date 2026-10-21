@@ -294,6 +294,27 @@ describe("text on several lines (4f-1, the message composer design §5.2)", () =
     expect(f.config()).toEqual({ message: "AP\ndown!" });
   });
 
+  it("keeps the line breaks of a text pasted where several lines are typed (the final review)", async () => {
+    const f = lines({ message: "AP down" });
+    const first = screen.getByLabelText<HTMLInputElement>("Message");
+    await userEvent.click(first);
+    first.setSelectionRange(2, 2);
+    await userEvent.paste("\nline 2\r\nline 3");
+    expect(f.config()).toEqual({ message: "AP\nline 2\nline 3 down" });
+    await waitFor(() => caretIn(screen.getByRole("textbox", { name: "Message, line 3" }), 6));
+  });
+
+  it("leaves Enter and the arrows to a composition in progress, as an IME types (the final review)", () => {
+    const f = lines({ message: "AP\ndown" });
+    const first = screen.getByLabelText<HTMLInputElement>("Message");
+    first.focus();
+    first.setSelectionRange(2, 2);
+    fireEvent.keyDown(first, { key: "Enter", isComposing: true });
+    fireEvent.keyDown(first, { key: "ArrowDown", isComposing: true });
+    expect(f.config()).toEqual({ message: "AP\ndown" });
+    expect(document.activeElement).toBe(first);
+  });
+
   it("keeps a one-line field on one line: Enter adds nothing", async () => {
     const f = showFields(NOTE, { steps, config: { message: "AP" } });
     await userEvent.type(screen.getByLabelText("Message"), "{Enter}");
