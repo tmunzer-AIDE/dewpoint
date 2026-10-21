@@ -927,6 +927,15 @@ def plugins_list() -> None:
         typer.echo(line)
 
 
+@plugins_cli.command("message-cases")
+def plugins_message_cases() -> None:
+    """Print the renderers' shared cases, which the editor's message previews are tested against (editor 4f-1): write
+    them to frontend/src/test/messageCases.json. No server or settings."""
+    from dewpoint.plugins.message_cases import document
+
+    typer.echo(json.dumps(document(), indent=2, sort_keys=True, ensure_ascii=False))
+
+
 def _entry(node_type: str | None, cel_profile: str | None) -> Entry:
     if bool(node_type) == bool(cel_profile):
         typer.echo("pass exactly one of --node-type or --cel-profile")
