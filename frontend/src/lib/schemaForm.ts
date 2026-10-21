@@ -201,16 +201,81 @@ export const tabsOf = (fields: FieldSpec[]) => ({
 /** The message's parts, in the composer's order (4f-1, the message composer design §5.1). */
 export const MESSAGE_PARTS = ["severity", "title", "text", "fields", "links"];
 
+/** An update's or a create's body, drawn as one list of its settings (4f-2, the Mist step design §5.3, §5.6): an
+ * update's with how it's sent (`mode`) and what it clears (`clear`). */
+export type Changes = { widget: "update" | "create"; body: FieldSpec; mode: FieldSpec | null; clear: FieldSpec | null };
+
+/** The changes a config's root asks for (`x-widget: "update"` or `"create"`), when it has the parts they need: a
+ * `body`; for an update, `mode` taking merge and replace, and `clear` a list. Else none: the generic form. */
+function changesOf(type: NodeType, fields: FieldSpec[]): Changes | null {
+  const widget = type.config_schema["x-widget"];
+  const body = fields.find((f) => f.name === "body");
+  if (body === undefined || (widget !== "update" && widget !== "create")) return null;
+  if (widget === "create") return { widget, body, mode: null, clear: null };
+  const mode = fields.find((f) => f.name === "mode");
+  const clear = fields.find((f) => f.name === "clear");
+  const modes = mode?.schema.enum;
+  const takes = Array.isArray(modes) && modes.includes("merge") && modes.includes("replace");
+  return mode && clear && takes && clear.base === "list" ? { widget, body, mode, clear } : null;
+}
+
+/** The parts the changes draw: body, then mode and clear. */
+export const changeParts = (c: Changes): FieldSpec[] => [c.body, ...(c.mode ? [c.mode] : []), ...(c.clear ? [c.clear] : [])];
+
 /** A step's settings on their tabs. With the composer's hint at its config's root (`x-widget: "message"`) and the
  * message's text, the message's parts are drawn together on Setup, after its required fields, optional ones included
- * (ruling 98, amended for a message); without its text, the generic form (ruling 100). */
-export function settingsOf(type: NodeType, fields: FieldSpec[]): { setup: FieldSpec[]; message: FieldSpec[] | null; options: FieldSpec[] } {
+ * (ruling 98, amended for a message); without its text, the generic form (ruling 100). An update's or a create's
+ * changes are drawn on Setup too (4f-2b; ruling 98 amended for them). */
+export function settingsOf(
+  type: NodeType, fields: FieldSpec[],
+): { setup: FieldSpec[]; message: FieldSpec[] | null; changes: Changes | null; options: FieldSpec[] } {  // prettier-ignore
   const message =
     type.config_schema["x-widget"] === "message" && fields.some((f) => f.name === "text")
       ? MESSAGE_PARTS.flatMap((name) => fields.filter((f) => f.name === name))
       : null;
-  return { ...tabsOf(message ? fields.filter((f) => !message.includes(f)) : fields), message };
+  const changes = message ? null : changesOf(type, fields);
+  const drawn = [...(message ?? []), ...(changes ? changeParts(changes) : [])];
+  return { ...tabsOf(fields.filter((f) => !drawn.includes(f))), message, changes };
 }
+
+/** A setting Mist sets itself (`readOnly`): never offered (4f-2b). */
+export const isReadOnly = (f: FieldSpec): boolean => f.schema.readOnly === true;
+
+/** A union's branches (`anyOf`, `oneOf`), each a group at the union's place, labelled by its own title: a device's
+ * "AP", "Switch", "Gateway". None when it isn't a union of two or more. */
+export function branchesOf(f: FieldSpec): FieldSpec[] {
+  const list = Array.isArray(f.schema.anyOf) ? f.schema.anyOf : Array.isArray(f.schema.oneOf) ? f.schema.oneOf : [];
+  if (f.cut || list.length < 2) return [];
+  return (list as unknown[]).map((raw, i) => ({
+    ...make(f.type, f.root, f.name, f.path, raw, f.required, f.entry, f.literalOnly, f.refs),
+    label: isObject(raw) && typeof raw.title === "string" ? raw.title : `Kind ${i + 1}`,
+  }));
+}
+
+/** The union's own title, which its entry's ("Body") hides: "Device". */
+export function unionTitle(f: FieldSpec): string | null {
+  const ref = f.refs[f.refs.length - 1];
+  const title = ref === undefined ? undefined : target(ref, f.root).title;
+  return typeof title === "string" && title.trim() !== "" ? title : null;
+}
+
+/** The setting every branch has and allows one value in: the kind (`type`), and each branch's value. */
+export function kindOf(branches: FieldSpec[]): { name: string; values: string[] } | null {
+  if (branches.length < 2) return null;
+  const one = (b: FieldSpec, name: string): string | null => {
+    const values = propertiesOf(b).find((p) => p.name === name)?.schema.enum;
+    return Array.isArray(values) && values.length === 1 && typeof values[0] === "string" ? values[0] : null;
+  };
+  for (const p of propertiesOf(branches[0]!)) {
+    const values = branches.map((b) => one(b, p.name));
+    if (values.every((v): v is string => v !== null) && new Set(values).size === values.length) return { name: p.name, values };
+  }
+  return null;
+}
+
+/** A group's settings a person may give: its properties, without the ones Mist sets and the kind's. */
+export const offeredOf = (f: FieldSpec, kind: string | null = null): FieldSpec[] =>
+  propertiesOf(f).filter((p) => !isReadOnly(p) && p.name !== kind);
 
 /** Where the engine takes a fixed value: not in a sensitive field (sensitive.literal), and `literal` among its kinds. */
 export const canFixed = (f: FieldSpec): boolean => !f.sensitive && (f.kinds === null || f.kinds.includes("literal"));

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from "vitest";
-import { DELAY, FILTER, IF, LOOP, REMOTE, RUN_WORKFLOW, SWITCH, TRANSFORM, typeWith } from "../test/nodeTypes";
+import { CREATE, DELAY, DEVICE_UPDATE, FILTER, IF, LOOP, REMOTE, RUN_WORKFLOW, SWITCH, TRANSFORM, typeWith, UPDATE } from "../test/nodeTypes";
 import {
-  canFixed, canFormula, emptyOf, entryOf, fieldLabel, fieldsOf, itemOf, pointerOf, propertiesOf, startsAsFormula, tabsOf,
-  takesPills,
+  branchesOf, canFixed, canFormula, changeParts, emptyOf, entryOf, fieldLabel, fieldsOf, isReadOnly, itemOf, kindOf, offeredOf,
+  pointerOf, propertiesOf, settingsOf, startsAsFormula, tabsOf, takesPills, unionTitle,
 } from "./schemaForm";  // prettier-ignore
 
 const field = (type: Parameters<typeof fieldsOf>[0], name: string) => fieldsOf(type).find((f) => f.name === name)!;
@@ -170,5 +170,46 @@ describe("4c-2b's field kinds", () => {
     expect(fieldLabel(SWITCH, "/cases/1/when")).toBe("Cases, item 2 › Condition");
     expect(fieldLabel(IF, "/condition")).toBe("Condition");
     expect(fieldLabel(IF, "/nope")).toBe("/nope");
+  });
+});
+
+describe("4f-2b's changes", () => {
+  const names = (fs: { name: string }[]) => fs.map((f) => f.name);
+  it("draws an update's body, mode and clear together on Setup, after its required fields", () => {
+    const { setup, changes, options } = settingsOf(UPDATE, fieldsOf(UPDATE));
+    expect(names(setup)).toEqual(["connection", "thing_id"]);
+    expect(changes?.widget).toBe("update");
+    expect(names(changeParts(changes!))).toEqual(["body", "mode", "clear"]);
+    expect(options).toEqual([]);
+  });
+  it("draws a create's body as its settings", () => {
+    const { setup, changes } = settingsOf(CREATE, fieldsOf(CREATE));
+    expect(names(setup)).toEqual(["connection"]);
+    expect([changes?.widget, changes?.mode, changes?.clear]).toEqual(["create", null, null]);
+    expect(names(changeParts(changes!))).toEqual(["body"]);
+  });
+  it("leaves an update without what the changes need to the generic form", () => {
+    const schema = UPDATE.config_schema as Record<string, Record<string, unknown>>;
+    const properties = Object.fromEntries(Object.entries(schema.properties!).filter(([name]) => name !== "clear"));
+    const odd = typeWith({ ...schema, properties });
+    const { changes, options } = settingsOf(odd, fieldsOf(odd));
+    expect(changes).toBeNull();
+    expect(names(options)).toEqual(["body", "mode"]);
+  });
+  it("offers a group's settings without the ones Mist sets", () => {
+    const body = fieldsOf(UPDATE).find((f) => f.name === "body")!;
+    expect(names(offeredOf(body))).toEqual(["name", "enabled", "rogue", "auto_upgrade", "port_usages", "networks", "tags", "vlan_id", "api_secret", "radius"]);
+    expect(isReadOnly(propertiesOf(body).find((p) => p.name === "id")!)).toBe(true);
+    expect(branchesOf(body)).toEqual([]);
+  });
+  it("reads a union body's branches, their kind and the union's own title", () => {
+    const body = fieldsOf(DEVICE_UPDATE).find((f) => f.name === "body")!;
+    const branches = branchesOf(body);
+    expect(branches.map((b) => [b.label, b.pointer])).toEqual([["Camera", "/body"], ["Sensor", "/body"]]);
+    expect(body.label).toBe("Body");
+    expect(unionTitle(body)).toBe("Device");
+    expect(kindOf(branches)).toEqual({ name: "type", values: ["camera", "sensor"] });
+    expect(names(offeredOf(branches[0]!, "type"))).toEqual(["name", "notes", "zoom"]);
+    expect(propertiesOf(branches[1]!).map((p) => p.pointer)).toEqual(["/body/type", "/body/name", "/body/notes", "/body/range"]);
   });
 });

@@ -9,7 +9,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { Button } from "../../../components/Button";
 import { Tabs } from "../../../components/Tabs";
 import { optionsLine, targetOf } from "../../../lib/composer";
-import { fieldsOf, settingsOf, type FieldSpec } from "../../../lib/schemaForm";
+import { changeParts, fieldsOf, settingsOf, type FieldSpec } from "../../../lib/schemaForm";
 import { groupOf } from "../../../lib/stepGroups";
 import type { UnappliedKind } from "../../../lib/unapplied";
 import type { Diagnostic, Expression, GraphNode, NodeType } from "../../../lib/workflows";
@@ -113,8 +113,9 @@ export function StepDrawer({
   }, [node.id]);
   const fields = useMemo(() => (type ? fieldsOf(type) : []), [type]);
   const group = type ? groupOf(type) : null; // its plugin's group: "Mist · Site settings" (4f-2)
-  const { setup, message, options } = type ? settingsOf(type, fields) : { setup: [], message: null, options: [] };
-  const onSetup = [...setup, ...(message ?? [])]; // what Setup shows: a message's parts too
+  const { setup, message, changes, options } = type ? settingsOf(type, fields) : { setup: [], message: null, changes: null, options: [] };
+  const changing = changes ? changeParts(changes) : [];
+  const onSetup = [...setup, ...(message ?? []), ...changing]; // what Setup shows: a message's parts, an update's changes
   const [tab, setTab] = useState<Tab>(result ? "result" : test && testAt ? "test" : onSetup.length > 0 ? "setup" : "options");
   useEffect(() => {
     if (test && testAt) setTab("test");
@@ -263,6 +264,7 @@ export function StepDrawer({
                   <>
                     {setup.map((f) => <FieldView key={f.pointer} spec={f} />)}
                     {message && <MessageComposer parts={message} />}
+                    {changing.map((f) => <FieldView key={f.pointer} spec={f} />)}
                     {options.map((f) => <FieldView key={f.pointer} spec={f} />)}
                   </>
                 ) : (
@@ -290,6 +292,12 @@ export function StepDrawer({
                     {setup.map((f) => <FieldView key={f.pointer} spec={f} drawn={{ marked: true }} />)}
                     <MessageComposer parts={message} />
                   </>
+                ) : changes ? (
+                  // An update's changes or a create's settings follow its required fields, optional or not (4f-2b).
+                  <>
+                    {setup.map((f) => <FieldView key={f.pointer} spec={f} drawn={{ marked: true }} />)}
+                    {changing.map((f) => <FieldView key={f.pointer} spec={f} />)}
+                  </>
                 ) : setup.length > 0 ? (
                   <>
                     <p className="text-small text-muted">Each of these is required.</p>
@@ -305,6 +313,9 @@ export function StepDrawer({
                 content: (
                   <>
                     {message && <p className="text-small text-muted">{optionsLine(targetOf(type))}</p>}
+                    {changes && (
+                      <p className="text-small text-muted">{changes.widget === "update" ? "The changes are on Setup." : "The settings are on Setup."}</p>
+                    )}
                     {options.length > 0
                       ? options.map((f) => <FieldView key={f.pointer} spec={f} />)
                       : <p className="text-small text-muted">Nothing else to set.</p>}
