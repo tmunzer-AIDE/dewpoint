@@ -4095,3 +4095,23 @@ owner's commit word); `names: null` in a PATCH refused as null; a picker beside 
 (4f-3b's rule); a label returned as typed (the UI escapes); names kept for a simulated start of a published version; an
 unknown picker node with no binding flagged at validation, not import (ruling 9); the whole suite left to CI; `noun()`
 without a scope word, a node with two connection fields (none in Mist).
+
+### 4f-3a merged; the 4f-3b plan accepted (2026-10-22)
+
+The owner merged 4f-3a as #141 (squash 391cbf04), every check green ("green and merged"); its seven deferred minors
+are issue #142.
+
+`docs/superpowers/plans/2026-10-22-editor-ui-4f3b-start-forms.md`, revision 1, with milestone pauses. The owner
+accepted it: its rulings 1–10 join this ledger as 372–381. Frontend only: no API, schema, migration or engine change.
+Mid-slice rulings start at M116.
+
+372. **Accepted. Milestone pauses after the run form's picker and after 44 px** (plan ruling 1).
+373. **Accepted. The shared choices parts, drawer-free; the drawer keeps its words and its route** (plan ruling 2).
+374. **Accepted. One picker-field rule; `format` isn't in a start form** (plan ruling 3).
+375. **Accepted. A combobox whose list waits for Down; Escape closes only the list** (plan ruling 4).
+376. **Accepted. The words, per answer; the run page names a field by its key** (plan ruling 5).
+377. **Accepted. Names kept per form, dropped when typed over or re-read, sent after the key** (plan ruling 6).
+378. **Accepted. Each form's route; Simulate through the draft picker's node** (plan ruling 7).
+379. **Accepted. 44 px through `max-sm:` on the run form; a picker's parts everywhere** (plan ruling 8).
+380. **Accepted. The browser test answers each listing itself, in CI** (plan ruling 9).
+381. **Accepted. The checks** (plan ruling 10).
