@@ -3,7 +3,9 @@
 // draft's own form at the revision it will send, its fields as a schedule's form enters them, or as JSON. An input in
 // a Mist event's shape, or with rules no field shows, is entered as JSON from a skeleton of its schema, labelled as
 // such (the catalogue keeps no examples). A draft whose input takes a CSV can't be simulated whole yet: the dialog says
-// so, and that Simulate step still works. Submitting hands the input to the editor, which freezes and sends it.
+// so, and that Simulate step still works. Submitting hands the input to the editor, which freezes and sends it. A picker
+// field lists through the node the draft's picker names, its connection read now; a draft's run keeps no names (the
+// 4f-3 design §5.3, §4.1).
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { Button } from "../../../components/Button";
@@ -13,6 +15,7 @@ import { draftStartFormQuery } from "../../../lib/simulations";
 import { skeletonOf } from "../../../lib/skeleton";
 import { triggerTypesQuery } from "../../../lib/triggers";
 import type { GraphDoc } from "../../../lib/workflows";
+import { PickerProvider, draftChoices, usePicks } from "../pickerField";
 import { InputControl, REQUIRED, fieldKey, fieldsShow, fromFields, hintOf, labelOf, startValues, wholeOf } from "../startInput";
 import { SimBanner } from "./SimBanner";
 
@@ -40,6 +43,7 @@ export function SimulateDialog({ tenantId, workflowId, name, revision, doc, onSi
   const [values, setValues] = useState<ReadonlyMap<string, string> | null>(null);
   const shownValues = values ?? (form.data ? startValues(form.data) : new Map<string, string>());
   const [jsonText, setJsonText] = useState<string | null>(null);
+  const picks = usePicks();
   const [errors, setErrors] = useState<Record<string, string>>({});
   const seeded = () => {
     if (whole) return JSON.stringify(skeletonOf(schema), null, 2);
@@ -114,7 +118,12 @@ export function SimulateDialog({ tenantId, workflowId, name, revision, doc, onSi
             />
           </>
         ) : (
-          <>
+          <PickerProvider
+            value={{
+              tenantId, scope: JSON.stringify([tenantId, workflowId, revision]), read: draftChoices(tenantId), draft: true, simulated: true,
+              picks: picks.picks, onPick: picks.onPick,
+            }}
+          >
             {form.data.fields.length === 0 && <p className="text-small text-muted">This draft takes no input.</p>}
             {form.data.fields.map((f) => (
               <InputControl
@@ -122,7 +131,7 @@ export function SimulateDialog({ tenantId, workflowId, name, revision, doc, onSi
                 onChange={(v) => setValues(new Map(shownValues).set(f.name, v))}
               />
             ))}
-          </>
+          </PickerProvider>
         )}
         {!resolving && !csv && !whole && form.data && (
           <div>

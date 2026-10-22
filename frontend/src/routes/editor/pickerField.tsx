@@ -11,7 +11,7 @@ import { Button } from "../../components/Button";
 import { Field } from "../../components/Field";
 import { ApiError, client, ok, type Schemas } from "../../lib/client";
 import { connectionsQuery } from "../../lib/connections";
-import { sameId } from "../../lib/graph";
+import { idKey, sameId } from "../../lib/graph";
 import type { StartField } from "../../lib/triggers";
 import { ChoiceList, useScopedChoices, type Choices, type Option } from "./choices";
 
@@ -80,6 +80,25 @@ export const versionChoices =
       )
     ).options;
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** A draft's choices (§5.3: Simulate): through the node type its picker names, with its connection. A connection that
+ * isn't a UUID is none of this tenant's: refused here, nothing asked. */
+export const draftChoices =
+  (tenantId: string) =>
+  async (_f: StartField, picker: Picker, query: string): Promise<Option[]> => {
+    const connection = idKey(picker.connection);
+    if (!UUID.test(connection)) throw new ApiError(422, "connection_unavailable", null);
+    return (
+      await ok(
+        client.POST("/api/v1/t/{tenant_id}/node-types/{ref}/options", {
+          params: { path: { tenant_id: tenantId, ref: picker.node } },
+          body: { field: picker.field, connection_id: connection, query },
+        }),
+      )
+    ).options;
+  };
+
 /** The field's label as the words call it: without "ID", its first word lower-cased unless it's an acronym. */
 export function labelWord(label: string): string {
   const bare = label.replace(/\s+ID$/, "");
@@ -139,7 +158,8 @@ export function PickerField({ f, picker, value, error, label, hint, onChange }: 
   const held = connections.data?.find((c) => sameId(c.id, picker.connection));
   const name = f.title ?? f.name;
   const words: Words = { c: held?.name ?? "the connection", C: held?.name ?? "The connection", n: picker.list?.noun ?? "choices", label: labelWord(name) };
-  const scope = JSON.stringify([form.scope, f.name, form.draft ? (held?.revision ?? null) : null]);
+  // A draft's choices are its picker's too: the node, the field, the connection and the connection's revision.
+  const scope = JSON.stringify([form.scope, f.name, form.draft ? [picker.node, picker.field, idKey(picker.connection), held?.revision ?? null] : null]);
   const { shown, load, close } = useScopedChoices(scope, (query) => form.read(f, picker, query), (e) => failedWords(e, words, form.draft));
   const text = value ?? "";
   const pick = form.picks.get(f.name);
