@@ -15,7 +15,7 @@ const LYON = "8a27c4d0-5e1f-4b6a-9c2d-3f4e5a6b7c8d";
 const SITES = [
   { value: LYON, label: "Lyon DC" },
   { value: "1b6e93f2-7a4c-4d1e-8b2f-0c9d8e7f6a5b", label: "Lyon store 4" },
-  { value: "c0d4a7e1-2b3c-4d5e-8f6a-7b8c9d0e1f2a", label: "Italy HQ" },
+  { value: "c0d4a7e1-2b3c-4d5e-8f6a-7b8c9d0e1f2a", label: "Paris HQ" }, // no "ly" in its name: two of three answer "ly"
 ];
 
 /** Every listing answered here, with the made-up sites whose name holds what's typed: what each asked, in order. */
@@ -57,6 +57,7 @@ test("the run form lists a picker's choices, picks one by the keyboard and names
   await expect(form.getByRole("listbox")).toHaveCount(0);
   await expect(form).toBeVisible(); // Escape closed the list, never the form; Enter listed, never started
   await site.press("Enter");
+  await expect(form.getByRole("listbox")).toBeVisible(); // Down enters a list shown, never one on its way
   await site.press("ArrowDown");
   await expect(form.getByRole("listbox", { name: "Choices for Site ID" })).toBeFocused();
   await page.keyboard.press("Enter");
