@@ -174,6 +174,30 @@ describe("a picker field (the 4f-3 design §5.2)", () => {
     document.removeEventListener("keydown", outer);
   });
 
+  it("drops a listing on its way on Escape, never closing the form, and ignores its answer (the final review)", async () => {
+    let settle: (o: Option[]) => void = () => undefined;
+    show({ over: { read: () => new Promise<Option[]>((resolve) => (settle = resolve)) } });
+    await ready();
+    const escapes = vi.fn();
+    const outer = (e: KeyboardEvent) => {
+      if (e.key === "Escape") escapes();
+    };
+    document.addEventListener("keydown", outer);
+    await userEvent.type(field(), "ly{Enter}");
+    expect(status()).toBe("Reading Acme Prod's sites…");
+    await userEvent.keyboard("{Escape}");
+    expect(escapes).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(field());
+    expect(status()).toBe("One of Acme Prod's sites: type part of its name, then Show choices.");
+    await act(async () => {
+      settle(LYON);
+      await Promise.resolve();
+    });
+    expect(screen.queryByRole("listbox")).toBeNull();
+    expect(status()).toBe("One of Acme Prod's sites: type part of its name, then Show choices.");
+    document.removeEventListener("keydown", outer);
+  });
+
   it("drops a pick's name once its value is typed over, even typed back (the owner's call, round 2)", async () => {
     show();
     await ready();

@@ -17,7 +17,7 @@ export const idStart = (value: string) => (value.length > 12 ? `${value.slice(0,
 
 /** Choices read on request, at most 200 characters of query as the API takes, each answer for its era only: each
  * change of `scope` is a new era, never to be returned to (choices from A, then B, then A again are A's first era's,
- * and stay gone: the review of revision 2). */
+ * and stay gone: the review of revision 2). Closing drops an answer still on its way (4f-3b's final review). */
 export function useScopedChoices(scope: string, read: (query: string) => Promise<Option[]>, why: (e: unknown) => string) {
   const [seen, setSeen] = useState(scope);
   const [era, setEra] = useState(0);
@@ -29,18 +29,24 @@ export function useScopedChoices(scope: string, read: (query: string) => Promise
   eraNow.current = era;
   const [choices, setChoices] = useState<{ era: number; state: Choices }>({ era, state: { status: "idle" } });
   const shown: Choices = choices.era === era && seen === scope ? choices.state : { status: "idle" };
+  const asks = useRef(0); // each read and each close: an answer for an older one is dropped
   async function load(typed: string) {
     const asked = era;
+    const ask = ++asks.current;
     const query = typed.slice(0, 200);
     setChoices({ era: asked, state: { status: "loading" } });
+    const latest = () => eraNow.current === asked && asks.current === ask;
     try {
       const options = await read(query);
-      if (eraNow.current === asked) setChoices({ era: asked, state: { status: "done", options, query } });
+      if (latest()) setChoices({ era: asked, state: { status: "done", options, query } });
     } catch (e) {
-      if (eraNow.current === asked) setChoices({ era: asked, state: { status: "failed", why: why(e) } });
+      if (latest()) setChoices({ era: asked, state: { status: "failed", why: why(e) } });
     }
   }
-  const close = () => setChoices({ era, state: { status: "idle" } });
+  const close = () => {
+    asks.current += 1;
+    setChoices({ era, state: { status: "idle" } });
+  };
   return { shown, load, close };
 }
 

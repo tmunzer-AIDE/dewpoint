@@ -167,9 +167,11 @@ export function PickerField({ f, picker, value, error, label, hint, tall, onChan
   const open = shown.status === "done" && shown.options.length > 0;
   const list = `${id}-list`;
   const back = () => document.getElementById(id)?.focus();
-  /** Down enters the shown list; Escape closes it, never the form or its dialog: from the field or Show choices. */
+  /** Down enters the shown list; Escape closes it, or drops a listing on its way, never the form or its dialog: from
+   * the field or Show choices (4f-3b's final review). */
   const listKeys = (e: KeyboardEvent) => {
-    if (!open || (e.key !== "ArrowDown" && e.key !== "Escape")) return;
+    const escape = e.key === "Escape" && (open || shown.status === "loading");
+    if (!escape && !(e.key === "ArrowDown" && open)) return;
     e.preventDefault();
     e.stopPropagation();
     if (e.key === "ArrowDown") document.getElementById(list)?.focus();

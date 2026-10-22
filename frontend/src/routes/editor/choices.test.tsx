@@ -70,6 +70,26 @@ it("ignores an answer for an older scope, and a scope come back is a new era (ru
   expect(result.current.shown).toEqual({ status: "idle" });
 });
 
+it("drops an answer on its way once the list is closed: a later read still answers", async () => {
+  let settle: (o: Option[]) => void = () => undefined;
+  const read = vi.fn(() => new Promise<Option[]>((resolve) => (settle = resolve)));
+  const { result } = renderHook(() => useScopedChoices("a", read, () => "failed"));
+  let loading: Promise<void> = Promise.resolve();
+  act(() => void (loading = result.current.load("ly")));
+  act(() => result.current.close());
+  await act(async () => {
+    settle(SITES);
+    await loading;
+  });
+  expect(result.current.shown).toEqual({ status: "idle" });
+  act(() => void (loading = result.current.load("ly")));
+  await act(async () => {
+    settle(SITES);
+    await loading;
+  });
+  expect(result.current.shown).toEqual({ status: "done", options: SITES, query: "ly" });
+});
+
 it("says why a read failed, in the caller's words", async () => {
   const { result } = renderHook(() => useScopedChoices("a", () => Promise.reject(new Error("503")), (e) => `why: ${(e as Error).message}`));
   await act(() => result.current.load(""));
