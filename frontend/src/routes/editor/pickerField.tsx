@@ -9,7 +9,7 @@ import { useQuery } from "@tanstack/react-query";
 import { createContext, useContext, useId, useState, type KeyboardEvent, type ReactNode } from "react";
 import { Button } from "../../components/Button";
 import { Field } from "../../components/Field";
-import { ApiError, type Schemas } from "../../lib/client";
+import { ApiError, client, ok, type Schemas } from "../../lib/client";
 import { connectionsQuery } from "../../lib/connections";
 import { sameId } from "../../lib/graph";
 import type { StartField } from "../../lib/triggers";
@@ -59,6 +59,26 @@ export function usePicks(first?: Picks) {
   return { picks: shown, onPick, clear: () => setPicks(new Map()) };
 }
 const NO_PICKS: Picks = new Map();
+
+/** The names a start sends (§5.5): each pick whose value the input holds at its field, else none. Never in the key. */
+export function namesFor(picks: Picks, input: Record<string, unknown>): Record<string, { value: string; label: string }> | undefined {
+  const held = [...picks].filter(([field, p]) => Object.hasOwn(input, field) && input[field] === p.value);
+  return held.length > 0 ? Object.fromEntries(held.map(([field, p]) => [field, { value: p.value, label: p.label }])) : undefined;
+}
+
+/** A published version's choices (§5.3: the run form, a CSV run's fields, a re-run, a schedule's form): listed only
+ * while that version is the active one (409 `version_changed` once another is, §4.2). */
+export const versionChoices =
+  (tenantId: string, workflowId: string, versionId: string) =>
+  async (f: StartField, _picker: Picker, query: string): Promise<Option[]> =>
+    (
+      await ok(
+        client.POST("/api/v1/t/{tenant_id}/workflows/{workflow_id}/input-options", {
+          params: { path: { tenant_id: tenantId, workflow_id: workflowId } },
+          body: { field: f.name, query, expected_version_id: versionId },
+        }),
+      )
+    ).options;
 
 /** The field's label as the words call it: without "ID", its first word lower-cased unless it's an acronym. */
 export function labelWord(label: string): string {

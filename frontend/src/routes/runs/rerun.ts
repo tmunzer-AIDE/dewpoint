@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // A re-run's input (editor 4e-2b; the run form design §5.4; the Rerun board): the original's, read back redacted. What
 // the server kept of it (a protected value) is never shown here: untouched, the re-run sends no input and the server
-// rebuilds the original whole; changed, the input goes whole, those values entered again, the marker never sent.
+// rebuilds the original whole; changed, the input goes whole, those values entered again, the marker never sent. A value
+// the original's start form picked is named as it was then (the 4f-3 design §5.5).
 import type { StartForm } from "../../lib/runForm";
+import type { Picks } from "../editor/pickerField";
 import { shownOf } from "../editor/startInput";
 
 /** What the read-back writes where the original held a protected value (a claim: sensitive, undeclared, too large, or
@@ -47,3 +49,14 @@ export const versionWords = (form: StartForm, ran: { id: string | null; number: 
 export const MARKER_WORDS = `It holds ${REDACTED}, a protected value the original kept: enter that value again.`;
 export const AGAIN = "Enter it again: a changed input is sent whole, and the original's protected values never reach this form.";
 export const UNSHOWN_AGAIN = "Enter it again: a changed input is sent whole, and this form can't show the original's value.";
+
+/** The first run's picks (the 4f-3 design §5.5): each name its read-back holds, for the value its input holds there. */
+export function firstPicks(read: { input: Record<string, unknown> | null; names?: Record<string, string> } | undefined): Picks {
+  const input = read?.input ?? {};
+  return new Map(
+    Object.entries(read?.names ?? {}).flatMap(([field, label]) => {
+      const value = Object.hasOwn(input, field) ? input[field] : undefined;
+      return typeof value === "string" ? [[field, { value, label, first: true }] as const] : [];
+    }),
+  );
+}
