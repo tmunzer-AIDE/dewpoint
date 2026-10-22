@@ -4115,3 +4115,18 @@ Mid-slice rulings start at M116.
 379. **Accepted. 44 px through `max-sm:` on the run form; a picker's parts everywhere** (plan ruling 8).
 380. **Accepted. The browser test answers each listing itself, in CI** (plan ruling 9).
 381. **Accepted. The checks** (plan ruling 10).
+
+### 4f-3b, milestone 1 (2026-10-22)
+
+The owner accepted the plan and chose inline execution ("approved, inline"), the branch from origin/main 391cbf04 and
+the frontend's packages restored offline.
+- Task 1 (5b6290c5): the plan's acceptance, rulings 372–381.
+- Task 2 (58b73184): the shared parts, out of the drawer. Red: the new file stops at its import; the drawer's 14
+  files, 256 passed. Green: 15 files, 263 passed; static silent.
+- Task 3 (4d7b1e2a): a start form's picker field. Red: the new file stops at its import; `Field.test.tsx`'s 4 pass.
+  Green: 21 passed; static silent.
+- Task 4 (0ed6f764): the run form, a re-run and a CSV run's fields, with names. Red: 9 failed (no picker field, no
+  first run's name). Green: 9 passed; static silent.
+
+The suites beside them (runs, editor, components, lib): 1,303 passed in 104 files.
+Mid-slice rulings: none. Nothing pushed.
