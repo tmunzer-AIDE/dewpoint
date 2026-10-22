@@ -4156,3 +4156,30 @@ The owner approved milestone 2 ("go").
   finding. The branch's code is the tree the plan's dry runs ended on (da479212), file for file.
 
 Mid-slice rulings: none. Nothing pushed. Next: the final review.
+
+### 4f-3b, the final review (2026-10-22)
+
+A fresh reviewer (Fable) read the branch against the plan, its Review Focus, the spec and the boards: one critical
+finding, two important, three minor; each Review Focus test present and failing if its behaviour broke; names never in
+the key; the drawer's behaviour unchanged. Fixed in one pass:
+- critical, in the browser spec: a made-up site, "Italy HQ", holds "ly", so the first test waited for "2 of…" against
+  three; renamed "Paris HQ" (ebcdbfed);
+- important, in the browser spec: Down pressed before the second listing's answer was shown; it waits for the list
+  (ebcdbfed);
+- important: Escape while a listing was on its way ("Reading…") reached the dialog, or the schedule's form, and closed
+  it, what was typed lost; and a closed list still took a late answer. Escape now drops the listing and returns to the
+  field; a close drops any answer on its way (1b97be7f, two tests watched red first).
+After the pass: the whole frontend suite, 1,636 passed in 119 files; the type check and ESLint silent; `check:api`
+passes; CodeQL, no finding. The browser spec's fixes are CI's to prove: no Compose stack here.
+
+Deferred minors (a follow-up issue, on the owner's word): a lost network answer says "Mist answered with an error";
+Simulate's scope moves when the connections list arrives, dropping a listing started before it, and every form's
+status line changes from "the connection's" to the connection's name then; the schedule form keeps its picks when its
+form is read again on a newer version (the run form drops them).
+
+What the reviewer set aside, each ruled as it stands: Show choices after a pick searches by the id (the owner's call:
+the box is the value and the search); Simulate's `connection_unavailable` words cover a connection of another type
+too (the spec's table; 4f-3c keeps such a connection out); "close the form and start again" in the schedule form (the
+spec's words); the list staying open when focus leaves it, and Up from the first row (the drawer's list, ruling 373);
+Edit as JSON toggled off dropping the JSON (4e-2's); a picker beside `format` (ruling 374); `labelWord` taking off only
+" ID"; a schedule's names kept at each tick (4f-3a).
