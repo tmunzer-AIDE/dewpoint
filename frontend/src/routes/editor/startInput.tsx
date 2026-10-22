@@ -112,17 +112,19 @@ export const hintOf = (f: StartField) =>
 export const listed = (items: string[]) => (items.length < 2 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)!}`);
 
 /** One field of the published version's form: never prefilled with what a sensitive field hides. */
-export function InputControl({ f, value, error, onChange, label: shownLabel, hint: shownHint }: {
+export function InputControl({ f, value, error, onChange, label: shownLabel, hint: shownHint, tall }: {
   f: StartField; value: string | undefined; error?: string; onChange: (v: string) => void; label?: ReactNode; hint?: ReactNode;
+  /** 44 px below 640 px: the run form's (the 4f-3 design §5.6). */
+  tall?: boolean;
 }) {  // prettier-ignore
   const pickers = usePickerForm();
   const label = shownLabel ?? `${nameOf(f)}${f.required ? " (required)" : ""}`;
   const entry = entryOf(f);
   const hint = shownHint ?? (entry === "json" ? [f.description, JSON_HINT].filter(Boolean).join(" ") : (f.description ?? undefined));
-  if (pickers && isPicker(f)) return <PickerField f={f} picker={f.picker} value={value} error={error} label={label} hint={hint} onChange={onChange} />;
+  if (pickers && isPicker(f)) return <PickerField f={f} picker={f.picker} value={value} error={error} label={label} hint={hint} tall={tall} onChange={onChange} />;
   if (entry === "yesno") {
     return (
-      <Select label={label} hint={hint} error={error} value={value === undefined ? "" : String(value)} onChange={(e) => onChange(e.target.value)}>
+      <Select label={label} hint={hint} error={error} tall={tall} value={value === undefined ? "" : String(value)} onChange={(e) => onChange(e.target.value)}>
         <option value="">Not given</option>
         <option value="true">Yes</option>
         <option value="false">No</option>
@@ -131,18 +133,18 @@ export function InputControl({ f, value, error, onChange, label: shownLabel, hin
   }
   if (entry === "choice") {
     return (
-      <Select label={label} hint={hint} error={error} value={value ?? ""} onChange={(e) => onChange(e.target.value)}>
+      <Select label={label} hint={hint} error={error} tall={tall} value={value ?? ""} onChange={(e) => onChange(e.target.value)}>
         <option value="">Not given</option>
         {(f.enum ?? []).map((v) => <option key={JSON.stringify(v)} value={JSON.stringify(v)}>{typeof v === "string" ? v : JSON.stringify(v)}</option>)}
       </Select>
     );  // prettier-ignore
   }
   if (entry === "json" && !f.sensitive) {
-    return <TextArea label={label} hint={hint} error={error} value={value ?? ""} rows={3} spellCheck={false} onChange={(e) => onChange(e.target.value)} />;
+    return <TextArea label={label} hint={hint} error={error} tall={tall} value={value ?? ""} rows={3} spellCheck={false} onChange={(e) => onChange(e.target.value)} />;
   }
   return (
     <Field
-      label={label} hint={hint} error={error} type={f.sensitive ? "password" : "text"} autoComplete="off" spellCheck={entry === "json" ? false : undefined}
+      label={label} hint={hint} error={error} tall={tall} type={f.sensitive ? "password" : "text"} autoComplete="off" spellCheck={entry === "json" ? false : undefined}
       inputMode={entry === "whole" || entry === "number" ? "decimal" : undefined} value={value ?? ""}
       onChange={(e) => onChange(e.target.value)}
     />

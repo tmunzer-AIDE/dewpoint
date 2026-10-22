@@ -149,8 +149,8 @@ export function failedWords(e: unknown, { C, n, label }: Words, draft: boolean):
 }
 
 /** A picker field (§5.2, §5.10): a combobox owning its list, its status line describing it. */
-export function PickerField({ f, picker, value, error, label, hint, onChange }: {
-  f: StartField; picker: Picker; value: string | undefined; error?: string; label: ReactNode; hint?: ReactNode; onChange: (v: string) => void;
+export function PickerField({ f, picker, value, error, label, hint, tall, onChange }: {
+  f: StartField; picker: Picker; value: string | undefined; error?: string; label: ReactNode; hint?: ReactNode; tall?: boolean; onChange: (v: string) => void;
 }) {  // prettier-ignore
   const form = usePickerForm()!;
   const id = useId();
@@ -185,7 +185,7 @@ export function PickerField({ f, picker, value, error, label, hint, onChange }: 
   };
   return (
     <Field
-      id={id} label={label} hint={hint} error={error} type="text" autoComplete="off" spellCheck={false} value={text}
+      id={id} label={label} hint={hint} error={error} tall={tall} type="text" autoComplete="off" spellCheck={false} value={text}
       role="combobox" aria-expanded={open} aria-controls={open ? list : undefined} describedBy={`${id}-status`} onKeyDown={onKeyDown}
       onChange={(e) => {
         if (pick) form.onPick(f.name, null); // typed over: its name goes (the owner's call, round 2)

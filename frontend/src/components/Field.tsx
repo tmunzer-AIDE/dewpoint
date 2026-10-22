@@ -12,6 +12,8 @@ interface Labelled {
   label: ReactNode; // its text, with what a form adds beside it (a "required" tag)
   hint?: ReactNode;
   error?: string;
+  /** 44 px below 640 px, where the root's smaller type makes min-h-11 38.5 px: the run form's (the 4f-3 design §5.6). */
+  tall?: boolean;
 }
 
 /** A field's own: what a start form's picker adds (the 4f-3 design §5.2). */
@@ -24,7 +26,7 @@ interface Around {
 
 /** The label, the control (given its id and description ids), then its hint and error, each described by the control.
  * Its id is the caller's when given: what's below the control may point at it. */
-function Frame({ id: given, label, hint, error, below, describedBy: more, control }: Labelled & Around & {
+function Frame({ id: given, label, hint, error, tall, below, describedBy: more, control }: Labelled & Around & {
   id?: string; control: (props: { id: string; describedBy?: string; className: string }) => ReactNode;
 }) {  // prettier-ignore
   const own = useId();
@@ -33,7 +35,7 @@ function Frame({ id: given, label, hint, error, below, describedBy: more, contro
   return (
     <div className="flex flex-col gap-1.5">
       <label htmlFor={id} className="text-small font-semibold">{label}</label>
-      {control({ id, describedBy: described, className: controlClass(!!error) })}
+      {control({ id, describedBy: described, className: `${controlClass(!!error)}${tall ? " max-sm:min-h-[44px]" : ""}` })}
       {hint && <p id={`${id}-hint`} className="text-small text-muted">{hint}</p>}
       {error && <p id={`${id}-err`} className="text-small text-danger">{error}</p>}
       {below}
@@ -41,17 +43,17 @@ function Frame({ id: given, label, hint, error, below, describedBy: more, contro
   );
 }
 
-export function Field({ id, label, hint, error, below, describedBy: more, ...input }: InputHTMLAttributes<HTMLInputElement> & Labelled & Around) {
+export function Field({ id, label, hint, error, tall, below, describedBy: more, ...input }: InputHTMLAttributes<HTMLInputElement> & Labelled & Around) {
   return (
-    <Frame id={id} label={label} hint={hint} error={error} below={below} describedBy={more} control={({ id, describedBy, className }) => (
+    <Frame id={id} label={label} hint={hint} error={error} tall={tall} below={below} describedBy={more} control={({ id, describedBy, className }) => (
       <input id={id} {...input} aria-invalid={!!error} aria-describedby={describedBy} className={className} />
     )} />
   );
 }
 
-export function Select({ label, hint, error, children, ...select }: SelectHTMLAttributes<HTMLSelectElement> & Labelled) {
+export function Select({ label, hint, error, tall, children, ...select }: SelectHTMLAttributes<HTMLSelectElement> & Labelled) {
   return (
-    <Frame label={label} hint={hint} error={error} control={({ id, describedBy, className }) => (
+    <Frame label={label} hint={hint} error={error} tall={tall} control={({ id, describedBy, className }) => (
       <select id={id} {...select} aria-invalid={!!error} aria-describedby={describedBy} className={className}>
         {children}
       </select>
@@ -60,9 +62,9 @@ export function Select({ label, hint, error, children, ...select }: SelectHTMLAt
 }
 
 /** Text of several lines, like JSON: a fixed-width face, its height from `rows`. */
-export function TextArea({ label, hint, error, ...area }: TextareaHTMLAttributes<HTMLTextAreaElement> & Labelled) {
+export function TextArea({ label, hint, error, tall, ...area }: TextareaHTMLAttributes<HTMLTextAreaElement> & Labelled) {
   return (
-    <Frame label={label} hint={hint} error={error} control={({ id, describedBy, className }) => (
+    <Frame label={label} hint={hint} error={error} tall={tall} control={({ id, describedBy, className }) => (
       <textarea id={id} {...area} aria-invalid={!!error} aria-describedby={describedBy} className={`${className} py-2 font-mono text-small`} />
     )} />
   );

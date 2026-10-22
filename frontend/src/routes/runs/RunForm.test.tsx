@@ -228,4 +228,22 @@ describe("below 640 px (the run form design §5.6; the Narrow320 boards)", () =>
     await userEvent.click(screen.getByRole("button", { name: "Close" }));
     expect(onClose).toHaveBeenCalled();
   });
+
+  it("makes every target 44 px: each kind of field, the mode's choices, Edit as JSON, Close, Start and Cancel (the 4f-3 design §5.6)", async () => {
+    const more = [
+      { name: "kind", title: "Kind", type: "string", enum: ["a", "b"], required: false, sensitive: false },
+      { name: "on", title: "On", type: "boolean", required: false, sensitive: false },
+      { name: "tags", title: "Tags", type: "array", required: false, sensitive: false },
+    ];  // prettier-ignore
+    forms = [{ ...FORM, fields: [...FORM.fields, ...more] }];
+    show();
+    await screen.findByLabelText(/^Site/);
+    const tall = (el: Element) => expect(el.className).toContain("max-sm:min-h-[44px]");
+    for (const label of [/^Site/, /^Floor/, /^Kind/, /^On/, /^Tags/]) tall(screen.getByLabelText(label));
+    for (const name of ["Live", "Simulated"]) tall(screen.getByRole("radio", { name }).closest("label")!);
+    for (const name of ["Edit as JSON", "Start the live run", "Cancel"]) tall(screen.getByRole("button", { name }));
+    expect(screen.getByRole("button", { name: "Close" }).className).toContain("size-[44px]");
+    await userEvent.click(screen.getByRole("button", { name: "Edit as JSON" }));
+    tall(screen.getByLabelText("The input, as JSON"));
+  });
 });

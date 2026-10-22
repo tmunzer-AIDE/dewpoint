@@ -268,3 +268,10 @@ describe("re-running a CSV run (the run form design §5.4; the Rerun board)", ()
     expect(screen.getByLabelText(/^API token/)).toHaveProperty("value", "");
   });
 });
+
+it("makes a CSV re-run's source choices 44 px rows below 640 px (the 4f-3 design §5.6)", async () => {
+  form = CSV_FORM;
+  input = CSV_KEPT;
+  show(CSV_RUN, 7);
+  for (const name of [/^The same rows/, /^Another file/]) expect((await screen.findByRole("radio", { name })).closest("label")!.className).toContain("max-sm:min-h-[44px]");
+});
