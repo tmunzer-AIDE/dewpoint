@@ -3987,3 +3987,34 @@ What the reviewer set aside, each ruled as it stands: a body switched to Formula
 sensitive part (M25's rule); Find matching substrings and its path words (ruling 352); an update's kind not saved
 (ruling 357); a map entry opening only its first part for a deeper hit (ruling 354); `/` or `~` in a setting's name
 (none in Mist); the composer's timeout (now M114); the listbox's height at 320 px (unspecified).
+
+### 4f-2b merged; 4f-3 designed; the 4f-3a plan accepted (2026-10-22)
+
+The owner merged 4f-2b as #139 (squash 99310614), every check green ("green and merged"); its sixteen deferred minors
+are issue #140. One CI fix went in with it: the changes spec takes a field by its own label, exact (a label matched as
+a substring also found its switch and its Remove).
+
+4f-3 was researched (notes R7–R10 in `~/4_dev/mist_dewpoint-4f-notes`), then proposed. The owner's answers
+(2026-10-22): all four backend changes (a draft's start form never a 500; a picker's connection in export bindings;
+choices pinned to the form's version; the picked name kept with the run); the run form's fields at 44 px below 640 px
+fixed inside 4f-3; Show choices in simulated mode, with a line. The boards ("4f-3 Start-form Picker Mockups") were
+approved at round 1 ("approved") and signed off at v9 (D8; "approved, let's write the specs"). The design,
+`docs/superpowers/specs/2026-10-22-editor-4f3-start-form-pickers-design.md` (37eaba6b), corrects the boards where the
+API had no words for a list (§3: the plugin gives them, `x-list`); the owner assigned migration slot 0074. Three plans:
+4f-3a, the backend; 4f-3b, the start forms; 4f-3c, authoring.
+
+`docs/superpowers/plans/2026-10-22-editor-ui-4f3a-backend.md`, revision 1, with milestone pauses. The owner accepted it:
+its rulings 1–10 join this ledger as 362–371. No step changes version: `x-list` is display metadata, outside the
+contract hash (the 294 hashes pinned). One migration (0074); no engine change, ENGINE_ABI stays 11, no replay history
+or golden changes. Mid-slice rulings start at M115.
+
+362. **Accepted. Milestone pauses after the start forms' reads and after the names** (plan ruling 1).
+363. **Accepted. A list's words from the plugin: `x-list` on each options field** (plan ruling 2).
+364. **Accepted. A start form never answers 500; its picker typed, with its list's words** (plan ruling 3).
+365. **Accepted. A start form's choices for the version it shows** (plan ruling 4).
+366. **Accepted. Migration 0074: a request's names record, a schedule's sealed names** (plan ruling 5).
+367. **Accepted. The names picked, kept where they fit, never refused, never in the input** (plan ruling 6).
+368. **Accepted. A run's names read back beside the value they name** (plan ruling 7).
+369. **Accepted. A schedule's names: with its input, never shown, filtered at each tick** (plan ruling 8).
+370. **Accepted. A picker's connection is a binding site; none travels otherwise** (plan ruling 9).
+371. **Accepted. The checks** (plan ruling 10).
