@@ -4183,3 +4183,9 @@ too (the spec's table; 4f-3c keeps such a connection out); "close the form and s
 spec's words); the list staying open when focus leaves it, and Up from the first row (the drawer's list, ruling 373);
 Edit as JSON toggled off dropping the JSON (4e-2's); a picker beside `format` (ruling 374); `labelWord` taking off only
 " ID"; a schedule's names kept at each tick (4f-3a).
+
+CI on the PR (#143): the e2e job's first run failed the browser spec's first test (the picker not focused when the
+run form opened; the other three skipped, the spec being serial). The graph is stored as `jsonb`, which keeps an
+object's keys shortest first: the fixture's `ticket` came before `site_id`, and the form's first field takes the focus.
+The fixture's second field is `change_ticket` now, so the picker is first, as on the boards. Start forms list their
+fields in that stored order, not as written: older than 4f-3b, every start form's.
