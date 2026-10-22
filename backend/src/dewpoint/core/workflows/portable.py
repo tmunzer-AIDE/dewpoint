@@ -4,7 +4,12 @@ holds where a binding goes (a connection field, a `flow.run_workflow`'s `workflo
 typed placeholder, and a draft that can't be made portable for certain is refused, never approximated. Imported, the
 file is checked whole against this server's node types before anything is written; each placeholder is then bound to
 one of the importing tenant's connections or workflows, or left unbound, its sites empty. Schedules, webhook bindings
-and CSV mappings are rows, not graph: they don't travel."""
+and CSV mappings are rows, not graph: they don't travel.
+
+A start form's picker (editor 4f-3, the start-form pickers design §4.5) is a connection site in the workflow's settings,
+its type its node type's connection field's: a step on the same connection shares its binding. A picker that isn't one
+(a node this server doesn't hold, a connection that isn't an id) leaves its connection behind; a file holding a
+picker's connection is refused, whatever it names."""
 
 import copy
 import uuid
@@ -17,6 +22,9 @@ FORMAT_VERSION = 1
 CONNECTION_MARKER = "x-dewpoint-connection"  # dewpoint.sdk.fields.CONNECTION; the SDK allows it top-level only
 RUN_WORKFLOW = "flow.run_workflow@1"  # the flow plugin's; its `workflow_id` is a literal workflow id
 FAILURE_HANDLER = "/settings/failure_handler"
+PICKER = "x-dewpoint-picker"  # dewpoint.apps.forms.PICKER: a start form's picker (plugins-3 D19)
+PROPERTIES = "/settings/input_schema/properties/"
+FIELD_MAX = 200  # a binding site's field at most (the file's model)
 UNKNOWN = {"connection": "Unknown connection", "workflow": "Unknown workflow"}
 
 Kind = Literal["connection", "workflow"]
@@ -27,7 +35,8 @@ class Site:
     kind: Kind
     type: str | None  # the connection type a connection site takes; None for a workflow
     node: str | None  # a step's id as the graph holds it; None for the workflow's settings
-    field: str  # a top-level config property (`/connection`), or FAILURE_HANDLER
+    field: str  # a top-level config property (`/connection`), FAILURE_HANDLER, or a picker's connection (pointer)
+    input: str | None = None  # the input field a picker site is in
 
 
 @dataclass(frozen=True)
@@ -89,10 +98,45 @@ def _shape(graph: Mapping[str, Any], config_schemas: Mapping[str, Mapping[str, A
     return out
 
 
+def _pickers(graph: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """Each input field's picker, by the field's name."""
+    settings = graph.get("settings")
+    schema = settings.get("input_schema") if isinstance(settings, Mapping) else None
+    props = schema.get("properties") if isinstance(schema, Mapping) else None
+    found = props.items() if isinstance(props, Mapping) else ()
+    return [(name, p[PICKER]) for name, p in found if isinstance(p, Mapping) and isinstance(p.get(PICKER), dict)]
+
+
+def picker_nodes(graph: Mapping[str, Any]) -> set[str]:
+    """The node type versions its pickers name, each that reads as one (`type@version`), connection or not."""
+    nodes = {p.get("node") for _, p in _pickers(graph)}
+    return {n for n in nodes if isinstance(n, str) and n.rpartition("@")[0] and n.rpartition("@")[2].isdigit()}
+
+
+def _pointer(name: str) -> str:
+    """A picker's connection, as a site's field: its input field's name escaped (RFC 6901)."""
+    return f"{PROPERTIES}{name.replace('~', '~0').replace('/', '~1')}/{PICKER}/connection"
+
+
+def _picker_site(name: str, picker: Mapping[str, Any], config_schemas: Mapping[str, Mapping[str, Any]]) -> Site | None:
+    """A picker's connection as a site: its node one this server holds, by its schema's connection field's type; its
+    field named; its connection none yet, or an id. None otherwise."""
+    node, connection = picker.get("node"), picker.get("connection")
+    schema = config_schemas.get(node) if isinstance(node, str) else None
+    if schema is None or not isinstance(picker.get("field"), str):
+        return None
+    if connection is not None and _canonical(connection) is None:
+        return None
+    field = _pointer(name)
+    kinds = [s[CONNECTION_MARKER] for s in (schema.get("properties") or {}).values()
+             if isinstance(s, Mapping) and isinstance(s.get(CONNECTION_MARKER), str)]  # fmt: skip
+    return Site("connection", kinds[0], None, field, name) if kinds and len(field) <= FIELD_MAX else None
+
+
 def sites(graph: Mapping[str, Any], config_schemas: Mapping[str, Mapping[str, Any]]) -> list[Site]:
     """Every place a graph may hold an id of the tenant's, by its steps' schemas: each top-level config property a type
-    marks as a connection, each `flow.run_workflow`'s `workflow_id`, and the failure handler. Only for a graph in
-    which `_shape` finds nothing."""
+    marks as a connection, each `flow.run_workflow`'s `workflow_id`, the failure handler, and each picker's connection
+    (`config_schemas` holding its node's). Only for a graph in which `_shape` finds nothing."""
     out: list[Site] = []
     for node in _nodes(graph):
         ref, node_id = str(node.get("type")), str(node.get("id"))
@@ -102,11 +146,19 @@ def sites(graph: Mapping[str, Any], config_schemas: Mapping[str, Mapping[str, An
         if ref == RUN_WORKFLOW:
             out.append(Site("workflow", None, node_id, "/workflow_id"))
     out.append(Site("workflow", None, None, FAILURE_HANDLER))
+    out += [s for name, picker in _pickers(graph) if (s := _picker_site(name, picker, config_schemas)) is not None]
     return out
+
+
+def _picker_at(graph: Mapping[str, Any], site: Site) -> Any:
+    return dict(_pickers(graph)).get(site.input) if site.input is not None else None
 
 
 def value_at(graph: Mapping[str, Any], site: Site) -> Any:
     """What a site holds; None when it holds nothing."""
+    if site.input is not None:
+        picker = _picker_at(graph, site)
+        return picker.get("connection") if isinstance(picker, Mapping) else None
     if site.node is None:
         settings = graph.get("settings")
         return settings.get("failure_handler") if isinstance(settings, Mapping) else None
@@ -116,6 +168,11 @@ def value_at(graph: Mapping[str, Any], site: Site) -> Any:
 
 
 def _empty(graph: dict[str, Any], site: Site) -> None:
+    if site.input is not None:
+        picker = _picker_at(graph, site)
+        if isinstance(picker, dict):
+            picker.pop("connection", None)
+        return
     if site.node is None:
         settings = graph.get("settings")
         if isinstance(settings, dict):
@@ -180,6 +237,8 @@ def export_document(
     graph = copy.deepcopy(dict(draft))
     for site in sites(draft, config_schemas):
         _empty(graph, site)
+    for _, picker in _pickers(graph):  # what's left is a picker that isn't a site: its connection never travels
+        picker.pop("connection", None)
     bindings: dict[tuple[str, str | None, str], dict[str, Any]] = {}
     for site, value in found:
         key = (site.kind, site.type, value)
@@ -216,6 +275,12 @@ def check_document(
         for s in allowed.values()
         if value_at(graph, s) is not None
     ]
+    held = {s.input for s in allowed.values() if s.input is not None and value_at(graph, s) is not None}
+    problems += [
+        Problem("embedded_value", field=_pointer(name))
+        for name, picker in _pickers(graph)
+        if "connection" in picker and name not in held
+    ]
     ids: set[str] = set()
     listed: set[tuple[str | None, str]] = set()
     for binding in bindings:
@@ -245,13 +310,17 @@ def apply(
     if problems:
         raise BadDocumentError(problems)
     out = copy.deepcopy(dict(graph))
+    allowed = {(s.node, s.field): s for s in sites(out, config_schemas)}
     for binding in bindings:
         value = chosen.get(binding["id"])
         if value is None:
             continue
-        for site in binding["sites"]:
-            if site["node"] is None:
+        for listed in binding["sites"]:
+            site = allowed[(listed["node"], listed["field"])]
+            if site.input is not None:
+                _picker_at(out, site)["connection"] = value
+            elif site.node is None:
                 out.setdefault("settings", {})["failure_handler"] = value
             else:
-                _node(out, site["node"]).setdefault("config", {})[site["field"][1:]] = value
+                _node(out, site.node).setdefault("config", {})[site.field[1:]] = value
     return out

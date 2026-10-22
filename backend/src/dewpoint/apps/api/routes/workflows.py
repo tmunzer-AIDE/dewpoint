@@ -443,9 +443,12 @@ def _bad_binding(binding: str, reason: str) -> HTTPException:
 
 
 async def _config_schemas(db: AsyncSession, graph: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """The config schema of each step type the graph names that this server knows, in any state: a retired type's
-    schema still says where its ids are. Called on a graph whose format is checked (each type a valid ref)."""
+    """The config schema of each step type the graph names, and each node type its start form's pickers name (4f-3:
+    a picker's connection type is its node's), that this server knows, in any state: a retired type's schema still
+    says where its ids are. Called on a graph whose format is checked (each step's type a valid ref; a picker's node
+    only when it reads as one)."""
     refs = {n["type"] for n in graph.get("nodes") or [] if isinstance(n, dict) and isinstance(n.get("type"), str)}
+    refs |= portable.picker_nodes(graph)
     return {row.ref: row.manifest.get("config_schema") or {} for row in await registry.load_node_types(db, refs)}
 
 
