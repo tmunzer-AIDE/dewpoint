@@ -4018,3 +4018,19 @@ or golden changes. Mid-slice rulings start at M115.
 369. **Accepted. A schedule's names: with its input, never shown, filtered at each tick** (plan ruling 8).
 370. **Accepted. A picker's connection is a binding site; none travels otherwise** (plan ruling 9).
 371. **Accepted. The checks** (plan ruling 10).
+
+### 4f-3a, milestone 1 (2026-10-22)
+
+The owner accepted the plan and chose inline execution ("approved, inline"), the branch from origin/main 99310614
+and the frontend's packages restored offline. The checks ran with a venv whose lock differs from main's only by
+certifi (2026.7.22 for 2026.10.19, #135; no test reads it), this worktree's source first.
+- Task 1 (456e15f1): the plan's acceptance, rulings 362–371.
+- Task 2 (6ca1f4eb): a list's words, `x-list`. Red: 9 failed, 69 passed (a first run passed the two paths as one
+  word and ran nothing; the change was taken out again and red watched). Green: 78 passed; static silent.
+- Task 3 (82c1304f): a start form never answers 500; its picker typed. Red: the collection stops on `picker_nodes`;
+  the API files alone, 3 failed and 11 passed. Green: 30 passed, 35 deselected; the API's schema regenerated (2 files,
+  90 insertions, 8 deletions); static silent.
+- Task 4 (2aba3c78): a form's choices for the version it shows. Red: 2 failed, 33 passed. Green: 35 passed; the API's
+  schema regenerated (14 insertions); static silent.
+
+Mid-slice rulings: none. Nothing pushed.
