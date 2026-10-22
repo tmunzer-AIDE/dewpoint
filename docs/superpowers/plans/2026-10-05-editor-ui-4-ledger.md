@@ -4067,3 +4067,31 @@ Mid-slice ruling (the plan's Task 9 wording):
   regression elsewhere shows in CI's backend job.
 
 Nothing pushed. Next: the final review.
+
+### 4f-3a, the final review (2026-10-22)
+
+A fresh reviewer (Fable) read the branch against the plan, its Review Focus and the spec: no critical finding, one
+important, eight minor; each Review Focus test present and passing; names never reach the engine, migration 0074 follows
+0071's online pattern, the pin's body is the start's, no id leaves an export. Fixed, each test-first (e660a158):
+- a schedule's names, or a re-run's original names record, that didn't open stopped the tick or failed the re-run:
+  both read as none now, as the run page reads them (display only, never a refusal);
+- graded up from minor: a picker's node ref whose version no registry row can hold (`@99999999999`) reached the
+  database, a 500 on a draft's start form and an export; both readers take only what `readable_ref` admits.
+The suites this branch's files feed after the pass: 1,746 passed (`tests/core/plugins` added); static silent; the API's
+schema unchanged.
+
+An untouched re-run's names are its original's, kept where they still fit the version it runs (the spec's "copies"
+reads so: a name only for a picker holding that value).
+
+Deferred minors (a follow-up issue, on the owner's word): an input field's name past about 133 characters drops its
+picker's export binding silently; a picker's `connection: null` in a file is refused as an embedded value; the pin's
+"nothing asked of the plugin" not pinned by the fake's request count; no interrupted-upgrade test for 0074 (`test_online`
+stops at 0052); the validator's own reader passes an impossible version to the registry (pre-existing); no retention
+test that a names record goes with its request; §4.4's "28 fields, on all 199 node types" against the 199 (node, field)
+pairs pinned.
+
+What the reviewer set aside, each ruled as it stands: the spec and plan off this branch (the plan joins it with the
+owner's commit word); `names: null` in a PATCH refused as null; a picker beside `enum`, `default` or `format` still named
+(4f-3b's rule); a label returned as typed (the UI escapes); names kept for a simulated start of a published version; an
+unknown picker node with no binding flagged at validation, not import (ruling 9); the whole suite left to CI; `noun()`
+without a scope word, a node with two connection fields (none in Mist).
