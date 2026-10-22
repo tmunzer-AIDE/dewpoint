@@ -4130,3 +4130,17 @@ the frontend's packages restored offline.
 
 The suites beside them (runs, editor, components, lib): 1,303 passed in 104 files.
 Mid-slice rulings: none. Nothing pushed.
+
+### 4f-3b, milestone 2 (2026-10-22)
+
+The owner approved milestone 1 ("approved").
+- Task 5 (cbb4bf4b): the schedule form and Simulate. Red: 6 failed (neither form has a picker field; a first run
+  passed the two test files as one word and ran nothing: the change was taken out again and red watched). Green: 6
+  passed; static silent.
+- Task 6 (2e0fb462): the run page names what was picked. Red: 2 failed, 40 passed (a named value shown as its id).
+  Green: 42 passed; static silent.
+- Task 7 (22a11979): the run form at 44 px below 640 px. Red: 5 failed, 59 passed (no control, row, button or
+  disclosure with the class). Green: 64 passed; static silent.
+
+The suites beside them (runs, editor, components, lib): 1,316 passed in 106 files.
+Mid-slice rulings: none. Nothing pushed.
