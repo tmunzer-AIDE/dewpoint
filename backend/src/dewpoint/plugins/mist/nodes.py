@@ -419,6 +419,7 @@ def build() -> tuple[type[Node], ...]:
         merge_with = by_path.get(("GET", op.path)) if op.method == "PUT" else None
         merge_with = merge_with if merge_with in entry.reads else None  # the map lists every read (O2)
         pickers = {f: o for f, o in routing.pickers(op.path, entry.scope, lists).items() if o in entry.reads}
+        listed = {f: entries[o].nodes[0] for f, o in pickers.items()}  # each options field's list step (4f-3 §4.4)
         name = _class_name(type_)
         config = display.titled(config_schema(doc, op, shape, paging, merge_with is not None, pickers))
         attrs: dict[str, Any] = {
@@ -429,7 +430,10 @@ def build() -> tuple[type[Node], ...]:
             "title": title(op_id),
             "description": _description(op) + (RACE if merge_with is not None else ""),
             "Config": declared_model(
-                f"{name}Config", display.displayed(type_, config, _widget(op, config)), formats=(), checked=False
+                f"{name}Config",
+                display.displayed(type_, config, _widget(op, config), listed),
+                formats=(),
+                checked=False,
             ),
             "Output": declared_model(f"{name}Output", output_schema(doc, answer, shape), formats=(), checked=False),
             "side_effect": SideEffect(entry.side_effect),

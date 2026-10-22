@@ -69,6 +69,37 @@ def test_each_step_of_a_resource_shares_its_group() -> None:
     assert all(len(titles) == 1 for titles in by_resource.values())
 
 
+def test_every_options_field_names_its_list() -> None:
+    """4f-3 spec §4.4: the list a field's choices come from, in words, on the field's own entry and nowhere else."""
+    marked = {(ref, f): p["x-list"] for ref, c in CONFIGS.items() for f, p in c["properties"].items() if "x-list" in p}
+    assert set(marked) == {(ref, f) for ref, n in NODES.items() for f in n.get("options", [])}
+    assert len(marked) == 199
+    by_field: dict[str, list[dict[str, str]]] = {}
+    for (_, field), listed in marked.items():
+        by_field.setdefault(field, []).append(listed)
+    assert len(by_field) == 28
+    assert all(all(x == lists[0] for x in lists) for lists in by_field.values())  # one list per field
+    assert {x["plugin"] for lists in by_field.values() for x in lists} == {"Mist"}
+
+
+@pytest.mark.parametrize(
+    ("field", "title", "noun"),
+    [
+        ("site_id", "Org sites", "sites"),
+        ("wlan_id", "Org WLANs", "WLANs"),
+        ("template_id", "Org WLAN templates", "WLAN templates"),
+        ("alarmtemplate_id", "Org alarm templates", "alarm templates"),
+        ("nacrule_id", "Org NAC rules", "NAC rules"),
+        ("secintelprofile_id", "Org SecIntel profiles", "SecIntel profiles"),
+        ("guest_mac", "Org guests", "guests"),
+    ],
+)
+def test_a_list_is_titled_by_its_group_and_named_by_its_noun(field: str, title: str, noun: str) -> None:
+    lists = [c["properties"][field]["x-list"] for c in CONFIGS.values() if "x-list" in c["properties"].get(field, {})]
+    assert lists
+    assert all(x == {"plugin": "Mist", "title": title, "noun": noun} for x in lists)
+
+
 def test_updates_and_creates_name_their_widget() -> None:
     widgets = {ref: config.get("x-widget") for ref, config in CONFIGS.items()}
     updates = {ref for ref, w in widgets.items() if w == "update"}

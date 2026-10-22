@@ -8,7 +8,9 @@ hash drops (`x-group`, `x-widget`, `title`), so no step's version changes.
 - A setting's title is its name in words: Mist's terms as `titles` writes them, and the terms only a body uses (SSID,
   VLAN…), which node and path titles don't take (they stay as signed off: `radius`, `dot1x`). It goes on the setting's
   own entry, never on a shared `$defs` component that other settings reach too.
-- A union whose every branch allows one `type` (a device's AP, switch or gateway) titles each branch by that value."""
+- A union whose every branch allows one `type` (a device's AP, switch or gateway) titles each branch by that value.
+- An options field names the list its choices come from (editor 4f-3, the start-form pickers design §4.4): the list's
+  group and its noun ("Org sites", "sites"), on the field's own entry (`x-list`), for a start form's words."""
 
 from collections.abc import Mapping
 from typing import Any
@@ -54,11 +56,25 @@ def setting_title(name: str) -> str:
     return title(name, BODY_TERMS)
 
 
-def displayed(type_: str, schema: dict[str, Any], widget: str | None = None) -> dict[str, Any]:
-    """`schema`, a step's config, with its group at its root, and its widget when it takes one."""
+def noun(group: str) -> str:
+    """A list's noun: its group's title without its scope word, lower-cased where that word is ("Org sites": "sites",
+    "Org WLANs": "WLANs")."""
+    rest = group.split(" ", 1)[1] if group.startswith(("Org ", "Site ")) else group
+    head = rest.split(" ", 1)[0]
+    return rest[0].lower() + rest[1:] if head[1:] == head[1:].lower() else rest
+
+
+def displayed(
+    type_: str, schema: dict[str, Any], widget: str | None = None, lists: Mapping[str, str] | None = None
+) -> dict[str, Any]:
+    """`schema`, a step's config, with its group at its root, its widget when it takes one, and on each options field
+    the list it reads (`lists`: the field's list step type)."""
     schema["x-group"] = {"plugin": PLUGIN_TITLE, "title": group_title(type_.split(".")[1])}
     if widget is not None:
         schema["x-widget"] = widget
+    for field, list_type in (lists or {}).items():
+        group = group_title(list_type.split(".")[1])
+        schema["properties"][field]["x-list"] = {"plugin": PLUGIN_TITLE, "title": group, "noun": noun(group)}
     return schema
 
 
