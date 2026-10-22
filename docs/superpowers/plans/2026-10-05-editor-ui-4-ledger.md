@@ -4144,3 +4144,15 @@ The owner approved milestone 1 ("approved").
 
 The suites beside them (runs, editor, components, lib): 1,316 passed in 106 files.
 Mid-slice rulings: none. Nothing pushed.
+
+### 4f-3b, milestone 3 and the final checkpoint (2026-10-22)
+
+The owner approved milestone 2 ("go").
+- Task 8 (25375b06): the browser spec, its fixture and the seed's helpers. The type check and ESLint silent;
+  Playwright lists its four tests in the workflows project. Not run here (no Compose stack): CI's e2e job runs it.
+- Task 9, every check on 25375b06: the whole frontend suite, 1,634 passed in 119 files (main has 1,588 in 114), 37 s;
+  ESLint silent; the build done (the run form's script 56.75 kB, main 48.37; the editor's 149.63, main 149.19; the
+  entry 651.91, main 651.73); `check:api` passes; CodeQL (CLI 2.27.2, CI's filter; javascript-queries 2.4.8): no
+  finding. The branch's code is the tree the plan's dry runs ended on (da479212), file for file.
+
+Mid-slice rulings: none. Nothing pushed. Next: the final review.
