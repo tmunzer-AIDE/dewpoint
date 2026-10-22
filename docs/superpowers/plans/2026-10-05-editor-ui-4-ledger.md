@@ -4048,3 +4048,22 @@ The owner approved milestone 1 ("apporoved").
 
 The suites beside them (schedules, their tick, run requests, admission, a simulation's reads, claims): 219 passed.
 Mid-slice rulings: none. Nothing pushed.
+
+### 4f-3a, milestone 3 and the final checkpoint (2026-10-22)
+
+The owner approved milestone 2 and left the whole backend suite to CI ("approved, leave the full suite to CI").
+- Task 8 (e95cdccf): a picker's connection, a binding site. Red: 9 failed, 62 passed (`…of_a_node_this_server_doesnt_
+  hold_is_refused` passes at once: an unknown site is `bad_site` already). Green: 71 passed; the API's schema unchanged;
+  static silent.
+- Task 9, every check on e95cdccf: the suites this branch's files feed (Mist plugin, registry, the API's tests, forms,
+  admission, schedules and their tick, workflows' files, keys, claims, the migration chain, 0074, the rights reference):
+  1,691 passed in 4 min 18 s with 12 workers; ruff, ruff format, mypy and lint-imports silent; the API's schema current
+  (`dewpoint api openapi` against the committed copy: no difference; `check:api` passes); CodeQL (CLI 2.27.2, CI's
+  filter; python-queries 1.8.13, javascript-queries 2.4.8): no finding. The whole backend suite waits for CI's job.
+
+Mid-slice ruling (the plan's Task 9 wording):
+- M115. **The final run takes the suites this branch's files feed, not all of `tests/apps` and `tests/core`** (4,589
+  tests, about 11 minutes here, past the 10-minute rule); the whole suite is CI's, on the owner's word. Cost: a
+  regression elsewhere shows in CI's backend job.
+
+Nothing pushed. Next: the final review.
