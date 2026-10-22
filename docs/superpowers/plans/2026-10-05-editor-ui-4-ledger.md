@@ -4034,3 +4034,17 @@ certifi (2026.7.22 for 2026.10.19, #135; no test reads it), this worktree's sour
   schema regenerated (14 insertions); static silent.
 
 Mid-slice rulings: none. Nothing pushed.
+
+### 4f-3a, milestone 2 (2026-10-22)
+
+The owner approved milestone 1 ("apporoved").
+- Task 5 (c24a8b1f): migration 0074, a request's names record and a schedule's sealed names. Red: 7 failed, 14 passed.
+  Green: 21 passed; static silent.
+- Task 6 (d058893b): the names picked, kept with a run and read back. Red: the collection stops on `picked_names`; the
+  API files alone, 9 failed and 8 passed. Green: 34 passed; the API's schema regenerated (98 insertions, 5 deletions);
+  static silent.
+- Task 7 (2208d29a): a schedule's names. Red: 5 failed, 6 passed. Green: 11 passed; the API's schema regenerated (49
+  insertions, 2 deletions); static silent.
+
+The suites beside them (schedules, their tick, run requests, admission, a simulation's reads, claims): 219 passed.
+Mid-slice rulings: none. Nothing pushed.
