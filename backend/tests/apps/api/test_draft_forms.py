@@ -22,6 +22,7 @@ from tests.support.graphs import G, cel, nid, ref
 
 pytestmark = pytest.mark.usefixtures("development_deployment")
 __all__ = ["keyed_app"]  # the run start tests' fixture: the API with fixture keys
+PICKER = {"node": "testkit.pick@1", "field": "site_id", "connection": "c0ffee00-0000-4000-8000-000000000001"}
 
 READS = (
     G().node("a", "flow.transform@1", {"fields": {"n": cel("1 + 1")}})
@@ -77,6 +78,25 @@ async def test_the_drafts_start_form_reads_the_draft_at_its_revision_published_o
     csv = (await editor.get(url(ctx, wf, "start-form"), params={"revision": 2})).json()["csv"]
     assert csv["columns"] == [{"header": "Site", "name": "site", "type": "string", "required": False,
                                "sensitive": False}]  # fmt: skip
+
+
+async def test_a_drafts_form_it_cant_read_whole_gives_the_fields_it_can(
+    keyed_app, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+) -> None:
+    """A draft saves any input schema the graph parses: its form answers with what it reads, never a 500 (4f-3 §4.3)."""
+    schema = {"type": "object", "properties": {"flag": True, "site": {"type": "string", "x-dewpoint-picker": "x"},
+                                               "kit": {"type": "string", "x-dewpoint-picker": PICKER}},
+              "required": [{"x": 1}, "kit"]}  # fmt: skip
+    graph = G().node("e", "testkit.echo@1", {"value": 1}).data() | {"settings": {"input_schema": schema}}
+    ctx, wf = await drafted(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, graph)
+    editor = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "editor")
+    answer = await editor.get(url(ctx, wf, "start-form"), params={"revision": 1})
+    assert answer.status_code == 200, answer.text
+    assert {f["name"]: f for f in answer.json()["fields"]} == {
+        "site": {"name": "site", "type": "string", "required": False, "sensitive": False},
+        "kit": {"name": "kit", "type": "string", "required": True, "sensitive": False,
+                "picker": PICKER | {"list": {"plugin": "Testkit", "title": "Sites", "noun": "sites"}}},
+    }  # fmt: skip
 
 
 @pytest.mark.parametrize(("role", "status"), [("viewer", 403), ("operator", 403), ("editor", 200), ("admin", 200)])
@@ -148,3 +168,17 @@ async def test_a_step_that_isnt_in_the_draft_has_no_seed_contract(
     editor = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "editor")
     answer = await editor.get(url(ctx, wf, f"steps/{uuid.uuid4()}/seeds"), params={"revision": 1})
     assert (answer.status_code, answer.json()) == (404, {"error": "not_found"})
+
+
+async def test_a_drafts_picker_naming_an_impossible_version_still_gives_its_form(
+    keyed_app, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+) -> None:
+    """The final review's M5: a version no registry row can hold is never asked for; the field shows, its list none."""
+    picker = PICKER | {"node": "testkit.pick@99999999999"}
+    schema = {"type": "object", "properties": {"site": {"type": "string", "x-dewpoint-picker": picker}}}
+    graph = G().node("e", "testkit.echo@1", {"value": 1}).data() | {"settings": {"input_schema": schema}}
+    ctx, wf = await drafted(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, graph)
+    editor = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "editor")
+    answer = await editor.get(url(ctx, wf, "start-form"), params={"revision": 1})
+    assert answer.status_code == 200, answer.text
+    assert answer.json()["fields"][0]["picker"] == picker | {"list": None}

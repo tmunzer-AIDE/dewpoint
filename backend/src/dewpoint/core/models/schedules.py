@@ -45,6 +45,7 @@ class Schedule(Base):
     catchup_window_s: Mapped[int] = mapped_column(Integer, default=600)
     mode: Mapped[str] = mapped_column(String(16))
     input: Mapped[bytes | None] = mapped_column(LargeBinary)
+    names: Mapped[bytes | None] = mapped_column(LargeBinary)  # the names its form picked, sealed (4f-3, 0074)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     generation: Mapped[int] = mapped_column(BigInteger, default=1)
     synced_generation: Mapped[int] = mapped_column(BigInteger, default=0)

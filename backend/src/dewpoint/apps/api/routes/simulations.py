@@ -34,7 +34,7 @@ from dewpoint.apps.api.routes.run_requests import (
 )
 from dewpoint.apps.api.routes.runs import _step, read_back
 from dewpoint.apps.api.routes.workflows import _get, _revision
-from dewpoint.apps.forms import csv_form, form_fields
+from dewpoint.apps.forms import csv_form, form_fields, held_manifests
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.config import Settings
 from dewpoint.core.crypto.keys import KeySource
@@ -312,7 +312,7 @@ async def draft_start_form(
     return {
         "workflow_id": str(wf.id),
         "draft_revision": wf.draft_revision,
-        "fields": form_fields(graph.settings.input_schema),
+        "fields": form_fields(graph.settings.input_schema, await held_manifests(db, graph.settings.input_schema)),
         "csv": csv_form(csv.model_dump(mode="json") if csv is not None else None),
     }
 

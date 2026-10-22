@@ -32,6 +32,9 @@ from dewpoint.sdk import (
     options_field,
     sensitive,
 )
+from dewpoint.sdk.fields import OPTIONS
+
+SITES_LIST = {"plugin": "Testkit", "title": "Sites", "noun": "sites"}
 
 
 class EchoConfig(BaseModel):
@@ -406,7 +409,8 @@ class ReconcilableCall(HttpCall):
 
 class PickConfig(BaseModel):
     connection: uuid.UUID = connection_field("testkit")
-    site_id: str = options_field()
+    # The list it reads, in words, as Mist names its own (the 4f-3 design §4.4): display only, out of the hash.
+    site_id: str = Field(json_schema_extra={OPTIONS: True, "x-list": SITES_LIST})
     note: str = ""
 
 

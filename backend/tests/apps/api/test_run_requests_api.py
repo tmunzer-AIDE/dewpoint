@@ -198,7 +198,8 @@ async def test_the_start_form_describes_the_active_versions_input(
     assert {f["name"]: f for f in form["fields"]} == {
         "token": {"name": "token", "type": "string", "required": True, "sensitive": True, "title": "API token"},
         "site": {"name": "site", "type": "string", "required": True, "sensitive": False, "enum": ["a", "b"],
-                 "default": "a", "picker": {"node": "testkit.pick@1", "field": "site_id", "connection": str(cid)}},
+                 "default": "a", "picker": {"node": "testkit.pick@1", "field": "site_id", "connection": str(cid),
+                                            "list": {"plugin": "Testkit", "title": "Sites", "noun": "sites"}}},
         "count": {"name": "count", "type": "integer", "required": False, "sensitive": False,
                   "description": "How many"},
     }  # fmt: skip
@@ -234,6 +235,25 @@ async def test_the_start_form_describes_a_csv_declaration(
         ],
     }  # fmt: skip
     assert {f["name"] for f in form["fields"]} == {"token", "site", "count"}  # `rows` comes from the file
+
+
+async def test_a_published_boolean_property_leaves_the_form_whole(
+    keyed_app, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+) -> None:
+    """`true` is a valid JSON Schema, so publish takes it; the form leaves it out and answers (the 4f-3 design §4.3)."""
+    from tests.apps.test_workflow_ops import actor, create, publish
+    from tests.support.registry import sync_test_plugins
+
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    schema = {"type": "object", "properties": {"flag": True, "site": {"type": "string"}}}
+    graph = G().node("a", "testkit.echo@1", {"value": 1}).data() | {"settings": {"input_schema": schema}}
+    wf = await create(api_sessionmaker, ctx, graph)
+    assert (await publish(api_sessionmaker, ctx, wf, api_settings)).version is not None
+    client = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx)
+    answer = await client.get(f"/api/v1/t/{ctx.tenant_id}/workflows/{wf}/start-form")
+    assert answer.status_code == 200, answer.text
+    assert [f["name"] for f in answer.json()["fields"]] == ["site"]
 
 
 async def test_a_workflow_without_an_active_version_has_no_start_form(

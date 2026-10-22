@@ -83,6 +83,7 @@ def test_contract_hash_covers_everything_that_changes_behaviour(path: tuple[str,
         (("config_schema", "properties", "value", "description"), "Any JSON value."),
         (("config_schema", "properties", "value", "examples"), [1, "a"]),
         (("config_schema", "properties", "value", "x-widget"), "pill-text"),
+        (("config_schema", "properties", "value", "x-list"), {"plugin": "Acme", "title": "Org sites", "noun": "sites"}),
     ],
 )
 def test_display_metadata_is_not_part_of_the_contract(path: tuple[str, ...], value: Any) -> None:

@@ -29,7 +29,8 @@ class _Claim:
 
 class InputClaim(_Claim, Base):
     """A claim made before its run starts: a trigger's claimed parts, a sub-flow's input (§3.5). Or, with the role
-    `envelope`, a request's trigger envelope (revision 7, §7.1): not a claim, never read or granted as one."""
+    `envelope`, a request's trigger envelope (revision 7, §7.1); `csv`, its CSV record (§8.1); `names`, the names its
+    start form picked (editor 4f-3, migration 0074): none a claim, never read or granted as one."""
 
     __tablename__ = "run_inputs"
     # What a request's envelope key names: its own tenant's envelope, owned by the request (revision 7).

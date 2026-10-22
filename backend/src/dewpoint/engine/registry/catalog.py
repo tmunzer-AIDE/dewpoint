@@ -29,7 +29,7 @@ from dewpoint.sdk.triggers import trigger_problems
 from dewpoint.sdk.version import SDK_MAJOR
 
 _DISPLAY = frozenset({"title", "description", "icon"})  # manifest keys that may change within a version
-_SCHEMA_ANNOTATIONS = frozenset({"title", "description", "examples", "x-widget", "x-group"})
+_SCHEMA_ANNOTATIONS = frozenset({"title", "description", "examples", "x-widget", "x-group", "x-list"})
 _KINDS = {k.value for k in NodeKind}
 _SIDE_EFFECTS = {s.value for s in SideEffect}
 

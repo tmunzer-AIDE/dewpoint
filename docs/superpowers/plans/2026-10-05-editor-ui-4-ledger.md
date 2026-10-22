@@ -3987,3 +3987,111 @@ What the reviewer set aside, each ruled as it stands: a body switched to Formula
 sensitive part (M25's rule); Find matching substrings and its path words (ruling 352); an update's kind not saved
 (ruling 357); a map entry opening only its first part for a deeper hit (ruling 354); `/` or `~` in a setting's name
 (none in Mist); the composer's timeout (now M114); the listbox's height at 320 px (unspecified).
+
+### 4f-2b merged; 4f-3 designed; the 4f-3a plan accepted (2026-10-22)
+
+The owner merged 4f-2b as #139 (squash 99310614), every check green ("green and merged"); its sixteen deferred minors
+are issue #140. One CI fix went in with it: the changes spec takes a field by its own label, exact (a label matched as
+a substring also found its switch and its Remove).
+
+4f-3 was researched (notes R7–R10 in `~/4_dev/mist_dewpoint-4f-notes`), then proposed. The owner's answers
+(2026-10-22): all four backend changes (a draft's start form never a 500; a picker's connection in export bindings;
+choices pinned to the form's version; the picked name kept with the run); the run form's fields at 44 px below 640 px
+fixed inside 4f-3; Show choices in simulated mode, with a line. The boards ("4f-3 Start-form Picker Mockups") were
+approved at round 1 ("approved") and signed off at v9 (D8; "approved, let's write the specs"). The design,
+`docs/superpowers/specs/2026-10-22-editor-4f3-start-form-pickers-design.md` (37eaba6b), corrects the boards where the
+API had no words for a list (§3: the plugin gives them, `x-list`); the owner assigned migration slot 0074. Three plans:
+4f-3a, the backend; 4f-3b, the start forms; 4f-3c, authoring.
+
+`docs/superpowers/plans/2026-10-22-editor-ui-4f3a-backend.md`, revision 1, with milestone pauses. The owner accepted it:
+its rulings 1–10 join this ledger as 362–371. No step changes version: `x-list` is display metadata, outside the
+contract hash (the 294 hashes pinned). One migration (0074); no engine change, ENGINE_ABI stays 11, no replay history
+or golden changes. Mid-slice rulings start at M115.
+
+362. **Accepted. Milestone pauses after the start forms' reads and after the names** (plan ruling 1).
+363. **Accepted. A list's words from the plugin: `x-list` on each options field** (plan ruling 2).
+364. **Accepted. A start form never answers 500; its picker typed, with its list's words** (plan ruling 3).
+365. **Accepted. A start form's choices for the version it shows** (plan ruling 4).
+366. **Accepted. Migration 0074: a request's names record, a schedule's sealed names** (plan ruling 5).
+367. **Accepted. The names picked, kept where they fit, never refused, never in the input** (plan ruling 6).
+368. **Accepted. A run's names read back beside the value they name** (plan ruling 7).
+369. **Accepted. A schedule's names: with its input, never shown, filtered at each tick** (plan ruling 8).
+370. **Accepted. A picker's connection is a binding site; none travels otherwise** (plan ruling 9).
+371. **Accepted. The checks** (plan ruling 10).
+
+### 4f-3a, milestone 1 (2026-10-22)
+
+The owner accepted the plan and chose inline execution ("approved, inline"), the branch from origin/main 99310614
+and the frontend's packages restored offline. The checks ran with a venv whose lock differs from main's only by
+certifi (2026.7.22 for 2026.10.19, #135; no test reads it), this worktree's source first.
+- Task 1 (456e15f1): the plan's acceptance, rulings 362–371.
+- Task 2 (6ca1f4eb): a list's words, `x-list`. Red: 9 failed, 69 passed (a first run passed the two paths as one
+  word and ran nothing; the change was taken out again and red watched). Green: 78 passed; static silent.
+- Task 3 (82c1304f): a start form never answers 500; its picker typed. Red: the collection stops on `picker_nodes`;
+  the API files alone, 3 failed and 11 passed. Green: 30 passed, 35 deselected; the API's schema regenerated (2 files,
+  90 insertions, 8 deletions); static silent.
+- Task 4 (2aba3c78): a form's choices for the version it shows. Red: 2 failed, 33 passed. Green: 35 passed; the API's
+  schema regenerated (14 insertions); static silent.
+
+Mid-slice rulings: none. Nothing pushed.
+
+### 4f-3a, milestone 2 (2026-10-22)
+
+The owner approved milestone 1 ("apporoved").
+- Task 5 (c24a8b1f): migration 0074, a request's names record and a schedule's sealed names. Red: 7 failed, 14 passed.
+  Green: 21 passed; static silent.
+- Task 6 (d058893b): the names picked, kept with a run and read back. Red: the collection stops on `picked_names`; the
+  API files alone, 9 failed and 8 passed. Green: 34 passed; the API's schema regenerated (98 insertions, 5 deletions);
+  static silent.
+- Task 7 (2208d29a): a schedule's names. Red: 5 failed, 6 passed. Green: 11 passed; the API's schema regenerated (49
+  insertions, 2 deletions); static silent.
+
+The suites beside them (schedules, their tick, run requests, admission, a simulation's reads, claims): 219 passed.
+Mid-slice rulings: none. Nothing pushed.
+
+### 4f-3a, milestone 3 and the final checkpoint (2026-10-22)
+
+The owner approved milestone 2 and left the whole backend suite to CI ("approved, leave the full suite to CI").
+- Task 8 (e95cdccf): a picker's connection, a binding site. Red: 9 failed, 62 passed (`…of_a_node_this_server_doesnt_
+  hold_is_refused` passes at once: an unknown site is `bad_site` already). Green: 71 passed; the API's schema unchanged;
+  static silent.
+- Task 9, every check on e95cdccf: the suites this branch's files feed (Mist plugin, registry, the API's tests, forms,
+  admission, schedules and their tick, workflows' files, keys, claims, the migration chain, 0074, the rights reference):
+  1,691 passed in 4 min 18 s with 12 workers; ruff, ruff format, mypy and lint-imports silent; the API's schema current
+  (`dewpoint api openapi` against the committed copy: no difference; `check:api` passes); CodeQL (CLI 2.27.2, CI's
+  filter; python-queries 1.8.13, javascript-queries 2.4.8): no finding. The whole backend suite waits for CI's job.
+
+Mid-slice ruling (the plan's Task 9 wording):
+- M115. **The final run takes the suites this branch's files feed, not all of `tests/apps` and `tests/core`** (4,589
+  tests, about 11 minutes here, past the 10-minute rule); the whole suite is CI's, on the owner's word. Cost: a
+  regression elsewhere shows in CI's backend job.
+
+Nothing pushed. Next: the final review.
+
+### 4f-3a, the final review (2026-10-22)
+
+A fresh reviewer (Fable) read the branch against the plan, its Review Focus and the spec: no critical finding, one
+important, eight minor; each Review Focus test present and passing; names never reach the engine, migration 0074 follows
+0071's online pattern, the pin's body is the start's, no id leaves an export. Fixed, each test-first (e660a158):
+- a schedule's names, or a re-run's original names record, that didn't open stopped the tick or failed the re-run:
+  both read as none now, as the run page reads them (display only, never a refusal);
+- graded up from minor: a picker's node ref whose version no registry row can hold (`@99999999999`) reached the
+  database, a 500 on a draft's start form and an export; both readers take only what `readable_ref` admits.
+The suites this branch's files feed after the pass: 1,746 passed (`tests/core/plugins` added); static silent; the API's
+schema unchanged.
+
+An untouched re-run's names are its original's, kept where they still fit the version it runs (the spec's "copies"
+reads so: a name only for a picker holding that value).
+
+Deferred minors (a follow-up issue, on the owner's word): an input field's name past about 133 characters drops its
+picker's export binding silently; a picker's `connection: null` in a file is refused as an embedded value; the pin's
+"nothing asked of the plugin" not pinned by the fake's request count; no interrupted-upgrade test for 0074 (`test_online`
+stops at 0052); the validator's own reader passes an impossible version to the registry (pre-existing); no retention
+test that a names record goes with its request; §4.4's "28 fields, on all 199 node types" against the 199 (node, field)
+pairs pinned.
+
+What the reviewer set aside, each ruled as it stands: the spec and plan off this branch (the plan joins it with the
+owner's commit word); `names: null` in a PATCH refused as null; a picker beside `enum`, `default` or `format` still named
+(4f-3b's rule); a label returned as typed (the UI escapes); names kept for a simulated start of a published version; an
+unknown picker node with no binding flagged at validation, not import (ruling 9); the whole suite left to CI; `noun()`
+without a scope word, a node with two connection fields (none in Mist).

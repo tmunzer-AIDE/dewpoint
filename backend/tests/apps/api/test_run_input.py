@@ -39,7 +39,7 @@ async def test_the_input_is_read_back_redacted(keyed_app, ready, owner_sessionma
     ctx, wf = ready
     request = (await admit(api_sessionmaker, ctx, wf)).request
     assert await read(keyed_app, owner_sessionmaker, api_settings, ctx, request.id) == {
-        "read_back": "kept", "input": {"token": "[redacted]", "site": "a"}, "seeds": None,
+        "read_back": "kept", "input": {"token": "[redacted]", "site": "a"}, "seeds": None, "names": {},
     }  # fmt: skip
 
 
@@ -63,7 +63,7 @@ async def test_a_csv_starts_input_leaves_its_rows_to_its_csv_record(
     upload = await staged(api_sessionmaker, ctx, wf)
     request = (await admit(api_sessionmaker, ctx, wf, csv=start(upload))).request
     found = await read(keyed_app, owner_sessionmaker, api_settings, ctx, request.id)
-    assert found == {"read_back": "kept", "input": {"token": "[redacted]", "site": "a"}, "seeds": None}
+    assert found == {"read_back": "kept", "input": {"token": "[redacted]", "site": "a"}, "seeds": None, "names": {}}
 
 
 async def test_a_rerun_of_a_csv_start_leaves_its_rows_out_too(
@@ -79,7 +79,7 @@ async def test_a_rerun_of_a_csv_start_leaves_its_rows_out_too(
     again = await operator.post(f"/api/v1/t/{ctx.tenant_id}/runs/{first.id}/rerun", headers={"Idempotency-Key": "r1"})
     assert again.status_code == 202, again.text
     found = await read(keyed_app, owner_sessionmaker, api_settings, ctx, uuid.UUID(again.json()["id"]))
-    assert found == {"read_back": "kept", "input": {"token": "[redacted]", "site": "a"}, "seeds": None}
+    assert found == {"read_back": "kept", "input": {"token": "[redacted]", "site": "a"}, "seeds": None, "names": {}}
 
 
 async def test_a_refusal_that_froze_nothing_kept_no_input(keyed_app, ready, owner_sessionmaker, api_sessionmaker,
@@ -88,7 +88,7 @@ async def test_a_refusal_that_froze_nothing_kept_no_input(keyed_app, ready, owne
     refused = (await admit(api_sessionmaker, ctx, wf, source="schedule", input={"token": 7})).request
     assert refused.status == "refused"
     assert await read(keyed_app, owner_sessionmaker, api_settings, ctx, refused.id) == {
-        "read_back": "absent", "input": None, "seeds": None,
+        "read_back": "absent", "input": None, "seeds": None, "names": {},
     }  # fmt: skip
 
 
@@ -102,7 +102,7 @@ async def test_an_input_that_doesnt_open_is_unreadable_its_key_gone_included(
         await s.execute(text("update run_inputs set ciphertext = :junk "
                              "where id = (select envelope_id from run_requests where id = :r)"),
                         {"junk": b"\x00" * 48, "r": broken.id})  # fmt: skip
-    unreadable = {"read_back": "unreadable", "input": None, "seeds": None}
+    unreadable = {"read_back": "unreadable", "input": None, "seeds": None, "names": {}}
     assert await read(keyed_app, owner_sessionmaker, api_settings, ctx, broken.id) == unreadable
     keyed_app.state.keys = FixtureKeys(missing={str(ctx.tenant_id)})  # an erasure took the tenant's key
     assert await read(keyed_app, owner_sessionmaker, api_settings, ctx, kept.id) == unreadable

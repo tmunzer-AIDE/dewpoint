@@ -443,9 +443,12 @@ def _bad_binding(binding: str, reason: str) -> HTTPException:
 
 
 async def _config_schemas(db: AsyncSession, graph: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """The config schema of each step type the graph names that this server knows, in any state: a retired type's
-    schema still says where its ids are. Called on a graph whose format is checked (each type a valid ref)."""
+    """The config schema of each step type the graph names, and each node type its start form's pickers name (4f-3:
+    a picker's connection type is its node's), that this server knows, in any state: a retired type's schema still
+    says where its ids are. Called on a graph whose format is checked (each step's type a valid ref; a picker's node
+    only when it reads as one)."""
     refs = {n["type"] for n in graph.get("nodes") or [] if isinstance(n, dict) and isinstance(n.get("type"), str)}
+    refs |= portable.picker_nodes(graph)
     return {row.ref: row.manifest.get("config_schema") or {} for row in await registry.load_node_types(db, refs)}
 
 
@@ -542,6 +545,8 @@ async def import_workflow(
 class InputOptionsIn(BaseModel):
     field: str = Field(min_length=1, max_length=200)
     query: str = Field(default="", max_length=200)
+    # The version the form shows (the 4f-3 design §4.2): another one active since is refused, as a start would be.
+    expected_version_id: uuid.UUID | None = None
 
 
 @router.post("/t/{tenant_id}/workflows/{workflow_id}/input-options", response_model=OptionsOut)
@@ -561,12 +566,19 @@ async def input_options(
         raise HTTPException(404, detail={"error": "not_published"})
     if not wf.enabled:  # no wider than a run (the 3a-2 review's finding 5): a disabled workflow can't be started
         raise HTTPException(409, detail={"error": "workflow_disabled"})
+    if body.expected_version_id is not None and version.id != body.expected_version_id:  # eL 261's order, 262's body
+        message = f"Version {version.number} is the active version now: its choices may differ."
+        active = {"active_version_id": str(version.id), "active_version_number": version.number}
+        raise HTTPException(409, detail={"error": "version_changed", "messages": [message], **active})
     props = version.input_schema.get("properties")
     prop = props.get(body.field) if isinstance(props, dict) else None
     picker = prop.get(PICKER) if isinstance(prop, dict) else None
     if not isinstance(picker, dict) or not all(isinstance(picker.get(k), str) for k in ("node", "field", "connection")):
         raise HTTPException(422, detail={"error": "not_a_picker"})
-    rows = await registry.load_node_types(db, [picker["node"]])
+    try:
+        rows = await registry.load_node_types(db, [picker["node"]])
+    except ValueError:  # a node without its version: publish refuses it now, a version from before may hold one
+        raise HTTPException(422, detail={"error": "not_a_picker"}) from None
     row = next((r for r in rows if r.state != "retired"), None)
     if row is None or picker["field"] not in row.manifest.get("options", []):
         raise HTTPException(404, detail={"error": "unknown_node_type"})

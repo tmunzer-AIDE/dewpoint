@@ -27,6 +27,7 @@ upload, all in the same savepoint."""
 
 import asyncio
 import uuid
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import timedelta
 from typing import Any
@@ -37,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps import csv_uploads, workflow_ops
 from dewpoint.apps.csv_input import Built, CsvFileError, RowError, build_rows, mapping_problems, read_table
+from dewpoint.apps.forms import picked_names
 from dewpoint.apps.inputs import (
     INPUT_INVALID,
     NOT_FINITE,
@@ -50,7 +52,7 @@ from dewpoint.apps.inputs import (
 from dewpoint.apps.workflow_ops import abi_reasons
 from dewpoint.core.audit import service as audit
 from dewpoint.core.claims import service as claims
-from dewpoint.core.claims.cipher import ClaimCipher
+from dewpoint.core.claims.cipher import ClaimCipher, ClaimUnreadableError
 from dewpoint.core.config import Settings
 from dewpoint.core.crypto.keys import KeySource
 from dewpoint.core.db import tenant_scope
@@ -252,12 +254,15 @@ async def admit_request(
     details: dict[str, object] | None = None,
     trigger_id: uuid.UUID | None = None,
     expected_version_id: uuid.UUID | None = None,
+    names: Mapping[str, Mapping[str, str]] | None = None,
 ) -> Admitted:
     """The request under `idempotency_key`: an exact retry's, or a new one, frozen. A re-run's digest covers its
     `rerun` identity in place of `input`, and a CSV start's its `csv` beside it; a start that confirmed a version
     (`expected_version_id`, B14) is refused once another is active, and its digest covers it. `trigger_id` is the
-    schedule or webhook endpoint a durable source's request came from. Raises IdempotencyConflictError,
-    WorkflowNotFoundError, or, for an interactive source, AdmissionRefusedError."""
+    schedule or webhook endpoint a durable source's request came from. `names` are what its start form picked, by
+    field, each with the value it was picked for: kept where they fit the frozen version, never in the digest (the
+    4f-3 design §4.1). Raises IdempotencyConflictError, WorkflowNotFoundError, or, for an interactive source,
+    AdmissionRefusedError."""
     if source not in INTERACTIVE + DURABLE or mode not in (LIVE, SIMULATE):
         raise ValueError(f"no such source or mode: {source}, {mode}")
     if csv is not None and source not in ("manual", "rerun"):
@@ -284,7 +289,8 @@ async def admit_request(
     request_id = uuid.uuid4()
     savepoint = await s.begin_nested()
     try:
-        frozen = await _frozen(s, keys, tenant_id, request_id, fields, actor_id, rerun, csv, expected_version_id)
+        frozen = await _frozen(s, keys, tenant_id, request_id, fields, actor_id, rerun, csv, expected_version_id,
+                               names or {})  # fmt: skip
     except _Consumed:
         await savepoint.rollback()
         existing = await _by_key(s, idempotency_key)  # its consumer has committed: under this key, an exact retry
@@ -431,6 +437,7 @@ async def _retry(
 async def _frozen(
     s: AsyncSession, keys: KeySource, tenant_id: uuid.UUID, request_id: uuid.UUID, fields: dict[str, Any],
     actor_id: uuid.UUID | None, rerun: Rerun | None, csv: CsvStart | None, expected_version_id: uuid.UUID | None = None,
+    names: Mapping[str, Mapping[str, str]] | None = None,
 ) -> _Frozen:  # fmt: skip
     """The mutable checks, then the trigger claimed and its envelope stored (a CSV start's rows built and its upload
     consumed first): the frozen version, the envelope and what the audit entry adds."""
@@ -480,6 +487,14 @@ async def _frozen(
     except InputRefusedError as e:
         raise _Refused(e.reason, e.reasons, version.id) from None
     envelope_id = await claims.write_envelope(s, ClaimCipher(keys), tenant_id, request_id=request_id, envelope=envelope)
+    if retained and rerun is not None:  # its original's names again, kept where they still fit (the 4f-3 design §4.1)
+        try:
+            names = await claims.read_names_record(s, ClaimCipher(keys), tenant_id, request_id=rerun.of)
+        except (ClaimUnreadableError, ValueError):  # display only: a record that doesn't open never fails the re-run
+            names = {}
+    kept_names = picked_names(version.input_schema, fields["input"], names or {})
+    if kept_names:
+        await claims.write_names_record(s, ClaimCipher(keys), tenant_id, request_id=request_id, names=kept_names)
     if retained and rerun is not None:  # its original's rows again: their record too (the run form design §4.5)
         kept = await claims.read_csv_record(s, ClaimCipher(keys), tenant_id, request_id=rerun.of)
         if kept is not None:

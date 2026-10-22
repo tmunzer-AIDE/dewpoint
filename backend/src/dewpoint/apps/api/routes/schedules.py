@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from dewpoint.apps import schedules
 from dewpoint.apps.api.responses import ScheduleOut, SchedulesOut
-from dewpoint.apps.api.routes.run_requests import get_keys, key_unusable
+from dewpoint.apps.api.routes.run_requests import Names, get_keys, key_unusable, picked
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.crypto.keys import KeySource
 from dewpoint.core.http import TenantContext, get_db, require
@@ -33,11 +33,13 @@ class ScheduleIn(BaseModel):
     mode: Literal["live", "simulate"] = "live"
     input: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = True
+    names: Names | None = Field(default=None, max_length=200)  # what its form picked (4f-3): kept where they fit
 
 
 class SchedulePatch(BaseModel):
     """Only the fields given change; `cron` or `every_s` given as null switches the timing's kind. Any other field
-    given as null is refused (422): it has no null to become (the owner's M3 review)."""
+    given as null is refused (422): it has no null to become (the owner's M3 review). Names come with the input they
+    were picked for: a new input replaces them (none given, none kept), and names alone are refused (4f-3)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -46,6 +48,8 @@ class SchedulePatch(BaseModel):
         nulled = sorted(k for k in self.model_fields_set - NULLABLE if getattr(self, k) is None)
         if nulled:
             raise ValueError(f"{', '.join(nulled)} can't be null")
+        if "names" in self.model_fields_set and "input" not in self.model_fields_set:
+            raise ValueError("names follow the input they were picked for")
         return self
 
     cron: str | None = Field(default=None, max_length=120)
@@ -56,6 +60,7 @@ class SchedulePatch(BaseModel):
     mode: Literal["live", "simulate"] | None = None
     input: dict[str, Any] | None = None
     enabled: bool | None = None
+    names: Names | None = Field(default=None, max_length=200)
 
 
 def _refused(e: schedules.ScheduleRefusedError) -> HTTPException:
@@ -74,7 +79,7 @@ async def create_schedule(
         created = await schedules.create(
             db, keys, tenant_id=ctx.tenant_id, actor_id=ctx.user.id, workflow_id=workflow_id,
             timing={k: getattr(given, k) for k in schedules.TIMING}, mode=given.mode, input=given.input,
-            enabled=given.enabled,
+            enabled=given.enabled, names=picked(given.names),
         )  # fmt: skip
     except schedules.ScheduleRefusedError as e:
         raise _refused(e) from None
@@ -117,7 +122,7 @@ async def update_schedule(
     db: AsyncSession = Depends(get_db, scope="function"),
     keys: KeySource = Depends(get_keys),
 ) -> dict[str, object]:
-    changes = {k: getattr(given, k) for k in given.model_fields_set}
+    changes = {k: getattr(given, k) for k in given.model_fields_set} | {"names": picked(given.names)}
     try:
         schedule = await schedules.found(db, schedule_id)
         updated = await schedules.update(db, keys, actor_id=ctx.user.id, schedule=schedule, changes=changes)

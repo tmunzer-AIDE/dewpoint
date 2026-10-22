@@ -296,11 +296,9 @@ async def read_envelope(s: AsyncSession, cipher: ClaimCipher, tenant_id: uuid.UU
         raise EnvelopeUnreadableError("A trigger envelope that isn't JSON.") from None
 
 
-async def write_csv_record(
-    s: AsyncSession, cipher: ClaimCipher, tenant_id: uuid.UUID, *, request_id: uuid.UUID, record: dict[str, Any]
+async def _write_record(
+    s: AsyncSession, cipher: ClaimCipher, tenant_id: uuid.UUID, request_id: uuid.UUID, role: str, record: Any
 ) -> None:
-    """A CSV start's record (§8.1): its mapping, the file's header names and its skipped rows, encrypted as a claim is
-    and owned by the request. Like the envelope it's never a claim: no claim read or grant serves it."""
     record_id = uuid.uuid4()
     row = {
         "id": record_id,
@@ -309,10 +307,30 @@ async def write_csv_record(
         "root_run_id": request_id,
         "sensitive_pointers": [],
         "ciphertext": await cipher.seal(str(tenant_id), str(record_id), _plain(record)),
-        "role": "csv",
+        "role": role,
         "pointer": None,
     }
     await s.execute(insert(InputClaim).values(row))
+
+
+async def _read_record(
+    s: AsyncSession, cipher: ClaimCipher, tenant_id: uuid.UUID, request_id: uuid.UUID, role: str
+) -> dict[str, Any] | None:
+    row = (
+        await s.execute(select(InputClaim).where(InputClaim.owner_run_id == request_id, InputClaim.role == role))
+    ).scalar_one_or_none()
+    if row is None:
+        return None
+    record: dict[str, Any] = json.loads(await cipher.open(str(tenant_id), str(row.id), row.ciphertext))
+    return record
+
+
+async def write_csv_record(
+    s: AsyncSession, cipher: ClaimCipher, tenant_id: uuid.UUID, *, request_id: uuid.UUID, record: dict[str, Any]
+) -> None:
+    """A CSV start's record (§8.1): its mapping, the file's header names and its skipped rows, encrypted as a claim is
+    and owned by the request. Like the envelope it's never a claim: no claim read or grant serves it."""
+    await _write_record(s, cipher, tenant_id, request_id, "csv", record)
 
 
 async def read_csv_record(
@@ -320,13 +338,24 @@ async def read_csv_record(
 ) -> dict[str, Any] | None:
     """A request's CSV record, in the caller's tenant; None for a request that took no CSV, or whose record retention
     removed."""
-    row = (
-        await s.execute(select(InputClaim).where(InputClaim.owner_run_id == request_id, InputClaim.role == "csv"))
-    ).scalar_one_or_none()
-    if row is None:
-        return None
-    record: dict[str, Any] = json.loads(await cipher.open(str(tenant_id), str(row.id), row.ciphertext))
-    return record
+    return await _read_record(s, cipher, tenant_id, request_id, "csv")
+
+
+async def write_names_record(
+    s: AsyncSession, cipher: ClaimCipher, tenant_id: uuid.UUID, *, request_id: uuid.UUID,
+    names: dict[str, dict[str, str]],
+) -> None:  # fmt: skip
+    """The names a request's start form picked (editor 4f-3, the start-form pickers design §4.1), each with the value
+    it was picked for, encrypted as a claim is and owned by the request: like its CSV record, never a claim."""
+    await _write_record(s, cipher, tenant_id, request_id, "names", names)
+
+
+async def read_names_record(
+    s: AsyncSession, cipher: ClaimCipher, tenant_id: uuid.UUID, *, request_id: uuid.UUID
+) -> dict[str, dict[str, str]]:
+    """A request's picked names, in the caller's tenant: none for a request that kept none, or whose record retention
+    removed."""
+    return await _read_record(s, cipher, tenant_id, request_id, "names") or {}
 
 
 async def read_request_claim(

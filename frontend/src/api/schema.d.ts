@@ -985,7 +985,8 @@ export interface paths {
          * Run Input
          * @description What a run was admitted with, read back from its request's own envelope, redacted, never recomputed (the runs
          *     design §4.3): a step test's seeds, or the workflow's input, a CSV start's rows (or a re-run's of one) left out. A
-         *     tenant's key gone (an erasure) reads as `unreadable`, never an error.
+         *     tenant's key gone (an erasure) reads as `unreadable`, never an error. Beside the input, the names its start form
+         *     picked, each for the value read back here (the 4f-3 design §4.1).
          */
         get: operations["run_input_api_v1_t__tenant_id__runs__run_id__input_get"];
         put?: never;
@@ -2803,6 +2804,8 @@ export interface components {
         };
         /** InputOptionsIn */
         InputOptionsIn: {
+            /** Expected Version Id */
+            expected_version_id?: string | null;
             /** Field */
             field: string;
             /**
@@ -2861,6 +2864,16 @@ export interface components {
             role: "owner" | "admin" | "editor" | "operator" | "viewer";
             /** User Id */
             user_id: string;
+        };
+        /**
+         * NameIn
+         * @description A name a start form picked (the 4f-3 design §4.1): the choice's label, and the value it was picked for.
+         */
+        NameIn: {
+            /** Label */
+            label: string;
+            /** Value */
+            value: string;
         };
         /**
          * NodeTypeOut
@@ -2989,6 +3002,32 @@ export interface components {
             current_password: string;
             /** New Password */
             new_password: string;
+        };
+        /**
+         * PickerListOut
+         * @description The list a picker's choices come from, in words (the 4f-3 design §4.4): "Mist", "Org sites", "sites".
+         */
+        PickerListOut: {
+            /** Noun */
+            noun: string;
+            /** Plugin */
+            plugin: string;
+            /** Title */
+            title: string;
+        };
+        /**
+         * PickerOut
+         * @description A start form's picker (plugins-3 D19): its node's options field through a connection, and the list's words
+         *     (null when this server doesn't hold the node type).
+         */
+        PickerOut: {
+            /** Connection */
+            connection: string;
+            /** Field */
+            field: string;
+            list: components["schemas"]["PickerListOut"] | null;
+            /** Node */
+            node: string;
         };
         /** PlatformStatusOut */
         PlatformStatusOut: {
@@ -3123,6 +3162,10 @@ export interface components {
             } | null;
             /** Mode */
             mode?: ("live" | "simulate") | null;
+            /** Names */
+            names?: {
+                [key: string]: components["schemas"]["NameIn"];
+            } | null;
         };
         /** RetentionIn */
         RetentionIn: {
@@ -3177,13 +3220,18 @@ export interface components {
          * @description What a run was admitted with, read back from its request's own envelope, redacted (the runs design §4.3): its
          *     `input`, or a step test's `seeds`. `absent`: the request kept none (a refusal admission never froze, or a run from
          *     before 2b-2); `unreadable`: there, but it doesn't open (a broken ciphertext, or the tenant's key gone during an
-         *     erasure). A CSV start's rows are its CSV record's, never repeated here.
+         *     erasure). A CSV start's rows are its CSV record's, never repeated here. `names`: what its start form picked, by
+         *     field, each for the value `input` holds (the 4f-3 design §4.1).
          */
         RunInputOut: {
             /** Input */
             input: {
                 [key: string]: unknown;
             } | null;
+            /** Names */
+            names: {
+                [key: string]: string;
+            };
             /**
              * Read Back
              * @enum {string}
@@ -3562,6 +3610,10 @@ export interface components {
              * @enum {string}
              */
             mode?: "live" | "simulate";
+            /** Names */
+            names?: {
+                [key: string]: components["schemas"]["NameIn"];
+            } | null;
             /**
              * Offset S
              * @default 0
@@ -3627,7 +3679,8 @@ export interface components {
         /**
          * SchedulePatch
          * @description Only the fields given change; `cron` or `every_s` given as null switches the timing's kind. Any other field
-         *     given as null is refused (422): it has no null to become (the owner's M3 review).
+         *     given as null is refused (422): it has no null to become (the owner's M3 review). Names come with the input they
+         *     were picked for: a new input replaces them (none given, none kept), and names alone are refused (4f-3).
          */
         SchedulePatch: {
             /** Catchup Window S */
@@ -3644,6 +3697,10 @@ export interface components {
             } | null;
             /** Mode */
             mode?: ("live" | "simulate") | null;
+            /** Names */
+            names?: {
+                [key: string]: components["schemas"]["NameIn"];
+            } | null;
             /** Offset S */
             offset_s?: number | null;
             /** Time Zone */
@@ -3929,10 +3986,7 @@ export interface components {
             enum_masked?: boolean | null;
             /** Name */
             name: string;
-            /** Picker */
-            picker?: {
-                [key: string]: unknown;
-            } | null;
+            picker?: components["schemas"]["PickerOut"] | null;
             /** Required */
             required: boolean;
             /** Sensitive */
@@ -3977,6 +4031,10 @@ export interface components {
              * @enum {string}
              */
             mode?: "live" | "simulate";
+            /** Names */
+            names?: {
+                [key: string]: components["schemas"]["NameIn"];
+            } | null;
         };
         /** StateOut */
         StateOut: {

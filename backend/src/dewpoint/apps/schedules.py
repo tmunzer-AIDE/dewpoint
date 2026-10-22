@@ -22,6 +22,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dewpoint.apps.forms import picked_names
 from dewpoint.apps.inputs import FORGED, NOT_FINITE, RESERVED_INPUT, TOO_DEEP, holds_non_finite, nests_too_deep, reasons
 from dewpoint.core.audit import service as audit
 from dewpoint.core.claims.cipher import ClaimCipher
@@ -33,6 +34,7 @@ from dewpoint.engine.graph.csv import RESERVED, trigger_schema
 from dewpoint.engine.handles import contains_marker
 
 INPUT_PURPOSE = "schedule.input"  # the fixed input, sealed with the schedule's id as context
+NAMES_PURPOSE = "schedule.names"  # the names its form picked for that input (editor 4f-3), sealed as it is
 TIMING = ("cron", "every_s", "offset_s", "time_zone", "catchup_window_s")
 MIN_INTERVAL = 60
 MAX_INTERVAL = 366 * 24 * 3600
@@ -177,9 +179,21 @@ def _checked_timing(timing: Mapping[str, Any]) -> None:
         raise ScheduleRefusedError(422, {"error": "schedule_invalid", "problems": problems})
 
 
-async def _sealed(keys: KeySource, tenant_id: uuid.UUID, schedule_id: uuid.UUID, value: Mapping[str, Any]) -> bytes:
+async def _sealed(
+    keys: KeySource, tenant_id: uuid.UUID, schedule_id: uuid.UUID, value: Mapping[str, Any],
+    purpose: str = INPUT_PURPOSE,
+) -> bytes:  # fmt: skip
     plaintext = json.dumps(dict(value), sort_keys=True, ensure_ascii=False, allow_nan=False).encode()
-    return await ClaimCipher(keys, purpose=INPUT_PURPOSE).seal(str(tenant_id), str(schedule_id), plaintext)
+    return await ClaimCipher(keys, purpose=purpose).seal(str(tenant_id), str(schedule_id), plaintext)
+
+
+async def _names(
+    keys: KeySource, schedule: Schedule, version: WorkflowVersion, input: Mapping[str, Any],
+    names: Mapping[str, Mapping[str, str]],
+) -> bytes | None:  # fmt: skip
+    """The names that fit the version and the input, sealed (the 4f-3 design §4.1); none kept, none stored."""
+    kept = picked_names(version.input_schema, input, names)
+    return await _sealed(keys, schedule.tenant_id, schedule.id, kept, NAMES_PURPOSE) if kept else None
 
 
 async def _audited(s: AsyncSession, action: str, actor_id: uuid.UUID, schedule: Schedule) -> None:
@@ -192,10 +206,12 @@ async def _audited(s: AsyncSession, action: str, actor_id: uuid.UUID, schedule: 
 async def create(
     s: AsyncSession, keys: KeySource, *, tenant_id: uuid.UUID, actor_id: uuid.UUID, workflow_id: uuid.UUID,
     timing: Mapping[str, Any], mode: str, input: Mapping[str, Any], enabled: bool,
+    names: Mapping[str, Mapping[str, str]] | None = None,
 ) -> Schedule:  # fmt: skip
-    """A schedule of the workflow's active version, its timing and its fixed input checked, the input sealed. None
-    before the inventory's cutover (the owner's review of checkpoint 4, M5): on any installation, one created then
-    would be captured as if from before migration 0040, its accounting incomplete for good."""
+    """A schedule of the workflow's active version, its timing and its fixed input checked, the input sealed, and the
+    names its form picked that fit sealed beside it. None before the inventory's cutover (the owner's review of
+    checkpoint 4, M5): on any installation, one created then would be captured as if from before migration 0040, its
+    accounting incomplete for good."""
     if not await inventory_cut_over(s):
         raise ScheduleRefusedError(503, {"error": "schedule_inventory_not_cut_over"})
     version = await _active_version(s, workflow_id)
@@ -207,6 +223,7 @@ async def create(
         synced_generation=0, input=await _sealed(keys, tenant_id, schedule_id, input), created_by=actor_id,
         **{k: timing[k] for k in TIMING},
     )  # fmt: skip
+    schedule.names = await _names(keys, schedule, version, input, names or {})
     s.add(schedule)
     await s.flush()
     await _audited(s, "schedule.create", actor_id, schedule)
@@ -232,13 +249,15 @@ async def found(s: AsyncSession, schedule_id: uuid.UUID) -> Schedule:
 async def update(
     s: AsyncSession, keys: KeySource, *, actor_id: uuid.UUID, schedule: Schedule, changes: Mapping[str, Any]
 ) -> Schedule:
-    """`changes` applied (the timing as a whole checked again, a new input against the active version), and the
-    generation raised, which the sync follows."""
+    """`changes` applied (the timing as a whole checked again, a new input against the active version, its names
+    replaced with the ones given that fit), and the generation raised, which the sync follows."""
     timing = {k: changes.get(k, getattr(schedule, k)) for k in TIMING}
     _checked_timing(timing)
     if "input" in changes:
-        _checked_input(await _active_version(s, schedule.workflow_id), changes["input"])
+        version = await _active_version(s, schedule.workflow_id)
+        _checked_input(version, changes["input"])
         schedule.input = await _sealed(keys, schedule.tenant_id, schedule.id, changes["input"])
+        schedule.names = await _names(keys, schedule, version, changes["input"], changes.get("names") or {})
     for key in TIMING:
         setattr(schedule, key, timing[key])
     for key in ("mode", "enabled"):
@@ -253,9 +272,10 @@ async def update(
 
 
 async def delete(s: AsyncSession, *, actor_id: uuid.UUID, schedule: Schedule) -> None:
-    """A tombstone: its fixed input cleared, its generation raised for the sync to delete it from Temporal; its
-    tenant, id, workflow and mode kept, so a late tick still records `schedule_deleted`."""
+    """A tombstone: its fixed input and names cleared, its generation raised for the sync to delete it from Temporal;
+    its tenant, id, workflow and mode kept, so a late tick still records `schedule_deleted`."""
     schedule.input = None
+    schedule.names = None
     schedule.deleted_at = func.now()
     schedule.generation += 1
     schedule.updated_at = func.now()

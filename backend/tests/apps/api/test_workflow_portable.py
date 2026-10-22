@@ -241,3 +241,36 @@ async def test_a_draft_holding_a_sensitive_literal_isnt_exported(app, owner_sess
     assert (r.status_code, r.json()) == (422, {"error": "not_portable", "problems": [problem]})
     assert "tok-9f2c" not in r.text
     assert ok.status_code == 200, ok.text  # filled at run time from the run's input: nothing to carry
+
+
+async def test_a_pickers_connection_travels_as_a_binding_and_binds_on_import(
+    app, owner_sessionmaker, api_settings
+) -> None:
+    """The 4f-3 design §4.5: a start form's picker shares its step's binding; bound on import, it names the importing
+    tenant's connection, never the exporter's. A picker naming a node without its version is left behind, no error."""
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    conn = await add_connection(owner_sessionmaker, tid)
+    picker = {"node": "testkit.pick@1", "field": "site_id", "connection": str(conn)}
+    odd = {"node": "testkit.pick", "field": "site_id", "connection": str(conn)}
+    schema = {"type": "object", "properties": {"site": {"type": "string", "x-dewpoint-picker": picker},
+                                               "odd": {"type": "string", "x-dewpoint-picker": odd}}}  # fmt: skip
+    graph = {"graph_format": 1, "edges": [], "settings": {"input_schema": schema},
+             "nodes": [{"id": CALL, "key": "call", "type": "testkit.http_call@1",
+                        "config": {"connection": str(conn), "path": "/x"}}]}  # fmt: skip
+    async with c:
+        wf = (await c.post(f"/api/v1/t/{tid}/workflows", json={"name": "Picked", "draft": graph})).json()
+        r = await c.get(f"/api/v1/t/{tid}/workflows/{wf['id']}/export")
+    assert r.status_code == 200, r.text
+    doc = r.json()
+    site = "/settings/input_schema/properties/site/x-dewpoint-picker/connection"
+    assert doc["bindings"][0]["sites"] == [{"node": CALL, "field": "/connection"}, {"node": None, "field": site}]
+    assert str(conn) not in r.text
+    other = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    async with other[0] as c2:
+        theirs = await add_connection(owner_sessionmaker, other[1])
+        done = await c2.post(f"/api/v1/t/{other[1]}/workflows/import",
+                             json={"name": "Picked", "document": doc, "bind": {"b1": str(theirs)}})  # fmt: skip
+    assert done.status_code == 201, done.text
+    props = done.json()["draft"]["settings"]["input_schema"]["properties"]
+    assert props["site"]["x-dewpoint-picker"] == picker | {"connection": str(theirs)}
+    assert props["odd"]["x-dewpoint-picker"] == {"node": "testkit.pick", "field": "site_id"}

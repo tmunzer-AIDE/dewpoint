@@ -568,6 +568,24 @@ class WorkflowBindingsOut(_Answer):
     bindings: list[WorkflowBindingOut]
 
 
+class PickerListOut(_Answer):
+    """The list a picker's choices come from, in words (the 4f-3 design §4.4): "Mist", "Org sites", "sites"."""
+
+    plugin: str
+    title: str
+    noun: str
+
+
+class PickerOut(_Answer):
+    """A start form's picker (plugins-3 D19): its node's options field through a connection, and the list's words
+    (null when this server doesn't hold the node type)."""
+
+    node: str
+    field: str
+    connection: str
+    list: PickerListOut | None
+
+
 class StartFieldOut(_Answer):
     """A start form's field (engine 2b spec §7.7). A key it doesn't have is left out of the answer (the route excludes
     what's unset): a sensitive field's default and enum are masked, never sent."""
@@ -582,7 +600,7 @@ class StartFieldOut(_Answer):
     default: Any = None
     default_masked: bool | None = None
     enum_masked: bool | None = None
-    picker: dict[str, Any] | None = None
+    picker: PickerOut | None = None
 
 
 class CsvColumnFormOut(_Answer):
@@ -999,8 +1017,10 @@ class RunInputOut(_Answer):
     """What a run was admitted with, read back from its request's own envelope, redacted (the runs design §4.3): its
     `input`, or a step test's `seeds`. `absent`: the request kept none (a refusal admission never froze, or a run from
     before 2b-2); `unreadable`: there, but it doesn't open (a broken ciphertext, or the tenant's key gone during an
-    erasure). A CSV start's rows are its CSV record's, never repeated here."""
+    erasure). A CSV start's rows are its CSV record's, never repeated here. `names`: what its start form picked, by
+    field, each for the value `input` holds (the 4f-3 design §4.1)."""
 
     read_back: Literal["kept", "absent", "unreadable"]
     input: dict[str, Any] | None
     seeds: dict[str, Any] | None
+    names: dict[str, str]

@@ -222,3 +222,87 @@ def test_apply_refuses_whatever_the_check_refuses() -> None:
     with pytest.raises(portable.BadDocumentError) as e:
         portable.apply(doc["graph"], doc["bindings"], {"b1": C1}, SCHEMAS)
     assert [p.reason for p in e.value.problems] == ["embedded_value"]
+
+
+# --- a start form's picker (editor 4f-3; the start-form pickers design §4.5) ---------------------------------------
+
+PICK = "acme.sites@1"
+PICKER_SCHEMAS = SCHEMAS | {
+    PICK: {"properties": {"connection": {"type": "string", "x-dewpoint-connection": "testkit"}, "site_id": {}}}
+}
+SITE = "/settings/input_schema/properties/site/x-dewpoint-picker/connection"
+
+
+def picked(connection: object = C1, node: object = PICK, step: object = C1, name: str = "site") -> dict:
+    """The draft with a picker on `name` listing `node`'s `site_id` through `connection` (none: not written)."""
+    picker = {"node": node, "field": "site_id"} | ({} if connection is None else {"connection": connection})
+    d = draft(conn=step, sub=None, handler=None)
+    d["settings"]["input_schema"] = {"type": "object", "properties": {name: {"type": "string",
+                                                                             "x-dewpoint-picker": picker}}}  # fmt: skip
+    return d
+
+
+def picker_of(graph: dict, name: str = "site") -> dict:
+    return graph["settings"]["input_schema"]["properties"][name]["x-dewpoint-picker"]  # type: ignore[no-any-return]
+
+
+def test_a_pickers_connection_is_a_site_sharing_a_steps_binding() -> None:
+    doc = portable.export_document("Nightly", picked(), PICKER_SCHEMAS, LABELS)
+    assert doc["bindings"][0] == {"id": "b1", "kind": "connection", "type": "testkit", "label": "Acme Prod",
+                                  "sites": [{"node": CALL, "field": "/connection"},
+                                            {"node": None, "field": SITE}]}  # fmt: skip
+    assert picker_of(doc["graph"]) == {"node": PICK, "field": "site_id"}
+    assert C1 not in str(doc)
+
+
+@pytest.mark.parametrize(
+    "graph", [picked(node="acme.unknown@1"), picked(connection="not-an-id"), picked(node=7), picked(connection=3)]
+)
+def test_a_picker_that_isnt_a_site_leaves_its_connection_behind(graph: dict) -> None:
+    """A node this server doesn't hold, a connection that isn't an id, a malformed picker: never a site, never an id
+    in the file (ruling 85); the export goes on."""
+    doc = portable.export_document("Nightly", graph, PICKER_SCHEMAS, LABELS)
+    assert "connection" not in picker_of(doc["graph"])
+    assert [s["field"] for s in doc["bindings"][0]["sites"]] == ["/connection"]
+
+
+def test_import_binds_a_picker_or_leaves_it_waiting_for_its_connection() -> None:
+    doc = portable.export_document("Nightly", picked(), PICKER_SCHEMAS, LABELS)
+    bound = portable.apply(doc["graph"], doc["bindings"], {"b1": OTHER}, PICKER_SCHEMAS)
+    assert picker_of(bound) == {"node": PICK, "field": "site_id", "connection": OTHER}
+    assert bound["nodes"][0]["config"]["connection"] == OTHER
+    assert picker_of(portable.apply(doc["graph"], doc["bindings"], {}, PICKER_SCHEMAS)) == {
+        "node": PICK,
+        "field": "site_id",
+    }
+
+
+def test_a_file_holding_a_pickers_connection_is_refused() -> None:
+    """Exported before 4f-3, or written by hand: whatever node it names, an id where none may travel."""
+    for graph in (picked(step=None), picked(node="acme.unknown@1", step=None)):
+        found = portable.check_document(graph, [], PICKER_SCHEMAS)
+        assert [(p.reason, p.node, p.field) for p in found] == [("embedded_value", None, SITE)]
+
+
+def test_a_picker_site_of_a_node_this_server_doesnt_hold_is_refused() -> None:
+    graph = picked(connection=None, node="acme.unknown@1", step=None)
+    binding = {"id": "b1", "kind": "connection", "type": "testkit", "label": "x", "sites": [{"node": None,
+                                                                                           "field": SITE}]}  # fmt: skip
+    assert [(p.reason, p.field) for p in portable.check_document(graph, [binding], PICKER_SCHEMAS)] == [
+        ("bad_site", SITE)
+    ]
+
+
+def test_a_pickers_site_escapes_its_fields_name() -> None:
+    doc = portable.export_document("Nightly", picked(name="a/b~c"), PICKER_SCHEMAS, LABELS)
+    field = "/settings/input_schema/properties/a~1b~0c/x-dewpoint-picker/connection"
+    assert doc["bindings"][0]["sites"][1] == {"node": None, "field": field}
+    bound = portable.apply(doc["graph"], doc["bindings"], {"b1": OTHER}, PICKER_SCHEMAS)
+    assert picker_of(bound, "a/b~c")["connection"] == OTHER
+
+
+def test_a_pickers_node_past_the_registrys_integer_isnt_looked_up() -> None:
+    """The final review's M5: its node type can't be held; its connection is left behind, as any picker's not a site."""
+    graph = picked(node="acme.sites@99999999999")
+    assert portable.picker_nodes(graph) == set()
+    assert portable.picker_nodes(picked(node="acme.sites@2147483647")) == {"acme.sites@2147483647"}

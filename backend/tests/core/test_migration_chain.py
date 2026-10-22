@@ -24,7 +24,7 @@ def script() -> ScriptDirectory:
 
 
 def test_the_chain_has_one_head() -> None:
-    assert script().get_heads() == ["0073"]
+    assert script().get_heads() == ["0074"]
 
 
 def test_runs_workflow_last_comes_after_the_orphan_backoff() -> None:
@@ -60,3 +60,8 @@ def test_the_draft_snapshots_come_after_the_step_instance_ends() -> None:
 def test_the_request_origins_come_after_the_draft_snapshots() -> None:
     """Slot 0073 (4e-1a; the runs design §8) is chained after main's head when it was written, 0072 (4d-1b's)."""
     assert script().get_revision("0073").down_revision == "0072"
+
+
+def test_the_picked_names_come_after_the_request_origins() -> None:
+    """Slot 0074 (4f-3a; the start-form pickers design §4.6) is chained after main's head when it was written, 0073."""
+    assert script().get_revision("0074").down_revision == "0073"

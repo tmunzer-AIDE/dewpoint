@@ -2706,6 +2706,18 @@
       },
       "InputOptionsIn": {
         "properties": {
+          "expected_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Version Id"
+          },
           "field": {
             "maxLength": 200,
             "minLength": 1,
@@ -2857,6 +2869,29 @@
           "role"
         ],
         "title": "MemberRoleOut",
+        "type": "object"
+      },
+      "NameIn": {
+        "additionalProperties": false,
+        "description": "A name a start form picked (the 4f-3 design \u00a74.1): the choice's label, and the value it was picked for.",
+        "properties": {
+          "label": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          },
+          "value": {
+            "maxLength": 1000,
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value",
+          "label"
+        ],
+        "title": "NameIn",
         "type": "object"
       },
       "NodeTypeOut": {
@@ -3191,6 +3226,67 @@
           "new_password"
         ],
         "title": "PasswordIn",
+        "type": "object"
+      },
+      "PickerListOut": {
+        "additionalProperties": false,
+        "description": "The list a picker's choices come from, in words (the 4f-3 design \u00a74.4): \"Mist\", \"Org sites\", \"sites\".",
+        "properties": {
+          "noun": {
+            "title": "Noun",
+            "type": "string"
+          },
+          "plugin": {
+            "title": "Plugin",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "plugin",
+          "title",
+          "noun"
+        ],
+        "title": "PickerListOut",
+        "type": "object"
+      },
+      "PickerOut": {
+        "additionalProperties": false,
+        "description": "A start form's picker (plugins-3 D19): its node's options field through a connection, and the list's words\n(null when this server doesn't hold the node type).",
+        "properties": {
+          "connection": {
+            "title": "Connection",
+            "type": "string"
+          },
+          "field": {
+            "title": "Field",
+            "type": "string"
+          },
+          "list": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PickerListOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "node": {
+            "title": "Node",
+            "type": "string"
+          }
+        },
+        "required": [
+          "node",
+          "field",
+          "connection",
+          "list"
+        ],
+        "title": "PickerOut",
         "type": "object"
       },
       "PlatformStatusOut": {
@@ -3586,6 +3682,25 @@
               }
             ],
             "title": "Mode"
+          },
+          "names": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/NameIn"
+                },
+                "maxProperties": 200,
+                "propertyNames": {
+                  "maxLength": 200,
+                  "minLength": 1
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Names"
           }
         },
         "title": "RerunIn",
@@ -3729,7 +3844,7 @@
       },
       "RunInputOut": {
         "additionalProperties": false,
-        "description": "What a run was admitted with, read back from its request's own envelope, redacted (the runs design \u00a74.3): its\n`input`, or a step test's `seeds`. `absent`: the request kept none (a refusal admission never froze, or a run from\nbefore 2b-2); `unreadable`: there, but it doesn't open (a broken ciphertext, or the tenant's key gone during an\nerasure). A CSV start's rows are its CSV record's, never repeated here.",
+        "description": "What a run was admitted with, read back from its request's own envelope, redacted (the runs design \u00a74.3): its\n`input`, or a step test's `seeds`. `absent`: the request kept none (a refusal admission never froze, or a run from\nbefore 2b-2); `unreadable`: there, but it doesn't open (a broken ciphertext, or the tenant's key gone during an\nerasure). A CSV start's rows are its CSV record's, never repeated here. `names`: what its start form picked, by\nfield, each for the value `input` holds (the 4f-3 design \u00a74.1).",
         "properties": {
           "input": {
             "anyOf": [
@@ -3742,6 +3857,13 @@
               }
             ],
             "title": "Input"
+          },
+          "names": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Names",
+            "type": "object"
           },
           "read_back": {
             "enum": [
@@ -3768,7 +3890,8 @@
         "required": [
           "read_back",
           "input",
-          "seeds"
+          "seeds",
+          "names"
         ],
         "title": "RunInputOut",
         "type": "object"
@@ -4938,6 +5061,25 @@
             "title": "Mode",
             "type": "string"
           },
+          "names": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/NameIn"
+                },
+                "maxProperties": 200,
+                "propertyNames": {
+                  "maxLength": 200,
+                  "minLength": 1
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Names"
+          },
           "offset_s": {
             "default": 0,
             "title": "Offset S",
@@ -5112,7 +5254,7 @@
       },
       "SchedulePatch": {
         "additionalProperties": false,
-        "description": "Only the fields given change; `cron` or `every_s` given as null switches the timing's kind. Any other field\ngiven as null is refused (422): it has no null to become (the owner's M3 review).",
+        "description": "Only the fields given change; `cron` or `every_s` given as null switches the timing's kind. Any other field\ngiven as null is refused (422): it has no null to become (the owner's M3 review). Names come with the input they\nwere picked for: a new input replaces them (none given, none kept), and names alone are refused (4f-3).",
         "properties": {
           "catchup_window_s": {
             "anyOf": [
@@ -5185,6 +5327,25 @@
               }
             ],
             "title": "Mode"
+          },
+          "names": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/NameIn"
+                },
+                "maxProperties": 200,
+                "propertyNames": {
+                  "maxLength": 200,
+                  "minLength": 1
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Names"
           },
           "offset_s": {
             "anyOf": [
@@ -6046,14 +6207,12 @@
           "picker": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/PickerOut"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Picker"
+            ]
           },
           "required": {
             "title": "Required",
@@ -6186,6 +6345,25 @@
             ],
             "title": "Mode",
             "type": "string"
+          },
+          "names": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/NameIn"
+                },
+                "maxProperties": 200,
+                "propertyNames": {
+                  "maxLength": 200,
+                  "minLength": 1
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Names"
           }
         },
         "title": "StartIn",
@@ -10538,7 +10716,7 @@
     },
     "/api/v1/t/{tenant_id}/runs/{run_id}/input": {
       "get": {
-        "description": "What a run was admitted with, read back from its request's own envelope, redacted, never recomputed (the runs\ndesign \u00a74.3): a step test's seeds, or the workflow's input, a CSV start's rows (or a re-run's of one) left out. A\ntenant's key gone (an erasure) reads as `unreadable`, never an error.",
+        "description": "What a run was admitted with, read back from its request's own envelope, redacted, never recomputed (the runs\ndesign \u00a74.3): a step test's seeds, or the workflow's input, a CSV start's rows (or a re-run's of one) left out. A\ntenant's key gone (an erasure) reads as `unreadable`, never an error. Beside the input, the names its start form\npicked, each for the value read back here (the 4f-3 design \u00a74.1).",
         "operationId": "run_input_api_v1_t__tenant_id__runs__run_id__input_get",
         "parameters": [
           {

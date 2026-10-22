@@ -28,6 +28,7 @@ TENANT_FIELDS = [
     ("csv_uploads", "id", "staged", "csv.upload", "id"),
     ("csv_mappings", "workflow_id", "mapping", "csv.mapping", "workflow_id"),
     ("schedules", "id", "input", "schedule.input", "id"),
+    ("schedules", "id", "names", "schedule.names", "id"),  # 4f-3: a schedule's picked names, sealed as its input
     ("connections", "id", "secret_ct", "connection.secret", "id"),
     ("tenant_event_keys", "version", "private_sealed", "event.private", "version"),
     ("rate_scope_keys", "tenant_id", "sealed", "rate.scope", "tenant_id"),  # plugins-3 D9: the tenant's id as context
@@ -93,9 +94,11 @@ async def stored(owner_sessionmaker, admin_sessionmaker, keyring) -> dict[str, A
     await _sql(owner, "insert into csv_mappings (workflow_id, tenant_id, mapping, saved_by, saved_against) "
                "values (:w, :t, :c, :u, :v)", w=w, t=t, u=user, v=v,
                c=await seal("csv_mappings", "csv.mapping"))  # fmt: skip
-    await _sql(owner, "insert into schedules (id, tenant_id, workflow_id, every_s, mode, input, created_by, "
-               "generation, synced_generation, action_key_version) values (:i, :t, :w, 60, 'live', :c, :u, 3, 3, 1)",
-               i=ids["schedules"], t=t, w=w, u=user, c=await seal("schedules", "schedule.input"))  # fmt: skip
+    await _sql(owner, "insert into schedules (id, tenant_id, workflow_id, every_s, mode, input, names, "
+               "created_by, generation, synced_generation, action_key_version) "
+               "values (:i, :t, :w, 60, 'live', :c, :n, :u, 3, 3, 1)",
+               i=ids["schedules"], t=t, w=w, u=user, c=await seal("schedules", "schedule.input"),
+               n=await seal("schedules", "schedule.names"))  # fmt: skip
     tombstone = uuid.uuid4()
     await _sql(owner, "insert into schedules (id, tenant_id, workflow_id, every_s, mode, input, created_by, "
                "generation, synced_generation, deleted_at) values (:i, :t, :w, 60, 'live', null, :u, 4, 4, now())",
@@ -144,7 +147,7 @@ async def test_every_record_under_an_older_version_is_sealed_again_under_the_act
 ) -> None:
     t = stored["t"]
     counts = await reencrypt.tenant(admin_sessionmaker, keyring, t, batch=1)
-    assert counts == {table: 1 for table, *_ in TENANT_FIELDS} | {"schedule_actions": 1}
+    assert counts == {table: 1 for table, *_ in TENANT_FIELDS} | {"schedules": 2, "schedule_actions": 1}  # input, names
     async with owner_sessionmaker() as s:
         for table, key, column, purpose, _ in TENANT_FIELDS:
             blob = await _blob(owner_sessionmaker, table, column, key, stored["ids"][table], t)
@@ -208,7 +211,7 @@ async def test_a_record_rewritten_meanwhile_is_never_overwritten(monkeypatch, st
 
     monkeypatch.setattr(reencrypt, "_after_choosing", rewritten)
     counts = await reencrypt.tenant(admin_sessionmaker, keyring, t)
-    assert counts["schedules"] == 0
+    assert counts["schedules"] == 1  # its names, which nothing rewrote: its input not
     assert await _blob(owner_sessionmaker, "schedules", "input", "id", sid, t) == fresh
 
 
@@ -223,7 +226,7 @@ async def test_the_key_admin_rewrites_ciphertexts_only(owner_sessionmaker) -> No
         updatable = dict(found.all())
     assert {k: v for k, v in updatable.items() if k not in ("connections", "user_mfa")} == {
         "run_inputs": "ciphertext", "step_outputs": "ciphertext", "run_secret_index": "ciphertext",
-        "csv_uploads": "staged", "csv_mappings": "mapping", "schedules": "generation,input",
+        "csv_uploads": "staged", "csv_mappings": "mapping", "schedules": "generation,input,names",
         "tenant_event_keys": "private_sealed", "rate_scope_keys": "sealed", "plugin_calls": "result_ct",
     }  # fmt: skip
 
