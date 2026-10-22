@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -60,12 +60,27 @@ class CsvIn(BaseModel):
         return admission.CsvStart(self.upload_id, dict(self.mapping), self.skip_invalid)
 
 
+class NameIn(BaseModel):
+    """A name a start form picked (the 4f-3 design §4.1): the choice's label, and the value it was picked for."""
+
+    model_config = ConfigDict(extra="forbid")
+    value: str = Field(max_length=1000)  # an option's value at most (`node_types.py`)
+    label: str = Field(min_length=1, max_length=200)  # an option's label
+
+
+Names = dict[Annotated[str, Field(min_length=1, max_length=200)], NameIn]
+
+
 class StartIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     input: dict[str, Any] = Field(default_factory=dict)
     mode: Literal["live", "simulate"] = "live"
     csv: CsvIn | None = None  # a workflow that declares a CSV starts only with one (§8.1)
     expected_version_id: uuid.UUID | None = None  # the version confirmed: 409 `version_changed` once another is (B14)
+    names: Names | None = Field(default=None, max_length=200)  # display only: kept where they fit, never refused
+
+    def picked(self) -> dict[str, dict[str, str]] | None:
+        return {f: n.model_dump() for f, n in self.names.items()} if self.names is not None else None
 
 
 class RerunIn(BaseModel):
@@ -74,6 +89,13 @@ class RerunIn(BaseModel):
     input: dict[str, Any] | None = None  # new input; else the original, rebuilt while it's retained
     csv: CsvIn | None = None  # a new upload, with `input` (or none) beside it
     expected_version_id: uuid.UUID | None = None  # as a start's (B14)
+    names: Names | None = Field(default=None, max_length=200)  # with new input; else the original's are kept
+
+    @model_validator(mode="after")
+    def _names_follow_their_input(self) -> "RerunIn":
+        if self.names is not None and self.input is None and self.csv is None:
+            raise ValueError("names follow the input they were picked for")
+        return self
 
 
 def key_unusable(e: Exception) -> HTTPException:
@@ -140,6 +162,7 @@ async def admit(
             db, keys, tenant_id=ctx.tenant_id, workflow_id=workflow_id, source=source, actor_id=ctx.user.id,
             mode=body.mode, idempotency_key=key, input=body.input, rerun=rerun,
             csv=body.csv.start() if body.csv is not None else None, expected_version_id=body.expected_version_id,
+            names=body.picked(),
         )  # fmt: skip
     except admission.WorkflowNotFoundError:
         raise HTTPException(404, detail={"error": "not_found"}) from None
@@ -289,10 +312,12 @@ async def rerun(
         return request_body(existing)
     expected = given.expected_version_id
     if given.csv is not None:
-        start = StartIn(input=given.input or {}, mode=mode, csv=given.csv, expected_version_id=expected)
+        start = StartIn(
+            input=given.input or {}, mode=mode, csv=given.csv, expected_version_id=expected, names=given.names
+        )
         return request_body(await admit(db, keys, ctx, workflow_id, "rerun", start, key, rerun=again, slot=slot))
     if given.input is not None:
-        start = StartIn(input=given.input, mode=mode, expected_version_id=expected)
+        start = StartIn(input=given.input, mode=mode, expected_version_id=expected, names=given.names)
         return request_body(await admit(db, keys, ctx, workflow_id, "rerun", start, key, rerun=again))
     if old is None or not await retention.request_kept(db, await retention.cutoff(db, ctx.tenant_id), old):
         raise HTTPException(410, detail={"error": INPUT_NOT_RETAINED})

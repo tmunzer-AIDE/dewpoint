@@ -1017,8 +1017,10 @@ class RunInputOut(_Answer):
     """What a run was admitted with, read back from its request's own envelope, redacted (the runs design §4.3): its
     `input`, or a step test's `seeds`. `absent`: the request kept none (a refusal admission never froze, or a run from
     before 2b-2); `unreadable`: there, but it doesn't open (a broken ciphertext, or the tenant's key gone during an
-    erasure). A CSV start's rows are its CSV record's, never repeated here."""
+    erasure). A CSV start's rows are its CSV record's, never repeated here. `names`: what its start form picked, by
+    field, each for the value `input` holds (the 4f-3 design §4.1)."""
 
     read_back: Literal["kept", "absent", "unreadable"]
     input: dict[str, Any] | None
     seeds: dict[str, Any] | None
+    names: dict[str, str]

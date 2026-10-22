@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from dewpoint.apps.forms import form_fields, picker_nodes
+from dewpoint.apps.forms import form_fields, picked_names, picker_nodes
 
 SITES = {"plugin": "Acme", "title": "Org sites", "noun": "sites"}
 MANIFESTS = {"acme.sites@1": {"config_schema": {"properties": {"site_id": {"type": "string", "x-list": SITES}}}}}
@@ -93,3 +93,20 @@ def test_the_nodes_a_form_needs_are_its_complete_pickers_whose_ref_reads() -> No
     }
     assert picker_nodes(schema) == ["acme.sites@1"]
     assert picker_nodes({"properties": []}) == [] and picker_nodes(None) == []
+
+
+def test_a_name_is_kept_only_for_a_picker_holding_the_value_it_was_picked_for() -> None:
+    """The 4f-3 design §4.1: a picker field, not sensitive, its input the very string the name was picked for."""
+    schema = {
+        "properties": {
+            "site": {"type": "string", "x-dewpoint-picker": PICKER},
+            "secret": {"type": "string", "x-sensitive": True, "x-dewpoint-picker": PICKER},
+            "plain": {"type": "string"},
+        }
+    }
+    names = {f: {"value": "s1", "label": "Lyon DC"} for f in ("site", "secret", "plain", "gone")}
+    given = {"site": "s1", "secret": "s1", "plain": "s1"}
+    assert picked_names(schema, given, names) == {"site": {"value": "s1", "label": "Lyon DC"}}
+    assert picked_names(schema, {"site": "s2"}, names) == {}
+    assert picked_names(schema, {"site": 1}, {"site": {"value": "1", "label": "x"}}) == {}
+    assert picked_names({"properties": []}, given, names) == {} and picked_names(schema, given, {}) == {}

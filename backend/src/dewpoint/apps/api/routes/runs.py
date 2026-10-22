@@ -23,7 +23,7 @@ from dewpoint.apps.api.responses import (
 from dewpoint.apps.api.routes.run_requests import get_keys, key_unusable
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.claims import service as claims
-from dewpoint.core.claims.cipher import ClaimCipher
+from dewpoint.core.claims.cipher import ClaimCipher, ClaimUnreadableError
 from dewpoint.core.crypto.keys import KeySource
 from dewpoint.core.http import TenantContext, get_db, require
 from dewpoint.core.models.requests import RunRequest
@@ -362,19 +362,33 @@ async def run_input(
 ) -> dict[str, object]:
     """What a run was admitted with, read back from its request's own envelope, redacted, never recomputed (the runs
     design §4.3): a step test's seeds, or the workflow's input, a CSV start's rows (or a re-run's of one) left out. A
-    tenant's key gone (an erasure) reads as `unreadable`, never an error."""
+    tenant's key gone (an erasure) reads as `unreadable`, never an error. Beside the input, the names its start form
+    picked, each for the value read back here (the 4f-3 design §4.1)."""
     await _ran(db, ctx, run_id)
     request = await db.get(RunRequest, run_id)
     if request is None:  # a run from before 2b-2 had no request
-        return {"read_back": "absent", "input": None, "seeds": None}
+        return {"read_back": "absent", "input": None, "seeds": None, "names": {}}
     try:
         kept, used = await read_back(db, keys, ctx, request)
     except HTTPException as e:
         if e.status_code != 503:
             raise
-        return {"read_back": "unreadable", "input": None, "seeds": None}
+        return {"read_back": "unreadable", "input": None, "seeds": None, "names": {}}
     if kept != "kept" or not isinstance(used, dict):
-        return {"read_back": kept, "input": None, "seeds": None}
+        return {"read_back": kept, "input": None, "seeds": None, "names": {}}
     if request.target_step_id is not None:
-        return {"read_back": kept, "input": None, "seeds": used}
-    return {"read_back": kept, "input": {k: v for k, v in used.items() if k not in CSV_ROWS}, "seeds": None}
+        return {"read_back": kept, "input": None, "seeds": used, "names": {}}
+    input = {k: v for k, v in used.items() if k not in CSV_ROWS}
+    return {"read_back": kept, "input": input, "seeds": None, "names": await _named(db, keys, ctx, request.id, input)}
+
+
+async def _named(
+    db: AsyncSession, keys: KeySource, ctx: TenantContext, request_id: uuid.UUID, input: dict[str, Any]
+) -> dict[str, str]:
+    """The request's picked names whose value the input read back holds, never a `[redacted]` one. Display only: a
+    record that doesn't open is left out."""
+    try:
+        record = await claims.read_names_record(db, ClaimCipher(keys), ctx.tenant_id, request_id=request_id)
+    except (ClaimUnreadableError, ValueError):
+        return {}
+    return {f: n["label"] for f, n in record.items() if input.get(f) == n["value"] and input.get(f) != REDACTED}

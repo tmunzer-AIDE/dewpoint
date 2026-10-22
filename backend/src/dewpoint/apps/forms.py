@@ -87,6 +87,22 @@ def form_fields(schema: Any, manifests: Mapping[str, Mapping[str, Any]] | None =
     return fields
 
 
+def picked_names(
+    schema: Any, input: Mapping[str, Any], names: Mapping[str, Mapping[str, str]]
+) -> dict[str, dict[str, str]]:
+    """The names a start form picked that fit (the 4f-3 design §4.1): each for a picker of `schema`, not sensitive,
+    whose `input` holds the very string it was picked for. The others are dropped: a name is display only."""
+    props = _properties(schema)
+    kept: dict[str, dict[str, str]] = {}
+    for field, name in names.items():
+        prop = props.get(field)
+        if not isinstance(prop, Mapping) or _picker(prop) is None or prop.get(SENSITIVE):
+            continue
+        if isinstance(input.get(field), str) and input[field] == name["value"]:
+            kept[field] = {"value": name["value"], "label": name["label"]}
+    return kept
+
+
 def csv_form(csv: Mapping[str, Any] | None) -> dict[str, Any] | None:
     """A version's CSV declaration, as the graph document holds it, for the upload and mapping step."""
     if not csv:

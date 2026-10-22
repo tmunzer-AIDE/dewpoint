@@ -2871,6 +2871,29 @@
         "title": "MemberRoleOut",
         "type": "object"
       },
+      "NameIn": {
+        "additionalProperties": false,
+        "description": "A name a start form picked (the 4f-3 design \u00a74.1): the choice's label, and the value it was picked for.",
+        "properties": {
+          "label": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          },
+          "value": {
+            "maxLength": 1000,
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value",
+          "label"
+        ],
+        "title": "NameIn",
+        "type": "object"
+      },
       "NodeTypeOut": {
         "additionalProperties": false,
         "description": "A node type the editor may place (active) or still draws (deprecated), and how a step of it runs (B5): what it\nmay change, the connection types it takes, what it may reach, and its retry and timeout defaults.",
@@ -3659,6 +3682,25 @@
               }
             ],
             "title": "Mode"
+          },
+          "names": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/NameIn"
+                },
+                "maxProperties": 200,
+                "propertyNames": {
+                  "maxLength": 200,
+                  "minLength": 1
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Names"
           }
         },
         "title": "RerunIn",
@@ -3802,7 +3844,7 @@
       },
       "RunInputOut": {
         "additionalProperties": false,
-        "description": "What a run was admitted with, read back from its request's own envelope, redacted (the runs design \u00a74.3): its\n`input`, or a step test's `seeds`. `absent`: the request kept none (a refusal admission never froze, or a run from\nbefore 2b-2); `unreadable`: there, but it doesn't open (a broken ciphertext, or the tenant's key gone during an\nerasure). A CSV start's rows are its CSV record's, never repeated here.",
+        "description": "What a run was admitted with, read back from its request's own envelope, redacted (the runs design \u00a74.3): its\n`input`, or a step test's `seeds`. `absent`: the request kept none (a refusal admission never froze, or a run from\nbefore 2b-2); `unreadable`: there, but it doesn't open (a broken ciphertext, or the tenant's key gone during an\nerasure). A CSV start's rows are its CSV record's, never repeated here. `names`: what its start form picked, by\nfield, each for the value `input` holds (the 4f-3 design \u00a74.1).",
         "properties": {
           "input": {
             "anyOf": [
@@ -3815,6 +3857,13 @@
               }
             ],
             "title": "Input"
+          },
+          "names": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Names",
+            "type": "object"
           },
           "read_back": {
             "enum": [
@@ -3841,7 +3890,8 @@
         "required": [
           "read_back",
           "input",
-          "seeds"
+          "seeds",
+          "names"
         ],
         "title": "RunInputOut",
         "type": "object"
@@ -6257,6 +6307,25 @@
             ],
             "title": "Mode",
             "type": "string"
+          },
+          "names": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/NameIn"
+                },
+                "maxProperties": 200,
+                "propertyNames": {
+                  "maxLength": 200,
+                  "minLength": 1
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Names"
           }
         },
         "title": "StartIn",
@@ -10609,7 +10678,7 @@
     },
     "/api/v1/t/{tenant_id}/runs/{run_id}/input": {
       "get": {
-        "description": "What a run was admitted with, read back from its request's own envelope, redacted, never recomputed (the runs\ndesign \u00a74.3): a step test's seeds, or the workflow's input, a CSV start's rows (or a re-run's of one) left out. A\ntenant's key gone (an erasure) reads as `unreadable`, never an error.",
+        "description": "What a run was admitted with, read back from its request's own envelope, redacted, never recomputed (the runs\ndesign \u00a74.3): a step test's seeds, or the workflow's input, a CSV start's rows (or a re-run's of one) left out. A\ntenant's key gone (an erasure) reads as `unreadable`, never an error. Beside the input, the names its start form\npicked, each for the value read back here (the 4f-3 design \u00a74.1).",
         "operationId": "run_input_api_v1_t__tenant_id__runs__run_id__input_get",
         "parameters": [
           {

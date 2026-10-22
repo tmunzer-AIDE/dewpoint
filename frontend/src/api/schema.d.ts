@@ -985,7 +985,8 @@ export interface paths {
          * Run Input
          * @description What a run was admitted with, read back from its request's own envelope, redacted, never recomputed (the runs
          *     design §4.3): a step test's seeds, or the workflow's input, a CSV start's rows (or a re-run's of one) left out. A
-         *     tenant's key gone (an erasure) reads as `unreadable`, never an error.
+         *     tenant's key gone (an erasure) reads as `unreadable`, never an error. Beside the input, the names its start form
+         *     picked, each for the value read back here (the 4f-3 design §4.1).
          */
         get: operations["run_input_api_v1_t__tenant_id__runs__run_id__input_get"];
         put?: never;
@@ -2865,6 +2866,16 @@ export interface components {
             user_id: string;
         };
         /**
+         * NameIn
+         * @description A name a start form picked (the 4f-3 design §4.1): the choice's label, and the value it was picked for.
+         */
+        NameIn: {
+            /** Label */
+            label: string;
+            /** Value */
+            value: string;
+        };
+        /**
          * NodeTypeOut
          * @description A node type the editor may place (active) or still draws (deprecated), and how a step of it runs (B5): what it
          *     may change, the connection types it takes, what it may reach, and its retry and timeout defaults.
@@ -3151,6 +3162,10 @@ export interface components {
             } | null;
             /** Mode */
             mode?: ("live" | "simulate") | null;
+            /** Names */
+            names?: {
+                [key: string]: components["schemas"]["NameIn"];
+            } | null;
         };
         /** RetentionIn */
         RetentionIn: {
@@ -3205,13 +3220,18 @@ export interface components {
          * @description What a run was admitted with, read back from its request's own envelope, redacted (the runs design §4.3): its
          *     `input`, or a step test's `seeds`. `absent`: the request kept none (a refusal admission never froze, or a run from
          *     before 2b-2); `unreadable`: there, but it doesn't open (a broken ciphertext, or the tenant's key gone during an
-         *     erasure). A CSV start's rows are its CSV record's, never repeated here.
+         *     erasure). A CSV start's rows are its CSV record's, never repeated here. `names`: what its start form picked, by
+         *     field, each for the value `input` holds (the 4f-3 design §4.1).
          */
         RunInputOut: {
             /** Input */
             input: {
                 [key: string]: unknown;
             } | null;
+            /** Names */
+            names: {
+                [key: string]: string;
+            };
             /**
              * Read Back
              * @enum {string}
@@ -4002,6 +4022,10 @@ export interface components {
              * @enum {string}
              */
             mode?: "live" | "simulate";
+            /** Names */
+            names?: {
+                [key: string]: components["schemas"]["NameIn"];
+            } | null;
         };
         /** StateOut */
         StateOut: {
