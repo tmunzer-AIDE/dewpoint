@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // A start form's input (4c-3b; shared since 4d-1c): each field of a form as its control, what's typed read back as the
 // input's values, and the input entered whole as JSON where the fields can't show its rules. A schedule's form and the
-// Simulate workflow dialog both enter an input this way; a sensitive field is never prefilled with what it hides.
+// Simulate workflow dialog both enter an input this way; a sensitive field is never prefilled with what it hides. A
+// picker field is a combobox listing its choices, in a form that gives it a route (./pickerField; the 4f-3 design §5.2).
 import type { ReactNode } from "react";
 import { Field, Select, TextArea } from "../../components/Field";
 import { Tag } from "../../components/Tag";
@@ -9,6 +10,7 @@ import { parseJson } from "../../lib/config";
 import { isObject } from "../../lib/schemaForm";
 import type { StartField } from "../../lib/triggers";
 import { parseNumber } from "../../lib/unapplied";
+import { PickerField, isPicker, usePickerForm } from "./pickerField";
 
 /** How a field of the input is entered: one of its values, as its type says, or JSON for what the simple controls can't
  * hold (a list, an object, several types or none), each value's type kept (the review of revision 1). */
@@ -113,9 +115,11 @@ export const listed = (items: string[]) => (items.length < 2 ? (items[0] ?? "") 
 export function InputControl({ f, value, error, onChange, label: shownLabel, hint: shownHint }: {
   f: StartField; value: string | undefined; error?: string; onChange: (v: string) => void; label?: ReactNode; hint?: ReactNode;
 }) {  // prettier-ignore
+  const pickers = usePickerForm();
   const label = shownLabel ?? `${nameOf(f)}${f.required ? " (required)" : ""}`;
   const entry = entryOf(f);
   const hint = shownHint ?? (entry === "json" ? [f.description, JSON_HINT].filter(Boolean).join(" ") : (f.description ?? undefined));
+  if (pickers && isPicker(f)) return <PickerField f={f} picker={f.picker} value={value} error={error} label={label} hint={hint} onChange={onChange} />;
   if (entry === "yesno") {
     return (
       <Select label={label} hint={hint} error={error} value={value === undefined ? "" : String(value)} onChange={(e) => onChange(e.target.value)}>
