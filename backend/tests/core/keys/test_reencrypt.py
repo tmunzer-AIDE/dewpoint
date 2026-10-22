@@ -223,7 +223,7 @@ async def test_the_key_admin_rewrites_ciphertexts_only(owner_sessionmaker) -> No
         updatable = dict(found.all())
     assert {k: v for k, v in updatable.items() if k not in ("connections", "user_mfa")} == {
         "run_inputs": "ciphertext", "step_outputs": "ciphertext", "run_secret_index": "ciphertext",
-        "csv_uploads": "staged", "csv_mappings": "mapping", "schedules": "generation,input",
+        "csv_uploads": "staged", "csv_mappings": "mapping", "schedules": "generation,input,names",
         "tenant_event_keys": "private_sealed", "rate_scope_keys": "sealed", "plugin_calls": "result_ct",
     }  # fmt: skip
 
