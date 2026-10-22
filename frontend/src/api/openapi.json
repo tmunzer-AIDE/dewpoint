@@ -5061,6 +5061,25 @@
             "title": "Mode",
             "type": "string"
           },
+          "names": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/NameIn"
+                },
+                "maxProperties": 200,
+                "propertyNames": {
+                  "maxLength": 200,
+                  "minLength": 1
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Names"
+          },
           "offset_s": {
             "default": 0,
             "title": "Offset S",
@@ -5235,7 +5254,7 @@
       },
       "SchedulePatch": {
         "additionalProperties": false,
-        "description": "Only the fields given change; `cron` or `every_s` given as null switches the timing's kind. Any other field\ngiven as null is refused (422): it has no null to become (the owner's M3 review).",
+        "description": "Only the fields given change; `cron` or `every_s` given as null switches the timing's kind. Any other field\ngiven as null is refused (422): it has no null to become (the owner's M3 review). Names come with the input they\nwere picked for: a new input replaces them (none given, none kept), and names alone are refused (4f-3).",
         "properties": {
           "catchup_window_s": {
             "anyOf": [
@@ -5308,6 +5327,25 @@
               }
             ],
             "title": "Mode"
+          },
+          "names": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/NameIn"
+                },
+                "maxProperties": 200,
+                "propertyNames": {
+                  "maxLength": 200,
+                  "minLength": 1
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Names"
           },
           "offset_s": {
             "anyOf": [

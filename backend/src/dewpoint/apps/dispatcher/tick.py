@@ -165,9 +165,13 @@ async def admit_tick(
             return _outcome(expired)
         cipher = ClaimCipher(keys, purpose=schedules.INPUT_PURPOSE)
         given = json.loads(await cipher.open(str(tenant_id), str(schedule_id), schedule.input))
+        names = None  # what its form picked (editor 4f-3): kept where they fit the version active now
+        if schedule.names is not None:
+            opener = ClaimCipher(keys, purpose=schedules.NAMES_PURPOSE)
+            names = json.loads(await opener.open(str(tenant_id), str(schedule_id), schedule.names))
         admitted = await admission.admit_request(
             s, keys, tenant_id=tenant_id, workflow_id=schedule.workflow_id, source="schedule", actor_id=None,
-            mode=schedule.mode, idempotency_key=key, input=given, details=named, trigger_id=schedule_id,
+            mode=schedule.mode, idempotency_key=key, input=given, details=named, trigger_id=schedule_id, names=names,
         )  # fmt: skip
     except admission.IdempotencyConflictError:
         return "recorded"

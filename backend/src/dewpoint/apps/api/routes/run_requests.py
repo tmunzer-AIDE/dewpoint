@@ -71,6 +71,11 @@ class NameIn(BaseModel):
 Names = dict[Annotated[str, Field(min_length=1, max_length=200)], NameIn]
 
 
+def picked(names: Names | None) -> dict[str, dict[str, str]] | None:
+    """Names as admission and a schedule keep them: by field, each its value and label."""
+    return {f: n.model_dump() for f, n in names.items()} if names is not None else None
+
+
 class StartIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     input: dict[str, Any] = Field(default_factory=dict)
@@ -78,9 +83,6 @@ class StartIn(BaseModel):
     csv: CsvIn | None = None  # a workflow that declares a CSV starts only with one (§8.1)
     expected_version_id: uuid.UUID | None = None  # the version confirmed: 409 `version_changed` once another is (B14)
     names: Names | None = Field(default=None, max_length=200)  # display only: kept where they fit, never refused
-
-    def picked(self) -> dict[str, dict[str, str]] | None:
-        return {f: n.model_dump() for f, n in self.names.items()} if self.names is not None else None
 
 
 class RerunIn(BaseModel):
@@ -162,7 +164,7 @@ async def admit(
             db, keys, tenant_id=ctx.tenant_id, workflow_id=workflow_id, source=source, actor_id=ctx.user.id,
             mode=body.mode, idempotency_key=key, input=body.input, rerun=rerun,
             csv=body.csv.start() if body.csv is not None else None, expected_version_id=body.expected_version_id,
-            names=body.picked(),
+            names=picked(body.names),
         )  # fmt: skip
     except admission.WorkflowNotFoundError:
         raise HTTPException(404, detail={"error": "not_found"}) from None

@@ -3610,6 +3610,10 @@ export interface components {
              * @enum {string}
              */
             mode?: "live" | "simulate";
+            /** Names */
+            names?: {
+                [key: string]: components["schemas"]["NameIn"];
+            } | null;
             /**
              * Offset S
              * @default 0
@@ -3675,7 +3679,8 @@ export interface components {
         /**
          * SchedulePatch
          * @description Only the fields given change; `cron` or `every_s` given as null switches the timing's kind. Any other field
-         *     given as null is refused (422): it has no null to become (the owner's M3 review).
+         *     given as null is refused (422): it has no null to become (the owner's M3 review). Names come with the input they
+         *     were picked for: a new input replaces them (none given, none kept), and names alone are refused (4f-3).
          */
         SchedulePatch: {
             /** Catchup Window S */
@@ -3692,6 +3697,10 @@ export interface components {
             } | null;
             /** Mode */
             mode?: ("live" | "simulate") | null;
+            /** Names */
+            names?: {
+                [key: string]: components["schemas"]["NameIn"];
+            } | null;
             /** Offset S */
             offset_s?: number | null;
             /** Time Zone */

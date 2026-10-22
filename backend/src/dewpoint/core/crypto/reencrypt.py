@@ -38,12 +38,13 @@ class Field:
 
 
 TENANT_FIELDS = (
-    Field("run_inputs", "id", "ciphertext", "claim"),  # claims, envelopes and CSV records: the row's id
+    Field("run_inputs", "id", "ciphertext", "claim"),  # claims, envelopes, CSV and names records: the row's id
     Field("step_outputs", "id", "ciphertext", "claim"),
     Field("run_secret_index", "root_run_id", "ciphertext", "secret_index"),
     Field("csv_uploads", "id", "staged", "csv.upload"),
     Field("csv_mappings", "workflow_id", "mapping", "csv.mapping"),
     Field("schedules", "id", "input", "schedule.input"),
+    Field("schedules", "id", "names", "schedule.names"),  # its picked names (editor 4f-3, migration 0074)
     Field("connections", "id", "secret_ct", "connection.secret"),
     Field("tenant_event_keys", "version", "private_sealed", "event.private"),  # its keypair version
     # the tenant's credential scope key (plugins-3 D9): the same key sealed again, never a new one, so no credential's
@@ -115,7 +116,9 @@ async def tenant(sessionmaker: async_sessionmaker[AsyncSession], keyring: Keyrin
                  batch: int = BATCH) -> dict[str, int]:  # fmt: skip
     """A tenant's records sealed again under its active version, and its schedules whose Temporal action still names a
     version queued for their sync: how many of each."""
-    counts = {field.table: await _field(sessionmaker, keyring, tenant_id, field, batch) for field in TENANT_FIELDS}
+    counts: dict[str, int] = {}
+    for field in TENANT_FIELDS:  # by table: a table may seal more than one column (a schedule's input and names)
+        counts[field.table] = counts.get(field.table, 0) + await _field(sessionmaker, keyring, tenant_id, field, batch)
     async with sessionmaker() as s, s.begin():
         await tenant_scope(s, tenant_id)
         await lock_scope(s, tenant_id)
