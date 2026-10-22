@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 import { act, render, renderHook, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { expect, it, vi } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { ChoiceList, useScopedChoices, type Option } from "./choices";
 
 const SITES: Option[] = [{ value: "8a27c4d0-5e1f-4b6a-9c2d-3f4e5a6b7c8d", label: "Lyon DC" }, { value: "s2", label: "Lyon store 4" }];
+
+afterEach(() => vi.restoreAllMocks());
 
 it("takes focus when shown, as the drawer's list does (ruling 338)", () => {
   render(<ChoiceList label="Site" options={SITES} onPick={vi.fn()} onClose={vi.fn()} />);
@@ -27,6 +29,13 @@ it("makes a start form's rows 44 px below 640 px, the name over the id; the draw
   unmount();
   render(<ChoiceList label="Site" options={SITES} onPick={vi.fn()} onClose={vi.fn()} />);
   expect(screen.getByRole("option", { name: /^Lyon DC/ }).className).not.toContain("max-sm:");
+});
+
+it("closes cleanly where scrollIntoView answers a promise (Chromium 153): its effect returns no cleanup", () => {
+  const scroll = vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(() => Promise.resolve() as unknown as undefined);
+  const { unmount } = render(<ChoiceList label="Site" options={SITES} onPick={vi.fn()} onClose={vi.fn()} />);
+  expect(scroll).toHaveBeenCalledWith({ block: "nearest" });
+  expect(() => unmount()).not.toThrow();
 });
 
 it("moves with Up and Down, picks with Enter and closes with Escape, never past the list", async () => {

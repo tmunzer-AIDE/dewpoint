@@ -4189,3 +4189,10 @@ run form opened; the other three skipped, the spec being serial). The graph is s
 object's keys shortest first: the fixture's `ticket` came before `site_id`, and the form's first field takes the focus.
 The fixture's second field is `change_ticket` now, so the picker is first, as on the boards. Start forms list their
 fields in that stored order, not as written: older than 4f-3b, every start form's.
+
+CI's second e2e run passed that step, then lost the run form on Escape: Chromium 153's `scrollIntoView` answers a
+promise, the choices list's scroll effect returned it as its value, and React called it as the effect's cleanup when
+the list closed ("is not a function"), unmounting the form. The drawer's list held the same line since 4f-2a. The
+effect is a statement now; a test makes `scrollIntoView` answer a promise (red first, as CI's error), and a local
+Chromium 153 page showed the form lost before the change and kept after it. No other effect returns a call's value
+that could be one.

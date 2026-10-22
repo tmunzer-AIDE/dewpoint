@@ -62,7 +62,10 @@ export function ChoiceList({ label, options, onPick, onClose, id, focusOnShow = 
   useEffect(() => {
     if (focusOnShow) list.current?.focus();
   }, [focusOnShow]);
-  useEffect(() => document.getElementById(`${own}-${active}`)?.scrollIntoView?.({ block: "nearest" }), [active, own]);
+  useEffect(() => {
+    // A statement, never the effect's value: a browser's scrollIntoView may answer a promise, which isn't a cleanup.
+    document.getElementById(`${own}-${active}`)?.scrollIntoView?.({ block: "nearest" });
+  }, [active, own]);
   const onKeyDown = (e: KeyboardEvent) => {
     const move = { ArrowDown: active + 1, ArrowUp: active - 1, Home: 0, End: options.length - 1 }[e.key];
     if (move !== undefined) setActive(Math.max(0, Math.min(options.length - 1, move)));
