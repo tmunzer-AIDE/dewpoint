@@ -2706,6 +2706,18 @@
       },
       "InputOptionsIn": {
         "properties": {
+          "expected_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Version Id"
+          },
           "field": {
             "maxLength": 200,
             "minLength": 1,

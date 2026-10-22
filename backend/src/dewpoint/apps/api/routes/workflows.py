@@ -542,6 +542,8 @@ async def import_workflow(
 class InputOptionsIn(BaseModel):
     field: str = Field(min_length=1, max_length=200)
     query: str = Field(default="", max_length=200)
+    # The version the form shows (the 4f-3 design §4.2): another one active since is refused, as a start would be.
+    expected_version_id: uuid.UUID | None = None
 
 
 @router.post("/t/{tenant_id}/workflows/{workflow_id}/input-options", response_model=OptionsOut)
@@ -561,12 +563,19 @@ async def input_options(
         raise HTTPException(404, detail={"error": "not_published"})
     if not wf.enabled:  # no wider than a run (the 3a-2 review's finding 5): a disabled workflow can't be started
         raise HTTPException(409, detail={"error": "workflow_disabled"})
+    if body.expected_version_id is not None and version.id != body.expected_version_id:  # eL 261's order, 262's body
+        message = f"Version {version.number} is the active version now: its choices may differ."
+        active = {"active_version_id": str(version.id), "active_version_number": version.number}
+        raise HTTPException(409, detail={"error": "version_changed", "messages": [message], **active})
     props = version.input_schema.get("properties")
     prop = props.get(body.field) if isinstance(props, dict) else None
     picker = prop.get(PICKER) if isinstance(prop, dict) else None
     if not isinstance(picker, dict) or not all(isinstance(picker.get(k), str) for k in ("node", "field", "connection")):
         raise HTTPException(422, detail={"error": "not_a_picker"})
-    rows = await registry.load_node_types(db, [picker["node"]])
+    try:
+        rows = await registry.load_node_types(db, [picker["node"]])
+    except ValueError:  # a node without its version: publish refuses it now, a version from before may hold one
+        raise HTTPException(422, detail={"error": "not_a_picker"}) from None
     row = next((r for r in rows if r.state != "retired"), None)
     if row is None or picker["field"] not in row.manifest.get("options", []):
         raise HTTPException(404, detail={"error": "unknown_node_type"})

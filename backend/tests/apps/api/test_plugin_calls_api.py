@@ -347,6 +347,54 @@ async def test_an_unpublished_workflow_has_no_start_form(app, owner_sessionmaker
     assert (r.status_code, r.json()) == (404, {"error": "not_published"})
 
 
+async def test_a_start_forms_options_are_for_the_version_it_shows(
+    app, owner_sessionmaker, api_settings, worker, fake
+) -> None:
+    """The 4f-3 design §4.2: listed for the version the form shows; one published since is refused with the start's
+    own answer (ruling 262), and nothing is asked of the plugin."""
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
+    async with c:
+        wid = await _published_with_a_picker(c, tid, fake[1].port)
+        url = f"/api/v1/t/{tid}/workflows/{wid}"
+        first = (await c.get(f"{url}/start-form")).json()["version_id"]
+        draft = (await c.get(url)).json()
+        changed = draft["draft"]
+        changed["settings"]["input_schema"]["properties"]["note"]["title"] = "Note"
+        saved = await c.put(f"{url}/draft", json=changed, headers={"If-Match": str(draft["draft_revision"])})
+        assert saved.status_code == 200, saved.text
+        again = await c.post(f"{url}/publish", headers={"If-Match": str(saved.json()["draft_revision"])})
+        assert again.status_code == 201, again.text
+        second = (await c.get(f"{url}/start-form")).json()["version_id"]
+        asked = {"field": "site", "query": "s"}
+        stale = await c.post(f"{url}/input-options", json=asked | {"expected_version_id": first})
+        assert await _calls_left(owner_sessionmaker) == 0
+        current = await c.post(f"{url}/input-options", json=asked | {"expected_version_id": second})
+        unpinned = await c.post(f"{url}/input-options", json=asked)
+    assert (stale.status_code, stale.json()) == (409, {
+        "error": "version_changed", "messages": ["Version 2 is the active version now: its choices may differ."],
+        "active_version_id": second, "active_version_number": 2,
+    })  # fmt: skip
+    assert current.status_code == 200 and current.json() == unpinned.json() == {
+        "options": [{"value": "s1", "label": "Site 1"}]
+    }
+
+
+async def test_a_picker_naming_no_version_isnt_a_picker(app, owner_sessionmaker, api_settings, unserved, fake) -> None:
+    """Publish refuses it now; a version from before pickers were checked may hold one: refused, never a 500."""
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "admin")
+    async with c:
+        wid = await _published_with_a_picker(c, tid, fake[1].port)
+        async with owner_sessionmaker() as s, s.begin():
+            await s.execute(text("SET LOCAL session_replication_role = replica"))  # versions are immutable
+            await s.execute(text(
+                "update workflow_versions set input_schema = jsonb_set(input_schema, "
+                "'{properties,site,x-dewpoint-picker,node}', '\"testkit.pick\"') where workflow_id = :w"
+            ), {"w": wid})  # fmt: skip
+        r = await c.post(f"/api/v1/t/{tid}/workflows/{wid}/input-options", json={"field": "site", "query": ""})
+    assert (r.status_code, r.json()) == (422, {"error": "not_a_picker"})
+    assert await _calls_left(owner_sessionmaker) == 0
+
+
 async def test_a_stored_secret_never_follows_a_moved_base_url(
     app, owner_sessionmaker, api_settings, worker, fake
 ) -> None:

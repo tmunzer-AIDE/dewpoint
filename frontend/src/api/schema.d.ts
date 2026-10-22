@@ -2803,6 +2803,8 @@ export interface components {
         };
         /** InputOptionsIn */
         InputOptionsIn: {
+            /** Expected Version Id */
+            expected_version_id?: string | null;
             /** Field */
             field: string;
             /**
