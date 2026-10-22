@@ -5,25 +5,20 @@
 // the connection's id and revision), and each change of scope is a new era: shown choices go, and an answer from an
 // older era is ignored, even when the scope comes back. They help; they never gate what's typed. They show as a list
 // under the field (4f-2, the Mist step design §5.2; ruling 126: in the drawer's flow); a pick replaces the value and is
-// named until the drawer closes or the value changes: the config keeps only the value.
+// named until the drawer closes or the value changes: the config keeps only the value. The list and its eras are the
+// start forms' too (../choices); the words and the route are the drawer's.
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
+import { useState } from "react";
 import { Button } from "../../../components/Button";
 import { controlClass } from "../../../components/Field";
-import { ApiError, client, ok, type Schemas } from "../../../lib/client";
+import { ApiError, client, ok } from "../../../lib/client";
+import { connectionsQuery } from "../../../lib/connections";
 import { valueAt } from "../../../lib/config";
 import { idKey, sameId } from "../../../lib/graph";
 import { fieldsOf, type FieldSpec } from "../../../lib/schemaForm";
+import { ChoiceList, useScopedChoices, type Choices, type Option } from "../choices";
 import { useDrawer } from "./context";
-import { connectionsQuery } from "./pickers";
 import type { ControlProps } from "./scalars";
-
-type Option = Schemas["OptionOut"];
-type Choices =
-  | { status: "idle" }
-  | { status: "loading" }
-  | { status: "done"; options: Option[] }
-  | { status: "failed"; why: string };
 
 /** Why the choices didn't load, by the API's code (`POST …/node-types/{ref}/options`). */
 const WHY: Record<string, string> = {
@@ -47,9 +42,6 @@ function said(choices: Choices): string {
   return "";
 }
 
-/** A choice's id, shortened when it's long: its name says the rest. */
-const idStart = (value: string) => (value.length > 12 ? `${value.slice(0, 8)}…` : value);
-
 /** A field's choices, loaded on request through the step's connection (ruling 109), each answer for its era only. */
 function useChoices(spec: FieldSpec) {
   const drawer = useDrawer();
@@ -63,39 +55,20 @@ function useChoices(spec: FieldSpec) {
   const listed = useQuery({ ...connectionsQuery(drawer.tenantId), enabled: takes && chosen !== null });
   const revision = chosen === null ? null : (listed.data?.find((c) => sameId(c.id, chosen))?.revision ?? null);
   const scope = JSON.stringify([drawer.tenantId, type.ref, spec.name, chosen === null ? null : idKey(chosen), revision]);
-  // Each change of scope is a new era, never to be returned to: choices from A, then B, then A again are A's first
-  // era's, and stay gone (the review of revision 2). Requests and results carry their era.
-  const [seen, setSeen] = useState(scope);
-  const [era, setEra] = useState(0);
-  if (seen !== scope) {
-    setSeen(scope);
-    setEra((e) => e + 1);
-  }
-  const eraNow = useRef(era);
-  eraNow.current = era;
-  const [choices, setChoices] = useState<{ era: number; state: Choices }>({ era, state: { status: "idle" } });
-  const shown: Choices = choices.era === era && seen === scope ? choices.state : { status: "idle" };
   const blocked = takes && chosen === null;
   // Its scope isn't known until the connection's revision is: while the list loads, when it fails, when it doesn't
   // name the connection (the review of revision 2).
   const unsettled = takes && chosen !== null && (revision === null || listed.isError); // a failed refresh keeps old data
-  async function load(query: string) {
-    const asked = era;
-    setChoices({ era: asked, state: { status: "loading" } });
-    try {
-      const answer = await ok(
+  const read = async (query: string) =>
+    (
+      await ok(
         client.POST("/api/v1/t/{tenant_id}/node-types/{ref}/options", {
           params: { path: { tenant_id: drawer.tenantId, ref: type.ref } },
-          body: { field: spec.name, connection_id: chosen, query: query.slice(0, 200) },
+          body: { field: spec.name, connection_id: chosen, query },
         }),
-      );
-      if (eraNow.current === asked) setChoices({ era: asked, state: { status: "done", options: answer.options } });
-    } catch (e) {
-      const why = (e instanceof ApiError && WHY[e.code]) || "The choices couldn't load.";
-      if (eraNow.current === asked) setChoices({ era: asked, state: { status: "failed", why } });
-    }
-  }
-  const close = () => setChoices({ era, state: { status: "idle" } });
+      )
+    ).options;
+  const { shown, load, close } = useScopedChoices(scope, read, (e) => (e instanceof ApiError && WHY[e.code]) || "The choices couldn't load.");
   return { shown, load, close, blocked, unsettled, listed };
 }
 
@@ -114,41 +87,6 @@ function ChoiceWords({ choosing }: { choosing: Choosing }) {
       )}
       <p role="status" className={`text-small ${shown.status === "failed" ? "text-danger" : "text-muted"}`}>{said(shown)}</p>
     </>
-  );  // prettier-ignore
-}
-
-/** The choices, as a list under the field: Up and Down move, Enter picks, Escape closes; it scrolls past ten. */
-function ChoiceList({ label, options, onPick, onClose }: { label: string; options: Option[]; onPick: (o: Option) => void; onClose: () => void }) {
-  const id = useId();
-  const list = useRef<HTMLUListElement>(null);
-  const [active, setActive] = useState(0);
-  useEffect(() => list.current?.focus(), []);
-  useEffect(() => document.getElementById(`${id}-${active}`)?.scrollIntoView?.({ block: "nearest" }), [active, id]);
-  const onKeyDown = (e: KeyboardEvent) => {
-    const move = { ArrowDown: active + 1, ArrowUp: active - 1, Home: 0, End: options.length - 1 }[e.key];
-    if (move !== undefined) setActive(Math.max(0, Math.min(options.length - 1, move)));
-    else if (e.key === "Enter") onPick(options[active]!);
-    else if (e.key === "Escape") onClose();
-    else return;
-    e.preventDefault();
-    e.stopPropagation(); // Escape closes the list, not the drawer
-  };
-  return (
-    <ul
-      ref={list} role="listbox" tabIndex={0} aria-label={`Choices for ${label}`} aria-activedescendant={`${id}-${active}`} onKeyDown={onKeyDown}
-      className="max-h-[320px] overflow-y-auto rounded-control border border-line p-1"
-    >
-      {options.map((o, i) => (
-        <li
-          key={`${i}:${o.value}`} id={`${id}-${i}`} role="option" aria-selected={i === active}
-          onMouseDown={(e) => e.preventDefault()} onClick={() => onPick(o)}
-          className="flex min-h-[32px] cursor-pointer items-center justify-between gap-3 rounded-control px-2.5 text-body aria-selected:bg-accent-soft"
-        >
-          <span className="min-w-0 truncate">{o.label}</span>
-          {o.label !== o.value && <span className="shrink-0 font-mono text-meta text-muted">{idStart(o.value)}</span>}
-        </li>
-      ))}
-    </ul>
   );  // prettier-ignore
 }
 
