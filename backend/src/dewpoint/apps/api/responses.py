@@ -568,6 +568,24 @@ class WorkflowBindingsOut(_Answer):
     bindings: list[WorkflowBindingOut]
 
 
+class PickerListOut(_Answer):
+    """The list a picker's choices come from, in words (the 4f-3 design §4.4): "Mist", "Org sites", "sites"."""
+
+    plugin: str
+    title: str
+    noun: str
+
+
+class PickerOut(_Answer):
+    """A start form's picker (plugins-3 D19): its node's options field through a connection, and the list's words
+    (null when this server doesn't hold the node type)."""
+
+    node: str
+    field: str
+    connection: str
+    list: PickerListOut | None
+
+
 class StartFieldOut(_Answer):
     """A start form's field (engine 2b spec §7.7). A key it doesn't have is left out of the answer (the route excludes
     what's unset): a sensitive field's default and enum are masked, never sent."""
@@ -582,7 +600,7 @@ class StartFieldOut(_Answer):
     default: Any = None
     default_masked: bool | None = None
     enum_masked: bool | None = None
-    picker: dict[str, Any] | None = None
+    picker: PickerOut | None = None
 
 
 class CsvColumnFormOut(_Answer):

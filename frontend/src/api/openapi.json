@@ -3193,6 +3193,67 @@
         "title": "PasswordIn",
         "type": "object"
       },
+      "PickerListOut": {
+        "additionalProperties": false,
+        "description": "The list a picker's choices come from, in words (the 4f-3 design \u00a74.4): \"Mist\", \"Org sites\", \"sites\".",
+        "properties": {
+          "noun": {
+            "title": "Noun",
+            "type": "string"
+          },
+          "plugin": {
+            "title": "Plugin",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "plugin",
+          "title",
+          "noun"
+        ],
+        "title": "PickerListOut",
+        "type": "object"
+      },
+      "PickerOut": {
+        "additionalProperties": false,
+        "description": "A start form's picker (plugins-3 D19): its node's options field through a connection, and the list's words\n(null when this server doesn't hold the node type).",
+        "properties": {
+          "connection": {
+            "title": "Connection",
+            "type": "string"
+          },
+          "field": {
+            "title": "Field",
+            "type": "string"
+          },
+          "list": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PickerListOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "node": {
+            "title": "Node",
+            "type": "string"
+          }
+        },
+        "required": [
+          "node",
+          "field",
+          "connection",
+          "list"
+        ],
+        "title": "PickerOut",
+        "type": "object"
+      },
       "PlatformStatusOut": {
         "additionalProperties": false,
         "properties": {
@@ -6046,14 +6107,12 @@
           "picker": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/PickerOut"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Picker"
+            ]
           },
           "required": {
             "title": "Required",

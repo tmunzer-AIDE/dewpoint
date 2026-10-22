@@ -2990,6 +2990,32 @@ export interface components {
             /** New Password */
             new_password: string;
         };
+        /**
+         * PickerListOut
+         * @description The list a picker's choices come from, in words (the 4f-3 design §4.4): "Mist", "Org sites", "sites".
+         */
+        PickerListOut: {
+            /** Noun */
+            noun: string;
+            /** Plugin */
+            plugin: string;
+            /** Title */
+            title: string;
+        };
+        /**
+         * PickerOut
+         * @description A start form's picker (plugins-3 D19): its node's options field through a connection, and the list's words
+         *     (null when this server doesn't hold the node type).
+         */
+        PickerOut: {
+            /** Connection */
+            connection: string;
+            /** Field */
+            field: string;
+            list: components["schemas"]["PickerListOut"] | null;
+            /** Node */
+            node: string;
+        };
         /** PlatformStatusOut */
         PlatformStatusOut: {
             /** Environment */
@@ -3929,10 +3955,7 @@ export interface components {
             enum_masked?: boolean | null;
             /** Name */
             name: string;
-            /** Picker */
-            picker?: {
-                [key: string]: unknown;
-            } | null;
+            picker?: components["schemas"]["PickerOut"] | null;
             /** Required */
             required: boolean;
             /** Sensitive */

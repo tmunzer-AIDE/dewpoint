@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from dewpoint.apps import admission, cancels
 from dewpoint.apps.api.responses import CancelOut, RequestOut, StartFormOut
 from dewpoint.apps.csv_slots import CsvBusyError, Slot
-from dewpoint.apps.forms import csv_form, form_fields
+from dewpoint.apps.forms import csv_form, form_fields, held_manifests
 from dewpoint.apps.inputs import INPUT_INVALID, TOO_DEEP
 from dewpoint.core.authz.permissions import P
 from dewpoint.core.claims import service as claims
@@ -213,7 +213,7 @@ async def start_form(
         "version_number": version.number,
         "published_at": version.published_at.isoformat(),
         "published_by": published_by,  # null once the user who published it is gone
-        "fields": form_fields(version.input_schema or {}),
+        "fields": form_fields(version.input_schema, await held_manifests(db, version.input_schema)),
         "csv": csv_form((version.graph.get("settings") or {}).get("csv")),
     }
 
