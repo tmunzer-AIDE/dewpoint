@@ -7,6 +7,7 @@ import uuid
 from typing import Any
 
 import pytest
+from sqlalchemy import text
 
 from tests.apps.api.test_run_requests_api import as_role, keyed_app, published_with_a_picker, runs_url
 from tests.apps.test_admission import TOKEN, count, current
@@ -112,3 +113,17 @@ async def test_a_rerun_keeps_its_originals_names_or_the_ones_it_sends(
     assert (await read(client, ctx, changed.json()["id"]))["names"] == {"site": "Paris"}
     alone = await client.post(url, json={"names": LYON}, headers={"Idempotency-Key": "r3"})
     assert alone.status_code == 422, alone.text
+
+
+async def test_an_originals_names_that_dont_open_never_fail_its_rerun(
+    keyed_app, picker, owner_sessionmaker, api_settings
+) -> None:
+    """Display only (the final review's I1): the original's names record that doesn't open reads as none."""
+    ctx, wf = picker
+    client = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx)
+    first = await started(client, ctx, wf, names=LYON)
+    async with owner_sessionmaker() as s, s.begin():
+        await s.execute(text("update run_inputs set ciphertext = :junk where role = 'names'"), {"junk": b"\x00" * 48})
+    again = await client.post(f"/api/v1/t/{ctx.tenant_id}/runs/{first['id']}/rerun", headers={"Idempotency-Key": "r1"})
+    assert again.status_code == 202, again.text
+    assert (await read(client, ctx, again.json()["id"]))["names"] == {}

@@ -17,6 +17,8 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from dewpoint.core.plugins.registry import readable_ref
+
 FORMAT = "dewpoint.workflow"
 FORMAT_VERSION = 1
 CONNECTION_MARKER = "x-dewpoint-connection"  # dewpoint.sdk.fields.CONNECTION; the SDK allows it top-level only
@@ -108,9 +110,8 @@ def _pickers(graph: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
 
 
 def picker_nodes(graph: Mapping[str, Any]) -> set[str]:
-    """The node type versions its pickers name, each that reads as one (`type@version`), connection or not."""
-    nodes = {p.get("node") for _, p in _pickers(graph)}
-    return {n for n in nodes if isinstance(n, str) and n.rpartition("@")[0] and n.rpartition("@")[2].isdigit()}
+    """The node type versions its pickers name, each a ref the registry can read (`readable_ref`), connection or not."""
+    return {n for _, p in _pickers(graph) if isinstance(n := p.get("node"), str) and readable_ref(n)}
 
 
 def _pointer(name: str) -> str:

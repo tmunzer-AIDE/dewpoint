@@ -50,7 +50,7 @@ from temporalio.exceptions import ApplicationError
 
 from dewpoint.apps import admission, schedules, tick_contract
 from dewpoint.core.audit import service as audit
-from dewpoint.core.claims.cipher import ClaimCipher
+from dewpoint.core.claims.cipher import ClaimCipher, ClaimUnreadableError
 from dewpoint.core.crypto.keys import KeySource
 from dewpoint.core.db import tenant_scope
 from dewpoint.core.models.requests import RunRequest
@@ -168,7 +168,10 @@ async def admit_tick(
         names = None  # what its form picked (editor 4f-3): kept where they fit the version active now
         if schedule.names is not None:
             opener = ClaimCipher(keys, purpose=schedules.NAMES_PURPOSE)
-            names = json.loads(await opener.open(str(tenant_id), str(schedule_id), schedule.names))
+            try:
+                names = json.loads(await opener.open(str(tenant_id), str(schedule_id), schedule.names))
+            except (ClaimUnreadableError, ValueError):  # display only: names that don't open never stop a tick
+                names = None
         admitted = await admission.admit_request(
             s, keys, tenant_id=tenant_id, workflow_id=schedule.workflow_id, source="schedule", actor_id=None,
             mode=schedule.mode, idempotency_key=key, input=given, details=named, trigger_id=schedule_id, names=names,

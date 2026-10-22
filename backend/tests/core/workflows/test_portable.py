@@ -299,3 +299,10 @@ def test_a_pickers_site_escapes_its_fields_name() -> None:
     assert doc["bindings"][0]["sites"][1] == {"node": None, "field": field}
     bound = portable.apply(doc["graph"], doc["bindings"], {"b1": OTHER}, PICKER_SCHEMAS)
     assert picker_of(bound, "a/b~c")["connection"] == OTHER
+
+
+def test_a_pickers_node_past_the_registrys_integer_isnt_looked_up() -> None:
+    """The final review's M5: its node type can't be held; its connection is left behind, as any picker's not a site."""
+    graph = picked(node="acme.sites@99999999999")
+    assert portable.picker_nodes(graph) == set()
+    assert portable.picker_nodes(picked(node="acme.sites@2147483647")) == {"acme.sites@2147483647"}

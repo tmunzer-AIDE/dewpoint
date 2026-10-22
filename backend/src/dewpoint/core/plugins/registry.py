@@ -52,6 +52,15 @@ def split_ref(ref: str) -> tuple[str, int]:
     return type_, int(version)
 
 
+def readable_ref(ref: object) -> bool:
+    """Whether `ref` reads as `type@version`, its version one a registry row can hold (a positive 32-bit integer):
+    only such a ref is looked up, so a hand-written one never reaches the database as an error."""
+    if not isinstance(ref, str):
+        return False
+    type_, _, version = ref.rpartition("@")
+    return bool(type_) and version.isdigit() and 0 < int(version) < 2**31
+
+
 async def sync_plugins(s: AsyncSession, plugins: Sequence[tuple[dict[str, Any], list[NodeTypeRow]]]) -> SyncReport:
     """Register every installed plugin in one transaction. Refuses contract changes, and refuses a build that
     lacks a node type that isn't retired (spec §4.5: code is removed only after retirement)."""

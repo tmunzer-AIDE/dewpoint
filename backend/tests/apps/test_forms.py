@@ -110,3 +110,11 @@ def test_a_name_is_kept_only_for_a_picker_holding_the_value_it_was_picked_for() 
     assert picked_names(schema, {"site": "s2"}, names) == {}
     assert picked_names(schema, {"site": 1}, {"site": {"value": "1", "label": "x"}}) == {}
     assert picked_names({"properties": []}, given, names) == {} and picked_names(schema, given, {}) == {}
+
+
+def test_a_version_past_the_registrys_integer_is_never_looked_up() -> None:
+    """The final review's M5: `@99999999999` reads as a number but no version column holds it (a 500 if asked)."""
+    far, last = PICKER | {"node": "acme.sites@99999999999"}, PICKER | {"node": "acme.sites@2147483647"}
+    schema = {"properties": {"a": {"type": "string", "x-dewpoint-picker": far},
+                             "b": {"type": "string", "x-dewpoint-picker": last}}}  # fmt: skip
+    assert picker_nodes(schema) == ["acme.sites@2147483647"]

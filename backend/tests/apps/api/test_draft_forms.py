@@ -168,3 +168,17 @@ async def test_a_step_that_isnt_in_the_draft_has_no_seed_contract(
     editor = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "editor")
     answer = await editor.get(url(ctx, wf, f"steps/{uuid.uuid4()}/seeds"), params={"revision": 1})
     assert (answer.status_code, answer.json()) == (404, {"error": "not_found"})
+
+
+async def test_a_drafts_picker_naming_an_impossible_version_still_gives_its_form(
+    keyed_app, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+) -> None:
+    """The final review's M5: a version no registry row can hold is never asked for; the field shows, its list none."""
+    picker = PICKER | {"node": "testkit.pick@99999999999"}
+    schema = {"type": "object", "properties": {"site": {"type": "string", "x-dewpoint-picker": picker}}}
+    graph = G().node("e", "testkit.echo@1", {"value": 1}).data() | {"settings": {"input_schema": schema}}
+    ctx, wf = await drafted(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, graph)
+    editor = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "editor")
+    answer = await editor.get(url(ctx, wf, "start-form"), params={"revision": 1})
+    assert answer.status_code == 200, answer.text
+    assert answer.json()["fields"][0]["picker"] == picker | {"list": None}

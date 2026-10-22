@@ -52,7 +52,7 @@ from dewpoint.apps.inputs import (
 from dewpoint.apps.workflow_ops import abi_reasons
 from dewpoint.core.audit import service as audit
 from dewpoint.core.claims import service as claims
-from dewpoint.core.claims.cipher import ClaimCipher
+from dewpoint.core.claims.cipher import ClaimCipher, ClaimUnreadableError
 from dewpoint.core.config import Settings
 from dewpoint.core.crypto.keys import KeySource
 from dewpoint.core.db import tenant_scope
@@ -487,8 +487,11 @@ async def _frozen(
     except InputRefusedError as e:
         raise _Refused(e.reason, e.reasons, version.id) from None
     envelope_id = await claims.write_envelope(s, ClaimCipher(keys), tenant_id, request_id=request_id, envelope=envelope)
-    if retained and rerun is not None:  # its original's names again, as its rows (the 4f-3 design §4.1)
-        names = await claims.read_names_record(s, ClaimCipher(keys), tenant_id, request_id=rerun.of)
+    if retained and rerun is not None:  # its original's names again, kept where they still fit (the 4f-3 design §4.1)
+        try:
+            names = await claims.read_names_record(s, ClaimCipher(keys), tenant_id, request_id=rerun.of)
+        except (ClaimUnreadableError, ValueError):  # display only: a record that doesn't open never fails the re-run
+            names = {}
     kept_names = picked_names(version.input_schema, fields["input"], names or {})
     if kept_names:
         await claims.write_names_record(s, ClaimCipher(keys), tenant_id, request_id=request_id, names=kept_names)

@@ -104,3 +104,20 @@ async def test_each_ticks_request_carries_the_names_that_still_fit(
     assert (await fired(60))["names"] == {"site": "Lyon DC"}
     await published_again(api_sessionmaker, ctx, wf, api_settings)  # `site` no longer a picker
     assert (await fired(30))["names"] == {}
+
+
+async def test_names_that_dont_open_never_stop_a_tick(
+    keyed_app, picker, owner_sessionmaker, dispatch_sessionmaker, api_settings
+) -> None:
+    """Display only (the final review's I1): a schedule's names that don't open read as none; its tick still runs."""
+    ctx, wf = picker
+    editor = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "editor")
+    schedule_id = await scheduled(editor, ctx, wf)
+    async with owner_sessionmaker() as s, s.begin():
+        junk = {"junk": b"\x00" * 48, "i": schedule_id}
+        await s.execute(text("update schedules set names = :junk where id = :i"), junk)
+    key = tick.tick_key(schedule_id, datetime.now(UTC) - timedelta(seconds=45))[0]
+    async with dispatch_sessionmaker() as s, s.begin():
+        assert await tick.admit_tick(s, KEYS, tenant_id=ctx.tenant_id, schedule_id=uuid.UUID(schedule_id), key=key) == (
+            "queued"
+        )

@@ -37,9 +37,9 @@ def _picker(prop: Mapping[str, Any]) -> Mapping[str, str] | None:
 
 
 def picker_nodes(schema: Any) -> list[str]:
-    """The node type versions a form's complete pickers name, each a ref the registry can read (`type@version`)."""
+    """The node type versions a form's complete pickers name, each a ref the registry can read (`readable_ref`)."""
     refs = {p["node"] for prop in _properties(schema).values() if isinstance(prop, Mapping) and (p := _picker(prop))}
-    return sorted(r for r in refs if r.rpartition("@")[0] and r.rpartition("@")[2].isdigit())
+    return sorted(r for r in refs if registry.readable_ref(r))
 
 
 async def held_manifests(s: AsyncSession, schema: Any) -> dict[str, Mapping[str, Any]]:
