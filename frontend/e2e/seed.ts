@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Seeding the browser gate's runs through the API (editor 4e-1b; shared with 4e-2b's run form): workflows imported and
-// published, runs started and waited for, as the web client calls the API. Screens are checked light and dark.
+// published, their bindings bound to this tenant's connections (4f-3b), runs started and waited for, as the web client
+// calls the API. Screens are checked light and dark.
 import { readFileSync } from "node:fs";
 import type { Page } from "@playwright/test";
 import { expect, expectAccessible } from "./gate";
@@ -25,16 +26,23 @@ export async function api(page: Page) {
   };
   return {
     tenant,
-    /** A fixture imported under `name` and published: its workflow's id. */
-    async publish(fixture: string, name: string): Promise<string> {
+    /** A connection of this tenant's, by its name: its id. */
+    async connection(name: string): Promise<string> {
+      const listed = (await (await page.request.get(`/api/v1/t/${tenant}/connections`)).json()) as { id: string; name: string }[];
+      return listed.find((c) => c.name === name)!.id;
+    },
+    /** A fixture imported under `name`, each binding in `bind` bound to the id given, and published: its workflow's id. */
+    async publish(fixture: string, name: string, bind: Record<string, string> = {}): Promise<string> {
       const document = JSON.parse(readFileSync(`e2e/fixtures/${fixture}`, "utf8")) as unknown;
-      const workflow = await post("/workflows/import", { name, document });
+      const workflow = await post("/workflows/import", { name, document, bind });
       await post(`/workflows/${String(workflow.id)}/publish`, { expected_latest_version: null }, { "If-Match": String(workflow.draft_revision) });
       return String(workflow.id);
     },
-    /** A run started by hand: its id. */
-    async start(workflowId: string, input: Record<string, unknown>, mode: "live" | "simulate" = "live"): Promise<string> {
-      return String((await post(`/workflows/${workflowId}/runs`, { input, mode }, { "Idempotency-Key": crypto.randomUUID() })).id);
+    /** A run started by hand, with the names its start form picked: its id. */
+    async start(
+      workflowId: string, input: Record<string, unknown>, mode: "live" | "simulate" = "live", names: Record<string, { value: string; label: string }> = {},
+    ): Promise<string> {  // prettier-ignore
+      return String((await post(`/workflows/${workflowId}/runs`, { input, mode, ...(Object.keys(names).length > 0 ? { names } : {}) }, { "Idempotency-Key": crypto.randomUUID() })).id);
     },
     /** Waits for a run to end, as the dispatcher and the worker run it. */
     async ended(runId: string): Promise<void> {

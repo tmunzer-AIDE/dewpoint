@@ -1,0 +1,67 @@
+{
+  "format": "dewpoint.workflow",
+  "format_version": 1,
+  "name": "Picker",
+  "graph": {
+    "graph_format": 1,
+    "nodes": [
+      {
+        "id": "4f3b0001-0000-4000-8000-000000000001",
+        "key": "greet",
+        "type": "flow.transform@1",
+        "config": {
+          "fields": {
+            "greeting": {
+              "$value": {
+                "kind": "cel",
+                "expr": "'site ' + trigger.site_id"
+              }
+            }
+          }
+        },
+        "position": {
+          "x": 0,
+          "y": 140
+        }
+      }
+    ],
+    "edges": [],
+    "settings": {
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "site_id": {
+            "type": "string",
+            "title": "Site ID",
+            "description": "The site to onboard.",
+            "x-dewpoint-picker": {
+              "node": "mist.site.get@1",
+              "field": "site_id"
+            }
+          },
+          "ticket": {
+            "type": "string",
+            "title": "Change ticket"
+          }
+        },
+        "required": [
+          "site_id"
+        ]
+      }
+    }
+  },
+  "bindings": [
+    {
+      "id": "b1",
+      "kind": "connection",
+      "type": "mist",
+      "label": "Acme Prod",
+      "sites": [
+        {
+          "node": null,
+          "field": "/settings/input_schema/properties/site_id/x-dewpoint-picker/connection"
+        }
+      ]
+    }
+  ]
+}
