@@ -4,19 +4,26 @@
 // one undo step (ruling 8). A name is held while it's typed and applied when focus leaves it or Enter is pressed; a
 // default that doesn't parse is held (ruling 113), and one typed over a default that has since changed is written only
 // by Apply here. A sensitive field has no default and no Choice: either would be written into the workflow, which the
-// server refuses (§3.8).
-import { useEffect, useRef } from "react";
+// server refuses (§3.8). A Choice from a connection (the 4f-3 design §5.7) has its list and its connection instead of a
+// default, values or sensitivity; until both are chosen the editor holds the half choice and the field stays plain
+// text: closing the editor drops it, and so does any change to the field not made here (an undo). Below 640 px its
+// controls and buttons are 44 px (§5.10).
+import { useEffect, useRef, useState } from "react";
 import { Button } from "../../../components/Button";
 import { Field, Select, controlClass } from "../../../components/Field";
-import { FIELD_TYPES, fieldPointer, inputOf, removeField, setField, setSettings, type FieldType, type InputField } from "../../../lib/input";
+import { FIELD_TYPES, fieldPointer, inputOf, inputRows, removeField, setField, setSettings, type FieldType, type InputField } from "../../../lib/input";
 import { parseNumber } from "../../../lib/unapplied";
 import { FieldFrame } from "../drawer/FieldFrame";
 import { useText } from "../drawer/scalars";
 import { useTriggers } from "./context";
-import { Check, Problems, StaleEdit, Values, heldWhy, problemsAt, writeTyped } from "./parts";
+import { Check, Problems, StaleEdit, Values, heldWhy, problemsHere, writeTyped } from "./parts";
+import { PickerChoice, TryChoices } from "./PickerChoice";
 
 const SENSITIVE = "Kept apart from run history. A sensitive field has no default: it would be written into the workflow.";
-const NO_CHOICE = "A sensitive field can't be a Choice: its values would be written into the workflow.";
+const NO_CHOICE = "A sensitive field can't be a Choice, nor a Choice from a connection: its values would be written into the workflow, the names picked shown.";
+
+/** A field as it reads, whatever its name: what tells a change made elsewhere (an undo) from one made here. */
+const sigOf = (f: InputField) => JSON.stringify({ ...f, name: "" });
 
 /** A whole number's or a number's default: held while it doesn't parse, written once it does. */
 function NumberDefault({ field, pointer, disabled }: { field: InputField; pointer: string; disabled: boolean }) {
@@ -50,7 +57,7 @@ function NumberDefault({ field, pointer, disabled }: { field: InputField; pointe
                 "problem" in parsed ? null : actions.update((d) => setSettings(d, { input_schema: setField(inputOf(d), field.name, { default: parsed.value }) }), null, at),
               );
             }}
-            className={controlClass(invalid)}
+            className={`${controlClass(invalid)} max-sm:min-h-[44px]`}
           />
         )}
       </FieldFrame>
@@ -62,13 +69,13 @@ function NumberDefault({ field, pointer, disabled }: { field: InputField; pointe
 function Default({ field, pointer, disabled, set }: {
   field: InputField; pointer: string; disabled: boolean; set: (patch: Partial<InputField>, key: string) => void;
 }) {  // prettier-ignore
-  if (field.sensitive) return <Field label="Default" value="" disabled />;
+  if (field.sensitive) return <Field label="Default" value="" disabled tall />;
   if (field.type === "whole" || field.type === "number") return <NumberDefault field={field} pointer={pointer} disabled={disabled} />;
   if (field.type === "yesno" || field.type === "choice") {
     const options = field.type === "yesno" ? [["true", "Yes"], ["false", "No"]] : field.values.map((v) => [JSON.stringify(v), v]);
     return (
       <Select
-        label="Default" value={"default" in field ? JSON.stringify(field.default) : ""} disabled={disabled}
+        label="Default" value={"default" in field ? JSON.stringify(field.default) : ""} disabled={disabled} tall
         onChange={(e) => set({ default: e.target.value === "" ? undefined : (JSON.parse(e.target.value) as unknown) }, "default")}
       >
         <option value="">None</option>
@@ -78,25 +85,82 @@ function Default({ field, pointer, disabled, set }: {
   }
   return (
     <Field
-      label="Default" value={typeof field.default === "string" ? field.default : ""} disabled={disabled}
+      label="Default" value={typeof field.default === "string" ? field.default : ""} disabled={disabled} tall
       placeholder={field.type === "datetime" ? "2026-10-11T08:00:00Z" : undefined}
       onChange={(e) => set({ default: e.target.value === "" ? undefined : e.target.value }, "default")}
     />
   );  // prettier-ignore
 }
 
-export function FieldEditor({ field, focusDefault = false, onClose, onRenamed }: {
-  field: InputField; focusDefault?: boolean; onClose: () => void; onRenamed: (to: string) => void;
+/** Where a field's editor puts focus as it opens: Name, Default, or a picker's control (its Connection when the picker
+ * names its list, else Its choices: the 4f-3 design §5.8). */
+export type FieldFocus = "name" | "default" | "picker" | "connection";
+
+export function FieldEditor({ field, focusOn = "name", focusN = 0, onClose, onRenamed }: {
+  field: InputField; focusOn?: FieldFocus; focusN?: number; onClose: () => void; onRenamed: (to: string) => void;
 }) {  // prettier-ignore
   const t = useTriggers();
   const { actions } = t;
   const disabled = !t.editable;
   const pointer = fieldPointer(field.name);
   const box = useRef<HTMLDivElement>(null);
-  // Its first control takes focus, or its Default when "Go to it" was for the default (4c-3b's final review).
-  useEffect(() => box.current?.querySelector<HTMLElement>(focusDefault ? "[data-default] input, [data-default] select" : "input")?.focus(), []);
+  // Its first control takes focus, or the one a Go to was for (4c-3b's final review; the 4f-3 design §5.8), once for each
+  // Go to (`focusN`), a list still on its way waited for (ruling 111).
+  const focusedFor = useRef<number | null>(null);
+  useEffect(() => {
+    if (focusedFor.current === focusN || !box.current) return;
+    const on = focusOn === "picker" ? (field.picker ? "connection" : "list") : focusOn;
+    // Connection, or where to add one when it can't be chosen (a disabled select can't take focus: the final review).
+    const at = {
+      name: "input", default: "[data-default] input, [data-default] select", list: "[data-focus=list] select",
+      connection: "[data-focus=connection] select:not([disabled]), [data-focus=connection] a, [data-focus=connection] output",
+    }[on];  // prettier-ignore
+    const control = box.current.querySelector<HTMLElement>(at) ?? box.current.querySelector<HTMLElement>("input");
+    if (!control || control.dataset.loading !== undefined) return;
+    control.focus();
+    focusedFor.current = focusN;
+  });
   const set = (patch: Partial<InputField>, key: string) =>
     actions.update((d) => setSettings(d, { input_schema: setField(inputOf(d), field.name, patch) }), null, `${pointer}/${key}`);
+  // A Choice from a connection chosen without its list and connection, held here against the field as it then read.
+  const [half, setHalf] = useState<{ list: string | null; base: string } | null>(null);
+  const sig = sigOf(field);
+  const held = half !== null && half.base === sig ? half : null;
+  /** The field as `patch` would leave it, as `sigOf` reads it. */
+  const after = (patch: Partial<InputField>) => {
+    const row = inputRows(setField(inputOf(t.doc), field.name, patch)).find((r) => r.kind === "field" && r.field.name === field.name);
+    return row?.kind === "field" ? sigOf(row.field) : sig;
+  };
+  /** A write made here, which a half choice outlives. */
+  const write = (patch: Partial<InputField>, key: string) => {
+    const base = held ? after(patch) : null;
+    const why = set(patch, key);
+    if (why === null && base !== null) setHalf((h) => h && { ...h, base });
+    return why;
+  };
+  const picking = held !== null || field.type === "picker";
+  const pickerAt = `${pointer}/x-dewpoint-picker`;
+  /** The picker written once its list and its connection are both chosen (one undo step); short of that, plain text and
+   * the list held. */
+  const choose = (list: { field: string; node: string } | null, connection: string | null) => {
+    if (list !== null && connection !== null) {
+      if (set({ type: "picker", picker: { node: list.node, field: list.field, connection } }, "x-dewpoint-picker") === null) setHalf(null);
+    } else if (field.type === "picker") {
+      const base = after({ type: "text" });
+      if (set({ type: "text" }, "x-dewpoint-picker") === null) setHalf({ list: list?.field ?? null, base });
+    } else setHalf({ list: list?.field ?? null, base: sig });
+  };
+  const toType = (to: FieldType) => {
+    if (to !== "picker") {
+      setHalf(null);
+      set({ type: to }, "type");
+    } else if (field.type !== "picker") {
+      // Held as plain text until its list and connection are chosen: whatever else the type was goes now.
+      const plain = field.type !== "text" || "default" in field;
+      const base = plain ? after({ type: "text", default: undefined }) : sig;
+      if (!plain || set({ type: "text", default: undefined }, "type") === null) setHalf({ list: null, base });
+    }
+  };
   const name = actions.held("name", pointer);
   /** The name typed, applied: whether the field may close (a refused one stays, with why). */
   const applyName = (): boolean => {
@@ -124,7 +188,7 @@ export function FieldEditor({ field, focusDefault = false, onClose, onRenamed }:
       className="flex flex-col gap-3 rounded-lg border border-line-strong p-3"
     >
       <Field
-        label="Name" value={name?.text ?? field.name} disabled={disabled} spellCheck={false} autoCapitalize="off"
+        label="Name" value={name?.text ?? field.name} disabled={disabled} spellCheck={false} autoCapitalize="off" tall
         hint={`Steps read it as trigger.${field.name}. Lowercase letters, digits and _.`} error={heldWhy(actions, "name", pointer) ?? undefined}
         onChange={(e) => {
           const text = e.target.value;
@@ -143,35 +207,50 @@ export function FieldEditor({ field, focusDefault = false, onClose, onRenamed }:
           applyName();
         }}
       />
-      <Field label="Label" value={field.label} disabled={disabled} onChange={(e) => set({ label: e.target.value }, "title")} />
+      <Field label="Label" value={field.label} disabled={disabled} tall onChange={(e) => write({ label: e.target.value }, "title")} />
       <Select
-        label="Type" value={field.type} disabled={disabled} hint={field.sensitive ? NO_CHOICE : undefined}
-        onChange={(e) => set({ type: e.target.value as FieldType }, "type")}
+        label="Type" value={held ? "picker" : field.type} disabled={disabled} hint={field.sensitive ? NO_CHOICE : undefined} tall
+        onChange={(e) => toType(e.target.value as FieldType)}
       >
-        {FIELD_TYPES.map((x) => <option key={x.value} value={x.value} disabled={x.value === "choice" && field.sensitive}>{x.label}</option>)}
+        {FIELD_TYPES.map((x) => (
+          <option key={x.value} value={x.value} disabled={(x.value === "choice" || x.value === "picker") && field.sensitive}>{x.label}</option>
+        ))}
       </Select>
-      <Field label="Description (optional)" value={field.description} disabled={disabled} onChange={(e) => set({ description: e.target.value }, "description")} />
-      <Check label="Required" checked={field.required} disabled={disabled} onChange={(required) => set({ required }, "required")} />
-      <Check
-        label="Sensitive" checked={field.sensitive} disabled={disabled || field.type === "choice"} hint={field.type === "choice" ? NO_CHOICE : SENSITIVE}
-        onChange={(sensitive) => set({ sensitive }, "x-sensitive")}
-      />
-      {field.type === "choice" && (
-        <Values
-          label={`The field ${field.name}'s values`} values={field.values} disabled={disabled}
-          hint="A run's value must be one of these, as written. Up to 200."
-          onChange={(values) => set({ values }, "enum")}
+      {picking && (
+        <PickerChoice
+          picker={field.type === "picker" ? (field.picker ?? null) : null} held={held?.list ?? null} disabled={disabled}
+          problems={problemsHere(t, pickerAt)} onChoose={choose}
         />
       )}
-      <div data-default className="flex flex-col">
-        <Default field={field} pointer={pointer} disabled={disabled} set={set} />
-      </div>
-      <Problems problems={problemsAt(t.check, pointer)} />
+      <Field label="Description (optional)" value={field.description} disabled={disabled} tall onChange={(e) => write({ description: e.target.value }, "description")} />
+      <Check label="Required" checked={field.required} disabled={disabled} tall onChange={(required) => write({ required }, "required")} />
+      {field.type === "picker" && field.picker && field.picker.connection !== null && (
+        <TryChoices picker={{ ...field.picker, connection: field.picker.connection }} label={field.label || field.name} />
+      )}
+      {!picking && (
+        <>
+          <Check
+            label="Sensitive" checked={field.sensitive} disabled={disabled || field.type === "choice"} hint={field.type === "choice" ? NO_CHOICE : SENSITIVE} tall
+            onChange={(sensitive) => set({ sensitive }, "x-sensitive")}
+          />
+          {field.type === "choice" && (
+            <Values
+              label={`The field ${field.name}'s values`} values={field.values} disabled={disabled}
+              hint="A run's value must be one of these, as written. Up to 200." tall
+              onChange={(values) => set({ values }, "enum")}
+            />
+          )}
+          <div data-default className="flex flex-col">
+            <Default field={field} pointer={pointer} disabled={disabled} set={set} />
+          </div>
+        </>
+      )}
+      <Problems problems={problemsHere(t, pointer).filter((d) => !picking || (d.field !== pickerAt && !d.field!.startsWith(`${pickerAt}/`)))} />
       <div className="flex flex-wrap gap-2">
-        <Button size="sm" variant="primary" onClick={() => applyName() && onClose()}>Done</Button>
+        <Button size="sm" variant="primary" className="max-sm:min-h-[44px]" onClick={() => applyName() && onClose()}>Done</Button>
         {!disabled && (
           <Button
-            size="sm" variant="danger-outline"
+            size="sm" variant="danger-outline" className="max-sm:min-h-[44px]"
             onClick={() => {
               actions.discard(pointer);
               if (actions.update((d) => setSettings(d, { input_schema: removeField(inputOf(d), field.name) }), `Removed the field ${field.name}.`) === null) onClose();

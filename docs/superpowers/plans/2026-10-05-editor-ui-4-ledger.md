@@ -4196,3 +4196,99 @@ the list closed ("is not a function"), unmounting the form. The drawer's list he
 effect is a statement now; a test makes `scrollIntoView` answer a promise (red first, as CI's error), and a local
 Chromium 153 page showed the form lost before the change and kept after it. No other effect returns a call's value
 that could be one.
+
+### 4f-3b merged; the 4f-3c plan accepted (2026-10-23)
+
+The owner merged 4f-3b as #143 (squash 40a010cc), every check green ("green and merged"), after three fixes its CI
+found in the browser spec: the fixture's field order (the graph is `jsonb`, which keeps keys shortest first), the
+choices list's scroll effect (Chromium 153's `scrollIntoView` answers a promise), and a 320 px locator. Its deferred
+minors, and the start forms' field order, are issue #144.
+
+`docs/superpowers/plans/2026-10-23-editor-ui-4f3c-authoring.md`, revision 1, with milestone pauses. The owner accepted
+it: its rulings 1–12 join this ledger as 382–393. Frontend only: no API, schema, migration or engine change.
+Mid-slice rulings start at M116.
+
+382. **Accepted. Milestone pauses after the field's editor and after Go to and the import words** (plan ruling 1).
+383. **Accepted. A picker field read and written, one rule with the start forms** (plan ruling 2).
+384. **Accepted. The lists a picker can name, and the step each names** (plan ruling 3).
+385. **Accepted. A half choice held by the field's editor; one write once both are chosen** (plan ruling 4).
+386. **Accepted. Its choices and Connection, in ruling 107's words** (plan ruling 5).
+387. **Accepted. Show choices in the editor tries the list** (plan ruling 6).
+388. **Accepted. A picker field's row** (plan ruling 7).
+389. **Accepted. The field's editor at 44 px below 640 px** (plan ruling 8).
+390. **Accepted. Go to an input field's problem; what publish found, under the field** (plan ruling 9).
+391. **Accepted. Import and export name a start form's field; a binding's type by its label** (plan ruling 10).
+392. **Accepted. The browser spec's authoring tests** (plan ruling 11).
+393. **Accepted. The checks** (plan ruling 12).
+
+### 4f-3c, milestone 1 (2026-10-23)
+
+The owner accepted the plan and chose inline execution ("approved, inline"), with the branch from origin/main 40a010cc
+and the frontend's packages restored offline, as its handoff named them.
+- Task 1 (a407b1a1): the plan's acceptance, rulings 382–393.
+- Task 2 (5a76860c): a picker field read and written; the lists a picker can name. Red: the lists' file stops at its
+  import; `input.test.ts` 3 failed, 10 passed. Green: 15 passed; static silent.
+- Task 3 (d2f88c91): the field's editor's Choice from a connection. Red: 10 failed. Green: 10 passed; static silent.
+- Task 4 (6f8d84e6): Show choices in the editor; the editor at 44 px. Red: 3 failed, 11 passed. Green: 14 passed;
+  static silent.
+
+The suites beside them (routes, lib, components): 1,427 passed in 116 files.
+Mid-slice rulings: none. Nothing pushed.
+
+### 4f-3c, milestone 2 (2026-10-23)
+
+The owner approved milestone 1 ("approved").
+- Task 5 (cbbe8d30): Go to an input field's problem; what publish found, under the field. Red: 5 failed, 188 passed.
+  Green: 193 passed; static silent.
+- Task 6 (ae51efc4): import and export name a start form's field; a binding's type by its label. Red: 2 failed, 41
+  passed. Green: 43 passed; static silent.
+
+The suites beside them (routes, lib, components): 1,434 passed in 116 files.
+Mid-slice rulings: none. Nothing pushed.
+
+### 4f-3c, milestone 3 and the final checkpoint (2026-10-23)
+
+The owner approved milestone 2 ("approved").
+- Task 7 (54c95f2d): the browser spec's authoring tests and the seed's `imported`. The type check and ESLint silent;
+  Playwright lists 70 tests, the picker spec's seven. Not run here (no Compose stack): CI's e2e job runs it; its
+  authoring and 320 px tests were replayed in Chromium 153 against a probe of the Triggers panel while the plan was
+  checked.
+- Task 8, every check on 54c95f2d: the whole frontend suite, 1,664 passed in 121 files (main has 1,637 in 119); ESLint
+  silent; the build done (the editor's script 157.96 kB, main 149.63; the entry 653.77 kB, main 651.91); `check:api`
+  passes; CodeQL (CLI 2.27.2, CI's filter; javascript-queries 2.4.8): no finding. The branch's code is the tree the
+  plan's dry runs ended on (e15351c7), file for file.
+
+Mid-slice rulings: none. Nothing pushed. Next: the final review.
+
+### 4f-3c, the final review (2026-10-23)
+
+A fresh reviewer (Fable) read the branch against the plan, its Review Focus, the spec and the boards: no critical
+finding, three important, seven minor; each Review Focus test present and failing if its behaviour broke; the half
+choice never written against a field that changed; nothing said twice; the shared parts unchanged where already used.
+Fixed in one pass (39ba6bb1), each test-first:
+- Go to a problem on a field the list can't show (a malformed picker) opened no editor, hid the problem under its row
+  and dropped focus: the row now takes focus, its problem kept;
+- a picker imported with its binding open, in a tenant with no connection of its list's kind: its problem vanished in
+  the editor and Go to focused a disabled select; the problem now shows at Connection, and Go to lands on "add one on
+  Connections";
+- a list no step offers any more called the connection it holds "A connection that isn't in this tenant", and its
+  advice named "such" a connection: the held connection is named, and once cleared "This list isn't offered any more:
+  choose another.";
+- graded up from minor: Show choices sat between Connection and Description; it's under the field's controls, after
+  Required, as the signed-off Authoring board and §5.7 have it (`TryChoices`, rendered by the field's editor;
+  `PickerChoice` no longer takes `label`).
+After the pass: the whole frontend suite, 1,668 passed in 121 files; the type check and ESLint silent; `check:api`
+passes; CodeQL, no finding.
+
+Deferred minors (a follow-up issue, on the owner's word): the loading and failed Connection states unnamed for a screen
+reader, the failed one not taking Go to's focus; Go to a picker's unknown-node or not-an-options-field problem lands
+on Connection (§5.8's rule) where Its choices is what to change; a connection of unknown kind kept across a list
+change; the tried list's failure words are Simulate's (ruling 6's cost); Show choices in the editor ignores a read-only
+turn while open; no tests for a list whose step takes another connection kind, nor for a rename while half chosen.
+
+What the reviewer set aside, each ruled as it stands: Show choices disabled while loading drops focus on a failure (the
+start forms' and the drawer's pattern); "A connection that isn't in this tenant" for one of another type (the drawer's
+words; the server's message says the type); an undo after the picker write shows Text, no half choice (ruling 385); a
+viewer can't reach Go to (the Problems button is editors'); `found` dated as publish problems are (ruling 17); import's
+"places in the graph" counting the failure handler (older words); Simulate's own picker errors (its panel); a stale
+edit's 32 px buttons (ruling 389); the browser spec first run in CI (ruling 392).

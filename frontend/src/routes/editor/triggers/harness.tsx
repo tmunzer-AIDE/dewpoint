@@ -10,7 +10,7 @@ import { useState } from "react";
 import { admission } from "../../../lib/config";
 import { csvProblem } from "../../../lib/csv";
 import { applyAll, applyUnapplied, baseOf, isStale, lineageOf, TRIGGERS, unappliedId, within, type Unapplied, type UnappliedKind } from "../../../lib/unapplied";
-import type { GraphDoc, Validation } from "../../../lib/workflows";
+import type { Diagnostic, GraphDoc, Validation } from "../../../lib/workflows";
 import type { PanelActions, Triggers } from "./context";
 import { TriggersPanel } from "./TriggersPanel";
 
@@ -24,6 +24,7 @@ interface Options {
   activeNumber?: number | null;
   activeVersionId?: string | null;
   check?: Validation | null;
+  found?: Diagnostic[];
   focusAt?: { pointer: string; n: number } | null;
 }
 
@@ -99,7 +100,7 @@ function Harness({ options, state, writes }: { options: Options; state: State; w
   const value: Triggers = {
     tenantId: "t1", workflowId: "w1", name: "AP report", doc: state.doc, editable, manage: options.manage ?? editable,
     viewer: options.viewer ?? false, activeNumber: options.activeNumber === undefined ? 3 : options.activeNumber,
-    activeVersionId: options.activeVersionId === undefined ? "v3" : options.activeVersionId, check: options.check ?? null, actions,
+    activeVersionId: options.activeVersionId === undefined ? "v3" : options.activeVersionId, check: options.check ?? null, found: options.found ?? [], actions,
   };  // prettier-ignore
   return <TriggersPanel value={value} focusAt={options.focusAt ?? null} onClose={() => undefined} />;
 }

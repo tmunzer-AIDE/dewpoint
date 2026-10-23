@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-// Editor 4f-3b in the browser (the 4f-3 design §5, §6): a start form's picker in the run form at 1280 and 320 px, the
-// run page's name, a re-run's, the schedule form and Simulate. Behind nginx, under the served CSP, with axe, light and
-// dark. Mist is never called (D24): the fixture's picker is bound at import to "Acme Prod" (made by the foundations
+// Editor 4f-3b and 4f-3c in the browser (the 4f-3 design §5, §6): a start form's picker in the run form at 1280 and
+// 320 px, the run page's name, a re-run's, the schedule form and Simulate; a picker field authored in Triggers, Go to a
+// picker's problem, and the field's editor at 320 px. Behind nginx, under the served CSP, with axe, light and dark. Mist is never called (D24): the fixture's picker is bound at import to "Acme Prod" (made by the foundations
 // project, never verified), its steps are control steps only, and each listing is answered in the browser with
 // made-up sites: none reaches the API, so no worker calls Mist.
 import type { Locator, Page, Route } from "@playwright/test";
@@ -136,4 +136,69 @@ test("the schedule form lists the published version's choices, and Simulate the 
   await accessibleBothWays(page, "simulate: a picker's choices");
   expect(asked.at(-1)).toEqual({ field: "site_id", connection_id: acme, query: "" });
   await dialog.getByRole("button", { name: "Cancel" }).click();
+});
+
+/** The workflow's editor, its Triggers panel open, and the input there. */
+async function triggersOf(page: Page, tenant: string, workflow: string) {
+  await page.goto(`/t/${tenant}/workflows/${workflow}?triggers=true`);
+  return page.getByRole("complementary", { name: "Triggers" }).getByRole("region", { name: /^Input/ });
+}
+
+test("a picker field is authored in Triggers: its list, its connection, tried there, then said in its row (the Authoring board)", async ({ page }) => {
+  const seed = await api(page);
+  const acme = await seed.connection("Acme Prod");
+  const workflow = await seed.imported("runs-check.dewpoint.json", "Picker F");
+  const asked = await answerListings(page);
+  const input = await triggersOf(page, seed.tenant, workflow);
+  await input.getByRole("button", { name: "Edit site" }).click();
+  const field = input.getByRole("group", { name: "The field site" });
+  await field.getByRole("combobox", { name: "Type" }).selectOption({ label: "Choice from a connection" });
+  await expect(field.getByText("Until a list and a connection are chosen, the field is saved as plain text.")).toBeVisible();
+  await field.getByRole("combobox", { name: "Its choices" }).selectOption({ label: "Mist · Org sites" });
+  await field.getByRole("combobox", { name: "Connection" }).selectOption({ label: "Acme Prod · not verified yet" });
+  await expect(field.getByText("The list the form shows; the field holds the picked one's ID.")).toBeVisible();
+  await accessibleBothWays(page, "editor: a picker field authored");
+  const show = field.getByRole("button", { name: "Show choices: Site" });
+  await show.click();
+  await expect(field.getByRole("status")).toHaveText("3 of Acme Prod's sites.");
+  await expect(field.getByRole("listbox", { name: "Choices for Site" })).toBeFocused();
+  await accessibleBothWays(page, "editor: a picker field's choices, tried");
+  expect(asked).toEqual([{ field: "site_id", connection_id: acme, query: "" }]);
+  await page.keyboard.press("Escape");
+  await expect(field.getByRole("listbox")).toHaveCount(0);
+  await expect(show).toBeFocused(); // the list closed, not the field's editor
+  await field.getByRole("button", { name: "Done" }).click();
+  await expect(input.getByRole("listitem").first()).toContainText("site · Site · a choice of Acme Prod's sites · required"); // beside its Edit
+  await expect(page.getByText("Saved · not published")).toBeVisible({ timeout: 10_000 });
+});
+
+test("Go to a picker's problem opens its field in Triggers, on its Connection (the Authoring board)", async ({ page }) => {
+  const seed = await api(page);
+  const workflow = await seed.imported("picker.dewpoint.json", "Picker G"); // its binding left open: no connection
+  await page.goto(`/t/${seed.tenant}/workflows/${workflow}`);
+  await page.getByRole("button", { name: /^Problems/ }).click({ timeout: 10_000 });
+  await page.getByRole("complementary", { name: "Problems" }).getByRole("button", { name: "Go to site_id" }).click();
+  const field = page.getByRole("complementary", { name: "Triggers" }).getByRole("group", { name: "The field site_id" });
+  const connection = field.getByRole("combobox", { name: "Connection" });
+  await expect(connection).toBeFocused();
+  await expect(connection).toHaveAttribute("aria-invalid", "true");
+  await accessibleBothWays(page, "editor: Go to a picker's problem");
+  await connection.selectOption({ label: "Acme Prod · not verified yet" });
+  await expect(page.getByRole("button", { name: "No problems" })).toBeVisible({ timeout: 10_000 });
+});
+
+test("at 320 px a picker field's editor makes every target 44 px (the Narrow320 boards)", async ({ page }) => {
+  const { seed, workflow } = await published(page, "Picker H");
+  await page.setViewportSize({ width: 320, height: 720 });
+  const input = await triggersOf(page, seed.tenant, workflow);
+  await input.getByRole("button", { name: "Edit site_id" }).click();
+  const field = input.getByRole("group", { name: "The field site_id" });
+  for (const target of [
+    field.getByRole("textbox", { name: "Name" }), field.getByRole("textbox", { name: "Label" }), field.getByRole("textbox", { name: "Description (optional)" }),
+    field.getByRole("combobox", { name: "Type" }), field.getByRole("combobox", { name: "Its choices" }), field.getByRole("combobox", { name: "Connection" }),
+    field.locator("label").filter({ has: page.getByRole("checkbox", { name: "Required" }) }),
+    field.getByRole("button", { name: "Show choices: Site ID" }), field.getByRole("button", { name: "Done" }), field.getByRole("button", { name: "Remove field" }),
+  ]) await tall(target);  // prettier-ignore
+  await accessibleBothWays(page, "editor: a picker field at 320 px");
+  await page.setViewportSize({ width: 1280, height: 720 });
 });

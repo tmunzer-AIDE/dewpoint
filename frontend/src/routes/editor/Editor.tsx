@@ -58,6 +58,7 @@ import { useSimulation } from "./simulation/useSimulation";
 import { type Problems } from "./StepCard";
 import { StepPicker, type PickMode } from "./StepPicker";
 import { READ_ONLY, type PanelActions } from "./triggers/context";
+import { PUBLISH_FOUND } from "./triggers/parts";
 import { TriggersPanel } from "./triggers/TriggersPanel";
 import { UnappliedPanel } from "./UnappliedPanel";
 import { useCanvasNav } from "./useCanvasNav";
@@ -1483,7 +1484,8 @@ function Editor({
               // The active version as the editor last knew it; when an answer was lost, as the versions say.
               activeNumber: typeof sync.activeNumber === "number" ? sync.activeNumber : (versions.data?.find((v) => v.active)?.number ?? null),
               activeVersionId: versions.data?.find((v) => v.active)?.id ?? workflow.active_version_id,
-              check: viewing ? null : trusted, actions: triggersActions(),
+              check: viewing ? null : trusted, found: viewing ? NO_DIAGNOSTICS : published.filter((d) => PUBLISH_FOUND.has(d.code)),
+              actions: triggersActions(),
             }}
             focusAt={side.at ?? null}
             onClose={() => {
@@ -1521,8 +1523,11 @@ function Editor({
             publishCurrent={publishCurrent}
             keyOf={keyOf}
             onJump={(nodeId, field) => {
-              // A field inside the step opens its drawer there (ruling 16); the step as a whole is focused, as in 4b.
-              if (field === null || field === "") focus(item.node(nodeId));
+              // An input field's opens Triggers at it (the 4f-3 design §5.8); a field inside a step opens its drawer there
+              // (ruling 16); the step as a whole is focused, as in 4b.
+              if (nodeId === null) {
+                if (field) setSide({ kind: "triggers", at: { pointer: field, n: ++jumps.current } });
+              } else if (field === null || field === "") focus(item.node(nodeId));
               else setSide({ kind: "step", node: nodeId, field: { pointer: field, n: ++jumps.current } });
             }}
             onCheck={() => void validate.current()}

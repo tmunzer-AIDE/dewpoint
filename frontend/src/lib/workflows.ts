@@ -3,6 +3,7 @@
 // written by hand.
 import { queryOptions } from "@tanstack/react-query";
 import { client, ok, type Schemas } from "./client";
+import { inputFieldOf } from "./input";
 
 export type WorkflowRow = Schemas["WorkflowOut"];
 export type WorkflowDetail = Schemas["WorkflowDetailOut"];
@@ -76,10 +77,15 @@ export function since(iso: string, now: number = Date.now()): string {
 export type PortableProblem = { reason: string; binding: string | null; node: string | null; field: string | null };
 
 /** Why a workflow can't be exported as a portable file, as a clause ("it has …"): its steps named when `keyOf`
- * knows them (the editor), not on the list, which holds no graph. */
+ * knows them (the editor), not on the list, which holds no graph; outside the steps, a start form's field by its name
+ * (a picker's connection, the 4f-3 design §5.9), else the failure handler. */
 export function notPortable(problems: PortableProblem[], keyOf?: (nodeId: string) => string): string {
+  const settings = (field: string | null) => {
+    const input = field === null ? null : inputFieldOf(field);
+    return input === null ? "the failure handler" : `the start form's field ${input}`;
+  };
   const names = (reason: string) =>
-    problems.filter((p) => p.reason === reason).map((p) => (p.node === null ? "the failure handler" : keyOf ? keyOf(p.node) : p.node));
+    problems.filter((p) => p.reason === reason).map((p) => (p.node === null ? settings(p.field) : keyOf ? keyOf(p.node) : p.node));
   const clause = (text: string, reason: string) => {
     const found = names(reason);
     return found.length === 0 ? null : keyOf ? `${text} (${found.join(", ")})` : text;

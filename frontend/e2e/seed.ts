@@ -24,6 +24,10 @@ export async function api(page: Page) {
     expect(answer.ok(), `POST ${path}: ${answer.status()}`).toBe(true);
     return (await answer.json()) as Record<string, unknown>;
   };
+  const imported = async (fixture: string, name: string, bind: Record<string, string>) => {
+    const document = JSON.parse(readFileSync(`e2e/fixtures/${fixture}`, "utf8")) as unknown;
+    return post("/workflows/import", { name, document, bind });
+  };
   return {
     tenant,
     /** A connection of this tenant's, by its name: its id. */
@@ -31,10 +35,14 @@ export async function api(page: Page) {
       const listed = (await (await page.request.get(`/api/v1/t/${tenant}/connections`)).json()) as { id: string; name: string }[];
       return listed.find((c) => c.name === name)!.id;
     },
+    /** A fixture imported under `name`, each binding in `bind` bound to the id given (one left out stays open), not
+     * published: its workflow's id. */
+    async imported(fixture: string, name: string, bind: Record<string, string> = {}): Promise<string> {
+      return String((await imported(fixture, name, bind)).id);
+    },
     /** A fixture imported under `name`, each binding in `bind` bound to the id given, and published: its workflow's id. */
     async publish(fixture: string, name: string, bind: Record<string, string> = {}): Promise<string> {
-      const document = JSON.parse(readFileSync(`e2e/fixtures/${fixture}`, "utf8")) as unknown;
-      const workflow = await post("/workflows/import", { name, document, bind });
+      const workflow = await imported(fixture, name, bind);
       await post(`/workflows/${String(workflow.id)}/publish`, { expected_latest_version: null }, { "If-Match": String(workflow.draft_revision) });
       return String(workflow.id);
     },

@@ -1,21 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
 // The input (4c-3b; the InputFields, InputMist, InputCsv and InputEdit boards): what every trigger starts a run with,
 // and, by hand, the run's form. Saved with the draft, used once published. As form fields, as a Mist event's shape (read
-// only, replaceable), with a CSV file, or as JSON. Focus goes back to what opened a part once it closes (WCAG 2.4.3).
+// only, replaceable), with a CSV file, or as JSON. Focus goes back to what opened a part once it closes (WCAG 2.4.3). A
+// Choice from a connection's row says what it lists, and from which connection (the 4f-3 design §5.7).
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Button } from "../../../components/Button";
+import { connectionsQuery } from "../../../lib/connections";
 import { csvOf, newCsv } from "../../../lib/csv";
 import { addField, fieldPointer, inputOf, inputRows, setSettings, topicShaped } from "../../../lib/input";
 import { senderName, triggerTypesQuery } from "../../../lib/triggers";
 import { useTriggers } from "./context";
 import { CsvSection } from "./CsvSection";
-import { FieldEditor } from "./FieldEditor";
+import { FieldEditor, type FieldFocus } from "./FieldEditor";
 import { InputJson, JSON_AT } from "./InputJson";
 import { MistPicker, MistShape } from "./MistEvent";
-import { Problems, Section, problemsAt, useFocusBack } from "./parts";
+import { Problems, Section, problemsHere, useFocusBack } from "./parts";
+import { choiceWords, usePickerLists } from "./PickerChoice";
 
-const TYPE_WORDS: Record<string, string> = { text: "Text", whole: "Whole number", number: "Number", yesno: "Yes or no", choice: "Choice", datetime: "Date and time" };
+const TYPE_WORDS: Record<string, string> = {
+  text: "Text", whole: "Whole number", number: "Number", yesno: "Yes or no", choice: "Choice", datetime: "Date and time", picker: "Choice from a connection",
+};  // prettier-ignore
 
 type Mode = "fields" | "json" | "mist";
 
@@ -37,34 +42,46 @@ export function InputSection({ focusAt }: { focusAt: FocusAt }) {
   const [kept, setKept] = useState<{ name: string; key: string } | null>(null);
   const keyOf = (name: string) => (kept !== null && kept.name === name && editing === name ? kept.key : name);
   const { box, back } = useFocusBack<HTMLElement>();
-  // The field "Go to it" opened on its held default: its editor opens on Default, that once. Done, another field's Edit
-  // or ＋ Field clears it, so any later opening is on Name.
-  const [defaultOf, setDefaultOf] = useState<string | null>(null);
+  // The field a Go to opened, and the control it lands on: Default for its held default, a picker's for a picker's
+  // problem (the 4f-3 design §5.8), that once. Done, another field's Edit or ＋ Field clears it, so any later opening is
+  // on Name.
+  const [focusOf, setFocusOf] = useState<{ name: string; on: FieldFocus; n: number } | null>(null);
   useEffect(() => {
     if (!focusAt) return;
     if (focusAt.pointer === JSON_AT) return setMode("json");
-    const m = /^\/settings\/input_schema\/properties\/([^/]+)(\/default)?/.exec(focusAt.pointer);
+    const m = /^\/settings\/input_schema\/properties\/([^/]+)(?:\/(default|x-dewpoint-picker)(\/connection)?)?/.exec(focusAt.pointer);
     if (m) {
       setMode("fields");
       const name = m[1]!.replaceAll("~1", "/").replaceAll("~0", "~");
-      setDefaultOf(m[2] !== undefined ? name : null);
+      // A field the list can't show has no editor: its row takes focus, its problem kept under it (4f-3c's final review).
+      if (inputRows(schema).some((r) => r.kind === "other" && r.name === name)) {
+        setEditing(null);
+        setFocusOf(null);
+        back(`row:${name}`);
+        return;
+      }
+      setFocusOf({ name, on: m[2] === "default" ? "default" : m[3] ? "connection" : m[2] ? "picker" : "name", n: focusAt.n });
       setEditing(name);
     }
-  }, [focusAt]);
+  }, [focusAt]); // once per Go to: the draft and the rows as it found them
   const rows = inputRows(schema);
   const fields = rows.length; // every field the input has, the list can show it or not
+  // A picker's row names its list and its connection: read only when a field is one.
+  const pickers = rows.some((r) => r.kind === "field" && r.field.type === "picker");
+  const lists = usePickerLists(pickers);
+  const connections = useQuery({ ...connectionsQuery(t.tenantId), enabled: pickers });
   const heldJson = actions.held("json", JSON_AT);
   const add = () => {
     const made = addField(inputOf(doc));
     if (actions.update((d) => setSettings(d, { input_schema: addField(inputOf(d)).schema }), `Added the field ${made.name}.`) === null) {
-      setDefaultOf(null);
+      setFocusOf(null);
       setEditing(made.name);
     }
   };
   return (
     <Section id="triggers-input" title={csv ? "Input · CSV file" : "Input"} note="Saved with the draft · used once published" box={box}>
       {mode !== "json" && <p className="text-small text-muted">Every trigger starts a run with this input. By hand, it&apos;s the run&apos;s form.</p>}
-      <Problems problems={problemsAt(t.check, "/settings/input_schema", true)} />
+      <Problems problems={problemsHere(t, "/settings/input_schema", true)} />
       {heldJson && mode !== "json" && (
         <p className="text-small text-warn-ink">JSON typed here isn&apos;t saved yet: Edit as JSON shows it, with why.</p>
       )}
@@ -93,17 +110,20 @@ export function InputSection({ focusAt }: { focusAt: FocusAt }) {
               const name = r.kind === "field" ? r.field.name : r.name;
               const pointer = fieldPointer(name);
               return (
-                <li key={keyOf(name)} className="flex flex-col gap-2 border-t border-line py-2.5 first:border-t-0">
+                <li
+                  key={keyOf(name)} tabIndex={r.kind === "other" ? -1 : undefined} data-back={r.kind === "other" ? `row:${name}` : undefined}
+                  className="flex flex-col gap-2 border-t border-line py-2.5 first:border-t-0"
+                >
                   {r.kind === "field" && editing === name ? (
                     <FieldEditor
-                      field={r.field} focusDefault={defaultOf === name}
+                      field={r.field} focusOn={focusOf?.name === name ? focusOf.on : "name"} focusN={focusOf?.name === name ? focusOf.n : 0}
                       onRenamed={(to) => {
                         setKept({ name: to, key: keyOf(name) });
                         setEditing(to);
                       }}
                       onClose={() => {
                         setEditing(null);
-                        setDefaultOf(null);
+                        setFocusOf(null);
                         back(`field:${name}`, "add");
                       }}
                     />
@@ -113,7 +133,8 @@ export function InputSection({ focusAt }: { focusAt: FocusAt }) {
                         <span className="font-mono">{name}</span>
                         {r.kind === "field" ? (
                           <>
-                            {r.field.label && ` · ${r.field.label}`} · {TYPE_WORDS[r.field.type]}
+                            {r.field.label && ` · ${r.field.label}`} ·{" "}
+                            {r.field.picker ? choiceWords(r.field.picker, lists, connections.data ?? []) : TYPE_WORDS[r.field.type]}
                             {r.field.required ? " · required" : " · optional"}
                             {r.field.sensitive && " · sensitive"}
                           </>
@@ -125,7 +146,7 @@ export function InputSection({ focusAt }: { focusAt: FocusAt }) {
                         <Button
                           size="sm" aria-label={`Edit ${name}`} data-back={`field:${name}`}
                           onClick={() => {
-                            setDefaultOf(null);
+                            setFocusOf(null);
                             setEditing(name);
                           }}
                         >
@@ -134,7 +155,7 @@ export function InputSection({ focusAt }: { focusAt: FocusAt }) {
                       )}
                     </div>
                   )}
-                  {editing !== name && <Problems problems={problemsAt(t.check, pointer)} />}
+                  {editing !== name && <Problems problems={problemsHere(t, pointer)} />}
                   {actions.held("name", pointer) && editing !== name && (
                     <p className="text-small text-warn-ink">A new name typed for it isn&apos;t applied: Edit shows it, with why.</p>
                   )}
