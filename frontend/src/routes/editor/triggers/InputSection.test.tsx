@@ -371,7 +371,7 @@ describe("the input as JSON", () => {
     const line = box.value.split("\n").findIndex((l) => l.includes('"default": 0')) + 1;
     expect(input().textContent).toContain(`Line ${line}, csv.columns[0].default: A required column takes no default.`);
     fireEvent.change(box, { target: { value: '{"input_schema": {"type": "object", "properties": {"a": {"type": "string"}}}}' } });
-    expect(panel.settings()).toEqual({ input_schema: { type: "object", properties: { a: { type: "string" } } } });
+    expect(panel.settings()).toEqual({ input_schema: { type: "object", properties: { a: { type: "string" } }, "x-dewpoint-order": ["a"] } });
     fireEvent.change(box, { target: { value: '{\n"input_schema": {,\n}' } });
     expect(input().textContent).toContain("Line 2: This isn't valid JSON, so it isn't saved.");
     expect(panel.held().map((u) => u.pointer)).toEqual(["/settings/input"]);

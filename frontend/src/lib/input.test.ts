@@ -2,7 +2,8 @@
 import { describe, expect, it } from "vitest";
 import { DEVICE_EVENTS, MIST } from "../test/triggers";
 import {
-  addField, inputFieldOf, inputOf, inputRows, nameProblem, removeField, renameField, sameSchema, setField, setSettings, shapeRows, topicShaped,
+  addField, fieldOrder, inputFieldOf, inputOf, inputRows, nameProblem, removeField, renameField, sameSchema, setField, setSettings, shapeRows,
+  topicShaped,
 } from "./input";  // prettier-ignore
 import type { GraphDoc } from "./workflows";
 
@@ -78,6 +79,36 @@ describe("the input as form fields", () => {
     expect(removed.required).toEqual(["site"]);
     expect(Object.keys(removed.properties as object)).not.toContain("token");
     expect(removeField({ type: "object", properties: { a: {} }, required: ["a"] }, "a")).toEqual({ type: "object", properties: {} });
+  });
+});
+
+describe("the fields' order (#144: stored JSON keeps no key order)", () => {
+  const ABC = { type: "object", properties: { b: { type: "string" }, a: { type: "string" }, c: { type: "string" } } };
+
+  it("lists the fields in the order the schema gives, the others after, as stored", () => {
+    expect(fieldOrder({ ...ABC, "x-dewpoint-order": ["c", "a"] })).toEqual(["c", "a", "b"]);
+    expect(inputRows({ ...ABC, "x-dewpoint-order": ["c", "a"] }).map((r) => (r.kind === "field" ? r.field.name : r.name))).toEqual(["c", "a", "b"]);
+    expect(fieldOrder(ABC)).toEqual(["b", "a", "c"]);
+  });
+
+  it("reads an order that doesn't match the fields as far as it does (ruled: never refused)", () => {
+    expect(fieldOrder({ ...ABC, "x-dewpoint-order": ["c", "zz", "a", "c", 7, null] })).toEqual(["c", "a", "b"]);
+    for (const order of ["c", { c: 1 }, null, []]) expect(fieldOrder({ ...ABC, "x-dewpoint-order": order })).toEqual(["b", "a", "c"]);
+  });
+
+  it("keeps the order as written: a field added last, one renamed in its place, one removed gone", () => {
+    const listed = { ...ABC, "x-dewpoint-order": ["c", "a", "b"] };
+    expect(addField(listed).schema["x-dewpoint-order"]).toEqual(["c", "a", "b", "field_4"]);
+    expect(addField(ABC).schema["x-dewpoint-order"]).toEqual(["b", "a", "c", "field_4"]); // a stored order written down
+    expect(renameField(listed, "a", "alpha")["x-dewpoint-order"]).toEqual(["c", "alpha", "b"]);
+    expect(removeField(listed, "a")["x-dewpoint-order"]).toEqual(["c", "b"]);
+    expect(removeField({ type: "object", properties: { a: {} }, "x-dewpoint-order": ["a"] }, "a")).toEqual({ type: "object", properties: {} });
+    expect(setField(listed, "a", { label: "A" })["x-dewpoint-order"]).toEqual(["c", "a", "b"]);
+  });
+
+  it("says a schema is a topic's shape whatever order its fields are listed in", () => {
+    expect(sameSchema({ ...DEVICE_EVENTS, "x-dewpoint-order": ["topic", "events"] }, DEVICE_EVENTS)).toBe(true);
+    expect(topicShaped({ ...DEVICE_EVENTS, "x-dewpoint-order": ["topic", "events"] }, MIST.topics)).toBe("device-events");
   });
 });
 

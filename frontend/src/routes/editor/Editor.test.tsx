@@ -2122,12 +2122,13 @@ describe("the Triggers panel (4c-3b)", () => {
     await userEvent.click(screen.getByRole("button", { name: "Start" }));
     const panel = screen.getByRole("complementary", { name: "Triggers" });
     await userEvent.click(within(panel).getByRole("button", { name: "＋ Field" }));
-    expect(settings()?.input_schema).toEqual({ type: "object", properties: { field_1: { type: "string" } } });
+    const added = { type: "object", properties: { field_1: { type: "string" } }, "x-dewpoint-order": ["field_1"] }; // F3: the fields' order
+    expect(settings()?.input_schema).toEqual(added);
     await userEvent.type(within(panel).getByRole("textbox", { name: "Label" }), "Site");
     expect(settings()?.input_schema).toMatchObject({ properties: { field_1: { type: "string", title: "Site" } } });
     await userEvent.click(within(panel).getByRole("heading", { name: "Triggers" })); // focus leaves the field
     await userEvent.keyboard("{Control>}z{/Control}");
-    expect(settings()?.input_schema).toEqual({ type: "object", properties: { field_1: { type: "string" } } }); // the label's typing, whole
+    expect(settings()?.input_schema).toEqual(added); // the label's typing, whole
     await userEvent.keyboard("{Control>}z{/Control}");
     expect(settings()?.input_schema).toBeUndefined();
   });

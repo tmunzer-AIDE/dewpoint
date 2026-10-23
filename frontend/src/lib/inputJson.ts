@@ -5,7 +5,7 @@
 // shown at the line its value starts on.
 import { parseJson } from "./config";
 import { csvOf, csvProblem, type CsvSettings } from "./csv";
-import { inputOf } from "./input";
+import { formOrdered, inputOf, orderAsWritten } from "./input";
 import { isObject, type Schema } from "./schemaForm";
 import type { GraphDoc } from "./workflows";
 
@@ -14,10 +14,10 @@ export interface InputDocument {
   csv?: CsvSettings;
 }
 
-/** The draft's input as the JSON text shows it: its CSV file only when it declares one. */
+/** The draft's input as the JSON text shows it: its fields in the form's order, its CSV file only when it declares one. */
 export function inputText(doc: GraphDoc): string {
   const csv = csvOf(doc);
-  const shown: InputDocument = { input_schema: inputOf(doc), ...(csv ? { csv } : {}) };
+  const shown: InputDocument = { input_schema: formOrdered(inputOf(doc)), ...(csv ? { csv } : {}) };
   return JSON.stringify(shown, null, 2);
 }
 
@@ -46,7 +46,7 @@ export function readInput(text: string): { value: InputDocument } | { problem: s
   const csv = v.csv === null ? undefined : v.csv;
   const problem = csvProblem(csv);
   if (problem) return { problem, line: null };
-  return { value: { input_schema: v.input_schema, ...(csv ? { csv: csv as CsvSettings } : {}) } };
+  return { value: { input_schema: orderAsWritten(v.input_schema), ...(csv ? { csv: csv as CsvSettings } : {}) } };
 }
 
 /** A settings pointer as a reader says it: `/settings/csv/columns/1/default` is `csv.columns[1].default`. */
