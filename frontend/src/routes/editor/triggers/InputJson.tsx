@@ -71,6 +71,7 @@ export function InputJson({ onBack }: { onBack: () => void }) {
             ? "Saved with the draft as you type, when it's JSON; text that isn't stays here, unsaved, with the line where it breaks. Undo works as elsewhere."
             : "Read only."}
         </p>
+        <p className="text-small text-muted">The form shows the fields in the order they&apos;re written here.</p>
       </div>
       <div className="flex flex-wrap gap-2">
         <Button size="sm" onClick={onBack}>Back to the fields</Button>

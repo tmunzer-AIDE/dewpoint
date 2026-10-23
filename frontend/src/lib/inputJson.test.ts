@@ -17,10 +17,26 @@ describe("the input as JSON text", () => {
     expect(JSON.parse(inputText({ graph_format: 1 }))).toEqual({ input_schema: { type: "object" } });
   });
 
-  it("reads text a save takes back as the input, a null csv as none", () => {
+  it("reads text a save takes back as the input, the fields' order as written, a null csv as none", () => {
     const text = JSON.stringify({ input_schema: SCHEMA, csv: CSV });
-    expect(readInput(text)).toEqual({ value: { input_schema: SCHEMA, csv: CSV } });
-    expect(readInput(JSON.stringify({ input_schema: SCHEMA, csv: null }))).toEqual({ value: { input_schema: SCHEMA } });
+    const listed = { ...SCHEMA, "x-dewpoint-order": ["change"] };
+    expect(readInput(text)).toEqual({ value: { input_schema: listed, csv: CSV } });
+    expect(readInput(JSON.stringify({ input_schema: SCHEMA, csv: null }))).toEqual({ value: { input_schema: listed } });
+  });
+
+  it("shows the fields in the form's order, the order list folded into them (ruled)", () => {
+    const listed = { type: "object", properties: { b: { type: "string" }, a: { type: "string" } }, "x-dewpoint-order": ["a", "b"] };
+    const shown = JSON.parse(inputText(doc({ input_schema: listed }))) as { input_schema: Record<string, unknown> };
+    expect(Object.keys(shown.input_schema.properties as object)).toEqual(["a", "b"]);
+    expect(shown.input_schema).not.toHaveProperty("x-dewpoint-order");
+  });
+
+  it("takes the fields' order as they're written, a list typed by hand replaced by it", () => {
+    const typed = '{"input_schema": {"type": "object", "x-dewpoint-order": ["a", "b"], "properties": {"b": {}, "a": {}}}}';
+    expect(readInput(typed)).toEqual({ value: { input_schema: { type: "object", properties: { b: {}, a: {} }, "x-dewpoint-order": ["b", "a"] } } });
+    expect(readInput('{"input_schema": {"type": "object", "properties": {}, "x-dewpoint-order": ["a"]}}')).toEqual({
+      value: { input_schema: { type: "object", properties: {} } },
+    });
   });
 
   it("says why text isn't saved: where it breaks, what it must hold, what the save would refuse", () => {

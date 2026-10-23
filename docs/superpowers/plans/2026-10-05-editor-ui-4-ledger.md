@@ -4358,3 +4358,64 @@ such a name comes only from Edit as JSON, an import or the API); a draft saved t
 is still `picker.invalid` (the ruling is import only; the editor never writes one); the 4f-3 spec's §4.5 and §5.9 don't
 yet say `name_too_long` or the null taken on import (ruling 399's scope: to add when the spec joins main); a long field
 name quoted whole in the notice (every clause names its places so); the commits' trailers.
+
+### F2 merged; the F3 plan accepted (2026-10-23)
+
+The owner merged F2 as #148 (squash 3b7c00d1) once its backend job, cancelled after a Docker Hub failure hung it for
+over an hour, passed on a re-run; the backend job's timeout and image pulls are #149. F3 is #144 item 4, the start
+forms' field order: the owner ruled option (a), an order list beside the fields, with no Move control now; Edit as JSON
+takes the order the fields are written in, the list hidden; a list that doesn't match is read as far as it does, with
+no warning; one sentence under Edit as JSON; the start forms and the Input list, the run page as it is.
+
+`docs/superpowers/plans/2026-10-23-editor-f3-field-order.md`, revision 1. The owner accepted it: its rulings 1–8 join
+this ledger as 401–408. No migration, no API schema change, no engine runtime change (the validator's CSV rule admits
+the keyword). Mid-slice rulings start at M117.
+
+401. **Accepted. No milestone pause** (plan ruling 1).
+402. **Accepted. The fields' order, a list beside them** (plan ruling 2; the owner's ruling).
+403. **Accepted. A list that doesn't match, read as far as it does** (plan ruling 3; the owner's ruling).
+404. **Accepted. The Input list writes the order** (plan ruling 4).
+405. **Accepted. Edit as JSON: the order as written, and one sentence** (plan ruling 5; the owner's ruling).
+406. **Accepted. Where the order shows, and where it doesn't** (plan ruling 6; the owner's ruling).
+407. **Accepted. Three tests' expectations follow the order** (plan ruling 7).
+408. **Accepted. The checks** (plan ruling 8).
+
+### F3, the final checkpoint (2026-10-23)
+
+The owner accepted the plan and chose inline execution ("approved, inline"), with no milestone pause; the branch from
+origin/main 3b7c00d1.
+- Task 1 (2bd0602d): the plan's acceptance, rulings 401–408.
+- Task 2 (f81522a3): the start forms read the order; a CSV's input admits it. Red: 5 failed and 8 passed. Green: 13
+  passed; the four modules, 104.
+- Task 3 (69cca114): the Input list reads and writes the order; Edit as JSON's text. Red: 9 failed and 218 passed.
+  Green: 227 passed.
+- Task 4 (e89ac808): Edit as JSON's sentence. Red: 1 failed and 29 passed. Green: 30 passed.
+- Task 5, every check on e89ac808, whose tree is the prototype's (fbeea26e): the backend modules the plan reaches, 761
+  passed; ruff, its format check, mypy and the import contracts silent; the whole frontend suite, 1,693 passed in 121
+  files; the type check and ESLint silent; CodeQL (CLI 2.27.2; python-queries 1.8.13, javascript-queries 2.4.8): no
+  finding.
+
+Mid-slice ruling:
+
+M117. **Packages borrowed, nothing installed,** as F2's M116: the frontend's `node_modules` linked from the 4d-1b
+worktree (main's lockfile), the backend on that worktree's venv (its lock differs from main's only by certifi). Cost:
+none.
+
+Nothing pushed. Next: the final review.
+
+### F3, the final review (2026-10-23)
+
+A fresh reviewer (Fable) read the branch against the plan, its Review Focus, #144 and R11c: no critical finding, no
+important one, three minor; each Review Focus case pinned by its named test, the stored-order round trip proved on a
+draft and on a published version; every writer of the input schema keeping the list or dropping it on purpose; the ruled
+sentence exact. Ready to merge.
+
+Deferred minors: the operations guide's start-form paragraph doesn't say the fields come in the author's order; a
+list-less draft's order is pinned for ＋ Field only, not for a rename or a removal (the same path); the order sentence
+also shows on a read-only version's view.
+
+What the reviewer set aside, each ruled as it stands: an older server refuses a CSV workflow exported with the list
+(no format version, by the plan); a field named like a whole number listed first in Edit as JSON (ruling 405's cost);
+the run page, the Problems panel, Simulate's raw JSON, plugin manifests and step maps (ruling 406); no Move control (the
+owner's); a held JSON edit's base compared key-order sensitive (as before, and safe); a removal of a field that isn't
+there writing the list (unreachable).

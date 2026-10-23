@@ -8,7 +8,9 @@ publish) is shown as published, with the words of the list it reads (`x-list` on
 sensitive one has no default and no values to show, since publish refuses them.
 
 A draft saves any input schema its graph parses, and publish takes a boolean property (valid JSON Schema): the form
-gives the fields it can read and leaves the rest out, never failing (the 4f-3 design §4.3)."""
+gives the fields it can read and leaves the rest out, never failing (the 4f-3 design §4.3). Its fields come in the
+author's order, `x-dewpoint-order` beside the properties (stored JSON keeps no key order: #144), read as far as it
+matches them."""
 
 from collections.abc import Mapping
 from typing import Any
@@ -19,6 +21,7 @@ from dewpoint.core.plugins import registry
 
 SENSITIVE = "x-sensitive"
 PICKER = "x-dewpoint-picker"
+ORDER = "x-dewpoint-order"
 _PICKER_KEYS = frozenset({"node", "field", "connection"})
 _LIST_KEYS = frozenset({"plugin", "title", "noun"})
 
@@ -26,6 +29,16 @@ _LIST_KEYS = frozenset({"plugin", "title", "noun"})
 def _properties(schema: Any) -> Mapping[str, Any]:
     props = schema.get("properties") if isinstance(schema, Mapping) else None
     return props if isinstance(props, Mapping) else {}
+
+
+def _ordered(schema: Any) -> list[tuple[str, Any]]:
+    """The properties in the author's order: those `x-dewpoint-order` lists, as it lists them (a name that isn't a
+    property, a repeat or anything not a name passed over), then the others, as stored."""
+    props = _properties(schema)
+    listed = schema.get(ORDER) if isinstance(schema, Mapping) else None
+    names = listed if isinstance(listed, list) else []
+    first = list(dict.fromkeys(n for n in names if isinstance(n, str) and n in props))
+    return [(n, props[n]) for n in first] + [(n, p) for n, p in props.items() if n not in first]
 
 
 def _picker(prop: Mapping[str, Any]) -> Mapping[str, str] | None:
@@ -62,7 +75,7 @@ def form_fields(schema: Any, manifests: Mapping[str, Mapping[str, Any]] | None =
     raw = schema.get("required") if isinstance(schema, Mapping) else None
     required = {n for n in raw if isinstance(n, str)} if isinstance(raw, list) else set()
     fields: list[dict[str, Any]] = []
-    for name, prop in _properties(schema).items():
+    for name, prop in _ordered(schema):
         if not isinstance(prop, Mapping):
             continue
         sensitive = bool(prop.get(SENSITIVE))

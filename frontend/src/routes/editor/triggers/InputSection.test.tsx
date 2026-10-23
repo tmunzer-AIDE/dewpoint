@@ -371,13 +371,32 @@ describe("the input as JSON", () => {
     const line = box.value.split("\n").findIndex((l) => l.includes('"default": 0')) + 1;
     expect(input().textContent).toContain(`Line ${line}, csv.columns[0].default: A required column takes no default.`);
     fireEvent.change(box, { target: { value: '{"input_schema": {"type": "object", "properties": {"a": {"type": "string"}}}}' } });
-    expect(panel.settings()).toEqual({ input_schema: { type: "object", properties: { a: { type: "string" } } } });
+    expect(panel.settings()).toEqual({ input_schema: { type: "object", properties: { a: { type: "string" } }, "x-dewpoint-order": ["a"] } });
     fireEvent.change(box, { target: { value: '{\n"input_schema": {,\n}' } });
     expect(input().textContent).toContain("Line 2: This isn't valid JSON, so it isn't saved.");
     expect(panel.held().map((u) => u.pointer)).toEqual(["/settings/input"]);
     await userEvent.click(within(input()).getByRole("button", { name: "Discard what isn't saved" }));
     expect(panel.held()).toEqual([]);
     expect(JSON.parse(box.value)).toEqual({ input_schema: { type: "object", properties: { a: { type: "string" } } } });
+  });
+});
+
+describe("the fields' order (F3: stored JSON keeps no key order)", () => {
+  const names = () => within(input()).getAllByRole("listitem").map((li) => /^[a-z0-9_]+/.exec(li.textContent ?? "")?.[0]);
+
+  it("lists the fields in the form's order; Edit as JSON shows them so, says how to change it, and takes the new order", async () => {
+    const schema = { type: "object", properties: { b: { type: "string" }, a: { type: "string" } }, "x-dewpoint-order": ["a", "b"] };
+    const panel = await showPanel({ doc: draft({ input_schema: schema }) });
+    expect(names()).toEqual(["a", "b"]);
+    await userEvent.click(within(input()).getByRole("button", { name: "Edit as JSON" }));
+    const box = within(input()).getByRole<HTMLTextAreaElement>("textbox", { name: "The input's schema and CSV columns" });
+    expect(box.value.indexOf('"a"')).toBeLessThan(box.value.indexOf('"b"'));
+    expect(box.value).not.toContain("x-dewpoint-order");
+    expect(input().textContent).toContain("The form shows the fields in the order they're written here.");
+    fireEvent.change(box, { target: { value: '{"input_schema": {"type": "object", "properties": {"b": {"type": "string"}, "a": {"type": "string"}}}}' } });
+    expect(panel.settings()).toEqual({ input_schema: { ...schema, "x-dewpoint-order": ["b", "a"] } });
+    await userEvent.click(within(input()).getByRole("button", { name: "Back to the fields" }));
+    expect(names()).toEqual(["b", "a"]);
   });
 });
 

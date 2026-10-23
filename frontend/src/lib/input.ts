@@ -41,6 +41,8 @@ export type InputRow = { kind: "field"; field: InputField } | { kind: "other"; n
 
 /** The keys a field the list shows may have: anything else is a rule of its own the list would lose. */
 const PICKER = "x-dewpoint-picker";
+// The fields' order, a list beside them: stored JSON keeps no key order, so the author's travels here (F3).
+const ORDER = "x-dewpoint-order";
 const PLAIN = new Set(["type", "title", "description", "default", "x-sensitive", "format", "enum", PICKER]);
 const PICKER_KEYS = new Set(["node", "field", "connection"]);
 
@@ -99,10 +101,21 @@ function fieldOf(name: string, s: unknown, required: boolean): InputField | null
   };  // prettier-ignore
 }
 
-/** The input's fields, in the schema's order. */
+/** The fields' names in the form's order: those the schema's order lists, as it lists them (a name that isn't a field,
+ * a repeat or anything not a name passed over), then the others, as stored. */
+export function fieldOrder(schema: Schema): string[] {
+  const props = propertiesOf(schema);
+  const listed: unknown[] = Array.isArray(schema[ORDER]) ? schema[ORDER] : [];
+  const first = [...new Set(listed.filter((n): n is string => typeof n === "string" && Object.hasOwn(props, n)))];
+  return [...first, ...Object.keys(props).filter((n) => !first.includes(n))];
+}
+
+/** The input's fields, in the form's order. */
 export function inputRows(schema: Schema): InputRow[] {
   const required = new Set(requiredOf(schema));
-  return Object.entries(propertiesOf(schema)).map(([name, s]): InputRow => {
+  const props = propertiesOf(schema);
+  return fieldOrder(schema).map((name): InputRow => {
+    const s = props[name];
     const field = fieldOf(name, s, required.has(name));
     return field ? { kind: "field", field } : { kind: "other", name, required: required.has(name), what: what(isObject(s) ? s : {}, schema) };
   });
@@ -150,6 +163,26 @@ const withProperties = (schema: Schema, properties: Schema, required: string[]):
   return out;
 };
 
+/** The schema with its fields' order written; none without a field. */
+const withOrder = (schema: Schema, order: string[]): Schema => {
+  const out: Schema = { ...schema };
+  if (order.length > 0) out[ORDER] = order;
+  else delete out[ORDER];
+  return out;
+};
+
+/** The schema as Edit as JSON shows it: its fields written in the form's order, which the text then says. */
+export function formOrdered(schema: Schema): Schema {
+  const props = propertiesOf(schema);
+  const out: Schema = isObject(schema.properties) ? { ...schema, properties: Object.fromEntries(fieldOrder(schema).map((n) => [n, props[n]])) } : { ...schema };
+  delete out[ORDER];
+  return out;
+}
+
+/** The schema as Edit as JSON's text says it: its fields' order the order they're written in, a list typed there
+ * replaced by it (ruled). */
+export const orderAsWritten = (schema: Schema): Schema => withOrder(schema, Object.keys(propertiesOf(schema)));
+
 /** The schema with one field changed as `patch` says: a sensitive field has no default, a default that no longer fits
  * its type or values goes, a picker goes with its type, and `required` follows. A field the list can't show is left as
  * it is. */
@@ -178,7 +211,8 @@ export function nameProblem(schema: Schema, from: string | null, to: string): st
 export function renameField(schema: Schema, from: string, to: string): Schema {
   if (from === to || !Object.hasOwn(propertiesOf(schema), from)) return schema;
   const properties = Object.fromEntries(Object.entries(propertiesOf(schema)).map(([k, v]) => [k === from ? to : k, v]));
-  return withProperties(schema, properties, requiredOf(schema).map((r) => (r === from ? to : r)));
+  const renamed = withProperties(schema, properties, requiredOf(schema).map((r) => (r === from ? to : r)));
+  return withOrder(renamed, fieldOrder(schema).map((n) => (n === from ? to : n)));
 }
 
 /** The schema with a new, optional text field at the end, named `field_<n>` with the first n not taken. */
@@ -186,12 +220,14 @@ export function addField(schema: Schema): { schema: Schema; name: string } {
   let n = Object.keys(propertiesOf(schema)).length + 1;
   while (Object.hasOwn(propertiesOf(schema), `field_${n}`)) n++;
   const name = `field_${n}`;
-  return { schema: withProperties(schema, { ...propertiesOf(schema), [name]: { type: "string" } }, requiredOf(schema)), name };
+  const added = withProperties(schema, { ...propertiesOf(schema), [name]: { type: "string" } }, requiredOf(schema));
+  return { schema: withOrder(added, [...fieldOrder(schema), name]), name };
 }
 
 export function removeField(schema: Schema, name: string): Schema {
   const properties = Object.fromEntries(Object.entries(propertiesOf(schema)).filter(([k]) => k !== name));
-  return withProperties(schema, properties, requiredOf(schema).filter((r) => r !== name));
+  const removed = withProperties(schema, properties, requiredOf(schema).filter((r) => r !== name));
+  return withOrder(removed, fieldOrder(schema).filter((n) => n !== name));
 }
 
 /** Where a field is in the settings, as a pointer (RFC 6901): what its held edits and the server's problems name. */
@@ -219,8 +255,16 @@ export function setSettings(doc: GraphDoc, patch: Record<string, unknown>): Grap
 const canonical = (v: unknown): string =>
   JSON.stringify(v, (_, x: unknown) => (isObject(x) ? Object.fromEntries(Object.entries(x).sort(([a], [b]) => (a < b ? -1 : 1))) : x));
 
-/** Whether two schemas say the same, whatever their keys' order. */
-export const sameSchema = (a: unknown, b: unknown): boolean => canonical(a) === canonical(b);
+/** A schema without its fields' order. */
+function unordered(v: unknown): unknown {
+  if (!isObject(v) || !Object.hasOwn(v, ORDER)) return v;
+  const out: Schema = { ...v };
+  delete out[ORDER];
+  return out;
+}
+
+/** Whether two schemas say the same, whatever their keys' order or their fields': a topic's shape is one in any. */
+export const sameSchema = (a: unknown, b: unknown): boolean => canonical(unordered(a)) === canonical(unordered(b));
 
 /** The topic whose shape the input is, of a trigger type's: null when it's none of them. */
 export function topicShaped(schema: Schema, topics: Record<string, unknown>): string | null {
