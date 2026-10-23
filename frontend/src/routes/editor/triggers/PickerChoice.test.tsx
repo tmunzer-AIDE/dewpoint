@@ -297,6 +297,32 @@ describe("a Choice from a connection, F4 (#146)", () => {
   });
 });
 
+describe("a Choice from a connection, the tests 4f-3c's review asked for (#146 item 6)", () => {
+  it("writes plain text and holds the list when the new list's step takes another kind, listing that kind's connections", async () => {
+    const panel = await showPanel({ doc: draft({ "x-dewpoint-picker": PICKER }) });
+    await userEvent.click(within(input()).getByRole("button", { name: "Edit site" }));
+    await vi.waitFor(() => expect(select("Connection").value).toBe(C1));
+    await userEvent.selectOptions(select("Its choices"), "Ops · Channels");
+    expect(site(panel.settings())).toEqual({ type: "string", title: "Site" });
+    expect(select("Its choices").value).toBe("channel_id");
+    expect([...select("Connection").options].map((o) => o.text)).toEqual(["Choose a connection", "Slack ops · verified"]);
+  });
+
+  it("keeps a half choice through a rename made in its editor", async () => {
+    const panel = await showPanel({ doc: draft({}) });
+    await userEvent.click(within(input()).getByRole("button", { name: "Edit site" }));
+    await userEvent.selectOptions(select("Type"), "Choice from a connection");
+    await userEvent.selectOptions(select("Its choices"), "Acme · Org sites");
+    const name = () => within(input()).getByRole("textbox", { name: "Name" });
+    await userEvent.clear(name());
+    await userEvent.type(name(), "where");
+    await userEvent.tab();
+    expect(Object.keys(panel.settings()?.input_schema?.properties as object)).toEqual(["where"]);
+    const renamed = within(input()).getByRole("group", { name: "The field where" });
+    expect(within(renamed).getByRole<HTMLSelectElement>("combobox", { name: "Its choices" }).value).toBe("site_id");
+  });
+});
+
 describe("a Choice from a connection, the final review's cases", () => {
   const at = "/settings/input_schema/properties/site/x-dewpoint-picker";
   const problem = (message: string): Diagnostic => ({ code: "picker.invalid", severity: "error", message, fix: null, node: null, field: at });
