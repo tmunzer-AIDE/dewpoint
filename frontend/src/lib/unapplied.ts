@@ -4,8 +4,8 @@
 // never the control, so a tab, a toggle or a closed drawer can't lose them. Each is applied when it can be, and said,
 // with its reason, while it can't.
 import {
-  DECIMAL, admission, formula, formulaProblem, keyProblem, literal, parseJson, renameEntry, renameKey, renamePort, rootOf,
-  setAt, setConfig, setOptions, valueAt, type Changed,
+  DECIMAL, admission, formula, formulaProblem, isEmptyValue, keyProblem, literal, parseJson, renameEntry, renameKey, renamePort,
+  rootOf, setAt, setConfig, setOptions, valueAt, type Changed,
 } from "./config";  // prettier-ignore
 import { csvOf, csvProblem, rowsLimit, sizeLimit, textProblem } from "./csv";
 import { findNode, idKey, portOf, sameId } from "./graph";
@@ -136,6 +136,14 @@ export function limitProblem(name: Limit, text: string): string | null {
 function written(value: unknown, u: Unapplied): unknown {
   if (value === undefined) return u.entry ? null : undefined;
   return u.literal ? literal(value) : value;
+}
+
+/** Whether applying `u` writes nothing, an empty object or an empty list, which an update's or a create's body takes out
+ * (F1). JSON is the edit held while typed, applied when focus leaves; the others are written as typed. */
+export function empties(u: Unapplied): boolean {
+  if (u.kind !== "json") return false;
+  const parsed = parseJson(u.text);
+  return !("problem" in parsed) && isEmptyValue(written(parsed.value, u));
 }
 
 const quiet = (changed: Changed | { problem: string }): Applied | { problem: string } =>

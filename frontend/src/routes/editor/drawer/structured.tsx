@@ -3,13 +3,13 @@
 // own; and a dynamic port's name, which edges hang on (ruling 9). A change to a list's or a map's shape applies the
 // edits typed inside it first, or waits for them (ruling 18). A name is held while typed, applied when focus leaves or
 // on Enter.
-import { useId, useRef } from "react";
+import { useContext, useId, useRef } from "react";
 import { Button } from "../../../components/Button";
 import { controlClass } from "../../../components/Field";
 import { freePort, rootOf } from "../../../lib/config";
 import { emptyOf, entryOf, isObject, itemOf, pointerOf, propertiesOf, type FieldSpec, type Widget } from "../../../lib/schemaForm";
 import type { GraphNode } from "../../../lib/workflows";
-import { segment, useDrawer } from "./context";
+import { EmptiedContext, ITEM_EMPTIED, segment, useDrawer } from "./context";
 import { FieldView } from "./FieldView";
 import type { ControlProps } from "./scalars";
 
@@ -49,6 +49,7 @@ export function lineageKey(list: unknown): string {
 
 function ListItems({ spec, value }: { spec: FieldSpec; value: unknown }) {
   const drawer = useDrawer();
+  const emptied = useContext(EmptiedContext);
   const add = useRef<HTMLButtonElement>(null);
   const items = asList(value);
   const lineage = lineageKey(value);
@@ -64,6 +65,7 @@ function ListItems({ spec, value }: { spec: FieldSpec; value: unknown }) {
     });
   const remove = (index: number) => {
     if (drawer.restructure(spec.pointer, { path: [...spec.path, index], make: () => undefined }) !== null) return;
+    if (items.length === 1) emptied?.(); // an update's or a create's: not sent, nothing given (F1)
     // Its controls are gone: focus goes to Add. A removal that asks first lands on the drawer's heading instead.
     requestAnimationFrame(() => add.current?.focus());
   };
@@ -76,7 +78,9 @@ function ListItems({ spec, value }: { spec: FieldSpec; value: unknown }) {
         const item = itemOf(spec, i);
         return (
           <div key={i} className="flex min-w-0 flex-col gap-2">
-            <FieldView key={lineage} spec={item} />
+            <EmptiedContext.Provider value={ITEM_EMPTIED}>
+              <FieldView key={lineage} spec={item} />
+            </EmptiedContext.Provider>
             {drawer.editable && (
               <div className="flex flex-wrap gap-2">
                 <Button size="sm" aria-label={`Move up: ${item.label}`} disabled={i === 0} onClick={() => move(i, i - 1)}>Move up</Button>
@@ -152,8 +156,14 @@ function NameField({ map, name, onRenamed }: { map: FieldSpec; name: string; onR
 
 function MapEntries({ spec, value }: { spec: FieldSpec; value: unknown }) {
   const drawer = useDrawer();
+  const emptied = useContext(EmptiedContext);
   const add = useRef<HTMLButtonElement>(null);
   const entries = isObject(value) ? Object.entries(value) : [];
+  // An entry a write inside empties is taken out with it (F1): focus goes to Add, the map kept if it was its only one.
+  const entryEmptied = emptied && (() => {
+    if (entries.length === 1) emptied();
+    requestAnimationFrame(() => add.current?.focus());
+  });
   // Each entry is keyed by an id kept per name: a removal passes nothing to the next entry, and a rename made in its
   // name carries it, so the entry keeps its view and focus through it (#73).
   const ids = useRef(new Map<string, number>());
@@ -188,12 +198,15 @@ function MapEntries({ spec, value }: { spec: FieldSpec; value: unknown }) {
                 ids.current.set(to, id);
               }}
             />
-            <FieldView spec={entry} />
+            <EmptiedContext.Provider value={entryEmptied}>
+              <FieldView spec={entry} />
+            </EmptiedContext.Provider>
             {drawer.editable && (
               <Button
                 size="sm" variant="danger-outline" className="self-start" aria-label={`Remove: ${name}`}
                 onClick={() => {
                   if (drawer.restructure(spec.pointer, { path: entry.path, make: () => undefined }) === null) {
+                    if (entries.length === 1) emptied?.(); // as a list's last item (F1)
                     requestAnimationFrame(() => add.current?.focus());
                   }
                 }}

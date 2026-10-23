@@ -119,3 +119,123 @@ it("keeps focus after a Remove, on ＋ Another setting of …", async () => {
   await userEvent.click(within(at("/body/rogue")).getByRole("button", { name: "Remove Enabled" }));
   await vi.waitFor(() => expect(document.activeElement).toBe(within(at("/body/rogue")).getByRole("button", { name: "＋ Another setting of Rogue" })));
 });
+
+// F1: a place a Remove empties (#140-8, #140-9).
+it("sends no list its last item's Remove empties: the setting goes back to nothing given, focus on ＋ Add an item", async () => {
+  const { config } = showDrawer(UPDATE, { config: { body: { networks: [{ name: "a" }] } } });
+  await userEvent.click(within(at("/body/networks")).getByRole("button", { name: "Remove: item 1" }));
+  expect(config()).toEqual({ body: {} });
+  expect(within(at("/body/networks")).getByText(WORDS.pending)).toBeTruthy();
+  await vi.waitFor(() => expect(document.activeElement).toBe(within(at("/body/networks")).getByRole("button", { name: "＋ Add an item" })));
+});
+
+it("sends nothing for a list found, an item added and removed again", async () => {
+  const { config } = showDrawer(UPDATE, { config: {} });
+  await userEvent.type(screen.getByRole("combobox", { name: "Find a setting" }), "networks");
+  await userEvent.click(screen.getByRole("option", { name: /^Networks(?! ›)/ }));
+  await userEvent.click(within(at("/body/networks")).getByRole("button", { name: "＋ Add an item" }));
+  expect(config()).toEqual({ body: { networks: [{}] } });
+  await userEvent.click(within(at("/body/networks")).getByRole("button", { name: "Remove: item 1" }));
+  expect(config()).toEqual({ body: {} });
+  expect(within(at("/body/networks")).getByText(WORDS.pending)).toBeTruthy();
+});
+
+it("keeps a list emptied inside an object drawn there, nothing given, focus on its ＋ Add an item", async () => {
+  const { config } = showDrawer(UPDATE, { config: { body: { auto_upgrade: { enabled: true, schedules: [{ day: "sun" }] } } } });
+  await userEvent.click(within(at("/body/auto_upgrade/schedules")).getByRole("button", { name: "Remove: item 1" }));
+  expect(config()).toEqual({ body: { auto_upgrade: { enabled: true } } });
+  expect(within(at("/body/auto_upgrade/schedules")).getByText(WORDS.pending)).toBeTruthy();
+  await vi.waitFor(() => expect(document.activeElement).toBe(within(at("/body/auto_upgrade/schedules")).getByRole("button", { name: "＋ Add an item" })));
+});
+
+it("sends no plain list its last item's Remove empties: its row stays, nothing given, focus on its Add", async () => {
+  const { config } = showDrawer(UPDATE, { config: { body: { tags: ["x"] } } });
+  await userEvent.click(within(at("/body/tags")).getByRole("button", { name: "Remove: Tags, item 1" }));
+  expect(config()).toEqual({ body: {} });
+  expect(within(at("/body/tags")).getByText(WORDS.pending)).toBeTruthy();
+  await vi.waitFor(() => expect(document.activeElement).toBe(within(at("/body/tags")).getByRole("button", { name: "Add to Tags" })));
+});
+
+it("keeps an object a Remove empties drawn in its own, focus on its ＋ Another setting of …", async () => {
+  const { config } = showDrawer(UPDATE, { config: { body: { auto_upgrade: { enabled: true, custom: { ap41: "1.2" } } } } });
+  await userEvent.click(within(at("/body/auto_upgrade/custom")).getByRole("button", { name: "Remove AP41" }));
+  expect(config()).toEqual({ body: { auto_upgrade: { enabled: true } } });
+  await vi.waitFor(() => expect(document.activeElement).toBe(within(at("/body/auto_upgrade/custom")).getByRole("button", { name: "＋ Another setting of Custom versions" })));
+});
+
+it("keeps each object a Remove empties drawn, up to its setting's row, nothing given", async () => {
+  const { config } = showDrawer(UPDATE, { config: { body: { auto_upgrade: { custom: { ap41: "1.2" } } } } });
+  await userEvent.click(within(at("/body/auto_upgrade/custom")).getByRole("button", { name: "Remove AP41" }));
+  expect(config()).toEqual({ body: {} });
+  expect(within(at("/body/auto_upgrade")).getAllByText(WORDS.pending)).toHaveLength(2); // the row's, and Custom versions'
+  expect(within(at("/body/auto_upgrade/custom")).getByText(WORDS.pending)).toBeTruthy();
+  await vi.waitFor(() => expect(document.activeElement).toBe(within(at("/body/auto_upgrade/custom")).getByRole("button", { name: "＋ Another setting of Custom versions" })));
+});
+
+it("keeps a map its last entry's Remove empties drawn in its object, focus on its ＋ Add an entry", async () => {
+  const { config } = showDrawer(UPDATE, { config: { body: { auto_upgrade: { enabled: true, profiles: { ap: { channel: "6" } } } } } });
+  await userEvent.click(within(at("/body/auto_upgrade/profiles")).getByRole("button", { name: "Remove Profiles › ap" }));
+  expect(config()).toEqual({ body: { auto_upgrade: { enabled: true } } });
+  await vi.waitFor(() => expect(document.activeElement).toBe(within(at("/body/auto_upgrade/profiles")).getByRole("button", { name: "＋ Add an entry" })));
+});
+
+it("keeps a plain map its last entry's Remove empties drawn in its object, focus on its Add", async () => {
+  const { config } = showDrawer(UPDATE, { config: { body: { auto_upgrade: { enabled: true, labels: { hq: ["a"] } } } } });
+  await userEvent.click(within(at("/body/auto_upgrade/labels")).getByRole("button", { name: "Remove: hq" }));
+  expect(config()).toEqual({ body: { auto_upgrade: { enabled: true } } });
+  await vi.waitFor(() => expect(document.activeElement).toBe(within(at("/body/auto_upgrade/labels")).getByRole("button", { name: "Add to Labels" })));
+});
+
+it("takes out a plain map's entry its last item's Remove empties, focus on the map's Add", async () => {
+  const { config } = showDrawer(UPDATE, { config: { body: { auto_upgrade: { enabled: true, labels: { hq: ["a"], lab: ["b"] } } } } });
+  await userEvent.click(within(at("/body/auto_upgrade/labels")).getByRole("button", { name: "Remove: hq, item 1" }));
+  expect(config()).toEqual({ body: { auto_upgrade: { enabled: true, labels: { lab: ["b"] } } } });
+  await vi.waitFor(() => expect(document.activeElement).toBe(within(at("/body/auto_upgrade/labels")).getByRole("button", { name: "Add to Labels" })));
+});
+
+it("keeps a plain map its only entry's last item empties drawn, focus on its Add", async () => {
+  const { config } = showDrawer(UPDATE, { config: { body: { auto_upgrade: { enabled: true, labels: { hq: ["a"] } } } } });
+  await userEvent.click(within(at("/body/auto_upgrade/labels")).getByRole("button", { name: "Remove: hq, item 1" }));
+  expect(config()).toEqual({ body: { auto_upgrade: { enabled: true } } });
+  await vi.waitFor(() => expect(document.activeElement).toBe(within(at("/body/auto_upgrade/labels")).getByRole("button", { name: "Add to Labels" })));
+});
+
+it("keeps a part whose value is cleared drawn, nothing given, focus in it: typing goes on", async () => {
+  const { config } = showDrawer(UPDATE, { config: { body: { rogue: { enabled: true, min_rogue_rssi: -80 } } } });
+  const rssi = within(at("/body/rogue")).getByLabelText("Min rogue RSSI");
+  await userEvent.clear(rssi);
+  expect(config()).toEqual({ body: { rogue: { enabled: true } } });
+  expect(within(at("/body/rogue/min_rogue_rssi")).getByText(WORDS.pending)).toBeTruthy();
+  expect(document.activeElement).toBe(rssi);
+  await userEvent.type(rssi, "-70");
+  expect(config()).toEqual({ body: { rogue: { enabled: true, min_rogue_rssi: -70 } } });
+});
+
+it("keeps a row whose value is cleared, nothing given, focus in it", async () => {
+  const { config } = showDrawer(UPDATE, { config: { body: { name: "hq" } } });
+  const name = within(at("/body/name")).getByLabelText("Name");
+  await userEvent.clear(name);
+  expect(config()).toEqual({ body: {} });
+  expect(within(at("/body/name")).getByText(WORDS.pending)).toBeTruthy();
+  expect(document.activeElement).toBe(name);
+});
+
+it("keeps each object a cleared part empties drawn, focus in the part", async () => {
+  const { config } = showDrawer(UPDATE, { config: { body: { auto_upgrade: { enabled: true, custom: { ap41: "1.2" } } } } });
+  const ap41 = within(at("/body/auto_upgrade/custom")).getByLabelText("AP41");
+  await userEvent.clear(ap41);
+  expect(config()).toEqual({ body: { auto_upgrade: { enabled: true } } });
+  expect(document.activeElement).toBe(ap41);
+});
+
+it("sends no list edited as JSON to []: it stays drawn, nothing given, up to its row", async () => {
+  const { config } = showDrawer(UPDATE, { config: { body: { rogue: { whitelisted_ssids: ["a"] }, name: "hq" } } });
+  await userEvent.click(within(at("/body/rogue/whitelisted_ssids")).getByRole("button", { name: "Edit as JSON" }));
+  const box = within(at("/body/rogue/whitelisted_ssids")).getByRole("textbox");
+  await userEvent.clear(box);
+  await userEvent.type(box, "[[]");
+  await userEvent.tab();
+  expect(config()).toEqual({ body: { name: "hq" } });
+  expect(within(at("/body/rogue")).getAllByText(WORDS.pending)).toHaveLength(2); // the row's, and the list's
+  expect(within(at("/body/rogue/whitelisted_ssids")).getByText(WORDS.pending)).toBeTruthy();
+});
