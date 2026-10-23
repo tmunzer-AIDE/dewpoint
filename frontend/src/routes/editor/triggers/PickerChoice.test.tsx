@@ -267,6 +267,14 @@ describe("a Choice from a connection, F4 (#146)", () => {
     expect(within(field()).getByText("A picker needs its connection.")).toBeTruthy();
   });
 
+  it("describes the failed connections' state by the picker's problem, so it's heard where Go to lands (the final review)", async () => {
+    listConnections = () => json({ error: "internal" }, 500);
+    const check = checked([problem("picker.invalid", "A picker needs its connection.")]);
+    await showPanel({ doc: draft({ "x-dewpoint-picker": { node: "acme.site_zones.get@1", field: "site_id" } }), check, focusAt: { pointer: at, n: 1 } });
+    await within(field()).findByText("Connections couldn't load.");
+    expect(describedBy(within(field()).getByRole("status", { name: "Connection" }))).toContain("A picker needs its connection.");
+  });
+
   it("lands Go to a problem about a list no step offers on Its choices, the problem under it, not Connection (item 2, amending §5.8)", async () => {
     const check = checked([problem("picker.unknown_node", "This server has no such node type: choose another list.")]);
     await showPanel({ doc: draft({ "x-dewpoint-picker": { node: "acme.gone.get@1", field: "gone_id", connection: C1 } }), check, focusAt: { pointer: at, n: 1 } });

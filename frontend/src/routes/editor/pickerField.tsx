@@ -158,7 +158,9 @@ export function failedWords(e: unknown, { C, n, label }: Words, where: ReadFor):
   if (code === "plugin_calls_busy" || (e instanceof ApiError && e.status === 429)) return "Too many lists are being read right now: try again in a moment.";
   if (code === "connection_changed") return `${C} changed while its ${n} were read: Show choices again.`;
   if (code === "not_published" || code === "not_a_picker") return `This field's choices can't be listed: type the ${label}'s ID.`;
-  if (code === "network") return `${C}'s ${n} couldn't be read: the server didn't answer. ${then}`;
+  // No answer, or one that isn't the API's (a proxy's or an ingress's page while it's down: the final review).
+  if (code === "network" || (code === "http_error" && e instanceof ApiError && e.status >= 500))
+    return `${C}'s ${n} couldn't be read: the server didn't answer. ${then}`;
   if (code === "plugin_call_timeout") return `${C}'s ${n} couldn't be read: Mist didn't answer in time. ${then}`;
   return `${C}'s ${n} couldn't be read: Mist answered with an error. ${then}`;
 }

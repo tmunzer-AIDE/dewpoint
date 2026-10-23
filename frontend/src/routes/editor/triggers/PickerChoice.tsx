@@ -137,11 +137,14 @@ export function PickerChoice({ picker, held, disabled, problems, onChoose }: {
           // Named as the control it stands for, and focusable, so a Go to lands here, its problem said under it.
           <div className="flex flex-col gap-1.5">
             <span id={`${id}-connection`} className="text-small font-semibold">Connection</span>
-            <output aria-labelledby={`${id}-connection`} tabIndex={-1} className="flex flex-wrap items-center gap-2 text-small text-danger">
+            <output
+              aria-labelledby={`${id}-connection`} aria-describedby={error ? `${id}-connection-problem` : undefined} tabIndex={-1}
+              className="flex flex-wrap items-center gap-2 text-small text-danger"
+            >
               Connections couldn&apos;t load.
               <Button size="sm" onClick={() => void listed.refetch()}>Try again</Button>
             </output>
-            {error && <p className="text-small text-danger">{error}</p>}
+            {error && <p id={`${id}-connection-problem`} className="text-small text-danger">{error}</p>}
           </div>
         ) : mine.length === 0 && connection === null && entry === undefined ? (
           <Select label="Connection" value="" disabled tall hint="This list isn't offered any more: choose another." error={error}>

@@ -302,6 +302,14 @@ describe("a picker field's words (the 4f-3 design §5.4)", () => {
     expect(failedWords(no(422, "connection_unavailable"), unnamed, "form")).toBe("The connection can't list choices now: an editor can check it on Connections. Type the site's ID meanwhile.");
   });
 
+  it("says the server didn't answer when the answer isn't the API's: a proxy's or an ingress's page (the final review)", () => {
+    const page = (status: number) => new ApiError(status, "http_error", null); // ok()'s code for a body that isn't {"error": …}
+    for (const status of [502, 503, 504]) {
+      expect(failedWords(page(status), W, "form")).toBe("Acme Prod's sites couldn't be read: the server didn't answer. Try again, or type the site's ID.");
+      expect(failedWords(page(status), W, "editor")).toBe("Acme Prod's sites couldn't be read: the server didn't answer. Try again.");
+    }
+  });
+
   it("says why the list tried in the field's editor failed, in the editor's own words (F4, ruled)", () => {
     const no = (status: number, code: string) => new ApiError(status, code, null);
     expect(failedWords(no(502, "plugin_failed"), W, "editor")).toBe("Acme Prod's sites couldn't be read: Mist answered with an error. Try again.");
