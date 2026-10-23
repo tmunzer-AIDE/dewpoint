@@ -4196,3 +4196,27 @@ the list closed ("is not a function"), unmounting the form. The drawer's list he
 effect is a statement now; a test makes `scrollIntoView` answer a promise (red first, as CI's error), and a local
 Chromium 153 page showed the form lost before the change and kept after it. No other effect returns a call's value
 that could be one.
+
+### 4f-3b merged; the 4f-3c plan accepted (2026-10-23)
+
+The owner merged 4f-3b as #143 (squash 40a010cc), every check green ("green and merged"), after three fixes its CI
+found in the browser spec: the fixture's field order (the graph is `jsonb`, which keeps keys shortest first), the
+choices list's scroll effect (Chromium 153's `scrollIntoView` answers a promise), and a 320 px locator. Its deferred
+minors, and the start forms' field order, are issue #144.
+
+`docs/superpowers/plans/2026-10-23-editor-ui-4f3c-authoring.md`, revision 1, with milestone pauses. The owner accepted
+it: its rulings 1–12 join this ledger as 382–393. Frontend only: no API, schema, migration or engine change.
+Mid-slice rulings start at M116.
+
+382. **Accepted. Milestone pauses after the field's editor and after Go to and the import words** (plan ruling 1).
+383. **Accepted. A picker field read and written, one rule with the start forms** (plan ruling 2).
+384. **Accepted. The lists a picker can name, and the step each names** (plan ruling 3).
+385. **Accepted. A half choice held by the field's editor; one write once both are chosen** (plan ruling 4).
+386. **Accepted. Its choices and Connection, in ruling 107's words** (plan ruling 5).
+387. **Accepted. Show choices in the editor tries the list** (plan ruling 6).
+388. **Accepted. A picker field's row** (plan ruling 7).
+389. **Accepted. The field's editor at 44 px below 640 px** (plan ruling 8).
+390. **Accepted. Go to an input field's problem; what publish found, under the field** (plan ruling 9).
+391. **Accepted. Import and export name a start form's field; a binding's type by its label** (plan ruling 10).
+392. **Accepted. The browser spec's authoring tests** (plan ruling 11).
+393. **Accepted. The checks** (plan ruling 12).
