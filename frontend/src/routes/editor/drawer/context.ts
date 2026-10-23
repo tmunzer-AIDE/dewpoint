@@ -77,6 +77,13 @@ export function useDrawer(): Drawer {
   return drawer;
 }
 
+/** Where a write that empties a part takes it out (an update's or a create's body: lib/config.ts's `pruned`), what the
+ * part's place does then, told by the write's control: it stays drawn, nothing given, and so does each holder it was
+ * the only part of, up to its setting's row (F1). Null elsewhere: what's written stays. */
+export const EmptiedContext = createContext<(() => void) | null>(null);
+/** An item's: nothing. An item emptied stays written, its place the person's. */
+export const ITEM_EMPTIED = () => {};
+
 /** A name as one segment of a JSON pointer. */
 export const segment = (name: string): string => pointerOf([name]).slice(1);
 

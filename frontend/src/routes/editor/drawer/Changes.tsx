@@ -15,7 +15,7 @@ import {
   branchesOf, isObject, kindOf, offeredOf, propertiesOf, unionTitle, type Changes as Parts, type FieldSpec,
 } from "../../../lib/schemaForm";  // prettier-ignore
 import { settingsOf, type Setting } from "../../../lib/settingsIndex";
-import { problemsAt, useDrawer } from "./context";
+import { EmptiedContext, problemsAt, useDrawer } from "./context";
 import { FindSetting } from "./FindSetting";
 import { PartsContext, drawnNames, focusLater, found, partsOf } from "./GivenParts";
 import { FieldView } from "./FieldView";
@@ -117,8 +117,9 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
     if (drop) drawer.discard(row.spec.pointer);
     return drawer.restructure(row.spec.pointer, { path: [], make: (cfg) => make(isObject(cfg) ? cfg : {}) });
   };
-  // Merged into the memory as it is then: two in one handler both land.
-  const remember = (next: Partial<Memory>) => onMemory((now) => ({ ...now, ...next }));
+  // Merged into the memory as it is then: two in one handler both land; one made from it builds on those before.
+  const remember = (next: Partial<Memory> | ((now: Memory) => Partial<Memory>)) =>
+    onMemory((now) => ({ ...now, ...(typeof next === "function" ? next(now) : next) }));
   const set = (row: Row) => {
     if (row.state === "set") return;
     const value = row.state === "both" ? (body ?? {})[row.name] : memory.cleared[row.name];
@@ -183,10 +184,7 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
   );  // prettier-ignore
 
   // A setting emptied by a Remove inside it keeps its row, nothing given yet.
-  const top = (pointer: string) => {
-    const name = pointer.split("/")[parts.body.path.length + 1];
-    if (name !== undefined && !memory.pending.includes(name)) remember({ pending: [...memory.pending, name] });
-  };
+  const top = (name: string) => remember((now) => (now.pending.includes(name) ? {} : { pending: [...now.pending, name] }));
 
   const rowView = (row: Row) => {
     const actions = (
@@ -202,14 +200,16 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
     const pendingSaid = row.state === "pending" && drawer.editable && !required.includes(row.name);
     const said = json ? WORDS.json : drawnParts && update && row.spec.base !== "list" ? (replace ? WORDS.partsReplace : WORDS.partsMerge) : undefined;
     return (
+      <EmptiedContext.Provider key={row.name} value={() => top(row.name)}>
       <FieldView
-        key={row.name} spec={row.spec}
+        spec={row.spec}
         drawn={{
           name: row.name, hideClear: true, actions, startFixed: json, hint: said, parts: drawnParts,
           shown: drawnNames(row.spec, (body ?? {})[row.name], memory),
           below: pendingSaid ? <p className="text-small text-muted">{WORDS.pending}</p> : undefined,
         }}
       />
+      </EmptiedContext.Provider>
     );  // prettier-ignore
   };
 
@@ -272,7 +272,7 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
   );
 
   return (
-    <PartsContext.Provider value={{ memory, remember, top, where: label }}>
+    <PartsContext.Provider value={{ memory, remember, where: label }}>
     <FieldView
       spec={{ ...parts.body, label } satisfies FieldSpec}
       drawn={{

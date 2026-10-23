@@ -3,13 +3,13 @@
 // it, or neither (ruling 6); its control, chosen by its widget (ruling 5); the server's problems at it, with how a
 // formula runs (D19); and what's typed in it but not applied, with its reason and a Discard (ruling 18). Its typing
 // while it keeps focus is one undo step (ruling 8).
-import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { useContext, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { Button } from "../../../components/Button";
-import { fixedOf, formula, isPlainRef, kindOf, literal, referenceText, valueAt } from "../../../lib/config";
+import { fixedOf, formula, isEmptyValue, isPlainRef, kindOf, literal, referenceText, valueAt } from "../../../lib/config";
 import { segmentsOf, type Caret } from "../../../lib/pills";
 import { canFixed, canFormula, emptyOf, startsAsFormula, takesPills, type FieldSpec, type Widget } from "../../../lib/schemaForm";
-import { STALE, type UnappliedKind } from "../../../lib/unapplied";
-import { problemsAt, useDrawer, useSession } from "./context";
+import { STALE, empties, type Unapplied, type UnappliedKind } from "../../../lib/unapplied";
+import { EmptiedContext, problemsAt, useDrawer, useSession } from "./context";
 import { FieldFrame, GroupFrame, type Described } from "./FieldFrame";
 import { FormulaControl, ModeSwitch, ReferenceView, SensitiveView, runsText, type Mode } from "./Formula";
 import { ChoicesBelow, OptionsControl } from "./LiveOptions";
@@ -124,6 +124,7 @@ export interface Drawn {
 
 export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn }) {
   const drawer = useDrawer();
+  const emptied = useContext(EmptiedContext);
   const value = valueAt(drawer.node.config ?? {}, spec.path);
   const kind = kindOf(value);
   const empty = value === undefined || value === null;
@@ -182,8 +183,16 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
       setLocal(STALE);
       return STALE;
     }
-    const why = drawer.set(spec.path, next === undefined ? emptyOf(spec) : next, typed ? mark() : undefined);
+    const value = next === undefined ? emptyOf(spec) : next;
+    const why = drawer.set(spec.path, value, typed ? mark() : undefined);
     setLocal(why);
+    if (why === null && isEmptyValue(value)) emptied?.(); // cleared or emptied, it stays drawn while typed in (F1)
+    return why;
+  };
+  // What's held, applied: emptied by it, the field stays drawn all the same (F1).
+  const apply = (u: Unapplied): string | null => {
+    const why = drawer.apply(u.kind, spec.pointer);
+    if (why === null && empties(u)) emptied?.();
     return why;
   };
   // A literal's payload is written back as a literal: its kind changes only on purpose (ruling 15). An edit begun as a
@@ -278,7 +287,7 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
           aria-label={`Apply here: ${spec.label}`}
           onClick={() => {
             drawer.rebase(held.kind, spec.pointer);
-            setLocal(drawer.apply(held.kind, spec.pointer));
+            setLocal(apply(held));
             refocus();
           }}
         >
@@ -461,7 +470,7 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
       onFocus={onFocus}
       onBlur={(e) => {
         if (e.currentTarget.contains(e.relatedTarget)) return;
-        if (held && (held.kind === "json" || held.kind === "port")) drawer.apply(held.kind, spec.pointer);
+        if (held && (held.kind === "json" || held.kind === "port")) apply(held);
       }}
     >
       {body}

@@ -204,6 +204,7 @@ const SETTING_DEFS = {
       custom: { type: "object", title: "Custom versions", description: "A version per model", properties: { ap41: { type: "string", title: "AP41", description: "The AP41's version" } } },
       schedules: { type: "array", title: "Schedules", description: "When to upgrade", items: { type: "object", properties: { day: { type: "string", title: "Day", description: "The day" } } } },
       profiles: { type: "object", title: "Profiles", description: "A profile per radio", additionalProperties: { type: "object", properties: { channel: { type: "string", title: "Channel", description: "Its channel" } } } },
+      labels: { type: "object", title: "Labels", description: "Labels per site", additionalProperties: { type: "array", items: { type: "string" } } },
     },
   },
   port_usage: {

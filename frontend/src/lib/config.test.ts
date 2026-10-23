@@ -442,6 +442,15 @@ describe("an update's body sends no empty object (4f-2b)", () => {
     expect(after(setConfig(doc({ body: { x: { y: 1 } } }), A, ["body", "x", "y"], undefined, REMOTE).doc)).toEqual({ body: { x: {} } });
   });
 
+  it("removes a list a write empties, as an object, and each object it leaves empty; a list still holding an item stays (#140-9)", () => {
+    const start = doc({ body: { networks: [{ name: "a" }], tags: ["x"], auto_upgrade: { schedules: [{}] } } });
+    expect(after(setConfig(start, A, ["body", "networks"], [], UPDATE).doc)).toEqual({ body: { tags: ["x"], auto_upgrade: { schedules: [{}] } } });
+    expect(after(setConfig(start, A, ["body", "tags", 0], undefined, UPDATE).doc)).toEqual({ body: { networks: [{ name: "a" }], auto_upgrade: { schedules: [{}] } } });
+    expect(after(setConfig(start, A, ["body", "auto_upgrade", "schedules"], [], UPDATE).doc)).toEqual({ body: { networks: [{ name: "a" }], tags: ["x"] } });
+    expect(after(setConfig(doc({ body: { tags: ["x", "y"] } }), A, ["body", "tags", 0], undefined, UPDATE).doc)).toEqual({ body: { tags: ["y"] } });
+    expect(after(setConfig(doc({ body: { tags: ["x"] } }), A, ["body", "tags", 0], undefined, REMOTE).doc)).toEqual({ body: { tags: [] } });
+  });
+
   it("stops at a value that isn't an empty object", () => {
     expect(pruned({ body: { a: { b: { $value: { kind: "cel", expr: "{}" } } } } }, ["body", "a", "b"])).toEqual({ body: { a: { b: { $value: { kind: "cel", expr: "{}" } } } } });
   });

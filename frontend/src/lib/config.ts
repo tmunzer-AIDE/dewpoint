@@ -315,17 +315,22 @@ export function setConfig(doc: GraphDoc, nodeId: string, path: Path, value: unkn
   return dropLost(next, before, after, type);
 }
 
+/** Nothing, an empty object or an empty list: what an update's or a create's body never sends (`pruned`). */
+export const isEmptyValue = (v: unknown): boolean =>
+  v === undefined || (isObject(v) ? Object.keys(v).length === 0 : Array.isArray(v) && v.length === 0);
+
 /** An update's or a create's body never sends an empty object (4f-2b, the Mist step design §5.3: with replace, one
- * would reset the setting): after a write at `path`, each object it emptied, from there up to the body's top-level
- * setting, is removed. A list's item stays: its place is the person's. The body itself stays, empty or not. */
+ * would reset the setting) nor an empty list (F1: merge or replace, one would empty the current list): after a
+ * write at `path`, each object or list it emptied, from there up to the body's top-level setting, is removed. A list's
+ * item stays: its place is the person's. The body itself stays, empty or not. */
 export function pruned(config: Record<string, unknown>, path: Path): Record<string, unknown> {
   let out: unknown = config;
   for (let end = path.length; end >= 2; end--) {
     const at = path.slice(0, end);
-    if (typeof at[at.length - 1] === "number") break;
     const node = valueAt(out, at);
     if (node === undefined) continue; // removed by the write itself
-    if (!(isObject(node) && Object.keys(node).length === 0)) break;
+    if (typeof at[at.length - 1] === "number") break;
+    if (!isEmptyValue(node)) break;
     out = setAt(out, at, undefined);
   }
   return out as Record<string, unknown>;
