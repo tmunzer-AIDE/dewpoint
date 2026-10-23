@@ -171,6 +171,7 @@ ROW = {"site": "paris", "vlan": 1, "psk": "s3cret"}
         {"properties": {"note": {"type": "string"}}, "additionalProperties": {"type": "string"}},
         {"title": "T", "description": "D", "$defs": {"s": {"type": "string"}},
          "properties": {"note": {"$ref": "#/$defs/s"}}, "additionalProperties": False},
+        {"properties": {"note": {"type": "string"}}, "x-dewpoint-order": ["note"]},  # the fields' order (#144)
     ],
 )  # fmt: skip
 def test_every_input_schema_a_csv_accepts_admits_its_rows(root: dict[str, Any]) -> None:

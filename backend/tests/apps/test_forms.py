@@ -55,6 +55,27 @@ def test_a_schema_read_in_part_gives_the_fields_it_can() -> None:
     assert form_fields({"properties": {"a": {"type": "string"}}, "required": 3})[0]["required"] is False
 
 
+def test_a_forms_fields_follow_the_schemas_order() -> None:
+    """#144 item 4, option (a): the author's order, kept beside the properties (stored JSON keeps no key order); the
+    fields it doesn't list follow, as stored."""
+    schema = {"properties": {"b": {"type": "string"}, "a": {"type": "string"}, "c": {"type": "string"}},
+              "x-dewpoint-order": ["c", "a"]}  # fmt: skip
+    assert [f["name"] for f in form_fields(schema)] == ["c", "a", "b"]
+
+
+@pytest.mark.parametrize(
+    "order",
+    [["c", "zz", "a", "c", 7, None], "c", {"c": 1}, None, []],
+)
+def test_an_order_that_doesnt_match_the_fields_is_read_as_far_as_it_does(order: Any) -> None:
+    """Ruled: read tolerantly, never failing the form: a name that isn't a field, a repeat or anything not a name is
+    passed over; an order that isn't a list is none."""
+    schema = {"properties": {"b": {"type": "string"}, "a": {"type": "string"}, "c": {"type": "string"}},
+              "x-dewpoint-order": order}  # fmt: skip
+    expected = ["c", "a", "b"] if isinstance(order, list) and order else ["b", "a", "c"]
+    assert [f["name"] for f in form_fields(schema)] == expected
+
+
 def test_a_picker_is_typed_with_its_lists_words() -> None:
     schema = {"properties": {"site": {"type": "string", "x-dewpoint-picker": PICKER}}}
     assert form_fields(schema, MANIFESTS)[0]["picker"] == PICKER | {"list": SITES}

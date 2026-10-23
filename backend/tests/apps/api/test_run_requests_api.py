@@ -256,6 +256,27 @@ async def test_a_published_boolean_property_leaves_the_form_whole(
     assert [f["name"] for f in answer.json()["fields"]] == ["site"]
 
 
+async def test_a_published_forms_fields_keep_the_authors_order(
+    keyed_app, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+) -> None:
+    """#144 item 4: a version's input schema is stored JSON too (shortest key first); its order list keeps the
+    author's order for the run form, a re-run and the schedule form."""
+    from tests.apps.test_workflow_ops import actor, create, publish
+    from tests.support.registry import sync_test_plugins
+
+    await sync_test_plugins(admin_sessionmaker)
+    ctx = await actor(owner_sessionmaker)
+    props = {"site_identifier": {"type": "string"}, "ticket": {"type": "string"}}
+    schema = {"type": "object", "properties": props, "x-dewpoint-order": ["site_identifier", "ticket"]}
+    graph = G().node("a", "testkit.echo@1", {"value": 1}).data() | {"settings": {"input_schema": schema}}
+    wf = await create(api_sessionmaker, ctx, graph)
+    assert (await publish(api_sessionmaker, ctx, wf, api_settings)).version is not None
+    client = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx)
+    answer = await client.get(f"/api/v1/t/{ctx.tenant_id}/workflows/{wf}/start-form")
+    assert answer.status_code == 200, answer.text
+    assert [f["name"] for f in answer.json()["fields"]] == ["site_identifier", "ticket"]
+
+
 async def test_a_workflow_without_an_active_version_has_no_start_form(
     keyed_app, owner_sessionmaker, api_sessionmaker, api_settings
 ) -> None:

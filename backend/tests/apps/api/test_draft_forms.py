@@ -184,6 +184,24 @@ async def test_a_drafts_picker_naming_an_impossible_version_still_gives_its_form
     assert answer.json()["fields"][0]["picker"] == picker | {"list": None}
 
 
+async def test_a_drafts_form_keeps_its_fields_order_through_storage(
+    keyed_app, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings
+) -> None:
+    """#144 item 4: stored JSON (`jsonb`) keeps its keys shortest first, so the fields' order travels as a list beside
+    them; without one, the form takes the stored order."""
+    props = {"site_identifier": {"type": "string"}, "ticket": {"type": "string"}}
+    listed = {"type": "object", "properties": props, "x-dewpoint-order": ["site_identifier", "ticket"]}
+    names: list[list[str]] = []
+    for schema in (listed, {"type": "object", "properties": props}):
+        graph = G().node("e", "testkit.echo@1", {"value": 1}).data() | {"settings": {"input_schema": schema}}
+        ctx, wf = await drafted(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, graph)
+        editor = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "editor")
+        answer = await editor.get(url(ctx, wf, "start-form"), params={"revision": 1})
+        assert answer.status_code == 200, answer.text
+        names.append([f["name"] for f in answer.json()["fields"]])
+    assert names == [["site_identifier", "ticket"], ["ticket", "site_identifier"]]
+
+
 @pytest.mark.parametrize("node", ["testkit.pick@x", "testkit.pick@99999999999"])
 async def test_a_drafts_picker_naming_an_unreadable_ref_is_a_problem_never_a_500(
     keyed_app, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, node: str

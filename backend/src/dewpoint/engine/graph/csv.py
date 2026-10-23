@@ -16,10 +16,11 @@ INT_MIN, INT_MAX = -(2**63), 2**63 - 1  # CEL's int
 RESERVED = ("rows", "row_count")  # a trigger's: only admission writes them, from a CSV upload
 # The keywords a CSV's input schema may hold at its root: none can refuse the `rows` and `row_count` the trigger
 # schema adds there (`additionalProperties` skips declared properties). Any other (a closed `allOf` branch, a `$ref`,
-# `propertyNames`, `maxProperties`, `x-sensitive`, ...) could refuse them or taint the public count.
+# `propertyNames`, `maxProperties`, `x-sensitive`, ...) could refuse them or taint the public count. The fields' order
+# (`x-dewpoint-order`, the start forms') is an annotation like a title.
 INPUT_ROOT = frozenset(
     {"type", "properties", "required", "additionalProperties", "$defs", "$schema", "$comment"}
-    | {"title", "description", "examples", "default", "deprecated", "readOnly", "writeOnly"}
+    | {"title", "description", "examples", "default", "deprecated", "readOnly", "writeOnly", "x-dewpoint-order"}
 )
 _JSON_TYPES = {"integer": "integer", "number": "number", "boolean": "boolean"}  # the others are strings
 _JSON_TYPES.update({t: "string" for t in ("string", "mac", "ip", "cidr", "enum")})
