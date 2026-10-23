@@ -4292,3 +4292,29 @@ words; the server's message says the type); an undo after the picker write shows
 viewer can't reach Go to (the Problems button is editors'); `found` dated as publish problems are (ruling 17); import's
 "places in the graph" counting the failure handler (older words); Simulate's own picker errors (its panel); a stale
 edit's 32 px buttons (ruling 389); the browser spec first run in CI (ruling 392).
+
+### F1 merged; the F2 plan accepted (2026-10-23)
+
+The 4f follow-ups (R11, `~/4_dev/mist_dewpoint-4f-notes`): six issues, 46 items, in slices F1–F6, each with its own
+plan after F1; the owner ruled the slices, an emptied list's behaviour and the input fields' order (option (a), no Move
+control now).
+
+F1 (#140 items 8, 9) merged as #147 (squash e33bb6ad), every check green ("green and merged"): no list or object a
+write empties is sent from an update's or a create's body, and each place emptied stays drawn, nothing given, focus
+kept. Its calls, in its PR: "Nothing given yet: it isn't sent." under a nested part drawn with nothing given; JSON `[]`
+or `{}` counts as emptied; a plain map's emptied entry is taken out. Its deferred minors: an emptied entry of a map of
+objects moves to its map's end; the memory of what's drawn inside a list's items follows their numbers; drafts saved
+before it with `[]` send it; an empty value deep inside a JSON edit is sent. Open: a create's required list setting
+(WxLAN rules' `src_wxtags`) emptied is now missing, not `[]`.
+
+`docs/superpowers/plans/2026-10-23-editor-f2-picker-hardening.md`, revision 1. The owner accepted it: its rulings 1–7
+join this ledger as 394–400. Backend, with two frontend sentences: no migration, no API schema change, no engine
+change. Mid-slice rulings start at M116.
+
+394. **Accepted. No milestone pause** (plan ruling 1).
+395. **Accepted. A picker's ref read only when a registry row can hold it** (plan ruling 2).
+396. **Accepted. Export refuses a picker's name too long to carry its connection** (plan ruling 3; the owner's ruling).
+397. **Accepted. Import takes a picker's `connection: null` as none** (plan ruling 4; the owner's ruling).
+398. **Accepted. The 4f-3a review's tests** (plan ruling 5).
+399. **Accepted. The spec's count of node types, on its own branch** (plan ruling 6; the owner's ruling).
+400. **Accepted. The checks** (plan ruling 7).
