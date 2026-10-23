@@ -4343,3 +4343,18 @@ lockfile), its tools run from `node_modules/.bin`; the backend on that worktree'
 only by certifi). Cost: none.
 
 Nothing pushed. Next: the final review.
+
+### F2, the final review (2026-10-23)
+
+A fresh reviewer (Fable) read the branch against the plan, its Review Focus, #142 and R11c: no critical finding, no
+important one, two minor; each Review Focus case pinned by its named test, re-run; fail-closed kept on export, import
+and files exported before; the ruled words exact. Ready to merge.
+
+Deferred minors: 0074's interrupted-upgrade test stops at "validated" (the index and the grants rest on `test_online`'s
+generic test and on GRANT being idempotent); `held` walks the picker sites twice.
+
+What the reviewer set aside, each ruled as it stands: the hint undercounts a name holding `~` or `/` (the owner's words;
+such a name comes only from Edit as JSON, an import or the API); a draft saved through the API with `connection: null`
+is still `picker.invalid` (the ruling is import only; the editor never writes one); the 4f-3 spec's §4.5 and §5.9 don't
+yet say `name_too_long` or the null taken on import (ruling 399's scope: to add when the spec joins main); a long field
+name quoted whole in the notice (every clause names its places so); the commits' trailers.
