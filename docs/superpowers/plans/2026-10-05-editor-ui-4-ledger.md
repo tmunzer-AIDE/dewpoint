@@ -4220,3 +4220,17 @@ Mid-slice rulings start at M116.
 391. **Accepted. Import and export name a start form's field; a binding's type by its label** (plan ruling 10).
 392. **Accepted. The browser spec's authoring tests** (plan ruling 11).
 393. **Accepted. The checks** (plan ruling 12).
+
+### 4f-3c, milestone 1 (2026-10-23)
+
+The owner accepted the plan and chose inline execution ("approved, inline"), with the branch from origin/main 40a010cc
+and the frontend's packages restored offline, as its handoff named them.
+- Task 1 (a407b1a1): the plan's acceptance, rulings 382–393.
+- Task 2 (5a76860c): a picker field read and written; the lists a picker can name. Red: the lists' file stops at its
+  import; `input.test.ts` 3 failed, 10 passed. Green: 15 passed; static silent.
+- Task 3 (d2f88c91): the field's editor's Choice from a connection. Red: 10 failed. Green: 10 passed; static silent.
+- Task 4 (6f8d84e6): Show choices in the editor; the editor at 44 px. Red: 3 failed, 11 passed. Green: 14 passed;
+  static silent.
+
+The suites beside them (routes, lib, components): 1,427 passed in 116 files.
+Mid-slice rulings: none. Nothing pushed.
