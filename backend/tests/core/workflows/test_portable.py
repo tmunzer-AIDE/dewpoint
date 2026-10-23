@@ -284,6 +284,26 @@ def test_a_file_holding_a_pickers_connection_is_refused() -> None:
         assert [(p.reason, p.node, p.field) for p in found] == [("embedded_value", None, SITE)]
 
 
+@pytest.mark.parametrize("node", [PICK, "acme.unknown@1"])
+def test_a_files_picker_with_a_null_connection_imports_waiting_for_its_connection(node: str) -> None:
+    """#142 item 2, ruled: `connection: null` holds no id. Accepted, as a picker with none; on import the null goes,
+    so the editor reads it as a picker waiting for its connection, bound or not."""
+    graph = picked(connection=None, node=node, step=None)
+    picker_of(graph)["connection"] = None
+    assert portable.check_document(graph, [], PICKER_SCHEMAS) == []
+    assert picker_of(portable.apply(graph, [], {}, PICKER_SCHEMAS)) == {"node": node, "field": "site_id"}
+    assert picker_of(graph)["connection"] is None  # the file as it came
+
+
+def test_a_files_picker_with_a_null_connection_binds_on_import() -> None:
+    graph = picked(connection=None, step=None)
+    picker_of(graph)["connection"] = None
+    binding = {"id": "b1", "kind": "connection", "type": "testkit", "label": "x", "sites": [{"node": None,
+                                                                                           "field": SITE}]}  # fmt: skip
+    assert portable.check_document(graph, [binding], PICKER_SCHEMAS) == []
+    assert picker_of(portable.apply(graph, [binding], {"b1": OTHER}, PICKER_SCHEMAS))["connection"] == OTHER
+
+
 def test_a_picker_site_of_a_node_this_server_doesnt_hold_is_refused() -> None:
     graph = picked(connection=None, node="acme.unknown@1", step=None)
     binding = {"id": "b1", "kind": "connection", "type": "testkit", "label": "x", "sites": [{"node": None,

@@ -292,7 +292,7 @@ def check_document(
     problems += [
         Problem("embedded_value", field=_pointer(name))
         for name, picker in _pickers(graph)
-        if "connection" in picker and name not in held
+        if picker.get("connection") is not None and name not in held
     ]
     ids: set[str] = set()
     listed: set[tuple[str | None, str]] = set()
@@ -317,12 +317,16 @@ def apply(
     chosen: Mapping[str, str],
     config_schemas: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, Any]:
-    """The graph with each chosen binding's id written at each of its sites; an unbound binding's stay empty. Refuses
-    (BadDocumentError) whatever `check_document` refuses, so nothing unchecked is ever written."""
+    """The graph with each chosen binding's id written at each of its sites; an unbound binding's stay empty, a picker's
+    `connection: null` gone (#142: read as no picker otherwise). Refuses (BadDocumentError) whatever `check_document`
+    refuses, so nothing unchecked is ever written."""
     problems = check_document(graph, bindings, config_schemas)
     if problems:
         raise BadDocumentError(problems)
     out = copy.deepcopy(dict(graph))
+    for _, picker in _pickers(out):
+        if "connection" in picker and picker["connection"] is None:
+            del picker["connection"]
     allowed = {(s.node, s.field): s for s in sites(out, config_schemas)}
     for binding in bindings:
         value = chosen.get(binding["id"])

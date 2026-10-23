@@ -274,3 +274,19 @@ async def test_a_pickers_connection_travels_as_a_binding_and_binds_on_import(
     props = done.json()["draft"]["settings"]["input_schema"]["properties"]
     assert props["site"]["x-dewpoint-picker"] == picker | {"connection": str(theirs)}
     assert props["odd"]["x-dewpoint-picker"] == {"node": "testkit.pick", "field": "site_id"}
+
+
+async def test_a_file_whose_picker_holds_a_null_connection_imports_waiting_for_one(
+    app, owner_sessionmaker, api_settings
+) -> None:
+    """#142 item 2, ruled: accepted as a picker with no connection, the null gone from the draft."""
+    c, tid = await session_client(app, owner_sessionmaker, api_settings, "editor")
+    picker = {"node": "testkit.pick@1", "field": "site_id", "connection": None}
+    schema = {"type": "object", "properties": {"site": {"type": "string", "x-dewpoint-picker": picker}}}
+    graph = {"graph_format": 1, "edges": [], "settings": {"input_schema": schema}, "nodes": []}
+    doc = {"format": "dewpoint.workflow", "format_version": 1, "name": "Picked", "graph": graph, "bindings": []}
+    async with c:
+        done = await c.post(f"/api/v1/t/{tid}/workflows/import", json={"name": "Picked", "document": doc, "bind": {}})
+    assert done.status_code == 201, done.text
+    props = done.json()["draft"]["settings"]["input_schema"]["properties"]
+    assert props["site"]["x-dewpoint-picker"] == {"node": "testkit.pick@1", "field": "site_id"}
