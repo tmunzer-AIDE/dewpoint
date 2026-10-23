@@ -284,6 +284,26 @@ def test_a_file_holding_a_pickers_connection_is_refused() -> None:
         assert [(p.reason, p.node, p.field) for p in found] == [("embedded_value", None, SITE)]
 
 
+@pytest.mark.parametrize("node", [PICK, "acme.unknown@1"])
+def test_a_files_picker_with_a_null_connection_imports_waiting_for_its_connection(node: str) -> None:
+    """#142 item 2, ruled: `connection: null` holds no id. Accepted, as a picker with none; on import the null goes,
+    so the editor reads it as a picker waiting for its connection, bound or not."""
+    graph = picked(connection=None, node=node, step=None)
+    picker_of(graph)["connection"] = None
+    assert portable.check_document(graph, [], PICKER_SCHEMAS) == []
+    assert picker_of(portable.apply(graph, [], {}, PICKER_SCHEMAS)) == {"node": node, "field": "site_id"}
+    assert picker_of(graph)["connection"] is None  # the file as it came
+
+
+def test_a_files_picker_with_a_null_connection_binds_on_import() -> None:
+    graph = picked(connection=None, step=None)
+    picker_of(graph)["connection"] = None
+    binding = {"id": "b1", "kind": "connection", "type": "testkit", "label": "x", "sites": [{"node": None,
+                                                                                           "field": SITE}]}  # fmt: skip
+    assert portable.check_document(graph, [binding], PICKER_SCHEMAS) == []
+    assert picker_of(portable.apply(graph, [binding], {"b1": OTHER}, PICKER_SCHEMAS))["connection"] == OTHER
+
+
 def test_a_picker_site_of_a_node_this_server_doesnt_hold_is_refused() -> None:
     graph = picked(connection=None, node="acme.unknown@1", step=None)
     binding = {"id": "b1", "kind": "connection", "type": "testkit", "label": "x", "sites": [{"node": None,
@@ -299,6 +319,33 @@ def test_a_pickers_site_escapes_its_fields_name() -> None:
     assert doc["bindings"][0]["sites"][1] == {"node": None, "field": field}
     bound = portable.apply(doc["graph"], doc["bindings"], {"b1": OTHER}, PICKER_SCHEMAS)
     assert picker_of(bound, "a/b~c")["connection"] == OTHER
+
+
+def site_of(name: str) -> str:
+    return f"/settings/input_schema/properties/{name}/x-dewpoint-picker/connection"
+
+
+def test_a_pickers_name_too_long_to_carry_its_connection_refuses_the_export() -> None:
+    """#142 item 1, ruled: a site's field holds 200 characters, so a picker's name 137 (each `~` or `/` twice, escaped);
+    past that its connection can't travel, and leaving it behind would pass unseen: the export is refused."""
+    doc = portable.export_document("Nightly", picked(name="n" * 137), PICKER_SCHEMAS, LABELS)
+    assert doc["bindings"][0]["sites"][1] == {"node": None, "field": site_of("n" * 137)}
+    for name, field in (("n" * 138, site_of("n" * 138)), ("a/" * 46, site_of("a~1" * 46))):
+        with pytest.raises(portable.NotPortableError) as e:
+            portable.export_document("Nightly", picked(name=name), PICKER_SCHEMAS, LABELS)
+        assert [(p.reason, p.node, p.field) for p in e.value.problems] == [("name_too_long", None, field)]
+
+
+def test_a_long_named_picker_that_isnt_a_site_leaves_its_connection_behind() -> None:
+    """Not a site whatever its name's length (ruling 85): nothing a binding could carry, so nothing to refuse."""
+    doc = portable.export_document("Nightly", picked(node="acme.unknown@1", name="n" * 138), PICKER_SCHEMAS, LABELS)
+    assert picker_of(doc["graph"], "n" * 138) == {"node": "acme.unknown@1", "field": "site_id"}
+
+
+def test_a_pickers_long_name_without_a_connection_exports() -> None:
+    """Nothing to leave behind: it travels as it is, waiting for its connection."""
+    doc = portable.export_document("Nightly", picked(connection=None, name="n" * 138), PICKER_SCHEMAS, LABELS)
+    assert picker_of(doc["graph"], "n" * 138) == {"node": PICK, "field": "site_id"}
 
 
 def test_a_pickers_node_past_the_registrys_integer_isnt_looked_up() -> None:

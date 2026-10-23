@@ -14,7 +14,7 @@ from sqlalchemy import text
 
 from dewpoint.core.retention import sweep
 from tests.core.ingress.support import endpoint, record
-from tests.core.retention.support import OLD, RECENT, TREE_ROWS, count, request, run, sql, tenant, tree
+from tests.core.retention.support import OLD, RECENT, TREE_ROWS, _claim, count, request, run, sql, tenant, tree
 
 RETAINED = ("runs", "run_steps", "step_outputs", "run_inputs", "run_secret_index", "claim_grants", "run_requests",
             "inbound_events", "csv_uploads", "schedules", "operator_commands")  # fmt: skip
@@ -93,6 +93,22 @@ async def test_nothing_of_a_tree_still_running_or_a_request_still_pending_is_del
     before = await count(owner_sessionmaker, TREE_ROWS, r=kept["root"])
     assert (await sweep.sweep_tenant(retention_sessionmaker, ctx["t"])).runs == 0
     assert await count(owner_sessionmaker, TREE_ROWS, r=kept["root"]) == before
+
+
+async def test_a_requests_picked_names_go_with_it(owner_sessionmaker, retention_sessionmaker) -> None:
+    """#142 item 5: a request's `names` record (the 4f-3 design §4.1) goes with its tree, or with it unstarted, as its
+    envelope does; a kept one's stays."""
+    ctx = await tenant(owner_sessionmaker)
+    old, recent = await tree(owner_sessionmaker, ctx, OLD), await tree(owner_sessionmaker, ctx, RECENT)
+    gone, kept = (await request(owner_sessionmaker, ctx, "cancelled", OLD),
+                  await request(owner_sessionmaker, ctx, "cancelled", RECENT))  # fmt: skip
+    roots = (old["root"], recent["root"], gone, kept)
+    for root in roots:
+        await _claim(owner_sessionmaker, "run_inputs", ctx, root, root, role="names")
+    swept = await sweep.sweep_tenant(retention_sessionmaker, ctx["t"])
+    assert (swept.runs, swept.requests) == (1, 1)
+    names = "select count(*) from run_inputs where root_run_id = :r and role = 'names'"
+    assert [await count(owner_sessionmaker, names, r=root) for root in roots] == [0, 1, 0, 1]
 
 
 async def test_a_run_from_before_requests_goes_with_its_tree(owner_sessionmaker, retention_sessionmaker) -> None:

@@ -4292,3 +4292,69 @@ words; the server's message says the type); an undo after the picker write shows
 viewer can't reach Go to (the Problems button is editors'); `found` dated as publish problems are (ruling 17); import's
 "places in the graph" counting the failure handler (older words); Simulate's own picker errors (its panel); a stale
 edit's 32 px buttons (ruling 389); the browser spec first run in CI (ruling 392).
+
+### F1 merged; the F2 plan accepted (2026-10-23)
+
+The 4f follow-ups (R11, `~/4_dev/mist_dewpoint-4f-notes`): six issues, 46 items, in slices F1–F6, each with its own
+plan after F1; the owner ruled the slices, an emptied list's behaviour and the input fields' order (option (a), no Move
+control now).
+
+F1 (#140 items 8, 9) merged as #147 (squash e33bb6ad), every check green ("green and merged"): no list or object a
+write empties is sent from an update's or a create's body, and each place emptied stays drawn, nothing given, focus
+kept. Its calls, in its PR: "Nothing given yet: it isn't sent." under a nested part drawn with nothing given; JSON `[]`
+or `{}` counts as emptied; a plain map's emptied entry is taken out. Its deferred minors: an emptied entry of a map of
+objects moves to its map's end; the memory of what's drawn inside a list's items follows their numbers; drafts saved
+before it with `[]` send it; an empty value deep inside a JSON edit is sent. Open: a create's required list setting
+(WxLAN rules' `src_wxtags`) emptied is now missing, not `[]`.
+
+`docs/superpowers/plans/2026-10-23-editor-f2-picker-hardening.md`, revision 1. The owner accepted it: its rulings 1–7
+join this ledger as 394–400. Backend, with two frontend sentences: no migration, no API schema change, no engine
+change. Mid-slice rulings start at M116.
+
+394. **Accepted. No milestone pause** (plan ruling 1).
+395. **Accepted. A picker's ref read only when a registry row can hold it** (plan ruling 2).
+396. **Accepted. Export refuses a picker's name too long to carry its connection** (plan ruling 3; the owner's ruling).
+397. **Accepted. Import takes a picker's `connection: null` as none** (plan ruling 4; the owner's ruling).
+398. **Accepted. The 4f-3a review's tests** (plan ruling 5).
+399. **Accepted. The spec's count of node types, on its own branch** (plan ruling 6; the owner's ruling).
+400. **Accepted. The checks** (plan ruling 7).
+
+### F2, the final checkpoint (2026-10-23)
+
+The owner accepted the plan and chose inline execution ("approved, inline"), with no milestone pause; the branch from
+origin/main e33bb6ad.
+- Task 1 (c7df99ef): the plan's acceptance, rulings 394–400.
+- Task 2 (e14066f8): a picker's ref read only when a registry row can hold it. Red: 2 failed, each a 500. Green: 2
+  passed; the module, 12.
+- Task 3 (5c5bb4ca): export refuses a picker's name too long to carry its connection. Red: the backend's 1 failed and 2
+  passed; the frontend's 3 failed and 189 passed. Green: 3 passed; 192 passed.
+- Task 4 (6212a7a5): import takes a picker's `connection: null` as none. Red: 4 failed (`embedded_value`). Green: 4
+  passed; both portable modules, 79.
+- Task 5 (49646411): the 4f-3a review's tests: 6 passed, as the plan says.
+- Task 6 (21bea7cf, on the local branch `docs/editor-ui-4f3-spec`): the spec's count of node types.
+- Task 7, every check on 49646411, whose tree is the prototype's (9f849452): the touched backend modules, 783 passed;
+  ruff, its format check, mypy and the import contracts silent; the whole frontend suite, 1,686 passed in 121 files;
+  the type check and ESLint silent; CodeQL (CLI 2.27.2; python-queries 1.8.13, javascript-queries 2.4.8): no finding.
+
+Mid-slice ruling:
+
+M116. **Packages borrowed, nothing installed.** The frontend's `node_modules` linked from the 4d-1b worktree (main's
+lockfile), its tools run from `node_modules/.bin`; the backend on that worktree's venv (its lock differs from main's
+only by certifi). Cost: none.
+
+Nothing pushed. Next: the final review.
+
+### F2, the final review (2026-10-23)
+
+A fresh reviewer (Fable) read the branch against the plan, its Review Focus, #142 and R11c: no critical finding, no
+important one, two minor; each Review Focus case pinned by its named test, re-run; fail-closed kept on export, import
+and files exported before; the ruled words exact. Ready to merge.
+
+Deferred minors: 0074's interrupted-upgrade test stops at "validated" (the index and the grants rest on `test_online`'s
+generic test and on GRANT being idempotent); `held` walks the picker sites twice.
+
+What the reviewer set aside, each ruled as it stands: the hint undercounts a name holding `~` or `/` (the owner's words;
+such a name comes only from Edit as JSON, an import or the API); a draft saved through the API with `connection: null`
+is still `picker.invalid` (the ruling is import only; the editor never writes one); the 4f-3 spec's §4.5 and §5.9 don't
+yet say `name_too_long` or the null taken on import (ruling 399's scope: to add when the spec joins main); a long field
+name quoted whole in the notice (every clause names its places so); the commits' trailers.

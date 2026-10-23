@@ -899,6 +899,17 @@ it("offers a draft that can't be made portable as it is, labelled", async () => 
   expect(downloads).toEqual(["nightly.draft.json"]);
 });
 
+it("says a start form's field's name is too long to export, and how long one may be (#142)", async () => {
+  const name = "n".repeat(138);
+  const field = `/settings/input_schema/properties/${name}/x-dewpoint-picker/connection`;
+  answers.set(`GET ${BASE}/export`, () => json({ error: "not_portable", problems: [{ reason: "name_too_long", binding: null, node: null, field }] }, 422));
+  await show();
+  await userEvent.click(screen.getByRole("button", { name: "Export" }));
+  expect((await screen.findByRole("alert")).textContent).toContain(
+    `Not exported: it has a field whose name is too long to carry its connection (the start form's field ${name}), so it can't be exported as a portable file. A name of 137 characters or fewer exports.`,
+  );
+});
+
 it("shows what only publish checks, in the problems panel, marked", async () => {
   answers.set(`POST ${BASE}/publish`, () =>
     json({ error: "invalid", diagnostics: [{ code: "connection.unknown", message: "That connection doesn't exist.", node: null, field: null, fix: null, severity: "error" }] }, 422));

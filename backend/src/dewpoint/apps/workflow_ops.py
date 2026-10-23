@@ -63,8 +63,10 @@ class Checked:
 async def validation_context(
     s: AsyncSession, tenant_id: uuid.UUID, graph: Graph, settings: Settings
 ) -> tuple[ValidationContext, dict[uuid.UUID, WorkflowVersion]]:
-    """What validating `graph` needs: its node types, and the active versions of the workflows it pins."""
-    rows = await registry.load_node_types(s, {n.type for n in graph.nodes} | picker_refs(graph))
+    """What validating `graph` needs: its node types, and the active versions of the workflows it pins. A picker's ref
+    no registry row can hold is never looked up (#142): its picker names no node this server holds."""
+    pickers = {ref for ref in picker_refs(graph) if registry.readable_ref(ref)}
+    rows = await registry.load_node_types(s, {n.type for n in graph.nodes} | pickers)
     catalog = Catalog(spec_from_manifest(r.manifest, r.state) for r in rows)
     pins = await service.active_versions(s, tenant_id, referenced_workflows(graph))
     ctx = ValidationContext(

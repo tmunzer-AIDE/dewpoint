@@ -366,10 +366,13 @@ async def test_a_start_forms_options_are_for_the_version_it_shows(
         assert again.status_code == 201, again.text
         second = (await c.get(f"{url}/start-form")).json()["version_id"]
         asked = {"field": "site", "query": "s"}
+        before = len(fake[1].requests)
         stale = await c.post(f"{url}/input-options", json=asked | {"expected_version_id": first})
         assert await _calls_left(owner_sessionmaker) == 0
+        assert len(fake[1].requests) == before  # #142 item 3: nothing asked of Mist, not only nothing left queued
         current = await c.post(f"{url}/input-options", json=asked | {"expected_version_id": second})
         unpinned = await c.post(f"{url}/input-options", json=asked)
+        assert len(fake[1].requests) == before + 2
     assert (stale.status_code, stale.json()) == (409, {
         "error": "version_changed", "messages": ["Version 2 is the active version now: its choices may differ."],
         "active_version_id": second, "active_version_number": 2,

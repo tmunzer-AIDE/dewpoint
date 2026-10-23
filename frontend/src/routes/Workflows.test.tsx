@@ -156,6 +156,17 @@ it("says why a workflow can't be exported as a portable file", async () => {
   );
 });
 
+it("says how long a start form's field's name may be to export (#142)", async () => {
+  const field = `/settings/input_schema/properties/${"n".repeat(138)}/x-dewpoint-picker/connection`;
+  exportAnswer = new Response(JSON.stringify({ error: "not_portable", problems: [{ reason: "name_too_long", binding: null, node: null, field }] }), { status: 422 });
+  await show();
+  await userEvent.click(within(rowOf("Triage")).getByRole("button", { name: "Actions for Triage" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "Export" }));
+  expect((await screen.findByRole("alert")).textContent).toBe(
+    "Triage can't be exported as a portable file: it has a field whose name is too long to carry its connection. A name of 137 characters or fewer exports. Open it to download the draft as it is.",
+  );
+});
+
 it("offers New workflow to editors, and opens it when asked by the URL", async () => {
   await show();
   await userEvent.click(await screen.findByRole("button", { name: "New workflow" }));

@@ -22,6 +22,14 @@ COLUMN = ("SELECT data_type, is_nullable, column_default FROM information_schema
 GRANTED = ("SELECT grantee FROM information_schema.column_privileges WHERE table_name = 'schedules' "
            "AND column_name = 'names' AND privilege_type = 'UPDATE' AND grantee LIKE 'dewpoint_%' "
            "ORDER BY grantee")  # fmt: skip
+ROLES = "(role = 'claim' AND pointer IS NOT NULL) OR (role IN ('envelope', 'csv', 'names') AND pointer IS NULL)"
+COLUMN_ONLY = ("ALTER TABLE schedules ADD COLUMN names bytea",)
+NOT_VALID = (*COLUMN_ONLY, f"ALTER TABLE run_inputs ADD CONSTRAINT run_inputs_role_0074 CHECK ({ROLES}) NOT VALID")
+INTERRUPTED = {
+    "column": COLUMN_ONLY,
+    "not_valid": NOT_VALID,
+    "validated": (*NOT_VALID, "ALTER TABLE run_inputs VALIDATE CONSTRAINT run_inputs_role_0074"),
+}
 
 
 def record(role: str, owner: uuid.UUID, pointer: str | None = None) -> str:
@@ -79,6 +87,21 @@ async def test_a_request_holds_one_names_record_never_a_claim(db: str) -> None:
     with pytest.raises(asyncpg.CheckViolationError):
         await _sql(db, record("names", uuid.uuid4(), pointer="/site"))
     await _sql(db, record("csv", owner), record("claim", owner, pointer="/site"))  # the others, as before
+
+
+@pytest.mark.parametrize("state", list(INTERRUPTED))
+async def test_an_upgrade_interrupted_part_way_goes_on(db: str, state: str) -> None:
+    """#142 item 4, as 0071's: each place the online upgrade can stop (its steps commit one by one) goes on to the same
+    end: one validated check naming `names` in the old one's place, the index, the grants."""
+    await _sql(db, *INTERRUPTED[state])
+    await asyncio.to_thread(upgrade, db, "0074")
+    checks = await _rows(db, "SELECT conname, convalidated, pg_get_constraintdef(oid) LIKE '%names%' "
+                             "FROM pg_constraint WHERE conname LIKE 'run_inputs_role%'")  # fmt: skip
+    assert checks == [("run_inputs_role", True, True)]
+    assert await _rows(db, "SELECT indisvalid FROM pg_index WHERE indexrelid = 'run_inputs_one_names'::regclass") == [
+        (True,)
+    ]
+    assert await _rows(db, GRANTED) == [("dewpoint_admin",), ("dewpoint_api",)]
 
 
 async def test_the_downgrade_drops_them(db: str) -> None:

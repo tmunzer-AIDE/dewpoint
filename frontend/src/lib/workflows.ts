@@ -93,9 +93,16 @@ export function notPortable(problems: PortableProblem[], keyOf?: (nodeId: string
   const why = [
     clause("steps of a type this server doesn't know", "unknown_type"),
     clause("something other than an id where a connection or workflow goes", "unexpected_value"),
+    // A picker's connection travels at its field's pointer, which a site holds to 200 characters (F2).
+    clause("a field whose name is too long to carry its connection", "name_too_long"),
     clause("two steps sharing an id", "duplicate_node"),
     // A value written into a field marked sensitive, which the file would carry (ledger M25): named, never quoted.
     clause("a sensitive value written into a step", "sensitive_literal"),
   ].filter((c): c is string => c !== null);
   return `it has ${why.join(", and ")}`;
+}
+
+/** What makes such a file exportable, when a sentence says it: a start form's field's name short enough (F2). */
+export function portableHint(problems: PortableProblem[]): string | null {
+  return problems.some((p) => p.reason === "name_too_long") ? "A name of 137 characters or fewer exports." : null;
 }

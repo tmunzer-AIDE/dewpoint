@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { expect, it } from "vitest";
-import { canEdit, canPublish, notPortable, since } from "./workflows";
+import { canEdit, canPublish, notPortable, portableHint, since } from "./workflows";
 
 it("lets editors and above edit and publish, as the API's role sets do", () => {
   for (const role of ["owner", "admin", "editor"]) expect([canEdit(role), canPublish(role)]).toEqual([true, true]);
@@ -34,6 +34,15 @@ it("says when a workflow holds a sensitive value written into it, never the valu
   const problems = [{ reason: "sensitive_literal", binding: null, node: "n1", field: "/token" }];
   expect(notPortable(problems)).toBe("it has a sensitive value written into a step");
   expect(notPortable(problems, () => "send")).toBe("it has a sensitive value written into a step (send)");
+});
+
+it("says a start form's field's name is too long to carry its connection, and how long a name exports (#142)", () => {
+  const name = "n".repeat(138);
+  const problems = [{ reason: "name_too_long", binding: null, node: null, field: `/settings/input_schema/properties/${name}/x-dewpoint-picker/connection` }];
+  expect(notPortable(problems)).toBe("it has a field whose name is too long to carry its connection");
+  expect(notPortable(problems, (id) => id)).toBe(`it has a field whose name is too long to carry its connection (the start form's field ${name})`);
+  expect(portableHint(problems)).toBe("A name of 137 characters or fewer exports.");
+  expect(portableHint([{ reason: "unknown_type", binding: null, node: "n1", field: null }])).toBeNull();
 });
 
 it("names a start form's field for a picker's site, the failure handler for the settings' other (the 4f-3 design §5.9)", () => {
