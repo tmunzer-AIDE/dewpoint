@@ -4379,3 +4379,26 @@ the keyword). Mid-slice rulings start at M117.
 406. **Accepted. Where the order shows, and where it doesn't** (plan ruling 6; the owner's ruling).
 407. **Accepted. Three tests' expectations follow the order** (plan ruling 7).
 408. **Accepted. The checks** (plan ruling 8).
+
+### F3, the final checkpoint (2026-10-23)
+
+The owner accepted the plan and chose inline execution ("approved, inline"), with no milestone pause; the branch from
+origin/main 3b7c00d1.
+- Task 1 (2bd0602d): the plan's acceptance, rulings 401–408.
+- Task 2 (f81522a3): the start forms read the order; a CSV's input admits it. Red: 5 failed and 8 passed. Green: 13
+  passed; the four modules, 104.
+- Task 3 (69cca114): the Input list reads and writes the order; Edit as JSON's text. Red: 9 failed and 218 passed.
+  Green: 227 passed.
+- Task 4 (e89ac808): Edit as JSON's sentence. Red: 1 failed and 29 passed. Green: 30 passed.
+- Task 5, every check on e89ac808, whose tree is the prototype's (fbeea26e): the backend modules the plan reaches, 761
+  passed; ruff, its format check, mypy and the import contracts silent; the whole frontend suite, 1,693 passed in 121
+  files; the type check and ESLint silent; CodeQL (CLI 2.27.2; python-queries 1.8.13, javascript-queries 2.4.8): no
+  finding.
+
+Mid-slice ruling:
+
+M117. **Packages borrowed, nothing installed,** as F2's M116: the frontend's `node_modules` linked from the 4d-1b
+worktree (main's lockfile), the backend on that worktree's venv (its lock differs from main's only by certifi). Cost:
+none.
+
+Nothing pushed. Next: the final review.
