@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // The input (4c-3b; the InputFields, InputMist, InputCsv and InputEdit boards): what every trigger starts a run with,
 // and, by hand, the run's form. Saved with the draft, used once published. As form fields, as a Mist event's shape (read
-// only, replaceable), with a CSV file, or as JSON. Focus goes back to what opened a part once it closes (WCAG 2.4.3).
+// only, replaceable), with a CSV file, or as JSON. Focus goes back to what opened a part once it closes (WCAG 2.4.3). A
+// Choice from a connection's row says what it lists, and from which connection (the 4f-3 design §5.7).
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Button } from "../../../components/Button";
+import { connectionsQuery } from "../../../lib/connections";
 import { csvOf, newCsv } from "../../../lib/csv";
 import { addField, fieldPointer, inputOf, inputRows, setSettings, topicShaped } from "../../../lib/input";
 import { senderName, triggerTypesQuery } from "../../../lib/triggers";
@@ -14,8 +16,11 @@ import { FieldEditor } from "./FieldEditor";
 import { InputJson, JSON_AT } from "./InputJson";
 import { MistPicker, MistShape } from "./MistEvent";
 import { Problems, Section, problemsAt, useFocusBack } from "./parts";
+import { choiceWords, usePickerLists } from "./PickerChoice";
 
-const TYPE_WORDS: Record<string, string> = { text: "Text", whole: "Whole number", number: "Number", yesno: "Yes or no", choice: "Choice", datetime: "Date and time" };
+const TYPE_WORDS: Record<string, string> = {
+  text: "Text", whole: "Whole number", number: "Number", yesno: "Yes or no", choice: "Choice", datetime: "Date and time", picker: "Choice from a connection",
+};  // prettier-ignore
 
 type Mode = "fields" | "json" | "mist";
 
@@ -53,6 +58,10 @@ export function InputSection({ focusAt }: { focusAt: FocusAt }) {
   }, [focusAt]);
   const rows = inputRows(schema);
   const fields = rows.length; // every field the input has, the list can show it or not
+  // A picker's row names its list and its connection: read only when a field is one.
+  const pickers = rows.some((r) => r.kind === "field" && r.field.type === "picker");
+  const lists = usePickerLists(pickers);
+  const connections = useQuery({ ...connectionsQuery(t.tenantId), enabled: pickers });
   const heldJson = actions.held("json", JSON_AT);
   const add = () => {
     const made = addField(inputOf(doc));
@@ -113,7 +122,8 @@ export function InputSection({ focusAt }: { focusAt: FocusAt }) {
                         <span className="font-mono">{name}</span>
                         {r.kind === "field" ? (
                           <>
-                            {r.field.label && ` · ${r.field.label}`} · {TYPE_WORDS[r.field.type]}
+                            {r.field.label && ` · ${r.field.label}`} ·{" "}
+                            {r.field.picker ? choiceWords(r.field.picker, lists, connections.data ?? []) : TYPE_WORDS[r.field.type]}
                             {r.field.required ? " · required" : " · optional"}
                             {r.field.sensitive && " · sensitive"}
                           </>

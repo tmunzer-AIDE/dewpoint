@@ -6,19 +6,12 @@ import { Link } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 import { Button } from "../../../components/Button";
 import { controlClass } from "../../../components/Field";
-import { client, ok, type Schemas } from "../../../lib/client";
-import { connectionsQuery } from "../../../lib/connections";
+import { client, ok } from "../../../lib/client";
+import { CONNECTION_STATUS, connectionsQuery } from "../../../lib/connections";
 import { sameId } from "../../../lib/graph";
 import { workflowsQuery } from "../../../lib/workflows";
 import { useDrawer } from "./context";
 import type { ControlProps } from "./scalars";
-
-type Connection = Schemas["ConnectionOut"];
-const STATUS: Record<Connection["status"], string> = {
-  ok: "verified",
-  unverified: "not verified yet",
-  error: "failed its last check",
-};
 
 /** The connection types the plugins declare, under Connections' own key: a type is said by its label (4f-1). */
 export const connectionTypesQuery = () =>
@@ -91,7 +84,7 @@ export function ConnectionControl({ spec, value, id, describedBy, invalid, disab
       {mine.map((c) => (
         // The id as the step writes it, whatever its spelling, so the step's own stays chosen.
         <option key={c.id} value={known && sameId(c.id, current) ? current : c.id}>
-          {c.name} · {STATUS[c.status]}
+          {c.name} · {CONNECTION_STATUS[c.status]}
         </option>
       ))}
     </select>
