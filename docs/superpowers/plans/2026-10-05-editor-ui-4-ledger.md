@@ -4460,3 +4460,25 @@ M118. **Packages borrowed, nothing installed,** as F2's M116: the frontend's `no
 worktree (main's lockfile). Cost: none.
 
 Nothing pushed. Next: the final review.
+
+### F4, the final review (2026-10-23)
+
+A fresh reviewer (Fable) read the branch against the plan, its Review Focus, #144, #146 and the 4f-3 design: no
+critical finding, one important, three minor; the ruled words exact, each Review Focus case pinned. Fixed in one pass
+(53a60424), each test-first:
+- a failure answered by something other than the API (an ingress's or a proxy's 5xx page while it's down) still said
+  "Mist answered with an error": it says the server didn't answer;
+- graded up from minor: the failed Connection state Go to lands on didn't carry the picker's problem for a screen
+  reader: it's described by it.
+After the pass: the whole frontend suite, 1,705 passed in 121 files; the type check and ESLint silent; CodeQL, no
+finding.
+
+Deferred minors: the Simulate hold test shows the list appears once the connections land, not that it stays after; a
+Go to the connection's own pointer waits through the loading state's marker rather than the connections' status (it
+works; one condition would read simpler).
+
+What the reviewer set aside, each ruled as it stands: the status line said again as the connections land (ruling 412's
+"no new words"); a schedule form's typed values kept across a version (the item is the picks); a non-list problem on a
+retired list landing on Its choices (ruling 414); Simulate after a failed connections read (the failure path as
+before); `tenant_erasing` and `invalid_result` in the general line (not ruled); a read-only editor's disabled Its
+choices not taking focus (as before).
