@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { render, screen } from "@testing-library/react";
 import { expect, it } from "vitest";
-import { Field, Select } from "./Field";
+import { Field, Select, TextArea } from "./Field";
 
 it("labels its input and describes it by its hint", () => {
   render(<Field label="Slug" hint="Lowercase letters, digits and dashes." />);
@@ -38,4 +38,19 @@ it("gives a select the same label and boundary", () => {
   const select = screen.getByLabelText("Mist cloud");
   expect(select.tagName).toBe("SELECT");
   expect(select.className).toContain("border-line-control");
+});
+
+it("makes a tall control 44 px below 640 px, an input, a select or a text area; others keep their size (the 4f-3 design §5.6)", () => {
+  render(
+    <>
+      <Field label="Site" tall />
+      <Select label="Kind" tall value="a" onChange={() => undefined}>
+        <option value="a">A</option>
+      </Select>
+      <TextArea label="Input" tall />
+      <Field label="Note" />
+    </>,
+  );
+  for (const name of ["Site", "Kind", "Input"]) expect(screen.getByLabelText(name).className).toContain("max-sm:min-h-[44px]");
+  expect(screen.getByLabelText("Note").className).not.toContain("max-sm:");
 });

@@ -2,8 +2,9 @@
 // A run's start, opened from its start card (editor 4e-1; the runs design §5.4; the RunOther board), in the editor's
 // side drawer: what started it, who and when; its input as its request stored it, read back, sensitive values redacted
 // (`absent` once its tenant's retention dropped it, `unreadable` when it doesn't open); a step test's values; and a CSV
-// run's file: the rows read, run and skipped, why each skipped row was (the first 100), and the columns it mapped. Its
-// heading takes focus as it opens; Escape closes it as Close does.
+// run's file: the rows read, run and skipped, why each skipped row was (the first 100), and the columns it mapped. A
+// value its start form picked shows as the name picked, kept with the run (the 4f-3 design §5.5). Its heading takes
+// focus as it opens; Escape closes it as Close does.
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useId, useRef } from "react";
 import { Button } from "../../components/Button";
@@ -19,14 +20,31 @@ function Input({ tenantId, run }: { tenantId: string; run: Run }) {
   const read = useQuery(runInputQuery(tenantId, run.id));
   if (read.isPending) return <p className="text-small text-muted">Reading its input…</p>;
   if (read.isError) return <p className="text-small text-muted">Its input couldn&apos;t be read.</p>;
-  const { read_back: kept, input, seeds } = read.data;
+  const { read_back: kept, input, seeds, names = {} } = read.data;
   if (kept === "absent") return <p className="text-small">Its input isn&apos;t kept any more. The run&apos;s steps and results still are.</p>;
   if (kept === "unreadable") return <p className="text-small">Its input can&apos;t be read back: it doesn&apos;t open, or the tenant&apos;s key is gone during an erasure.</p>;
   return (
     <>
       <p className="text-small text-muted">As the run&apos;s request stored it. Sensitive values are redacted.</p>
-      {seeds ? <Values value={seeds} none="None." /> : <Values value={input} none="None." />}
+      {seeds ? <Values value={seeds} none="None." /> : <Values value={input} none="None." names={names} />}
+      {!seeds && <Named names={Object.keys(names).filter((k) => input && Object.hasOwn(input, k))} />}
     </>
+  );
+}
+
+/** One line under a start's input naming what was picked (§5.5): the field, or "names" for several. */
+function Named({ names }: { names: string[] }) {
+  if (names.length === 0) return null;
+  return (
+    <p className="text-small text-muted">
+      {names.length === 1 ? (
+        <>
+          <span className="font-mono">{names[0]}</span>&apos;s name as picked when the run started.
+        </>
+      ) : (
+        "Names as picked when the run started."
+      )}
+    </p>
   );
 }
 

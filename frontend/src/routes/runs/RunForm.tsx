@@ -7,7 +7,10 @@
 // passes; the columns are saved first when asked, and a failed save starts nothing. A file checked against a version
 // published since the form was read has the form read again, as a refused start does. A re-run (§5.4; the Rerun board)
 // is the same form on the active version, the run's own input prefilled and its mode chosen (rerun.ts). Below 640 px
-// it fills the screen, with a Close button, its buttons stacked full width, Start first (§5.6; the Narrow320 boards).
+// it fills the screen, with a Close button, its buttons stacked full width, Start first (§5.6; the Narrow320 boards),
+// every target 44 px (the 4f-3 design §5.6).
+// A picker field lists its choices for the version the form shows; a start sends the names of the picks its input still
+// holds, never in its key, and a newer version read drops them (the 4f-3 design §5.3, §5.5).
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Button } from "../../components/Button";
@@ -24,8 +27,9 @@ import { useNarrow } from "../../lib/media";
 import { tenantQuery } from "../../lib/workflows";
 import { SimBanner } from "../editor/simulation/SimBanner";
 import { CsvPart } from "./CsvFile";
-import { AGAIN, MARKER_WORDS, UNSHOWN_AGAIN, holdsMarker, prefill, versionWords } from "./rerun";
+import { AGAIN, MARKER_WORDS, UNSHOWN_AGAIN, firstPicks, holdsMarker, prefill, versionWords } from "./rerun";
 import { ENDED, csvReason, useCsvFile } from "./useCsvFile";
+import { PickerProvider, namesFor, usePicks, versionChoices } from "../editor/pickerField";
 import { InputControl, REQUIRED, fieldKey, fromFields, hintOf, labelOf, startValues, wholeOf } from "../editor/startInput";
 
 type Mode = StartBody["mode"];
@@ -40,7 +44,7 @@ function ModeChoice({ mode, onChange }: { mode: Mode; onChange: (m: Mode) => voi
       <legend className="mb-1.5 text-small font-semibold">Mode</legend>
       <div className="flex flex-wrap gap-x-6 gap-y-2">
         {(["live", "simulate"] as const).map((m) => (
-          <label key={m} className="flex min-h-6 items-center gap-2 text-small">
+          <label key={m} className="flex min-h-6 items-center gap-2 text-small max-sm:min-h-[44px]">
             <input type="radio" name={`${id}-mode`} checked={mode === m} onChange={() => onChange(m)} className="size-[16px] accent-accent" />
             {m === "live" ? "Live" : "Simulated"}
           </label>
@@ -109,6 +113,7 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, rerun, onSta
   const offerSame = !!rerun?.run.csv && !!form?.csv && readBack === "kept";
   const sameRows = offerSame && source === "same";
   const prefilled = form && readBack === "kept" && !csvGone ? prefill(form, original.data?.input ?? null) : null;
+  const picks = usePicks(prefilled ? firstPicks(original.data) : undefined);
   const [touched, setTouched] = useState(false); // a re-run's input changed: sent whole
   const changed = touched || (!!rerun && !!form?.csv && !sameRows); // another file: the fields go whole beside it
   const keptShown = prefilled && !changed ? prefilled.kept : NONE; // said as kept
@@ -141,6 +146,7 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, rerun, onSta
     try {
       const fresh = await qc.query({ ...startFormQuery(tenantId, workflow.id), staleTime: 0 });
       if (fresh) {
+        if (fresh.version_id !== from.version_id) picks.clear(); // a name comes from the version that starts
         setValues(keptValues(values, from, fresh));
         setForm(fresh);
         csv.recheck(fresh);
@@ -199,6 +205,8 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, rerun, onSta
     const body: StartBody | RerunBody = whole ? { input, mode, expected_version_id: form.version_id } : { mode, expected_version_id: form.version_id };
     if (form.csv && !sameRows && csv.file.phase === "staged") body.csv = { upload_id: csv.file.upload.upload_id, mapping: csv.file.mapping };
     const sent = keyFor(last, body);
+    const names = whole ? namesFor(picks.picks, input) : undefined; // after the key: never in it
+    if (names) body.names = names;
     setLast(sent);
     setErrors({});
     setRefusal(null);
@@ -245,7 +253,7 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, rerun, onSta
   const live = mode === "live";
   const narrow = useNarrow();
   const close = () => dialog.current?.close(); // its close event closes the form, giving focus back to its opener
-  const cancel = <Button onClick={close} className={narrow ? "w-full" : ""}>Cancel</Button>;
+  const cancel = <Button onClick={close} className={`max-sm:min-h-[44px]${narrow ? " w-full" : ""}`}>Cancel</Button>;
   const submitWords = rerun ? (live ? "Re-run live" : "◌ Re-run as a simulation") : live ? "Start the live run" : "◌ Start the simulation";
   return (
     <dialog
@@ -263,7 +271,7 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, rerun, onSta
             <p className="text-small text-muted">{workflow.name}</p>
           </div>
           {narrow && (
-            <button type="button" aria-label="Close" onClick={close} className="inline-grid size-11 shrink-0 place-items-center rounded-lg text-body-lg text-muted hover:bg-surface-hover">
+            <button type="button" aria-label="Close" onClick={close} className="inline-grid size-[44px] shrink-0 place-items-center rounded-lg text-body-lg text-muted hover:bg-surface-hover">
               <span aria-hidden="true">✕</span>
             </button>
           )}
@@ -302,11 +310,11 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, rerun, onSta
                 )}
                 {offerSame && (
                   <>
-                    <label className="flex min-h-6 items-center gap-2 text-small">
+                    <label className="flex min-h-6 items-center gap-2 text-small max-sm:min-h-[44px]">
                       <input type="radio" name={`${id}-source`} checked={source === "same"} onChange={() => setSource("same")} className="size-[16px] accent-accent" />
                       {`The same rows: ${rerun.run.csv!.row_count.toLocaleString("en-US")} rows, as run ${short} read them`}
                     </label>
-                    <label className="flex min-h-6 items-center gap-2 text-small">
+                    <label className="flex min-h-6 items-center gap-2 text-small max-sm:min-h-[44px]">
                       <input type="radio" name={`${id}-source`} checked={source === "file"} onChange={() => setSource("file")} className="size-[16px] accent-accent" />
                       Another file: it&apos;s checked here before the re-run starts, as for a new start
                     </label>
@@ -336,28 +344,34 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, rerun, onSta
                   value={shownJson}
                   rows={10}
                   spellCheck={false}
+                  tall
                   onChange={(e) => setJsonText(e.target.value)}
                 />
               ) : (
-                <>
+                <PickerProvider
+                  value={{
+                    tenantId, scope: JSON.stringify([tenantId, workflow.id, form.version_id]), read: versionChoices(tenantId, workflow.id, form.version_id),
+                    draft: false, simulated: !live, picks: picks.picks, onPick: picks.onPick,
+                  }}
+                >
                   {form.fields.length === 0 && !form.csv && <p className="text-small text-muted">This version takes no input.</p>}
                   {form.fields.map((f) =>
                     keptShown.has(f.name) ? (
                       <ReadOnly key={f.name} label={labelOf(f)} value={KEPT} />
                     ) : (
                       <InputControl
-                        key={f.name} f={f} value={shownValues.get(f.name)} error={errors[fieldKey(f.name)]}
+                        key={f.name} f={f} value={shownValues.get(f.name)} error={errors[fieldKey(f.name)]} tall
                         label={labelOf(again.has(f.name) ? { ...f, required: true } : f)} hint={again.has(f.name) ? (prefilled?.unshown.has(f.name) ? UNSHOWN_AGAIN : AGAIN) : hintOf(f)}
                         onChange={(v) => change(f.name, v)}
                       />
                     ),
                   )}
-                </>
+                </PickerProvider>
               )}
             </div>
             {(form.fields.length > 0 || !form.csv) && !sameRows && (
               <div>
-                <Button size="sm" aria-pressed={asJson} onClick={() => (asJson ? (setAsJson(false), setJsonText(null)) : toJson())}>
+                <Button size="sm" aria-pressed={asJson} className="max-sm:min-h-[44px]" onClick={() => (asJson ? (setAsJson(false), setJsonText(null)) : toJson())}>
                   Edit as JSON
                 </Button>
               </div>
@@ -375,7 +389,7 @@ export function RunForm({ tenantId, workflow, draftDiffers = false, rerun, onSta
           {!narrow && cancel}
           <Button
             type="submit" variant={mode === "live" ? "live-outline" : "simulate"} disabled={form === null || sending || reason !== null}
-            aria-describedby={reason ? `${id}-reason` : undefined} className={narrow ? "w-full" : ""}
+            aria-describedby={reason ? `${id}-reason` : undefined} className={`max-sm:min-h-[44px]${narrow ? " w-full" : ""}`}
           >
             {`${submitWords}${rows === null ? "" : ` · ${rows.toLocaleString("en-US")} row${rows === 1 ? "" : "s"}`}`}
           </Button>

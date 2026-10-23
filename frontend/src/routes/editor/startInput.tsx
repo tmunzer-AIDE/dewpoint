@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // A start form's input (4c-3b; shared since 4d-1c): each field of a form as its control, what's typed read back as the
 // input's values, and the input entered whole as JSON where the fields can't show its rules. A schedule's form and the
-// Simulate workflow dialog both enter an input this way; a sensitive field is never prefilled with what it hides.
+// Simulate workflow dialog both enter an input this way; a sensitive field is never prefilled with what it hides. A
+// picker field is a combobox listing its choices, in a form that gives it a route (./pickerField; the 4f-3 design §5.2).
 import type { ReactNode } from "react";
 import { Field, Select, TextArea } from "../../components/Field";
 import { Tag } from "../../components/Tag";
@@ -9,6 +10,7 @@ import { parseJson } from "../../lib/config";
 import { isObject } from "../../lib/schemaForm";
 import type { StartField } from "../../lib/triggers";
 import { parseNumber } from "../../lib/unapplied";
+import { PickerField, isPicker, usePickerForm } from "./pickerField";
 
 /** How a field of the input is entered: one of its values, as its type says, or JSON for what the simple controls can't
  * hold (a list, an object, several types or none), each value's type kept (the review of revision 1). */
@@ -110,15 +112,19 @@ export const hintOf = (f: StartField) =>
 export const listed = (items: string[]) => (items.length < 2 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)!}`);
 
 /** One field of the published version's form: never prefilled with what a sensitive field hides. */
-export function InputControl({ f, value, error, onChange, label: shownLabel, hint: shownHint }: {
+export function InputControl({ f, value, error, onChange, label: shownLabel, hint: shownHint, tall }: {
   f: StartField; value: string | undefined; error?: string; onChange: (v: string) => void; label?: ReactNode; hint?: ReactNode;
+  /** 44 px below 640 px: the run form's (the 4f-3 design §5.6). */
+  tall?: boolean;
 }) {  // prettier-ignore
+  const pickers = usePickerForm();
   const label = shownLabel ?? `${nameOf(f)}${f.required ? " (required)" : ""}`;
   const entry = entryOf(f);
   const hint = shownHint ?? (entry === "json" ? [f.description, JSON_HINT].filter(Boolean).join(" ") : (f.description ?? undefined));
+  if (pickers && isPicker(f)) return <PickerField f={f} picker={f.picker} value={value} error={error} label={label} hint={hint} tall={tall} onChange={onChange} />;
   if (entry === "yesno") {
     return (
-      <Select label={label} hint={hint} error={error} value={value === undefined ? "" : String(value)} onChange={(e) => onChange(e.target.value)}>
+      <Select label={label} hint={hint} error={error} tall={tall} value={value === undefined ? "" : String(value)} onChange={(e) => onChange(e.target.value)}>
         <option value="">Not given</option>
         <option value="true">Yes</option>
         <option value="false">No</option>
@@ -127,18 +133,18 @@ export function InputControl({ f, value, error, onChange, label: shownLabel, hin
   }
   if (entry === "choice") {
     return (
-      <Select label={label} hint={hint} error={error} value={value ?? ""} onChange={(e) => onChange(e.target.value)}>
+      <Select label={label} hint={hint} error={error} tall={tall} value={value ?? ""} onChange={(e) => onChange(e.target.value)}>
         <option value="">Not given</option>
         {(f.enum ?? []).map((v) => <option key={JSON.stringify(v)} value={JSON.stringify(v)}>{typeof v === "string" ? v : JSON.stringify(v)}</option>)}
       </Select>
     );  // prettier-ignore
   }
   if (entry === "json" && !f.sensitive) {
-    return <TextArea label={label} hint={hint} error={error} value={value ?? ""} rows={3} spellCheck={false} onChange={(e) => onChange(e.target.value)} />;
+    return <TextArea label={label} hint={hint} error={error} tall={tall} value={value ?? ""} rows={3} spellCheck={false} onChange={(e) => onChange(e.target.value)} />;
   }
   return (
     <Field
-      label={label} hint={hint} error={error} type={f.sensitive ? "password" : "text"} autoComplete="off" spellCheck={entry === "json" ? false : undefined}
+      label={label} hint={hint} error={error} tall={tall} type={f.sensitive ? "password" : "text"} autoComplete="off" spellCheck={entry === "json" ? false : undefined}
       inputMode={entry === "whole" || entry === "number" ? "decimal" : undefined} value={value ?? ""}
       onChange={(e) => onChange(e.target.value)}
     />

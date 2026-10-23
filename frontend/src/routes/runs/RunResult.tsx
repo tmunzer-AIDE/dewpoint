@@ -35,10 +35,20 @@ export function Section({ title, children }: { title: string; children: ReactNod
   );
 }
 
-/** A preview as the server stored it: an object as its keys and values, a value wholly redacted or cut as its mark. */
-export function Values({ value, none }: { value: unknown; none: string }) {
+/** A preview as the server stored it: an object as its keys and values, a value wholly redacted or cut as its mark; a
+ * value its start form picked (`names`, the 4f-3 design §5.5) as the name, its id under it in the code face. */
+export function Values({ value, none, names }: { value: unknown; none: string; names?: Record<string, string> }) {
   // Own keys only: a value is run data, and "__proto__" or "constructor" must read as itself.
   const one = (v: unknown) => (typeof v === "string" && Object.hasOwn(MARKS, v) ? <Chip>{MARKS[v]}</Chip> : <PreviewValue value={v} />);
+  const named = (k: string, v: unknown) =>
+    names && Object.hasOwn(names, k) && typeof v === "string" ? (
+      <>
+        <span className="block">{names[k]}</span>
+        <span className="block font-mono text-meta break-all text-muted">{v}</span>
+      </>
+    ) : (
+      one(v)
+    );
   if (value === null || value === undefined) return <p className="text-small text-muted">{none}</p>;
   if (typeof value !== "object" || Array.isArray(value)) return <p className="text-small break-words">{one(value)}</p>;
   const entries = Object.entries(value as Record<string, unknown>);
@@ -48,7 +58,7 @@ export function Values({ value, none }: { value: unknown; none: string }) {
       {entries.map(([k, v]) => (
         <Fragment key={k}>
           <dt className="font-mono break-all">{k}</dt>
-          <dd className="min-w-0 break-words">{one(v)}</dd>
+          <dd className="min-w-0 break-words">{named(k, v)}</dd>
         </Fragment>
       ))}
     </dl>

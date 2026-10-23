@@ -643,6 +643,29 @@ describe("runs that didn't run, and others (§5.4; the RunOther board)", () => {
       await vi.waitFor(() => expect(document.activeElement).toBe(start()));
     });
 
+    it("shows a value its start form picked as the name, the id under it, as picked then (the 4f-3 design §5.5)", async () => {
+      const LYON = "8a27c4d0-5e1f-4b6a-9c2d-3f4e5a6b7c8d";
+      answers.set(`${RUN_PATH}/input`, json({ read_back: "kept", input: { site_id: LYON, ticket: "CHG-1042" }, names: { site_id: "Lyon DC" }, seeds: null }));
+      show();
+      await screen.findByRole("complementary", { name: "notify_noc" });
+      await userEvent.click(start());
+      const input = within(screen.getByRole("complementary", { name: "Start" })).getByRole("region", { name: "Input" });
+      await vi.waitFor(() => expect(within(input).getAllByRole("definition").map((d) => d.textContent)).toEqual([`Lyon DC${LYON}`, '"CHG-1042"']));
+      expect(within(input).getByText(LYON).className).toContain("font-mono");
+      expect(within(input).getByText((_, el) => el?.tagName === "P" && el.textContent === "site_id's name as picked when the run started.")).toBeTruthy();
+    });
+
+    it("says names, not one, when its start form picked several; a value without a name shows as it is", async () => {
+      const input = { site_id: "s1", wlan_id: "w1", ticket: "s1" };
+      answers.set(`${RUN_PATH}/input`, json({ read_back: "kept", input, names: { site_id: "Lyon DC", wlan_id: "Guests" }, seeds: null }));
+      show();
+      await screen.findByRole("complementary", { name: "notify_noc" });
+      await userEvent.click(start());
+      const region = within(screen.getByRole("complementary", { name: "Start" })).getByRole("region", { name: "Input" });
+      await vi.waitFor(() => expect(within(region).getAllByRole("definition").map((d) => d.textContent)).toEqual(["Lyon DCs1", "Guestsw1", '"s1"']));
+      expect(within(region).getByText("Names as picked when the run started.")).toBeTruthy();
+    });
+
     it("says when its input isn't kept any more, or can't be read back", async () => {
       answers.set(`${RUN_PATH}/input`, json({ read_back: "absent", input: null, seeds: null }));
       show();

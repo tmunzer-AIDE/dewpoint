@@ -3,7 +3,8 @@
 // the workflow reads before a file, the file being read, why one can't be, and the file's column chosen for each of the
 // workflow's, with how it was proposed. Once checked: its errors at a glance (counted by column and problem on the
 // server, every error), or, every row passing, its first rows as written, the columns folded to a line. Below 640 px
-// the columns and the problems are lists, one item each (§5.6; the Narrow320 boards).
+// the columns and the problems are lists, one item each (§5.6; the Narrow320 boards), every target 44 px (the 4f-3
+// design §5.6).
 import { useId, useState, type ChangeEvent, type DragEvent } from "react";
 import { Button, LINK_BUTTON } from "../../components/Button";
 import { controlClass } from "../../components/Field";
@@ -45,7 +46,7 @@ function Choose({ label, onChoose }: { label: string; onChoose: (f: File) => voi
     if (f) onChoose(f);
   };
   return (
-    <label className={`${LINK_BUTTON} cursor-pointer focus-within:outline focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-focus`}>
+    <label className={`${LINK_BUTTON} cursor-pointer max-sm:min-h-[44px] focus-within:outline focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-focus`}>
       {label}
       <input type="file" accept=".csv,text/csv" className="sr-only" onChange={picked} />
     </label>
@@ -86,7 +87,7 @@ function Columns({ csv, file, onMap }: { csv: Csv; file: Extract<CsvFile, { phas
       <>
         <select
           aria-label={`${c.header}, from the file's column`} aria-invalid={!!error} aria-describedby={error ? errorId : undefined}
-          value={chosen} onChange={(e) => onMap(c.name, e.target.value)} className={`${controlClass(!!error)} min-w-40`}
+          value={chosen} onChange={(e) => onMap(c.name, e.target.value)} className={`${controlClass(!!error)} min-w-40 max-sm:min-h-[44px]`}
         >
           <option value="">{c.required ? "Choose a column" : "Not used"}</option>
           {chosen && !file.upload.headers.includes(chosen) && <option value={chosen}>{chosen}</option>}
@@ -170,7 +171,7 @@ function Errors({ csv, shown, rows }: { csv: Csv; shown: CsvPreview; rows: numbe
         </Table>
       )}
       <details className="text-small">
-        <summary className="min-h-6 cursor-pointer">{`Every error, row by row (${count(shown.error_count)})`}</summary>
+        <summary className="min-h-6 cursor-pointer max-sm:min-h-[44px]">{`Every error, row by row (${count(shown.error_count)})`}</summary>
         <Table label="Every error, row by row" className="mt-2">
           <thead>
             <tr><Th>Row</Th><Th>Column</Th><Th>Problem</Th></tr>
@@ -254,13 +255,13 @@ export function CsvPart({ form, csv, file, saveable, save, onChoose, onMap, onSa
         {passes && !unfolded ? (
           <p className="flex flex-wrap items-center gap-2 text-small">
             {`Columns: ${mapped.length} of ${csv.columns.length} mapped${asSaved ? ", as saved" : ""}${unused.length > 0 ? ` · ${listed(unused)} not used` : ""}`}
-            <Button size="sm" onClick={() => setUnfolded(true)}>Change</Button>
+            <Button size="sm" className="max-sm:min-h-[44px]" onClick={() => setUnfolded(true)}>Change</Button>
           </p>
         ) : (
           <Columns csv={csv} file={file} onMap={onMap} />
         )}
         {saveable && (
-          <label className="flex min-h-6 items-center gap-2 text-small">
+          <label className="flex min-h-6 items-center gap-2 text-small max-sm:min-h-[44px]">
             <input type="checkbox" checked={save} onChange={(e) => onSave(e.target.checked)} className="size-[16px] accent-accent" />
             Save these columns for this workflow&apos;s next CSV
           </label>

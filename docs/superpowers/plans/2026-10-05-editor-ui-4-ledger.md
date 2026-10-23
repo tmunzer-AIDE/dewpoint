@@ -4095,3 +4095,104 @@ owner's commit word); `names: null` in a PATCH refused as null; a picker beside 
 (4f-3b's rule); a label returned as typed (the UI escapes); names kept for a simulated start of a published version; an
 unknown picker node with no binding flagged at validation, not import (ruling 9); the whole suite left to CI; `noun()`
 without a scope word, a node with two connection fields (none in Mist).
+
+### 4f-3a merged; the 4f-3b plan accepted (2026-10-22)
+
+The owner merged 4f-3a as #141 (squash 391cbf04), every check green ("green and merged"); its seven deferred minors
+are issue #142.
+
+`docs/superpowers/plans/2026-10-22-editor-ui-4f3b-start-forms.md`, revision 1, with milestone pauses. The owner
+accepted it: its rulings 1–10 join this ledger as 372–381. Frontend only: no API, schema, migration or engine change.
+Mid-slice rulings start at M116.
+
+372. **Accepted. Milestone pauses after the run form's picker and after 44 px** (plan ruling 1).
+373. **Accepted. The shared choices parts, drawer-free; the drawer keeps its words and its route** (plan ruling 2).
+374. **Accepted. One picker-field rule; `format` isn't in a start form** (plan ruling 3).
+375. **Accepted. A combobox whose list waits for Down; Escape closes only the list** (plan ruling 4).
+376. **Accepted. The words, per answer; the run page names a field by its key** (plan ruling 5).
+377. **Accepted. Names kept per form, dropped when typed over or re-read, sent after the key** (plan ruling 6).
+378. **Accepted. Each form's route; Simulate through the draft picker's node** (plan ruling 7).
+379. **Accepted. 44 px through `max-sm:` on the run form; a picker's parts everywhere** (plan ruling 8).
+380. **Accepted. The browser test answers each listing itself, in CI** (plan ruling 9).
+381. **Accepted. The checks** (plan ruling 10).
+
+### 4f-3b, milestone 1 (2026-10-22)
+
+The owner accepted the plan and chose inline execution ("approved, inline"), the branch from origin/main 391cbf04 and
+the frontend's packages restored offline.
+- Task 1 (5b6290c5): the plan's acceptance, rulings 372–381.
+- Task 2 (58b73184): the shared parts, out of the drawer. Red: the new file stops at its import; the drawer's 14
+  files, 256 passed. Green: 15 files, 263 passed; static silent.
+- Task 3 (4d7b1e2a): a start form's picker field. Red: the new file stops at its import; `Field.test.tsx`'s 4 pass.
+  Green: 21 passed; static silent.
+- Task 4 (0ed6f764): the run form, a re-run and a CSV run's fields, with names. Red: 9 failed (no picker field, no
+  first run's name). Green: 9 passed; static silent.
+
+The suites beside them (runs, editor, components, lib): 1,303 passed in 104 files.
+Mid-slice rulings: none. Nothing pushed.
+
+### 4f-3b, milestone 2 (2026-10-22)
+
+The owner approved milestone 1 ("approved").
+- Task 5 (cbb4bf4b): the schedule form and Simulate. Red: 6 failed (neither form has a picker field; a first run
+  passed the two test files as one word and ran nothing: the change was taken out again and red watched). Green: 6
+  passed; static silent.
+- Task 6 (2e0fb462): the run page names what was picked. Red: 2 failed, 40 passed (a named value shown as its id).
+  Green: 42 passed; static silent.
+- Task 7 (22a11979): the run form at 44 px below 640 px. Red: 5 failed, 59 passed (no control, row, button or
+  disclosure with the class). Green: 64 passed; static silent.
+
+The suites beside them (runs, editor, components, lib): 1,316 passed in 106 files.
+Mid-slice rulings: none. Nothing pushed.
+
+### 4f-3b, milestone 3 and the final checkpoint (2026-10-22)
+
+The owner approved milestone 2 ("go").
+- Task 8 (25375b06): the browser spec, its fixture and the seed's helpers. The type check and ESLint silent;
+  Playwright lists its four tests in the workflows project. Not run here (no Compose stack): CI's e2e job runs it.
+- Task 9, every check on 25375b06: the whole frontend suite, 1,634 passed in 119 files (main has 1,588 in 114), 37 s;
+  ESLint silent; the build done (the run form's script 56.75 kB, main 48.37; the editor's 149.63, main 149.19; the
+  entry 651.91, main 651.73); `check:api` passes; CodeQL (CLI 2.27.2, CI's filter; javascript-queries 2.4.8): no
+  finding. The branch's code is the tree the plan's dry runs ended on (da479212), file for file.
+
+Mid-slice rulings: none. Nothing pushed. Next: the final review.
+
+### 4f-3b, the final review (2026-10-22)
+
+A fresh reviewer (Fable) read the branch against the plan, its Review Focus, the spec and the boards: one critical
+finding, two important, three minor; each Review Focus test present and failing if its behaviour broke; names never in
+the key; the drawer's behaviour unchanged. Fixed in one pass:
+- critical, in the browser spec: a made-up site, "Italy HQ", holds "ly", so the first test waited for "2 of…" against
+  three; renamed "Paris HQ" (ebcdbfed);
+- important, in the browser spec: Down pressed before the second listing's answer was shown; it waits for the list
+  (ebcdbfed);
+- important: Escape while a listing was on its way ("Reading…") reached the dialog, or the schedule's form, and closed
+  it, what was typed lost; and a closed list still took a late answer. Escape now drops the listing and returns to the
+  field; a close drops any answer on its way (1b97be7f, two tests watched red first).
+After the pass: the whole frontend suite, 1,636 passed in 119 files; the type check and ESLint silent; `check:api`
+passes; CodeQL, no finding. The browser spec's fixes are CI's to prove: no Compose stack here.
+
+Deferred minors (a follow-up issue, on the owner's word): a lost network answer says "Mist answered with an error";
+Simulate's scope moves when the connections list arrives, dropping a listing started before it, and every form's
+status line changes from "the connection's" to the connection's name then; the schedule form keeps its picks when its
+form is read again on a newer version (the run form drops them).
+
+What the reviewer set aside, each ruled as it stands: Show choices after a pick searches by the id (the owner's call:
+the box is the value and the search); Simulate's `connection_unavailable` words cover a connection of another type
+too (the spec's table; 4f-3c keeps such a connection out); "close the form and start again" in the schedule form (the
+spec's words); the list staying open when focus leaves it, and Up from the first row (the drawer's list, ruling 373);
+Edit as JSON toggled off dropping the JSON (4e-2's); a picker beside `format` (ruling 374); `labelWord` taking off only
+" ID"; a schedule's names kept at each tick (4f-3a).
+
+CI on the PR (#143): the e2e job's first run failed the browser spec's first test (the picker not focused when the
+run form opened; the other three skipped, the spec being serial). The graph is stored as `jsonb`, which keeps an
+object's keys shortest first: the fixture's `ticket` came before `site_id`, and the form's first field takes the focus.
+The fixture's second field is `change_ticket` now, so the picker is first, as on the boards. Start forms list their
+fields in that stored order, not as written: older than 4f-3b, every start form's.
+
+CI's second e2e run passed that step, then lost the run form on Escape: Chromium 153's `scrollIntoView` answers a
+promise, the choices list's scroll effect returned it as its value, and React called it as the effect's cleanup when
+the list closed ("is not a function"), unmounting the form. The drawer's list held the same line since 4f-2a. The
+effect is a statement now; a test makes `scrollIntoView` answer a promise (red first, as CI's error), and a local
+Chromium 153 page showed the form lost before the change and kept after it. No other effect returns a call's value
+that could be one.

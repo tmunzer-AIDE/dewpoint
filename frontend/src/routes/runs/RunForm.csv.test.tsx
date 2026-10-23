@@ -169,6 +169,27 @@ describe("a CSV workflow's file (the run form design §5.3; the CsvStates board)
     expect(starts).toEqual([{ input: {}, mode: "live", expected_version_id: "v7", csv: { upload_id: "u1", mapping: SAVED } }]);
   });
 
+  it("makes the CSV part's targets 44 px below 640 px: choosing a file, Change, its columns and saving them (the 4f-3 design §5.6)", async () => {
+    role = "editor";
+    show();
+    const tall = (el: Element) => expect(el.className).toContain("max-sm:min-h-[44px]");
+    tall((await screen.findByLabelText("Choose a file")).closest("label")!);
+    const user = await choose();
+    await screen.findByText("sites-q4.csv · 2,431 rows · 6 columns");
+    tall(screen.getByLabelText("Choose another file").closest("label")!);
+    tall(screen.getByRole("button", { name: "Change" }));
+    await user.click(screen.getByRole("button", { name: "Change" }));
+    for (const select of within(screen.getByRole("region", { name: "Columns" })).getAllByRole("combobox")) tall(select);
+    tall(screen.getByRole("checkbox", { name: "Save these columns for this workflow's next CSV" }).closest("label")!);
+  });
+
+  it("opens a file's errors row by row from a 44 px disclosure below 640 px (the 4f-3 design §5.6)", async () => {
+    uploadAnswer = () => Promise.resolve(json(upload(ERRORS), 201));
+    show();
+    await choose();
+    expect((await screen.findByText("Every error, row by row (37)")).className).toContain("max-sm:min-h-[44px]");
+  });
+
   it("says the file's columns with the same names are proposed when none are saved", async () => {
     uploadAnswer = () => Promise.resolve(json(upload({ default_mapping: { status: "none" }, mapping: { address: "address" } }), 201));
     show();

@@ -6,11 +6,13 @@
 // JSON, where its rules are more than the form's fields show, or on request (the review of revision 2): how is settled
 // before anything is typed, what's typed goes with it from one way to the other, JSON a parse would change is refused,
 // and every key is kept as typed (the review of revision 3). Saved at once; the API checks the timing and the input
-// (each refusal said at its field).
+// (each refusal said at its field). A picker field lists the choices of the version whose input it shows, and the
+// names of the picks the input still holds go with it, never alone (the 4f-3 design §5.3, §5.5).
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useId, useState, type FormEvent, type ReactNode } from "react";
 import { Button } from "../../../components/Button";
 import { Field, Select, TextArea } from "../../../components/Field";
+import { PickerProvider, namesFor, usePicks, versionChoices } from "../pickerField";
 import { InputControl, fieldKey, fieldsShow, fromFields, listed, shownOf, startValues, wholeOf } from "../startInput";
 import { announce } from "../../../lib/announce";
 import { ApiError } from "../../../lib/client";
@@ -63,6 +65,7 @@ export function ScheduleForm({ schedule, form, activeNumber, onDone, onDelete }:
   const [catchup, setCatchup] = useState(schedule?.catchup_window_s ?? 600);
   const [replacing, setReplacing] = useState(!editing);
   const [values, setValues] = useState<ReadonlyMap<string, string>>(() => (editing ? new Map() : startValues(form)));
+  const picks = usePicks();
   const version = useQuery(versionQuery(t.tenantId, t.workflowId, form.version_id));
   const resolving = version.isPending; // the version's input decides how it's entered: nothing is taken before
   const whole = version.data !== undefined && !fieldsShow(inputOf(asGraph(version.data.graph)));
@@ -126,11 +129,12 @@ export function ScheduleForm({ schedule, form, activeNumber, onDone, onDelete }:
         if ("problems" in made) throw new Local(made.problems);
         input = made.input;
       }
+      const names = replacing ? namesFor(picks.picks, input) : undefined;
       const timing = made?.timing ?? null;
       const time_zone = (timing ? timing.cron !== null : schedule?.cron != null) ? zone.trim() : "UTC";
       if (!editing) {
         if (!timing) throw new Local({ when: TIMING_WORDS.timing_missing! });
-        return createSchedule(t.tenantId, t.workflowId, { ...timing, time_zone, catchup_window_s: catchup, mode, input });
+        return createSchedule(t.tenantId, t.workflowId, { ...timing, time_zone, catchup_window_s: catchup, mode, input, ...(names ? { names } : {}) });
       }
       const changed = (k: keyof Schedule, v: unknown) => schedule[k] !== v;
       return updateSchedule(t.tenantId, schedule.id, {
@@ -139,7 +143,7 @@ export function ScheduleForm({ schedule, form, activeNumber, onDone, onDelete }:
         ...((timing ? timing.cron !== null : schedule.cron !== null) && changed("time_zone", time_zone) ? { time_zone } : {}),
         ...(changed("catchup_window_s", catchup) ? { catchup_window_s: catchup } : {}),
         ...(changed("mode", mode) ? { mode } : {}),
-        ...(replacing ? { input } : {}),
+        ...(replacing ? { input, ...(names ? { names } : {}) } : {}),
       });
     },
     onSuccess: (saved) => {
@@ -252,7 +256,12 @@ export function ScheduleForm({ schedule, form, activeNumber, onDone, onDelete }:
                 {!whole && <Button size="sm" className="self-start" onClick={toFields}>Enter it field by field</Button>}
               </>
             ) : (
-              <>
+              <PickerProvider
+                value={{
+                  tenantId: t.tenantId, scope: JSON.stringify([t.tenantId, t.workflowId, form.version_id]),
+                  read: versionChoices(t.tenantId, t.workflowId, form.version_id), draft: false, simulated: mode === "simulate", picks: picks.picks, onPick: picks.onPick,
+                }}
+              >
                 {version.isError && <p className="text-small text-muted">Version {activeNumber}&apos;s input couldn&apos;t be loaded: its fields are shown, and Enter it as JSON takes any rule they don&apos;t.</p>}
                 {form.fields.length === 0 && <p className="text-small text-muted">Version {activeNumber} takes no input.</p>}
                 {form.fields.map((f) => (
@@ -262,7 +271,7 @@ export function ScheduleForm({ schedule, form, activeNumber, onDone, onDelete }:
                   />
                 ))}
                 <Button size="sm" className="self-start" onClick={toJson}>Enter it as JSON</Button>
-              </>
+              </PickerProvider>
             )}
             <p className="text-small text-muted">
               {editing

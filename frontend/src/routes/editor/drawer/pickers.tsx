@@ -7,6 +7,7 @@ import type { ReactNode } from "react";
 import { Button } from "../../../components/Button";
 import { controlClass } from "../../../components/Field";
 import { client, ok, type Schemas } from "../../../lib/client";
+import { connectionsQuery } from "../../../lib/connections";
 import { sameId } from "../../../lib/graph";
 import { workflowsQuery } from "../../../lib/workflows";
 import { useDrawer } from "./context";
@@ -18,13 +19,6 @@ const STATUS: Record<Connection["status"], string> = {
   unverified: "not verified yet",
   error: "failed its last check",
 };
-
-/** The tenant's connections, under Connections' own key: each page sees the other's changes. */
-export const connectionsQuery = (tenantId: string) =>
-  queryOptions({
-    queryKey: ["connections", tenantId],
-    queryFn: () => ok(client.GET("/api/v1/t/{tenant_id}/connections", { params: { path: { tenant_id: tenantId } } })),
-  });
 
 /** The connection types the plugins declare, under Connections' own key: a type is said by its label (4f-1). */
 export const connectionTypesQuery = () =>
