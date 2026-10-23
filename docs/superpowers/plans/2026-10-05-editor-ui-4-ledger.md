@@ -4439,3 +4439,24 @@ ledger as 409–417. Frontend only: no API, schema, migration or engine change. 
 415. **Accepted. Connection's loading and failed states, named; the failed one takes Go to** (plan ruling 7).
 416. **Accepted. A kept connection's kind; Show choices read only** (plan ruling 8).
 417. **Accepted. The tests, and the checks** (plan ruling 9).
+
+### F4, the final checkpoint (2026-10-23)
+
+The owner accepted the plan and chose inline execution ("approved, inline"), with no milestone pause; the branch from
+origin/main 1ebd2055.
+- Task 1 (f5a468a7): the plan's acceptance, rulings 409–417.
+- Task 2 (d1b634a2): the choices list's failure words, where it's read. Red: 3 failed and 38 passed. Green: 41 passed.
+- Task 3 (62a1cc1a): Simulate lists once the connections are read; a schedule's picks follow its version. Red: 2
+  failed and 23 passed. Green: 25 passed.
+- Task 4 (ed8f0743): the field's editor: Go to, Connection's states, a kept connection's kind, read only. Red: 4 failed
+  and 24 passed. Green: 28 passed.
+- Task 5 (4b25e3a9): the two tests 4f-3c's review asked for: 28 passed, as the plan says.
+- Task 6, every check on 4b25e3a9, whose tree is the prototype's (41d9b8ee): the whole frontend suite, 1,703 passed in
+  121 files; the type check and ESLint silent; CodeQL (CLI 2.27.2; javascript-queries 2.4.8): no finding.
+
+Mid-slice ruling:
+
+M118. **Packages borrowed, nothing installed,** as F2's M116: the frontend's `node_modules` linked from the 4d-1b
+worktree (main's lockfile). Cost: none.
+
+Nothing pushed. Next: the final review.
