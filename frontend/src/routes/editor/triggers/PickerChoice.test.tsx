@@ -24,10 +24,13 @@ const field = () => within(input()).getByRole("group", { name: "The field site" 
 const select = (name: string) => within(field()).getByRole<HTMLSelectElement>("combobox", { name });
 const site = (settings: GraphDoc["settings"]) => (settings?.input_schema as { properties: { site: unknown } }).properties.site;
 
+const OPTIONS = "POST /api/v1/t/t1/node-types/acme.site_zones.get@1/options";
 let connections: unknown[];
+let sent: { method: string; path: string; body: unknown }[];
 beforeEach(() => {
   connections = CONNECTIONS;
-  fakeApi({
+  sent = fakeApi({
+    [OPTIONS]: () => json({ options: [{ value: "8a27c4d0-5e1f-4b6a-9c2d-3f4e5a6b7c8d", label: "Lyon DC" }, { value: "s2", label: "Lyon store 4" }] }),
     "GET /api/v1/trigger-types": () => json([MIST]),
     "GET /api/v1/node-types": () => json(LISTING),
     "GET /api/v1/t/t1/connections": () => json(connections),
@@ -138,5 +141,58 @@ describe("a Choice from a connection, in its row (the Authoring and Read only bo
   it("calls a connection this tenant doesn't hold “the connection”, and a list this server doesn't offer “choices”", async () => {
     await showPanel({ doc: draft({ "x-dewpoint-picker": { node: "acme.gone.get@1", field: "gone_id", connection: "00000000-0000-4000-8000-0000000000ff" } }) });
     await vi.waitFor(() => expect(within(input()).getAllByRole("listitem")[0]!.textContent).toContain("site · Site · a choice of the connection's choices · required"));
+  });
+});
+
+describe("a Choice from a connection, tried in its editor (the 4f-3 design §5.7)", () => {
+  it("tries the list as the form will show it, through the list's step and connection, never closing the field on Escape", async () => {
+    await showPanel({ doc: draft({ "x-dewpoint-picker": PICKER }) });
+    await userEvent.click(within(input()).getByRole("button", { name: "Edit site" }));
+    expect(within(field()).getByRole("status").textContent).toBe("Try the list as the form will show it.");
+    const show = within(field()).getByRole("button", { name: "Show choices: Site" });
+    await userEvent.click(show);
+    const list = await within(field()).findByRole("listbox", { name: "Choices for Site" });
+    expect(sent.find((r) => `${r.method} ${r.path}` === OPTIONS)?.body).toEqual({ field: "site_id", connection_id: C1, query: "" });
+    await vi.waitFor(() => expect(within(field()).getByRole("status").textContent).toBe("2 of Acme Prod's sites."));
+    expect(document.activeElement).toBe(list); // as the step drawer's list does (ruling 338)
+    await userEvent.keyboard("{Escape}");
+    expect(within(field()).queryByRole("listbox")).toBeNull();
+    expect(document.activeElement).toBe(show);
+    expect(field()).toBeTruthy(); // the list closed, not the field's editor
+  });
+
+  it("offers Show choices only once the list and the connection are both chosen", async () => {
+    await showPanel({ doc: draft({}) });
+    await userEvent.click(within(input()).getByRole("button", { name: "Edit site" }));
+    await userEvent.selectOptions(select("Type"), "Choice from a connection");
+    await userEvent.selectOptions(select("Its choices"), "Acme · Org sites");
+    expect(within(field()).queryByRole("button", { name: /^Show choices/ })).toBeNull();
+  });
+});
+
+describe("a field's editor below 640 px (the 4f-3 design §5.10; the Narrow320 boards)", () => {
+  const tall = (el: Element) => expect(el.className).toContain("max-sm:min-h-[44px]");
+
+  it("makes a picker field's controls and buttons 44 px", async () => {
+    await showPanel({ doc: draft({ "x-dewpoint-picker": PICKER }) });
+    await userEvent.click(within(input()).getByRole("button", { name: "Edit site" }));
+    for (const name of ["Name", "Label", "Description (optional)"]) tall(within(field()).getByRole("textbox", { name }));
+    for (const name of ["Type", "Its choices", "Connection"]) tall(select(name));
+    tall(within(field()).getByRole("checkbox", { name: "Required" }).closest("label")!);
+    for (const name of ["Show choices: Site", "Done", "Remove field"]) tall(within(field()).getByRole("button", { name }));
+  });
+
+  it("makes a choice's values, a number's default and Sensitive 44 px too", async () => {
+    const choice = { type: "object", properties: { band: { type: "string", enum: ["2.4 GHz"] }, floor: { type: "integer" } } };
+    await showPanel({ doc: { graph_format: 1, nodes: [], edges: [], settings: { input_schema: choice } } });
+    await userEvent.click(within(input()).getByRole("button", { name: "Edit band" }));
+    const band = within(input()).getByRole("group", { name: "The field band" });
+    tall(within(band).getByRole("textbox", { name: "Value 1" }));
+    for (const name of ["Remove 2.4 GHz", "＋ Value"]) tall(within(band).getByRole("button", { name }));
+    tall(within(band).getByRole("checkbox", { name: "Sensitive" }).closest("label")!);
+    tall(within(band).getByRole("combobox", { name: "Default" }));
+    await userEvent.click(within(band).getByRole("button", { name: "Done" }));
+    await userEvent.click(within(input()).getByRole("button", { name: "Edit floor" }));
+    tall(within(within(input()).getByRole("group", { name: "The field floor" })).getByRole("textbox", { name: "Default" }));
   });
 });

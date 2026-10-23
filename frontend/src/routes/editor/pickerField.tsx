@@ -82,22 +82,23 @@ export const versionChoices =
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-/** A draft's choices (§5.3: Simulate): through the node type its picker names, with its connection. A connection that
- * isn't a UUID is none of this tenant's: refused here, nothing asked. */
-export const draftChoices =
-  (tenantId: string) =>
-  async (_f: StartField, picker: Picker, query: string): Promise<Option[]> => {
-    const connection = idKey(picker.connection);
-    if (!UUID.test(connection)) throw new ApiError(422, "connection_unavailable", null);
-    return (
-      await ok(
-        client.POST("/api/v1/t/{tenant_id}/node-types/{ref}/options", {
-          params: { path: { tenant_id: tenantId, ref: picker.node } },
-          body: { field: picker.field, connection_id: connection, query },
-        }),
-      )
-    ).options;
-  };
+/** A picker's choices through the node type it names, with its connection (§5.3: Simulate; §5.7: its editor). A
+ * connection that isn't a UUID is none of this tenant's: refused here, nothing asked. */
+export async function nodeChoices(tenantId: string, picker: { node: string; field: string; connection: string }, query: string): Promise<Option[]> {
+  const connection = idKey(picker.connection);
+  if (!UUID.test(connection)) throw new ApiError(422, "connection_unavailable", null);
+  return (
+    await ok(
+      client.POST("/api/v1/t/{tenant_id}/node-types/{ref}/options", {
+        params: { path: { tenant_id: tenantId, ref: picker.node } },
+        body: { field: picker.field, connection_id: connection, query },
+      }),
+    )
+  ).options;
+}
+
+/** A draft's choices (§5.3: Simulate): through the node type its picker names. */
+export const draftChoices = (tenantId: string) => (_f: StartField, picker: Picker, query: string) => nodeChoices(tenantId, picker, query);
 
 /** The field's label as the words call it: without "ID", its first word lower-cased unless it's an acronym. */
 export function labelWord(label: string): string {

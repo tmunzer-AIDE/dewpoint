@@ -2,17 +2,20 @@
 // A Choice from a connection's own controls (the 4f-3 design §5.7; the Authoring board): Its choices, one of the lists a
 // picker can name, in its plugin's words, and Connection, the tenant's connections of the kind that list's step takes,
 // in ruling 107's words. The field's editor holds a half choice (a list without its connection) and writes the picker
-// once both are chosen. A field's row says what a picker field lists, and from which connection.
+// once both are chosen; then Show choices tries the list as the form will show it. A field's row says what a picker
+// field lists, and from which connection. Below 640 px every control here is 44 px (§5.10).
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { useMemo } from "react";
+import { useId, useMemo } from "react";
 import { Button } from "../../../components/Button";
 import { Select } from "../../../components/Field";
 import { CONNECTION_STATUS, connectionsQuery } from "../../../lib/connections";
-import { sameId } from "../../../lib/graph";
+import { idKey, sameId } from "../../../lib/graph";
 import type { InputPicker } from "../../../lib/input";
 import { listOf, pickerLists, type PickerList } from "../../../lib/pickerLists";
 import { nodeTypesQuery, type Diagnostic } from "../../../lib/workflows";
+import { ChoiceList, useScopedChoices } from "../choices";
+import { failedWords, labelWord, nodeChoices, statusWords } from "../pickerField";
 import { useTriggers } from "./context";
 
 export const HALF = "Until a list and a connection are chosen, the field is saved as plain text.";
@@ -31,10 +34,43 @@ export function choiceWords(picker: InputPicker, lists: PickerList[], connection
   return `a choice of ${held?.name ?? "the connection"}'s ${listOf(lists, picker.field)?.noun ?? "choices"}`;
 }
 
+/** Show choices in the editor (§5.7): the list tried as the form will show it, through its step and its connection,
+ * before it's used; picking a choice changes nothing. */
+function Try({ picker, label }: { picker: { node: string; field: string; connection: string }; label: string }) {
+  const t = useTriggers();
+  const id = useId();
+  const lists = usePickerLists();
+  const listed = useQuery(connectionsQuery(t.tenantId));
+  const held = listed.data?.find((c) => sameId(c.id, picker.connection));
+  const words = { c: held?.name ?? "the connection", C: held?.name ?? "The connection", n: listOf(lists, picker.field)?.noun ?? "choices", label: labelWord(label) };
+  const scope = JSON.stringify([t.tenantId, picker.node, picker.field, idKey(picker.connection), held?.revision ?? null]);
+  const { shown, load, close } = useScopedChoices(scope, (query) => nodeChoices(t.tenantId, picker, query), (e) => failedWords(e, words, true));
+  const back = () => {
+    close();
+    document.getElementById(`${id}-show`)?.focus();
+  };
+  return (
+    <div className="flex min-w-0 flex-col gap-2">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <Button
+          id={`${id}-show`} size="sm" aria-label={`Show choices: ${label}`} className="max-sm:min-h-[44px]" disabled={shown.status === "loading"}
+          onClick={() => void load("")}
+        >
+          Show choices
+        </Button>
+        <p role="status" className={`min-w-0 text-small ${shown.status === "failed" ? "text-danger" : "text-muted"}`}>
+          {shown.status === "idle" ? "Try the list as the form will show it." : statusWords(shown, null, words)}
+        </p>
+      </div>
+      {shown.status === "done" && shown.options.length > 0 && <ChoiceList label={label} options={shown.options} tall onPick={back} onClose={back} />}
+    </div>
+  );  // prettier-ignore
+}
+
 /** Its choices and Connection: `picker` is the field's as written, `held` the list its editor holds without one. Each
  * choice is given as the list (its field and the step it names) and the connection, either null when not chosen. */
-export function PickerChoice({ picker, held, disabled, problems, onChoose }: {
-  picker: InputPicker | null; held: string | null; disabled: boolean; problems: Diagnostic[];
+export function PickerChoice({ picker, held, label, disabled, problems, onChoose }: {
+  picker: InputPicker | null; held: string | null; label: string; disabled: boolean; problems: Diagnostic[];
   onChoose: (list: { field: string; node: string } | null, connection: string | null) => void;
 }) {  // prettier-ignore
   const t = useTriggers();
@@ -53,7 +89,7 @@ export function PickerChoice({ picker, held, disabled, problems, onChoose }: {
   return (
     <>
       <Select
-        label="Its choices" value={field ?? ""} disabled={disabled} hint={complete ? HOLDS : undefined}
+        label="Its choices" value={field ?? ""} disabled={disabled} hint={complete ? HOLDS : undefined} tall
         onChange={(e) => {
           const to = e.target.value;
           const node = to === "" ? null : nodeOf(to);
@@ -68,7 +104,7 @@ export function PickerChoice({ picker, held, disabled, problems, onChoose }: {
       </Select>
       <div data-focus="connection" className="flex flex-col">
         {field === null ? (
-          <Select label="Connection" value="" disabled hint={HALF}>
+          <Select label="Connection" value="" disabled hint={HALF} tall>
             <option value="">Choose the list first</option>
           </Select>
         ) : listed.isPending ? (
@@ -86,7 +122,7 @@ export function PickerChoice({ picker, held, disabled, problems, onChoose }: {
           </div>
         ) : mine.length === 0 && connection === null ? (
           <Select
-            label="Connection" value="" disabled
+            label="Connection" value="" disabled tall
             hint={
               <>
                 {`No ${plugin} connection yet: `}
@@ -99,7 +135,7 @@ export function PickerChoice({ picker, held, disabled, problems, onChoose }: {
           </Select>
         ) : (
           <Select
-            label="Connection" value={connection ?? ""} disabled={disabled} hint={complete ? undefined : HALF} error={error}
+            label="Connection" value={connection ?? ""} disabled={disabled} hint={complete ? undefined : HALF} error={error} tall
             onChange={(e) => onChoose(field === null || nodeOf(field) === null ? null : { field, node: nodeOf(field)! }, e.target.value === "" ? null : e.target.value)}
           >
             <option value="">Choose a connection</option>
@@ -113,6 +149,7 @@ export function PickerChoice({ picker, held, disabled, problems, onChoose }: {
           </Select>
         )}
       </div>
+      {complete && <Try picker={{ node: picker.node, field: picker.field, connection }} label={label} />}
     </>
   );  // prettier-ignore
 }

@@ -6,7 +6,8 @@
 // by Apply here. A sensitive field has no default and no Choice: either would be written into the workflow, which the
 // server refuses (§3.8). A Choice from a connection (the 4f-3 design §5.7) has its list and its connection instead of a
 // default, values or sensitivity; until both are chosen the editor holds the half choice and the field stays plain
-// text: closing the editor drops it, and so does any change to the field not made here (an undo).
+// text: closing the editor drops it, and so does any change to the field not made here (an undo). Below 640 px its
+// controls and buttons are 44 px (§5.10).
 import { useEffect, useRef, useState } from "react";
 import { Button } from "../../../components/Button";
 import { Field, Select, controlClass } from "../../../components/Field";
@@ -56,7 +57,7 @@ function NumberDefault({ field, pointer, disabled }: { field: InputField; pointe
                 "problem" in parsed ? null : actions.update((d) => setSettings(d, { input_schema: setField(inputOf(d), field.name, { default: parsed.value }) }), null, at),
               );
             }}
-            className={controlClass(invalid)}
+            className={`${controlClass(invalid)} max-sm:min-h-[44px]`}
           />
         )}
       </FieldFrame>
@@ -68,13 +69,13 @@ function NumberDefault({ field, pointer, disabled }: { field: InputField; pointe
 function Default({ field, pointer, disabled, set }: {
   field: InputField; pointer: string; disabled: boolean; set: (patch: Partial<InputField>, key: string) => void;
 }) {  // prettier-ignore
-  if (field.sensitive) return <Field label="Default" value="" disabled />;
+  if (field.sensitive) return <Field label="Default" value="" disabled tall />;
   if (field.type === "whole" || field.type === "number") return <NumberDefault field={field} pointer={pointer} disabled={disabled} />;
   if (field.type === "yesno" || field.type === "choice") {
     const options = field.type === "yesno" ? [["true", "Yes"], ["false", "No"]] : field.values.map((v) => [JSON.stringify(v), v]);
     return (
       <Select
-        label="Default" value={"default" in field ? JSON.stringify(field.default) : ""} disabled={disabled}
+        label="Default" value={"default" in field ? JSON.stringify(field.default) : ""} disabled={disabled} tall
         onChange={(e) => set({ default: e.target.value === "" ? undefined : (JSON.parse(e.target.value) as unknown) }, "default")}
       >
         <option value="">None</option>
@@ -84,7 +85,7 @@ function Default({ field, pointer, disabled, set }: {
   }
   return (
     <Field
-      label="Default" value={typeof field.default === "string" ? field.default : ""} disabled={disabled}
+      label="Default" value={typeof field.default === "string" ? field.default : ""} disabled={disabled} tall
       placeholder={field.type === "datetime" ? "2026-10-11T08:00:00Z" : undefined}
       onChange={(e) => set({ default: e.target.value === "" ? undefined : e.target.value }, "default")}
     />
@@ -169,7 +170,7 @@ export function FieldEditor({ field, focusDefault = false, onClose, onRenamed }:
       className="flex flex-col gap-3 rounded-lg border border-line-strong p-3"
     >
       <Field
-        label="Name" value={name?.text ?? field.name} disabled={disabled} spellCheck={false} autoCapitalize="off"
+        label="Name" value={name?.text ?? field.name} disabled={disabled} spellCheck={false} autoCapitalize="off" tall
         hint={`Steps read it as trigger.${field.name}. Lowercase letters, digits and _.`} error={heldWhy(actions, "name", pointer) ?? undefined}
         onChange={(e) => {
           const text = e.target.value;
@@ -188,9 +189,9 @@ export function FieldEditor({ field, focusDefault = false, onClose, onRenamed }:
           applyName();
         }}
       />
-      <Field label="Label" value={field.label} disabled={disabled} onChange={(e) => write({ label: e.target.value }, "title")} />
+      <Field label="Label" value={field.label} disabled={disabled} tall onChange={(e) => write({ label: e.target.value }, "title")} />
       <Select
-        label="Type" value={held ? "picker" : field.type} disabled={disabled} hint={field.sensitive ? NO_CHOICE : undefined}
+        label="Type" value={held ? "picker" : field.type} disabled={disabled} hint={field.sensitive ? NO_CHOICE : undefined} tall
         onChange={(e) => toType(e.target.value as FieldType)}
       >
         {FIELD_TYPES.map((x) => (
@@ -199,22 +200,22 @@ export function FieldEditor({ field, focusDefault = false, onClose, onRenamed }:
       </Select>
       {picking && (
         <PickerChoice
-          picker={field.type === "picker" ? (field.picker ?? null) : null} held={held?.list ?? null} disabled={disabled}
+          picker={field.type === "picker" ? (field.picker ?? null) : null} held={held?.list ?? null} label={field.label || field.name} disabled={disabled}
           problems={problemsAt(t.check, pickerAt)} onChoose={choose}
         />
       )}
-      <Field label="Description (optional)" value={field.description} disabled={disabled} onChange={(e) => write({ description: e.target.value }, "description")} />
-      <Check label="Required" checked={field.required} disabled={disabled} onChange={(required) => write({ required }, "required")} />
+      <Field label="Description (optional)" value={field.description} disabled={disabled} tall onChange={(e) => write({ description: e.target.value }, "description")} />
+      <Check label="Required" checked={field.required} disabled={disabled} tall onChange={(required) => write({ required }, "required")} />
       {!picking && (
         <>
           <Check
-            label="Sensitive" checked={field.sensitive} disabled={disabled || field.type === "choice"} hint={field.type === "choice" ? NO_CHOICE : SENSITIVE}
+            label="Sensitive" checked={field.sensitive} disabled={disabled || field.type === "choice"} hint={field.type === "choice" ? NO_CHOICE : SENSITIVE} tall
             onChange={(sensitive) => set({ sensitive }, "x-sensitive")}
           />
           {field.type === "choice" && (
             <Values
               label={`The field ${field.name}'s values`} values={field.values} disabled={disabled}
-              hint="A run's value must be one of these, as written. Up to 200."
+              hint="A run's value must be one of these, as written. Up to 200." tall
               onChange={(values) => set({ values }, "enum")}
             />
           )}
@@ -225,10 +226,10 @@ export function FieldEditor({ field, focusDefault = false, onClose, onRenamed }:
       )}
       <Problems problems={problemsAt(t.check, pointer).filter((d) => !picking || (d.field !== pickerAt && !d.field!.startsWith(`${pickerAt}/`)))} />
       <div className="flex flex-wrap gap-2">
-        <Button size="sm" variant="primary" onClick={() => applyName() && onClose()}>Done</Button>
+        <Button size="sm" variant="primary" className="max-sm:min-h-[44px]" onClick={() => applyName() && onClose()}>Done</Button>
         {!disabled && (
           <Button
-            size="sm" variant="danger-outline"
+            size="sm" variant="danger-outline" className="max-sm:min-h-[44px]"
             onClick={() => {
               actions.discard(pointer);
               if (actions.update((d) => setSettings(d, { input_schema: removeField(inputOf(d), field.name) }), `Removed the field ${field.name}.`) === null) onClose();
