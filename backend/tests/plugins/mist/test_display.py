@@ -74,6 +74,7 @@ def test_every_options_field_names_its_list() -> None:
     marked = {(ref, f): p["x-list"] for ref, c in CONFIGS.items() for f, p in c["properties"].items() if "x-list" in p}
     assert set(marked) == {(ref, f) for ref, n in NODES.items() for f in n.get("options", [])}
     assert len(marked) == 199
+    assert len({ref for ref, _ in marked}) == 199  # one options field on each of 199 of the 294 node types (#142)
     by_field: dict[str, list[dict[str, str]]] = {}
     for (_, field), listed in marked.items():
         by_field.setdefault(field, []).append(listed)
