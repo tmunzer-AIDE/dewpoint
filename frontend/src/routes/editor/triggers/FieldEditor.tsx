@@ -17,7 +17,7 @@ import { FieldFrame } from "../drawer/FieldFrame";
 import { useText } from "../drawer/scalars";
 import { useTriggers } from "./context";
 import { Check, Problems, StaleEdit, Values, heldWhy, problemsHere, writeTyped } from "./parts";
-import { PickerChoice } from "./PickerChoice";
+import { PickerChoice, TryChoices } from "./PickerChoice";
 
 const SENSITIVE = "Kept apart from run history. A sensitive field has no default: it would be written into the workflow.";
 const NO_CHOICE = "A sensitive field can't be a Choice, nor a Choice from a connection: its values would be written into the workflow, the names picked shown.";
@@ -110,7 +110,11 @@ export function FieldEditor({ field, focusOn = "name", focusN = 0, onClose, onRe
   useEffect(() => {
     if (focusedFor.current === focusN || !box.current) return;
     const on = focusOn === "picker" ? (field.picker ? "connection" : "list") : focusOn;
-    const at = { name: "input", default: "[data-default] input, [data-default] select", connection: "[data-focus=connection] select, [data-focus=connection] output", list: "[data-focus=list] select" }[on];  // prettier-ignore
+    // Connection, or where to add one when it can't be chosen (a disabled select can't take focus: the final review).
+    const at = {
+      name: "input", default: "[data-default] input, [data-default] select", list: "[data-focus=list] select",
+      connection: "[data-focus=connection] select:not([disabled]), [data-focus=connection] a, [data-focus=connection] output",
+    }[on];  // prettier-ignore
     const control = box.current.querySelector<HTMLElement>(at) ?? box.current.querySelector<HTMLElement>("input");
     if (!control || control.dataset.loading !== undefined) return;
     control.focus();
@@ -214,12 +218,15 @@ export function FieldEditor({ field, focusOn = "name", focusN = 0, onClose, onRe
       </Select>
       {picking && (
         <PickerChoice
-          picker={field.type === "picker" ? (field.picker ?? null) : null} held={held?.list ?? null} label={field.label || field.name} disabled={disabled}
+          picker={field.type === "picker" ? (field.picker ?? null) : null} held={held?.list ?? null} disabled={disabled}
           problems={problemsHere(t, pickerAt)} onChoose={choose}
         />
       )}
       <Field label="Description (optional)" value={field.description} disabled={disabled} tall onChange={(e) => write({ description: e.target.value }, "description")} />
       <Check label="Required" checked={field.required} disabled={disabled} tall onChange={(required) => write({ required }, "required")} />
+      {field.type === "picker" && field.picker && field.picker.connection !== null && (
+        <TryChoices picker={{ ...field.picker, connection: field.picker.connection }} label={field.label || field.name} />
+      )}
       {!picking && (
         <>
           <Check

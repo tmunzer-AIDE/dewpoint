@@ -233,3 +233,44 @@ describe("a Choice from a connection's problems (the 4f-3 design §5.8; the Auth
     expect(within(field()).getAllByText(/No connection of this tenant has that id/)).toHaveLength(1);
   });
 });
+
+describe("a Choice from a connection, the final review's cases", () => {
+  const at = "/settings/input_schema/properties/site/x-dewpoint-picker";
+  const problem = (message: string): Diagnostic => ({ code: "picker.invalid", severity: "error", message, fix: null, node: null, field: at });
+  const checked = (diagnostics: Diagnostic[]): Validation => ({
+    draft_revision: 1, valid: false, diagnostics, expressions: [], taint: { sites: [], declassified: [] }, conditional_steps: [], schedule_breaks: [],
+  });  // prettier-ignore
+
+  it("keeps an unreadable picker's problem under its row on Go to, focus on the row", async () => {
+    await showPanel({ doc: draft({ "x-dewpoint-picker": { ...PICKER, extra: 1 } }), check: checked([problem("A picker is a node, a field and a connection.")]), focusAt: { pointer: at, n: 1 } });
+    const row = within(input()).getAllByRole("listitem")[0]!;
+    expect(row.textContent).toContain("A picker is a node, a field and a connection.");
+    await vi.waitFor(() => expect(document.activeElement).toBe(row));
+  });
+
+  it("says a picker's problem, and goes to where to add a connection, when the tenant has none of its list's kind", async () => {
+    connections = [CONNECTIONS[2]];
+    const doc = draft({ "x-dewpoint-picker": { node: "acme.site_zones.get@1", field: "site_id" } });
+    await showPanel({ doc, check: checked([problem("A picker needs its connection.")]), focusAt: { pointer: at, n: 1 } });
+    await vi.waitFor(() => expect(document.activeElement).toBe(within(field()).getByRole("link", { name: "add one on Connections" })));
+    expect(within(field()).getByText("A picker needs its connection.")).toBeTruthy();
+  });
+
+  it("names a held connection of a list no step offers any more, and says to choose another list once it's cleared", async () => {
+    await showPanel({ doc: draft({ "x-dewpoint-picker": { node: "acme.gone.get@1", field: "gone_id", connection: C1 } }) });
+    await vi.waitFor(() => expect(within(input()).getAllByRole("listitem")[0]!.textContent).toContain("a choice of Acme Prod's choices"));
+    await userEvent.click(within(input()).getByRole("button", { name: "Edit site" }));
+    await vi.waitFor(() => expect(select("Connection").selectedOptions[0]!.text).toBe("Acme Prod · verified"));
+    expect(within(field()).queryByText(/isn't in this tenant/)).toBeNull();
+    await userEvent.selectOptions(select("Connection"), "Choose a connection");
+    expect(within(field()).getByText("This list isn't offered any more: choose another.")).toBeTruthy();
+  });
+
+  it("puts Show choices under the field's controls, after Required, as the Authoring board does", async () => {
+    await showPanel({ doc: draft({ "x-dewpoint-picker": PICKER }) });
+    await userEvent.click(within(input()).getByRole("button", { name: "Edit site" }));
+    const required = within(field()).getByRole("checkbox", { name: "Required" });
+    const show = within(field()).getByRole("button", { name: "Show choices: Site" });
+    expect(required.compareDocumentPosition(show) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+});

@@ -53,10 +53,17 @@ export function InputSection({ focusAt }: { focusAt: FocusAt }) {
     if (m) {
       setMode("fields");
       const name = m[1]!.replaceAll("~1", "/").replaceAll("~0", "~");
+      // A field the list can't show has no editor: its row takes focus, its problem kept under it (4f-3c's final review).
+      if (inputRows(schema).some((r) => r.kind === "other" && r.name === name)) {
+        setEditing(null);
+        setFocusOf(null);
+        back(`row:${name}`);
+        return;
+      }
       setFocusOf({ name, on: m[2] === "default" ? "default" : m[3] ? "connection" : m[2] ? "picker" : "name", n: focusAt.n });
       setEditing(name);
     }
-  }, [focusAt]);
+  }, [focusAt]); // once per Go to: the draft and the rows as it found them
   const rows = inputRows(schema);
   const fields = rows.length; // every field the input has, the list can show it or not
   // A picker's row names its list and its connection: read only when a field is one.
@@ -103,7 +110,10 @@ export function InputSection({ focusAt }: { focusAt: FocusAt }) {
               const name = r.kind === "field" ? r.field.name : r.name;
               const pointer = fieldPointer(name);
               return (
-                <li key={keyOf(name)} className="flex flex-col gap-2 border-t border-line py-2.5 first:border-t-0">
+                <li
+                  key={keyOf(name)} tabIndex={r.kind === "other" ? -1 : undefined} data-back={r.kind === "other" ? `row:${name}` : undefined}
+                  className="flex flex-col gap-2 border-t border-line py-2.5 first:border-t-0"
+                >
                   {r.kind === "field" && editing === name ? (
                     <FieldEditor
                       field={r.field} focusOn={focusOf?.name === name ? focusOf.on : "name"} focusN={focusOf?.name === name ? focusOf.n : 0}
