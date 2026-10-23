@@ -4402,3 +4402,20 @@ worktree (main's lockfile), the backend on that worktree's venv (its lock differ
 none.
 
 Nothing pushed. Next: the final review.
+
+### F3, the final review (2026-10-23)
+
+A fresh reviewer (Fable) read the branch against the plan, its Review Focus, #144 and R11c: no critical finding, no
+important one, three minor; each Review Focus case pinned by its named test, the stored-order round trip proved on a
+draft and on a published version; every writer of the input schema keeping the list or dropping it on purpose; the ruled
+sentence exact. Ready to merge.
+
+Deferred minors: the operations guide's start-form paragraph doesn't say the fields come in the author's order; a
+list-less draft's order is pinned for ＋ Field only, not for a rename or a removal (the same path); the order sentence
+also shows on a read-only version's view.
+
+What the reviewer set aside, each ruled as it stands: an older server refuses a CSV workflow exported with the list
+(no format version, by the plan); a field named like a whole number listed first in Edit as JSON (ruling 405's cost);
+the run page, the Problems panel, Simulate's raw JSON, plugin manifests and step maps (ruling 406); no Move control (the
+owner's); a held JSON edit's base compared key-order sensitive (as before, and safe); a removal of a field that isn't
+there writing the list (unreachable).
