@@ -4234,3 +4234,14 @@ and the frontend's packages restored offline, as its handoff named them.
 
 The suites beside them (routes, lib, components): 1,427 passed in 116 files.
 Mid-slice rulings: none. Nothing pushed.
+
+### 4f-3c, milestone 2 (2026-10-23)
+
+The owner approved milestone 1 ("approved").
+- Task 5 (cbbe8d30): Go to an input field's problem; what publish found, under the field. Red: 5 failed, 188 passed.
+  Green: 193 passed; static silent.
+- Task 6 (ae51efc4): import and export name a start form's field; a binding's type by its label. Red: 2 failed, 41
+  passed. Green: 43 passed; static silent.
+
+The suites beside them (routes, lib, components): 1,434 passed in 116 files.
+Mid-slice rulings: none. Nothing pushed.
