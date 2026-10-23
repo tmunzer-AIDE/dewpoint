@@ -176,6 +176,8 @@ export function PickerField({ f, picker, value, error, label, hint, tall, onChan
   // A draft's choices are its picker's too: the node, the field, the connection and the connection's revision.
   const scope = JSON.stringify([form.scope, f.name, form.draft ? [picker.node, picker.field, idKey(picker.connection), held?.revision ?? null] : null]);
   const { shown, load, close } = useScopedChoices(scope, (query) => form.read(f, picker, query), (e) => failedWords(e, words, form.draft ? "draft" : "form"));
+  // Until the tenant's connections are read, a draft lists nothing: its scope would change under the listing (F4).
+  const settling = form.draft && connections.isPending;
   const text = value ?? "";
   const pick = form.picks.get(f.name);
   const named = pick !== undefined && pick.value === text ? pick : null;
@@ -198,7 +200,7 @@ export function PickerField({ f, picker, value, error, label, hint, tall, onChan
   const onKeyDown = (e: KeyboardEvent) => {
     if (e.key !== "Enter") return listKeys(e);
     e.preventDefault(); // lists, never submits the form
-    if (shown.status !== "loading") void load(text);
+    if (shown.status !== "loading" && !settling) void load(text);
   };
   return (
     <Field
@@ -213,7 +215,7 @@ export function PickerField({ f, picker, value, error, label, hint, tall, onChan
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
             {/* Named by its field, its visible text first (WCAG 2.5.3). */}
             <Button
-              size="sm" aria-label={`Show choices: ${name}`} className="max-sm:min-h-[44px]" disabled={shown.status === "loading"}
+              size="sm" aria-label={`Show choices: ${name}`} className="max-sm:min-h-[44px]" disabled={settling || shown.status === "loading"}
               onClick={() => void load(text)} onKeyDown={listKeys}
             >
               Show choices

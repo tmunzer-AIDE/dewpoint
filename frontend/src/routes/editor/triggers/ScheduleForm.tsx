@@ -66,6 +66,13 @@ export function ScheduleForm({ schedule, form, activeNumber, onDone, onDelete }:
   const [replacing, setReplacing] = useState(!editing);
   const [values, setValues] = useState<ReadonlyMap<string, string>>(() => (editing ? new Map() : startValues(form)));
   const picks = usePicks();
+  // A name comes from the version a schedule starts: another one shown since drops the picks (§5.5, as a run form's
+  // re-read does).
+  const [pickedFor, setPickedFor] = useState(form.version_id);
+  if (pickedFor !== form.version_id) {
+    setPickedFor(form.version_id);
+    picks.clear();
+  }
   const version = useQuery(versionQuery(t.tenantId, t.workflowId, form.version_id));
   const resolving = version.isPending; // the version's input decides how it's entered: nothing is taken before
   const whole = version.data !== undefined && !fieldsShow(inputOf(asGraph(version.data.graph)));

@@ -40,8 +40,11 @@ function Form({ f = SITE, over = {}, first, onSubmit }: { f?: StartField; over?:
   );
 }
 
-function show(props: { f?: StartField; over?: Partial<PickerForm>; first?: Picks } = {}, connections = [connection(C1, "Acme Prod")]) {
-  fakeApi({ "GET /api/v1/t/t1/connections": () => json(connections) });
+function show(
+  props: { f?: StartField; over?: Partial<PickerForm>; first?: Picks } = {}, connections = [connection(C1, "Acme Prod")],
+  answer: () => Response | Promise<Response> = () => json(connections),
+) {  // prettier-ignore
+  fakeApi({ "GET /api/v1/t/t1/connections": answer });
   const onSubmit = vi.fn();
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const shown = (over: typeof props) => (
@@ -230,6 +233,21 @@ describe("a picker field (the 4f-3 design §5.2)", () => {
     rerender({ over: { scope: "v8" } });
     expect(screen.queryByRole("listbox")).toBeNull();
     expect(status()).toBe("One of Acme Prod's sites: type part of its name, then Show choices.");
+  });
+
+  it("holds a draft's Show choices until the tenant's connections are read, so its listing isn't dropped when they come (F4)", async () => {
+    let answer: () => void = () => undefined;
+    const held = () => new Promise<Response>((resolve) => (answer = () => resolve(json([connection(C1, "Acme Prod")]))));
+    show({ over: { draft: true, simulated: true } }, undefined, held);
+    const showChoices = screen.getByRole("button", { name: "Show choices: Site ID" });
+    expect(showChoices).toHaveProperty("disabled", true);
+    await userEvent.type(field(), "ly{Enter}");
+    expect(screen.queryByRole("listbox")).toBeNull(); // Enter waits too
+    await act(() => Promise.resolve(answer()));
+    await vi.waitFor(() => expect(showChoices).toHaveProperty("disabled", false));
+    await userEvent.click(showChoices);
+    await screen.findByRole("listbox");
+    expect(screen.getByText("Read from Acme Prod now: listing changes nothing in Mist.")).toBeTruthy();
   });
 
   it("says, under a simulated form's list only, that it's read from the connection now (the owner's answer 4)", async () => {
