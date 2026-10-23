@@ -8,16 +8,18 @@
 // default, values or sensitivity; until both are chosen the editor holds the half choice and the field stays plain
 // text: closing the editor drops it, and so does any change to the field not made here (an undo). Below 640 px its
 // controls and buttons are 44 px (§5.10).
+import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "../../../components/Button";
 import { Field, Select, controlClass } from "../../../components/Field";
+import { connectionsQuery } from "../../../lib/connections";
 import { FIELD_TYPES, fieldPointer, inputOf, inputRows, removeField, setField, setSettings, type FieldType, type InputField } from "../../../lib/input";
 import { parseNumber } from "../../../lib/unapplied";
 import { FieldFrame } from "../drawer/FieldFrame";
 import { useText } from "../drawer/scalars";
 import { useTriggers } from "./context";
 import { Check, Problems, StaleEdit, Values, heldWhy, problemsHere, writeTyped } from "./parts";
-import { PickerChoice, TryChoices } from "./PickerChoice";
+import { PickerChoice, TryChoices, useOffered } from "./PickerChoice";
 
 const SENSITIVE = "Kept apart from run history. A sensitive field has no default: it would be written into the workflow.";
 const NO_CHOICE = "A sensitive field can't be a Choice, nor a Choice from a connection: its values would be written into the workflow, the names picked shown.";
@@ -92,8 +94,8 @@ function Default({ field, pointer, disabled, set }: {
   );  // prettier-ignore
 }
 
-/** Where a field's editor puts focus as it opens: Name, Default, or a picker's control (its Connection when the picker
- * names its list, else Its choices: the 4f-3 design §5.8). */
+/** Where a field's editor puts focus as it opens: Name, Default, or a picker's control (its Connection when an active
+ * step offers the picker's list, else Its choices: the 4f-3 design §5.8, as F4 amends it). */
 export type FieldFocus = "name" | "default" | "picker" | "connection";
 
 export function FieldEditor({ field, focusOn = "name", focusN = 0, onClose, onRenamed }: {
@@ -107,9 +109,13 @@ export function FieldEditor({ field, focusOn = "name", focusN = 0, onClose, onRe
   // Its first control takes focus, or the one a Go to was for (4c-3b's final review; the 4f-3 design §5.8), once for each
   // Go to (`focusN`), a list still on its way waited for (ruling 111).
   const focusedFor = useRef<number | null>(null);
+  const offered = useOffered(field.picker?.field ?? null);
+  // The tenant's connections settling, loaded or failed, draws this editor again: a Go to waiting for them lands then.
+  const connections = useQuery({ ...connectionsQuery(t.tenantId), enabled: field.picker !== undefined }).status;
   useEffect(() => {
     if (focusedFor.current === focusN || !box.current) return;
-    const on = focusOn === "picker" ? (field.picker ? "connection" : "list") : focusOn;
+    if (focusOn === "picker" && field.picker && (offered === null || connections === "pending")) return; // on their way (ruling 111)
+    const on = focusOn === "picker" ? (field.picker && offered ? "connection" : "list") : focusOn;
     // Connection, or where to add one when it can't be chosen (a disabled select can't take focus: the final review).
     const at = {
       name: "input", default: "[data-default] input, [data-default] select", list: "[data-focus=list] select",
@@ -225,7 +231,7 @@ export function FieldEditor({ field, focusOn = "name", focusN = 0, onClose, onRe
       <Field label="Description (optional)" value={field.description} disabled={disabled} tall onChange={(e) => write({ description: e.target.value }, "description")} />
       <Check label="Required" checked={field.required} disabled={disabled} tall onChange={(required) => write({ required }, "required")} />
       {field.type === "picker" && field.picker && field.picker.connection !== null && (
-        <TryChoices picker={{ ...field.picker, connection: field.picker.connection }} label={field.label || field.name} />
+        <TryChoices picker={{ ...field.picker, connection: field.picker.connection }} label={field.label || field.name} disabled={disabled} />
       )}
       {!picking && (
         <>

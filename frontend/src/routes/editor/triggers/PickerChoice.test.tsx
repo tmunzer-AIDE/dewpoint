@@ -49,7 +49,7 @@ describe("a Choice from a connection, authored (the 4f-3 design §5.7; the Autho
     await userEvent.selectOptions(select("Type"), "Choice from a connection");
     expect(site(panel.settings())).toEqual({ type: "string", title: "Site" });
     expect(select("Type").value).toBe("picker");
-    expect([...select("Its choices").options].map((o) => o.text)).toEqual(["Choose a list", "Acme · Org PSKs", "Acme · Org sites", "Acme · Org WLANs"]);
+    expect([...select("Its choices").options].map((o) => o.text)).toEqual(["Choose a list", "Acme · Org PSKs", "Acme · Org sites", "Acme · Org WLANs", "Ops · Channels"]);
     const connection = select("Connection");
     expect(connection.disabled).toBe(true);
     expect([...connection.options].map((o) => o.text)).toEqual(["Choose the list first"]);
@@ -246,6 +246,54 @@ describe("a Choice from a connection's problems (the 4f-3 design §5.8; the Auth
     await userEvent.click(within(input()).getByRole("button", { name: "Edit site" }));
     expect(select("Connection").getAttribute("aria-invalid")).toBe("true");
     expect(within(field()).getAllByText(/No connection of this tenant has that id/)).toHaveLength(1);
+  });
+});
+
+describe("a Choice from a connection, F4 (#146)", () => {
+  const at = "/settings/input_schema/properties/site/x-dewpoint-picker";
+  const problem = (code: string, message: string): Diagnostic => ({ code, severity: "error", message, fix: null, node: null, field: at });
+  const checked = (diagnostics: Diagnostic[]): Validation => ({
+    draft_revision: 1, valid: false, diagnostics, expressions: [], taint: { sites: [], declassified: [] }, conditional_steps: [], schedule_breaks: [],
+  });  // prettier-ignore
+  const describedBy = (el: HTMLElement) => (el.getAttribute("aria-describedby") ?? "").split(" ").map((id) => document.getElementById(id)?.textContent).join(" ");
+
+  it("lands Go to on the failed connections' state, named as Connection, the problem said there (item 1)", async () => {
+    listConnections = () => json({ error: "internal" }, 500);
+    const check = checked([problem("picker.invalid", "A picker needs its connection.")]);
+    await showPanel({ doc: draft({ "x-dewpoint-picker": { node: "acme.site_zones.get@1", field: "site_id" } }), check, focusAt: { pointer: at, n: 1 } });
+    await within(field()).findByText("Connections couldn't load.");
+    const failed = within(field()).getByRole("status", { name: "Connection" }); // as the loading state is named
+    await vi.waitFor(() => expect(document.activeElement).toBe(failed));
+    expect(within(field()).getByText("A picker needs its connection.")).toBeTruthy();
+  });
+
+  it("lands Go to a problem about a list no step offers on Its choices, the problem under it, not Connection (item 2, amending §5.8)", async () => {
+    const check = checked([problem("picker.unknown_node", "This server has no such node type: choose another list.")]);
+    await showPanel({ doc: draft({ "x-dewpoint-picker": { node: "acme.gone.get@1", field: "gone_id", connection: C1 } }), check, focusAt: { pointer: at, n: 1 } });
+    await vi.waitFor(() => expect(document.activeElement).toBe(select("Its choices")));
+    expect(select("Its choices").getAttribute("aria-invalid")).toBe("true");
+    expect(describedBy(select("Its choices"))).toContain("This server has no such node type: choose another list.");
+    expect(select("Connection").getAttribute("aria-invalid")).not.toBe("true");
+  });
+
+  it("keeps a connection this tenant doesn't hold only for a list whose step takes the same kind (item 3)", async () => {
+    const unknown = "00000000-0000-4000-8000-0000000000c9";
+    const panel = await showPanel({ doc: draft({ "x-dewpoint-picker": { ...PICKER, connection: unknown } }) });
+    await userEvent.click(within(input()).getByRole("button", { name: "Edit site" }));
+    await vi.waitFor(() => expect(select("Its choices").value).toBe("site_id"));
+    await userEvent.selectOptions(select("Its choices"), "Acme · Org WLANs");
+    expect(site(panel.settings())).toMatchObject({ "x-dewpoint-picker": { field: "wlan_id", connection: unknown } });
+    await userEvent.selectOptions(select("Its choices"), "Ops · Channels");
+    expect(site(panel.settings())).not.toHaveProperty("x-dewpoint-picker");
+    expect(select("Its choices").value).toBe("channel_id");
+  });
+
+  it("disables Show choices once the editor turns read only while it's open (item 5)", async () => {
+    const panel = await showPanel({ doc: draft({ "x-dewpoint-picker": PICKER }) });
+    await userEvent.click(within(input()).getByRole("button", { name: "Edit site" }));
+    expect(within(field()).getByRole("button", { name: "Show choices: Site" })).toHaveProperty("disabled", false);
+    panel.lock();
+    await vi.waitFor(() => expect(within(field()).getByRole("button", { name: "Show choices: Site" })).toHaveProperty("disabled", true));
   });
 });
 
