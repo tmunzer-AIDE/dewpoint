@@ -45,7 +45,7 @@ export function TryChoices({ picker, label }: { picker: { node: string; field: s
   const held = listed.data?.find((c) => sameId(c.id, picker.connection));
   const words = { c: held?.name ?? "the connection", C: held?.name ?? "The connection", n: listOf(lists, picker.field)?.noun ?? "choices", label: labelWord(label) };
   const scope = JSON.stringify([t.tenantId, picker.node, picker.field, idKey(picker.connection), held?.revision ?? null]);
-  const { shown, load, close } = useScopedChoices(scope, (query) => nodeChoices(t.tenantId, picker, query), (e) => failedWords(e, words, true));
+  const { shown, load, close } = useScopedChoices(scope, (query) => nodeChoices(t.tenantId, picker, query), (e) => failedWords(e, words, "editor"));
   const back = () => {
     close();
     document.getElementById(`${id}-show`)?.focus();

@@ -131,22 +131,36 @@ export function statusWords(shown: Choices, picked: Pick | null, { c, C, n, labe
   }
 }
 
-/** Why a listing failed, by the API's answer (§5.4); `draft`: Simulate's, through the node's route. */
-export function failedWords(e: unknown, { C, n, label }: Words, draft: boolean): string {
+/** Where a listing is read: a published version's form, Simulate's (the draft, through its node's route), or the
+ * field's editor (Show choices there, §5.7). */
+export type ReadFor = "form" | "draft" | "editor";
+
+/** Why a listing failed, by the API's answer (§5.4; F4's rulings): a form's lines end with what to type, the field's
+ * editor's with what to choose there. */
+export function failedWords(e: unknown, { C, n, label }: Words, where: ReadFor): string {
   const code = e instanceof ApiError ? e.code : "network";
   const body = (e instanceof ApiError ? (e.body ?? {}) : {}) as { active_version_number?: unknown };
+  const editor = where === "editor";
+  const then = editor ? "Try again." : `Try again, or type the ${label}'s ID.`;
   if (code === "version_changed" && typeof body.active_version_number === "number")
     return `Version ${body.active_version_number} was published after this form opened, and its choices may differ: close the form and start again.`;
   if (code === "workflow_disabled") return `The workflow is disabled, so its choices can't be listed: type the ${label}'s ID, or enable it first.`;
-  if (code === "unknown_node_type") return `This list isn't offered any more: type the ${label}'s ID. An editor can choose another list in Triggers.`;
-  if (code === "connection_unavailable")
-    return draft
+  if (code === "unknown_node_type" || code === "not_an_options_field")
+    return editor ? "This list isn't offered any more: choose another in Its choices." : `This list isn't offered any more: type the ${label}'s ID. An editor can choose another list in Triggers.`;
+  if (code === "connection_unavailable") {
+    if (editor) return "This tenant doesn't have the chosen connection now: choose another.";
+    return where === "draft"
       ? `The draft names a connection this tenant doesn't have: choose one in Triggers › Input, or type the ${label}'s ID.`
       : `${C} can't list choices now: an editor can check it on Connections. Type the ${label}'s ID meanwhile.`;
+  }
+  if (code === "forbidden" || (e instanceof ApiError && e.status === 403))
+    return editor ? "Your role can't try this list." : `Your role can't list these choices: type the ${label}'s ID.`;
   if (code === "plugin_calls_busy" || (e instanceof ApiError && e.status === 429)) return "Too many lists are being read right now: try again in a moment.";
   if (code === "connection_changed") return `${C} changed while its ${n} were read: Show choices again.`;
   if (code === "not_published" || code === "not_a_picker") return `This field's choices can't be listed: type the ${label}'s ID.`;
-  return `${C}'s ${n} couldn't be read: Mist answered with an error. Try again, or type the ${label}'s ID.`;
+  if (code === "network") return `${C}'s ${n} couldn't be read: the server didn't answer. ${then}`;
+  if (code === "plugin_call_timeout") return `${C}'s ${n} couldn't be read: Mist didn't answer in time. ${then}`;
+  return `${C}'s ${n} couldn't be read: Mist answered with an error. ${then}`;
 }
 
 /** A picker field (§5.2, §5.10): a combobox owning its list, its status line describing it. */
@@ -161,7 +175,7 @@ export function PickerField({ f, picker, value, error, label, hint, tall, onChan
   const words: Words = { c: held?.name ?? "the connection", C: held?.name ?? "The connection", n: picker.list?.noun ?? "choices", label: labelWord(name) };
   // A draft's choices are its picker's too: the node, the field, the connection and the connection's revision.
   const scope = JSON.stringify([form.scope, f.name, form.draft ? [picker.node, picker.field, idKey(picker.connection), held?.revision ?? null] : null]);
-  const { shown, load, close } = useScopedChoices(scope, (query) => form.read(f, picker, query), (e) => failedWords(e, words, form.draft));
+  const { shown, load, close } = useScopedChoices(scope, (query) => form.read(f, picker, query), (e) => failedWords(e, words, form.draft ? "draft" : "form"));
   const text = value ?? "";
   const pick = form.picks.get(f.name);
   const named = pick !== undefined && pick.value === text ? pick : null;

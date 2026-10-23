@@ -163,6 +163,21 @@ describe("a Choice from a connection, tried in its editor (the 4f-3 design §5.7
     expect(field()).toBeTruthy(); // the list closed, not the field's editor
   });
 
+  it("says why the tried list failed in the editor's own words, never to type an ID (F4, ruled)", async () => {
+    sent = fakeApi({
+      [OPTIONS]: () => json({ error: "connection_unavailable" }, 422),
+      "GET /api/v1/trigger-types": () => json([MIST]),
+      "GET /api/v1/node-types": () => json(LISTING),
+      "GET /api/v1/t/t1/connections": () => listConnections(),
+      "GET /api/v1/t/t1/workflows/w1/schedules": () => json({ schedules: [] }),
+      "GET /api/v1/t/t1/workflows/w1/webhook-bindings": () => json({ bindings: [] }),
+    });
+    await showPanel({ doc: draft({ "x-dewpoint-picker": PICKER }) });
+    await userEvent.click(within(input()).getByRole("button", { name: "Edit site" }));
+    await userEvent.click(within(field()).getByRole("button", { name: "Show choices: Site" }));
+    await vi.waitFor(() => expect(within(field()).getByRole("status").textContent).toBe("This tenant doesn't have the chosen connection now: choose another."));
+  });
+
   it("offers Show choices only once the list and the connection are both chosen", async () => {
     await showPanel({ doc: draft({}) });
     await userEvent.click(within(input()).getByRole("button", { name: "Edit site" }));

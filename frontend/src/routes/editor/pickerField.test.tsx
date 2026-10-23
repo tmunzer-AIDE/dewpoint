@@ -264,20 +264,37 @@ describe("a picker field's words (the 4f-3 design §5.4)", () => {
   it("says why a listing failed, per answer", () => {
     const no = (status: number, code: string, body: unknown = null) => new ApiError(status, code, body);
     const changed = no(409, "version_changed", { error: "version_changed", active_version_id: "v8", active_version_number: 8 });
-    expect(failedWords(changed, W, false)).toBe("Version 8 was published after this form opened, and its choices may differ: close the form and start again.");
-    expect(failedWords(no(409, "workflow_disabled"), W, false)).toBe("The workflow is disabled, so its choices can't be listed: type the site's ID, or enable it first.");
-    expect(failedWords(no(404, "unknown_node_type"), W, false)).toBe("This list isn't offered any more: type the site's ID. An editor can choose another list in Triggers.");
-    expect(failedWords(no(422, "connection_unavailable"), W, false)).toBe("Acme Prod can't list choices now: an editor can check it on Connections. Type the site's ID meanwhile.");
-    expect(failedWords(no(422, "connection_unavailable"), W, true)).toBe("The draft names a connection this tenant doesn't have: choose one in Triggers › Input, or type the site's ID.");
-    expect(failedWords(no(503, "plugin_calls_busy"), W, false)).toBe("Too many lists are being read right now: try again in a moment.");
-    expect(failedWords(no(429, "too_many_plugin_calls"), W, false)).toBe("Too many lists are being read right now: try again in a moment.");
-    expect(failedWords(no(409, "connection_changed"), W, false)).toBe("Acme Prod changed while its sites were read: Show choices again.");
-    expect(failedWords(no(404, "not_published"), W, false)).toBe("This field's choices can't be listed: type the site's ID.");
-    expect(failedWords(no(422, "not_a_picker"), W, false)).toBe("This field's choices can't be listed: type the site's ID.");
-    for (const e of [no(504, "plugin_call_timeout"), no(502, "plugin_failed"), new TypeError("Failed to fetch")])
-      expect(failedWords(e, W, false)).toBe("Acme Prod's sites couldn't be read: Mist answered with an error. Try again, or type the site's ID.");
+    expect(failedWords(changed, W, "form")).toBe("Version 8 was published after this form opened, and its choices may differ: close the form and start again.");
+    expect(failedWords(no(409, "workflow_disabled"), W, "form")).toBe("The workflow is disabled, so its choices can't be listed: type the site's ID, or enable it first.");
+    expect(failedWords(no(404, "unknown_node_type"), W, "form")).toBe("This list isn't offered any more: type the site's ID. An editor can choose another list in Triggers.");
+    expect(failedWords(no(422, "connection_unavailable"), W, "form")).toBe("Acme Prod can't list choices now: an editor can check it on Connections. Type the site's ID meanwhile.");
+    expect(failedWords(no(422, "connection_unavailable"), W, "draft")).toBe("The draft names a connection this tenant doesn't have: choose one in Triggers › Input, or type the site's ID.");
+    expect(failedWords(no(503, "plugin_calls_busy"), W, "form")).toBe("Too many lists are being read right now: try again in a moment.");
+    expect(failedWords(no(429, "too_many_plugin_calls"), W, "form")).toBe("Too many lists are being read right now: try again in a moment.");
+    expect(failedWords(no(409, "connection_changed"), W, "form")).toBe("Acme Prod changed while its sites were read: Show choices again.");
+    expect(failedWords(no(404, "not_published"), W, "form")).toBe("This field's choices can't be listed: type the site's ID.");
+    expect(failedWords(no(422, "not_a_picker"), W, "form")).toBe("This field's choices can't be listed: type the site's ID.");
+    expect(failedWords(no(502, "plugin_failed"), W, "form")).toBe("Acme Prod's sites couldn't be read: Mist answered with an error. Try again, or type the site's ID.");
+    // F4's three lines (ruled): no answer, Mist too slow, a role that can't list.
+    expect(failedWords(new TypeError("Failed to fetch"), W, "form")).toBe("Acme Prod's sites couldn't be read: the server didn't answer. Try again, or type the site's ID.");
+    expect(failedWords(no(504, "plugin_call_timeout"), W, "draft")).toBe("Acme Prod's sites couldn't be read: Mist didn't answer in time. Try again, or type the site's ID.");
+    expect(failedWords(no(403, "forbidden"), W, "form")).toBe("Your role can't list these choices: type the site's ID.");
+    expect(failedWords(no(422, "not_an_options_field"), W, "draft")).toBe("This list isn't offered any more: type the site's ID. An editor can choose another list in Triggers.");
     const unnamed = { c: "the connection", C: "The connection", n: "choices", label: "site" };
-    expect(failedWords(no(422, "connection_unavailable"), unnamed, false)).toBe("The connection can't list choices now: an editor can check it on Connections. Type the site's ID meanwhile.");
+    expect(failedWords(no(422, "connection_unavailable"), unnamed, "form")).toBe("The connection can't list choices now: an editor can check it on Connections. Type the site's ID meanwhile.");
+  });
+
+  it("says why the list tried in the field's editor failed, in the editor's own words (F4, ruled)", () => {
+    const no = (status: number, code: string) => new ApiError(status, code, null);
+    expect(failedWords(no(502, "plugin_failed"), W, "editor")).toBe("Acme Prod's sites couldn't be read: Mist answered with an error. Try again.");
+    expect(failedWords(new TypeError("Failed to fetch"), W, "editor")).toBe("Acme Prod's sites couldn't be read: the server didn't answer. Try again.");
+    expect(failedWords(no(504, "plugin_call_timeout"), W, "editor")).toBe("Acme Prod's sites couldn't be read: Mist didn't answer in time. Try again.");
+    expect(failedWords(no(422, "connection_unavailable"), W, "editor")).toBe("This tenant doesn't have the chosen connection now: choose another.");
+    for (const e of [no(404, "unknown_node_type"), no(422, "not_an_options_field")])
+      expect(failedWords(e, W, "editor")).toBe("This list isn't offered any more: choose another in Its choices.");
+    expect(failedWords(no(403, "forbidden"), W, "editor")).toBe("Your role can't try this list.");
+    expect(failedWords(no(503, "plugin_calls_busy"), W, "editor")).toBe("Too many lists are being read right now: try again in a moment.");
+    expect(failedWords(no(409, "connection_changed"), W, "editor")).toBe("Acme Prod changed while its sites were read: Show choices again.");
   });
 
   it("calls a field by its label without “ID”, its first word lower-cased unless it's an acronym", () => {
