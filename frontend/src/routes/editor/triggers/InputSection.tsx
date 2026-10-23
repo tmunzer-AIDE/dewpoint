@@ -12,10 +12,10 @@ import { addField, fieldPointer, inputOf, inputRows, setSettings, topicShaped } 
 import { senderName, triggerTypesQuery } from "../../../lib/triggers";
 import { useTriggers } from "./context";
 import { CsvSection } from "./CsvSection";
-import { FieldEditor } from "./FieldEditor";
+import { FieldEditor, type FieldFocus } from "./FieldEditor";
 import { InputJson, JSON_AT } from "./InputJson";
 import { MistPicker, MistShape } from "./MistEvent";
-import { Problems, Section, problemsAt, useFocusBack } from "./parts";
+import { Problems, Section, problemsHere, useFocusBack } from "./parts";
 import { choiceWords, usePickerLists } from "./PickerChoice";
 
 const TYPE_WORDS: Record<string, string> = {
@@ -42,17 +42,18 @@ export function InputSection({ focusAt }: { focusAt: FocusAt }) {
   const [kept, setKept] = useState<{ name: string; key: string } | null>(null);
   const keyOf = (name: string) => (kept !== null && kept.name === name && editing === name ? kept.key : name);
   const { box, back } = useFocusBack<HTMLElement>();
-  // The field "Go to it" opened on its held default: its editor opens on Default, that once. Done, another field's Edit
-  // or ＋ Field clears it, so any later opening is on Name.
-  const [defaultOf, setDefaultOf] = useState<string | null>(null);
+  // The field a Go to opened, and the control it lands on: Default for its held default, a picker's for a picker's
+  // problem (the 4f-3 design §5.8), that once. Done, another field's Edit or ＋ Field clears it, so any later opening is
+  // on Name.
+  const [focusOf, setFocusOf] = useState<{ name: string; on: FieldFocus; n: number } | null>(null);
   useEffect(() => {
     if (!focusAt) return;
     if (focusAt.pointer === JSON_AT) return setMode("json");
-    const m = /^\/settings\/input_schema\/properties\/([^/]+)(\/default)?/.exec(focusAt.pointer);
+    const m = /^\/settings\/input_schema\/properties\/([^/]+)(?:\/(default|x-dewpoint-picker)(\/connection)?)?/.exec(focusAt.pointer);
     if (m) {
       setMode("fields");
       const name = m[1]!.replaceAll("~1", "/").replaceAll("~0", "~");
-      setDefaultOf(m[2] !== undefined ? name : null);
+      setFocusOf({ name, on: m[2] === "default" ? "default" : m[3] ? "connection" : m[2] ? "picker" : "name", n: focusAt.n });
       setEditing(name);
     }
   }, [focusAt]);
@@ -66,14 +67,14 @@ export function InputSection({ focusAt }: { focusAt: FocusAt }) {
   const add = () => {
     const made = addField(inputOf(doc));
     if (actions.update((d) => setSettings(d, { input_schema: addField(inputOf(d)).schema }), `Added the field ${made.name}.`) === null) {
-      setDefaultOf(null);
+      setFocusOf(null);
       setEditing(made.name);
     }
   };
   return (
     <Section id="triggers-input" title={csv ? "Input · CSV file" : "Input"} note="Saved with the draft · used once published" box={box}>
       {mode !== "json" && <p className="text-small text-muted">Every trigger starts a run with this input. By hand, it&apos;s the run&apos;s form.</p>}
-      <Problems problems={problemsAt(t.check, "/settings/input_schema", true)} />
+      <Problems problems={problemsHere(t, "/settings/input_schema", true)} />
       {heldJson && mode !== "json" && (
         <p className="text-small text-warn-ink">JSON typed here isn&apos;t saved yet: Edit as JSON shows it, with why.</p>
       )}
@@ -105,14 +106,14 @@ export function InputSection({ focusAt }: { focusAt: FocusAt }) {
                 <li key={keyOf(name)} className="flex flex-col gap-2 border-t border-line py-2.5 first:border-t-0">
                   {r.kind === "field" && editing === name ? (
                     <FieldEditor
-                      field={r.field} focusDefault={defaultOf === name}
+                      field={r.field} focusOn={focusOf?.name === name ? focusOf.on : "name"} focusN={focusOf?.name === name ? focusOf.n : 0}
                       onRenamed={(to) => {
                         setKept({ name: to, key: keyOf(name) });
                         setEditing(to);
                       }}
                       onClose={() => {
                         setEditing(null);
-                        setDefaultOf(null);
+                        setFocusOf(null);
                         back(`field:${name}`, "add");
                       }}
                     />
@@ -135,7 +136,7 @@ export function InputSection({ focusAt }: { focusAt: FocusAt }) {
                         <Button
                           size="sm" aria-label={`Edit ${name}`} data-back={`field:${name}`}
                           onClick={() => {
-                            setDefaultOf(null);
+                            setFocusOf(null);
                             setEditing(name);
                           }}
                         >
@@ -144,7 +145,7 @@ export function InputSection({ focusAt }: { focusAt: FocusAt }) {
                       )}
                     </div>
                   )}
-                  {editing !== name && <Problems problems={problemsAt(t.check, pointer)} />}
+                  {editing !== name && <Problems problems={problemsHere(t, pointer)} />}
                   {actions.held("name", pointer) && editing !== name && (
                     <p className="text-small text-warn-ink">A new name typed for it isn&apos;t applied: Edit shows it, with why.</p>
                   )}

@@ -7,7 +7,7 @@ import { Button } from "../../../components/Button";
 import { controlClass } from "../../../components/Field";
 import { STALE, type Holding, type UnappliedKind } from "../../../lib/unapplied";
 import type { Diagnostic, Validation } from "../../../lib/workflows";
-import { useTriggers, type PanelActions } from "./context";
+import { useTriggers, type PanelActions, type Triggers } from "./context";
 
 /** A section of the panel; its heading takes focus when given a ref (where focus lands once what held it is gone), and
  * `box` is the section itself (where `useFocusBack` looks). */
@@ -29,6 +29,15 @@ export function Section({ id, title, note, heading, box, children }: {
 export function problemsAt(check: Validation | null, pointer: string, exact = false): Diagnostic[] {
   return (check?.diagnostics ?? []).filter((d) => d.field !== null && (d.field === pointer || (!exact && d.field.startsWith(`${pointer}/`))));
 }
+
+/** What only publish finds, shown at its field too (the 4f-3 design §5.8): a picker's connection. */
+export const PUBLISH_FOUND = new Set(["picker.connection_unknown", "picker.connection_wrong_type"]);
+
+/** The problems at `pointer` the panel shows: the current check's, and what the last publish found there. */
+export const problemsHere = (t: Triggers, pointer: string, exact = false): Diagnostic[] => [
+  ...problemsAt(t.check, pointer, exact),
+  ...problemsAt({ diagnostics: t.found } as Validation, pointer, exact),
+];
 
 /** Problems shown under what they're about, in the server's words (D18). */
 export function Problems({ problems }: { problems: Diagnostic[] }) {

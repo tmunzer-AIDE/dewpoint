@@ -16,7 +16,7 @@ import { parseNumber } from "../../../lib/unapplied";
 import { FieldFrame } from "../drawer/FieldFrame";
 import { useText } from "../drawer/scalars";
 import { useTriggers } from "./context";
-import { Check, Problems, StaleEdit, Values, heldWhy, problemsAt, writeTyped } from "./parts";
+import { Check, Problems, StaleEdit, Values, heldWhy, problemsHere, writeTyped } from "./parts";
 import { PickerChoice } from "./PickerChoice";
 
 const SENSITIVE = "Kept apart from run history. A sensitive field has no default: it would be written into the workflow.";
@@ -92,16 +92,30 @@ function Default({ field, pointer, disabled, set }: {
   );  // prettier-ignore
 }
 
-export function FieldEditor({ field, focusDefault = false, onClose, onRenamed }: {
-  field: InputField; focusDefault?: boolean; onClose: () => void; onRenamed: (to: string) => void;
+/** Where a field's editor puts focus as it opens: Name, Default, or a picker's control (its Connection when the picker
+ * names its list, else Its choices: the 4f-3 design §5.8). */
+export type FieldFocus = "name" | "default" | "picker" | "connection";
+
+export function FieldEditor({ field, focusOn = "name", focusN = 0, onClose, onRenamed }: {
+  field: InputField; focusOn?: FieldFocus; focusN?: number; onClose: () => void; onRenamed: (to: string) => void;
 }) {  // prettier-ignore
   const t = useTriggers();
   const { actions } = t;
   const disabled = !t.editable;
   const pointer = fieldPointer(field.name);
   const box = useRef<HTMLDivElement>(null);
-  // Its first control takes focus, or its Default when "Go to it" was for the default (4c-3b's final review).
-  useEffect(() => box.current?.querySelector<HTMLElement>(focusDefault ? "[data-default] input, [data-default] select" : "input")?.focus(), []);
+  // Its first control takes focus, or the one a Go to was for (4c-3b's final review; the 4f-3 design §5.8), once for each
+  // Go to (`focusN`), a list still on its way waited for (ruling 111).
+  const focusedFor = useRef<number | null>(null);
+  useEffect(() => {
+    if (focusedFor.current === focusN || !box.current) return;
+    const on = focusOn === "picker" ? (field.picker ? "connection" : "list") : focusOn;
+    const at = { name: "input", default: "[data-default] input, [data-default] select", connection: "[data-focus=connection] select, [data-focus=connection] output", list: "[data-focus=list] select" }[on];  // prettier-ignore
+    const control = box.current.querySelector<HTMLElement>(at) ?? box.current.querySelector<HTMLElement>("input");
+    if (!control || control.dataset.loading !== undefined) return;
+    control.focus();
+    focusedFor.current = focusN;
+  });
   const set = (patch: Partial<InputField>, key: string) =>
     actions.update((d) => setSettings(d, { input_schema: setField(inputOf(d), field.name, patch) }), null, `${pointer}/${key}`);
   // A Choice from a connection chosen without its list and connection, held here against the field as it then read.
@@ -201,7 +215,7 @@ export function FieldEditor({ field, focusDefault = false, onClose, onRenamed }:
       {picking && (
         <PickerChoice
           picker={field.type === "picker" ? (field.picker ?? null) : null} held={held?.list ?? null} label={field.label || field.name} disabled={disabled}
-          problems={problemsAt(t.check, pickerAt)} onChoose={choose}
+          problems={problemsHere(t, pickerAt)} onChoose={choose}
         />
       )}
       <Field label="Description (optional)" value={field.description} disabled={disabled} tall onChange={(e) => write({ description: e.target.value }, "description")} />
@@ -224,7 +238,7 @@ export function FieldEditor({ field, focusDefault = false, onClose, onRenamed }:
           </div>
         </>
       )}
-      <Problems problems={problemsAt(t.check, pointer).filter((d) => !picking || (d.field !== pickerAt && !d.field!.startsWith(`${pickerAt}/`)))} />
+      <Problems problems={problemsHere(t, pointer).filter((d) => !picking || (d.field !== pickerAt && !d.field!.startsWith(`${pickerAt}/`)))} />
       <div className="flex flex-wrap gap-2">
         <Button size="sm" variant="primary" className="max-sm:min-h-[44px]" onClick={() => applyName() && onClose()}>Done</Button>
         {!disabled && (

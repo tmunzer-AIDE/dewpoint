@@ -88,20 +88,22 @@ export function PickerChoice({ picker, held, label, disabled, problems, onChoose
   const error = problems.length > 0 ? problems.map((d) => d.message).join(" ") : undefined;
   return (
     <>
-      <Select
-        label="Its choices" value={field ?? ""} disabled={disabled} hint={complete ? HOLDS : undefined} tall
-        onChange={(e) => {
-          const to = e.target.value;
-          const node = to === "" ? null : nodeOf(to);
-          const kind = connection === null ? undefined : typeOf(connection);
-          const keep = connection !== null && to !== "" && (kind === undefined || (listOf(lists, to)?.credentials.includes(kind) ?? true));
-          onChoose(node === null ? null : { field: to, node }, keep ? connection : null);
-        }}
-      >
-        <option value="">Choose a list</option>
-        {field !== null && entry === undefined && <option value={field}>A list this server doesn&apos;t offer</option>}
-        {lists.map((l) => <option key={l.field} value={l.field}>{l.label}</option>)}
-      </Select>
+      <div data-focus="list" className="flex flex-col">
+        <Select
+          label="Its choices" value={field ?? ""} disabled={disabled} hint={complete ? HOLDS : undefined} tall
+          onChange={(e) => {
+            const to = e.target.value;
+            const node = to === "" ? null : nodeOf(to);
+            const kind = connection === null ? undefined : typeOf(connection);
+            const keep = connection !== null && to !== "" && (kind === undefined || (listOf(lists, to)?.credentials.includes(kind) ?? true));
+            onChoose(node === null ? null : { field: to, node }, keep ? connection : null);
+          }}
+        >
+          <option value="">Choose a list</option>
+          {field !== null && entry === undefined && <option value={field}>A list this server doesn&apos;t offer</option>}
+          {lists.map((l) => <option key={l.field} value={l.field}>{l.label}</option>)}
+        </Select>
+      </div>
       <div data-focus="connection" className="flex flex-col">
         {field === null ? (
           <Select label="Connection" value="" disabled hint={HALF} tall>

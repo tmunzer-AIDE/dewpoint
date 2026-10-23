@@ -2,9 +2,11 @@
 // The draft's problems (outline §2's validate and publish; engine-core §5.10). The server's messages and fixes, as
 // it wrote them: there's no catalogue in the client. A step's problem goes to the step (4b ruling 16). What the check
 // says is dated (ruling 24): "none found" only for a current check. What only publish checks shows apart, marked, and
-// dated against the edits since (ruling 17).
+// dated against the edits since (ruling 17). An input field's problem goes to the field, in Triggers (the 4f-3 design
+// §5.8).
 import { useEffect, useRef } from "react";
 import { Button } from "../../components/Button";
+import { inputFieldOf } from "../../lib/input";
 import type { Diagnostic, Validation } from "../../lib/workflows";
 import type { CheckState } from "./check";
 import { SIDE } from "./side";
@@ -12,7 +14,10 @@ import { SIDE } from "./side";
 /** What only publish found, with the snapshot it was found in: the saved revision, and the editor's generation. */
 export type PublishProblems = { revision: number; generation: number; diagnostics: Diagnostic[] };
 
-function Problem({ d, keyOf, onJump }: { d: Diagnostic; keyOf: (id: string) => string; onJump: (nodeId: string, field: string | null) => void }) {
+type Jump = (nodeId: string | null, field: string | null) => void;
+
+function Problem({ d, keyOf, onJump }: { d: Diagnostic; keyOf: (id: string) => string; onJump: Jump }) {
+  const input = d.node || !d.field ? null : inputFieldOf(d.field);
   return (
     <li className="flex flex-col gap-0.5 border-t border-line py-2.5 text-small first:border-t-0">
       <span className={d.severity === "error" ? "text-danger" : "text-warn-ink"}>
@@ -22,8 +27,13 @@ function Problem({ d, keyOf, onJump }: { d: Diagnostic; keyOf: (id: string) => s
       <span className="flex flex-wrap items-center gap-2">
         <span className="font-mono text-meta text-muted">{d.code}{d.field ? ` · ${d.field}` : ""}</span>
         {d.node && (
-          <Button size="sm" onClick={() => onJump(d.node!, d.field)}>
+          <Button size="sm" onClick={() => onJump(d.node, d.field)}>
             Go to {keyOf(d.node)}
+          </Button>
+        )}
+        {input !== null && (
+          <Button size="sm" onClick={() => onJump(null, d.field)}>
+            Go to {input}
           </Button>
         )}
       </span>
@@ -44,7 +54,7 @@ export function ProblemsPanel({
   state, validation, publishProblems, publishCurrent, keyOf, onJump, onCheck, onClose,
 }: {
   state: CheckState; validation: Validation | null; publishProblems: PublishProblems | null; publishCurrent: boolean;
-  keyOf: (id: string) => string; onJump: (nodeId: string, field: string | null) => void; onCheck: () => void; onClose: () => void;
+  keyOf: (id: string) => string; onJump: Jump; onCheck: () => void; onClose: () => void;
 }) {  // prettier-ignore
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => heading.current?.focus(), []);

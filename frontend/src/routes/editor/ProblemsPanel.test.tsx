@@ -66,3 +66,15 @@ it("says a failed check failed, and checks again when asked", async () => {
   await userEvent.click(screen.getByRole("button", { name: "Check again" }));
   expect(onCheck).toHaveBeenCalled();
 });
+
+it("goes to an input field's problem in Triggers, naming the field, from the check and from publish (the 4f-3 design §5.8)", async () => {
+  const onJump = vi.fn();
+  const at = "/settings/input_schema/properties/site/x-dewpoint-picker";
+  const input = (code: string, field: string) => ({ ...d(code, null, "error"), field });
+  const validation = { ...VALIDATION, diagnostics: [input("picker.invalid", at), input("picker.not_top_level", "/settings/input_schema"), input("handler.unknown", "/settings/failure_handler")] };
+  panel("current", validation, { onJump, publishProblems: { revision: 1, generation: 1, diagnostics: [input("picker.connection_unknown", at)] }, publishCurrent: true });
+  const goes = within(screen.getByRole("complementary", { name: "Problems" })).getAllByRole("button", { name: /^Go to/ });
+  expect(goes.map((b) => b.textContent)).toEqual(["Go to site", "Go to site"]); // none for the schema or the failure handler
+  await userEvent.click(goes[1]!);
+  expect(onJump).toHaveBeenCalledWith(null, at);
+});

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-import { screen, within } from "@testing-library/react";
+import { act, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { GraphDoc } from "../../../lib/workflows";
+import type { Diagnostic, GraphDoc, Validation } from "../../../lib/workflows";
 import { LISTING } from "../../../test/nodeTypes";
 import { MIST } from "../../../test/triggers";
 import { fakeApi, json } from "../drawer/harness";
@@ -26,14 +26,16 @@ const site = (settings: GraphDoc["settings"]) => (settings?.input_schema as { pr
 
 const OPTIONS = "POST /api/v1/t/t1/node-types/acme.site_zones.get@1/options";
 let connections: unknown[];
+let listConnections: () => Response | Promise<Response>;
 let sent: { method: string; path: string; body: unknown }[];
 beforeEach(() => {
   connections = CONNECTIONS;
+  listConnections = () => json(connections);
   sent = fakeApi({
     [OPTIONS]: () => json({ options: [{ value: "8a27c4d0-5e1f-4b6a-9c2d-3f4e5a6b7c8d", label: "Lyon DC" }, { value: "s2", label: "Lyon store 4" }] }),
     "GET /api/v1/trigger-types": () => json([MIST]),
     "GET /api/v1/node-types": () => json(LISTING),
-    "GET /api/v1/t/t1/connections": () => json(connections),
+    "GET /api/v1/t/t1/connections": () => listConnections(),
     "GET /api/v1/t/t1/workflows/w1/schedules": () => json({ schedules: [] }),
     "GET /api/v1/t/t1/workflows/w1/webhook-bindings": () => json({ bindings: [] }),
   });
@@ -194,5 +196,40 @@ describe("a field's editor below 640 px (the 4f-3 design §5.10; the Narrow320 b
     await userEvent.click(within(band).getByRole("button", { name: "Done" }));
     await userEvent.click(within(input()).getByRole("button", { name: "Edit floor" }));
     tall(within(within(input()).getByRole("group", { name: "The field floor" })).getByRole("textbox", { name: "Default" }));
+  });
+});
+
+describe("a Choice from a connection's problems (the 4f-3 design §5.8; the Authoring board)", () => {
+  const at = "/settings/input_schema/properties/site/x-dewpoint-picker";
+  const problem = (code: string, message: string): Diagnostic => ({ code, severity: "error", message, fix: null, node: null, field: at });
+  const checked = (diagnostics: Diagnostic[]): Validation => ({
+    draft_revision: 1, valid: false, diagnostics, expressions: [], taint: { sites: [], declassified: [] }, conditional_steps: [], schedule_breaks: [],
+  });  // prettier-ignore
+  const describedBy = (el: HTMLElement) => (el.getAttribute("aria-describedby") ?? "").split(" ").map((id) => document.getElementById(id)?.textContent).join(" ");
+
+  it("opens at Connection on Go to a picker's problem, once its list has loaded, the problem under it", async () => {
+    let answer: () => void = () => undefined;
+    listConnections = () => new Promise<Response>((resolve) => (answer = () => resolve(json(CONNECTIONS))));
+    const check = checked([problem("picker.invalid", "A picker needs its connection.")]);
+    await showPanel({ doc: draft({ "x-dewpoint-picker": { node: "acme.site_zones.get@1", field: "site_id" } }), check, focusAt: { pointer: at, n: 1 } });
+    await within(field()).findByText("Loading connections…");
+    await act(() => Promise.resolve(answer()));
+    await vi.waitFor(() => expect(document.activeElement).toBe(select("Connection")));
+    expect(select("Connection").getAttribute("aria-invalid")).toBe("true");
+    expect(describedBy(select("Connection"))).toContain("A picker needs its connection.");
+  });
+
+  it("opens at Connection on Go to its connection's own pointer too", async () => {
+    await showPanel({ doc: draft({ "x-dewpoint-picker": PICKER }), focusAt: { pointer: `${at}/connection`, n: 1 } });
+    await vi.waitFor(() => expect(document.activeElement).toBe(select("Connection")));
+  });
+
+  it("shows what publish found under the field's row and its Connection, never twice (the 4f-3 design §5.8)", async () => {
+    const found = [problem("picker.connection_unknown", "No connection of this tenant has that id: a picker lists options through one.")];
+    await showPanel({ doc: draft({ "x-dewpoint-picker": PICKER }), found });
+    expect(within(input()).getAllByRole("listitem")[0]!.textContent).toContain("No connection of this tenant has that id");
+    await userEvent.click(within(input()).getByRole("button", { name: "Edit site" }));
+    expect(select("Connection").getAttribute("aria-invalid")).toBe("true");
+    expect(within(field()).getAllByText(/No connection of this tenant has that id/)).toHaveLength(1);
   });
 });

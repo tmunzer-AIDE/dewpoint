@@ -5,7 +5,7 @@
 // rows the API writes at once, outside undo: `manage` is whether this person may (trigger.manage, editor and above).
 import { createContext, useContext } from "react";
 import type { Holding, Unapplied, UnappliedKind } from "../../../lib/unapplied";
-import type { GraphDoc, Validation } from "../../../lib/workflows";
+import type { Diagnostic, GraphDoc, Validation } from "../../../lib/workflows";
 
 export interface PanelActions {
   /** Writes what `make` makes of the editor's latest draft (edits sharing a `mark` are one undo step); why it wasn't
@@ -36,6 +36,7 @@ export interface Triggers {
   activeNumber: number | null;
   activeVersionId: string | null;
   check: Validation | null; // the current check of the saved draft, or null: its problems show at their fields
+  found: Diagnostic[]; // what the last publish found that the check doesn't (a picker's connection), while it's current
   actions: PanelActions;
 }
 

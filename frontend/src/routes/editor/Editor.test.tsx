@@ -10,7 +10,7 @@ import { onAnnounce } from "../../lib/announce";
 import { cancelLeaving, mayLeave } from "../../lib/leaving";
 import type { CanvasProps } from "./Canvas";
 import { EditorPage } from "./Editor";
-import { DELAY, IF, LOOP, REMOTE, SWITCH, TRANSFORM, typeWith } from "../../test/nodeTypes";
+import { DELAY, IF, LISTING, LOOP, REMOTE, SWITCH, TRANSFORM, typeWith } from "../../test/nodeTypes";
 import { formula } from "../../lib/config";
 import { STALE } from "../../lib/unapplied";
 import { SCHEDULE } from "../../test/triggers";
@@ -62,6 +62,7 @@ const TYPES = [{
   ref: "flow.transform@1", type: "flow.transform", version: 1, kind: "control", state: "active", title: "Transform",
   description: "", ports: ["out"], dynamic_ports: null, config_schema: {}, output_schema: {}, side_effect: "none",
   credentials: [], capabilities: [], retry: { max_attempts: 3, initial_interval_s: 1, backoff: 2, max_interval_s: 60, non_retryable: [] }, timeout_s: 60,
+  options: [],
 }];  // prettier-ignore
 /** A draft of transform steps with these keys, one under the other. */
 const draftWith = (...keys: string[]): GraphDoc => ({
@@ -2520,4 +2521,25 @@ describe("Start a run from the editor", () => {
     await screen.findByRole("button", { name: "Versions" });
     expect(screen.queryByRole("button", { name: "Start a run…" })).toBeNull();
   });
+});
+
+it("goes to an input field's problem: Triggers opens at the field, on its Connection once it has loaded (the 4f-3 design §5.8)", async () => {
+  let answer: () => void = () => undefined;
+  const prod = { id: "c1", name: "Acme Prod", type: "acme", status: "ok", revision: 1, config: {}, secret_set: true, status_detail: "", privilege: null, last_verified_at: null };
+  const at = "/settings/input_schema/properties/site/x-dewpoint-picker";
+  answers.set("GET /api/v1/t/t1/connections", () => new Promise<Response>((resolve) => (answer = () => resolve(json([prod])))));
+  answers.set("GET /api/v1/node-types", () => json([...TYPES, ...LISTING]));
+  const input_schema = { type: "object", properties: { site: { type: "string", title: "Site", "x-dewpoint-picker": { node: "acme.site_zones.get@1", field: "site_id" } } } };
+  answers.set(`GET ${BASE}`, () => json({ ...WORKFLOW, draft: { ...draftWith(), settings: { input_schema } } }));
+  answers.set(`POST ${BASE}/validate`, () =>
+    json({ ...valid(1), valid: false, diagnostics: [{ code: "picker.invalid", node: null, field: at, fix: null, severity: "error", message: "A picker needs its connection." }] }),
+  );
+  await show();
+  await userEvent.click(await screen.findByRole("button", { name: "Problems · 1" }, { timeout: 3000 }));
+  await userEvent.click(within(screen.getByRole("complementary", { name: "Problems" })).getByRole("button", { name: "Go to site" }));
+  const triggers = await screen.findByRole("complementary", { name: "Triggers" });
+  const site = within(triggers).getByRole("group", { name: "The field site" });
+  await within(site).findByText("Loading connections…");
+  await act(() => Promise.resolve(answer()));
+  await vi.waitFor(() => expect(document.activeElement).toBe(within(site).getByRole("combobox", { name: "Connection" })));
 });
