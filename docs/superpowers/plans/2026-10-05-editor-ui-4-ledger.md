@@ -4419,3 +4419,23 @@ What the reviewer set aside, each ruled as it stands: an older server refuses a 
 the run page, the Problems panel, Simulate's raw JSON, plugin manifests and step maps (ruling 406); no Move control (the
 owner's); a held JSON edit's base compared key-order sensitive (as before, and safe); a removal of a field that isn't
 there writing the list (unreachable).
+
+### F3 merged; the F4 plan accepted (2026-10-23)
+
+The owner merged F3 as #150 (squash 1ebd2055), every check green ("green and merged"), after #149 (the backend job's
+timeout and image pulls, 82f0d89c). F4 is #144 items 1–3 and #146: the owner ruled the start forms' three new
+failure lines (no answer, Mist too slow, a role that can't list), the field's editor's own endings, and had no
+preference on §5.8's Go to for a problem about a picker's list (the plan's ruling 6 takes Its choices).
+
+`docs/superpowers/plans/2026-10-23-editor-f4-pickers.md`, revision 1. The owner accepted it: its rulings 1–9 join this
+ledger as 409–417. Frontend only: no API, schema, migration or engine change. Mid-slice rulings start at M118.
+
+409. **Accepted. No milestone pause** (plan ruling 1).
+410. **Accepted. The forms' failure words, three new lines** (plan ruling 2; the owner's ruling).
+411. **Accepted. The field's editor's own endings** (plan ruling 3; the owner's ruling).
+412. **Accepted. Simulate lists once the tenant's connections are read** (plan ruling 4).
+413. **Accepted. A schedule's picks go with the version they came from** (plan ruling 5).
+414. **Accepted. Go to a problem about a picker's list lands on Its choices** (plan ruling 6; amends the 4f-3 design §5.8).
+415. **Accepted. Connection's loading and failed states, named; the failed one takes Go to** (plan ruling 7).
+416. **Accepted. A kept connection's kind; Show choices read only** (plan ruling 8).
+417. **Accepted. The tests, and the checks** (plan ruling 9).
