@@ -4318,3 +4318,28 @@ change. Mid-slice rulings start at M116.
 398. **Accepted. The 4f-3a review's tests** (plan ruling 5).
 399. **Accepted. The spec's count of node types, on its own branch** (plan ruling 6; the owner's ruling).
 400. **Accepted. The checks** (plan ruling 7).
+
+### F2, the final checkpoint (2026-10-23)
+
+The owner accepted the plan and chose inline execution ("approved, inline"), with no milestone pause; the branch from
+origin/main e33bb6ad.
+- Task 1 (c7df99ef): the plan's acceptance, rulings 394–400.
+- Task 2 (e14066f8): a picker's ref read only when a registry row can hold it. Red: 2 failed, each a 500. Green: 2
+  passed; the module, 12.
+- Task 3 (5c5bb4ca): export refuses a picker's name too long to carry its connection. Red: the backend's 1 failed and 2
+  passed; the frontend's 3 failed and 189 passed. Green: 3 passed; 192 passed.
+- Task 4 (6212a7a5): import takes a picker's `connection: null` as none. Red: 4 failed (`embedded_value`). Green: 4
+  passed; both portable modules, 79.
+- Task 5 (49646411): the 4f-3a review's tests: 6 passed, as the plan says.
+- Task 6 (21bea7cf, on the local branch `docs/editor-ui-4f3-spec`): the spec's count of node types.
+- Task 7, every check on 49646411, whose tree is the prototype's (9f849452): the touched backend modules, 783 passed;
+  ruff, its format check, mypy and the import contracts silent; the whole frontend suite, 1,686 passed in 121 files;
+  the type check and ESLint silent; CodeQL (CLI 2.27.2; python-queries 1.8.13, javascript-queries 2.4.8): no finding.
+
+Mid-slice ruling:
+
+M116. **Packages borrowed, nothing installed.** The frontend's `node_modules` linked from the 4d-1b worktree (main's
+lockfile), its tools run from `node_modules/.bin`; the backend on that worktree's venv (its lock differs from main's
+only by certifi). Cost: none.
+
+Nothing pushed. Next: the final review.
