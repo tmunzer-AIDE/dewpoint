@@ -35,3 +35,13 @@ it("says when a workflow holds a sensitive value written into it, never the valu
   expect(notPortable(problems)).toBe("it has a sensitive value written into a step");
   expect(notPortable(problems, () => "send")).toBe("it has a sensitive value written into a step (send)");
 });
+
+it("names a start form's field for a picker's site, the failure handler for the settings' other (the 4f-3 design §5.9)", () => {
+  const problems = [
+    { reason: "unexpected_value", binding: null, node: null, field: "/settings/input_schema/properties/site/x-dewpoint-picker/connection" },
+    { reason: "unexpected_value", binding: null, node: null, field: "/settings/failure_handler" },
+  ];
+  expect(notPortable(problems, (id) => id)).toBe(
+    "it has something other than an id where a connection or workflow goes (the start form's field site, the failure handler)",
+  );
+});

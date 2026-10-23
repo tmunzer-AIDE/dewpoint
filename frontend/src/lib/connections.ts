@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // A tenant's connections, as the step drawer's pickers, a start form's picker fields and a picker field's editor read
 // them (4c-1; the 4f-3 design §5.2, §5.7): one query, under Connections' own key, so each page sees the other's
-// changes; and a connection's status in words.
+// changes; a connection's status in words; and the types the plugins declare, each said by its label (4f-1).
 import { queryOptions } from "@tanstack/react-query";
 import { client, ok, type Schemas } from "./client";
 
@@ -11,6 +11,10 @@ export const CONNECTION_STATUS: Record<Schemas["ConnectionOut"]["status"], strin
   unverified: "not verified yet",
   error: "failed its last check",
 };
+
+/** The connection types the plugins declare, under Connections' own key: a type is said by its label (4f-1). */
+export const connectionTypesQuery = () =>
+  queryOptions({ queryKey: ["connection-types"], queryFn: () => ok(client.GET("/api/v1/connection-types")) });
 
 /** The tenant's connections, under Connections' own key: each page sees the other's changes. */
 export const connectionsQuery = (tenantId: string) =>

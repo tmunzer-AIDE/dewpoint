@@ -21,12 +21,14 @@ const CONNECTIONS = [
 let sent: { method: string; path: string; body: unknown }[];
 let answer: { status: number; body: unknown };
 let connectionsAnswer: () => Response;
+let typesAnswer: () => Response;
 let client: QueryClient;
 
 beforeEach(() => {
   sent = [];
   answer = { status: 201, body: { id: "w9", name: "Nightly report" } };
   connectionsAnswer = () => new Response(JSON.stringify(CONNECTIONS));
+  typesAnswer = () => new Response("[]");
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const request = input as Request;
     const path = new URL(request.url).pathname;
@@ -34,6 +36,7 @@ beforeEach(() => {
     sent.push({ method: request.method, path, body: text ? JSON.parse(text) : null });
     if (request.method === "POST") return new Response(JSON.stringify(answer.body), { status: answer.status });
     if (path.endsWith("/connections")) return connectionsAnswer();
+    if (path.endsWith("/connection-types")) return typesAnswer();
     return new Response("[]");
   });
 });
@@ -354,4 +357,22 @@ describe("what starts it (4c-3b)", () => {
     await vi.waitFor(() => expect(screen.getByRole<HTMLInputElement>("radio", { name: /^A Mist webhook/ }).disabled).toBe(true));
     expect(screen.getByRole("dialog").textContent).toContain("No endpoint for it yet: Settings › Webhook endpoints makes one.");
   });
+});
+
+it("says where each binding is, a start form's field among them, and names its type by its label (the 4f-3 design §5.9)", async () => {
+  typesAnswer = () => new Response(JSON.stringify([{ key: "mist", label: "Juniper Mist" }]));
+  const picker = (name: string) => ({ node: null, field: `/settings/input_schema/properties/${name}/x-dewpoint-picker/connection` });
+  const doc = {
+    ...DOC,
+    bindings: [
+      { ...DOC.bindings[0]!, sites: [{ node: "n1", field: "/connection" }, picker("site")] },
+      { id: "b2", kind: "connection", type: "mist", label: "Acme Lab", sites: [picker("site"), picker("wlan")] },
+    ],
+  };
+  await show();
+  await userEvent.click(screen.getByRole("radio", { name: /Import from file/ }));
+  await userEvent.upload(screen.getByLabelText("Workflow file"), new File([JSON.stringify(doc)], "n.json", { type: "application/json" }));
+  const hint = (el: HTMLElement) => document.getElementById(el.getAttribute("aria-describedby")!)!.textContent;
+  expect(hint(await screen.findByLabelText("Acme Prod (Juniper Mist connection)"))).toBe("1 place in the graph and the start form's field site");
+  expect(hint(screen.getByLabelText("Acme Lab (Juniper Mist connection)"))).toBe("The start form's fields site and wlan");
 });

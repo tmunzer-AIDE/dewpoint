@@ -1,21 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Choosing what a step uses from the tenant's own (4c-1, rulings 12 and 13): a connection of the field's type, its
 // status in words, or another workflow. A value naming nothing here is said to, until it's changed.
-import { queryOptions, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 import { Button } from "../../../components/Button";
 import { controlClass } from "../../../components/Field";
-import { client, ok } from "../../../lib/client";
-import { CONNECTION_STATUS, connectionsQuery } from "../../../lib/connections";
+import { CONNECTION_STATUS, connectionTypesQuery, connectionsQuery } from "../../../lib/connections";
 import { sameId } from "../../../lib/graph";
 import { workflowsQuery } from "../../../lib/workflows";
 import { useDrawer } from "./context";
 import type { ControlProps } from "./scalars";
-
-/** The connection types the plugins declare, under Connections' own key: a type is said by its label (4f-1). */
-export const connectionTypesQuery = () =>
-  queryOptions({ queryKey: ["connection-types"], queryFn: () => ok(client.GET("/api/v1/connection-types")) });
 
 /** What a picker says in place of its list (loading, failed, nothing to choose): an `<output>` with the field's control
  * id, so the field's label names it (#73), as the drawer shows a value it doesn't edit. A list on its way is marked, so

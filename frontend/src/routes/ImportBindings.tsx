@@ -2,11 +2,15 @@
 // Each id a workflow file names (a connection, a workflow) bound to one of this tenant's, or left unbound (B12; 4b
 // ruling 18). A connection binding offers only connections of its type. Leaving one unbound is a choice the person
 // makes, from what was read (ruling 28): each binding starts at "Choose…", the import waits for every one, and while
-// this tenant's connections and workflows are loading, or when they couldn't be read, no choice is offered.
+// this tenant's connections and workflows are loading, or when they couldn't be read, no choice is offered. Each says
+// where it is, a start form's field by its name (the 4f-3 design §5.9), and a connection's type by its label (ruling
+// 335; its key until the types are read).
 import { useQuery } from "@tanstack/react-query";
 import { Button } from "../components/Button";
 import { Select } from "../components/Field";
 import { client, ok } from "../lib/client";
+import { connectionTypesQuery } from "../lib/connections";
+import { inputFieldOf } from "../lib/input";
 import { workflowsQuery, type WorkflowDocument } from "../lib/workflows";
 
 /** Each binding's choice: one of this tenant's ids, or UNBOUND. A binding without one hasn't been chosen. */
@@ -44,6 +48,17 @@ export function useBindingChoices(tenantId: string, bindings: WorkflowDocument["
   };
 }
 
+const and = (items: string[]) => (items.length < 2 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)!}`);
+
+/** Where a binding's id is: places in the graph, and the start form's fields whose picker names it. */
+function placesOf(sites: WorkflowDocument["bindings"][number]["sites"]): string {
+  const fields = [...new Set(sites.flatMap((s) => (s.node === null ? (inputFieldOf(s.field) ?? []) : [])))];
+  const graph = sites.length - sites.filter((s) => s.node === null && inputFieldOf(s.field) !== null).length;
+  const form = fields.length === 0 ? null : `the start form's field${fields.length === 1 ? "" : "s"} ${and(fields)}`;
+  if (graph === 0 && form) return `${form[0]!.toUpperCase()}${form.slice(1)}`;
+  return `${graph} place${graph === 1 ? "" : "s"} in the graph${form ? ` and ${form}` : ""}`;
+}
+
 export function ImportBindings({
   bindings,
   choices,
@@ -55,6 +70,8 @@ export function ImportBindings({
   chosen: Chosen;
   onChange: (chosen: Chosen) => void;
 }) {
+  const types = useQuery({ ...connectionTypesQuery(), enabled: bindings.some((b) => b.kind === "connection") });
+  const typeOf = (key: string | null) => types.data?.find((t) => t.key === key)?.label ?? key;
   if (bindings.length === 0) return <p className="text-small text-muted">The file names no connection or workflow.</p>;
   if (choices.state === "loading") {
     return <p className="text-small text-muted">Reading this tenant&apos;s connections and workflows…</p>;
@@ -75,13 +92,12 @@ export function ImportBindings({
           b.kind === "connection"
             ? choices.connections.filter((c) => c.type === b.type)
             : choices.workflows;
-        const places = `${b.sites.length} place${b.sites.length === 1 ? "" : "s"} in the graph`;
-        const none = b.kind === "connection" ? `No ${b.type} connection in this tenant: choose Leave unbound.` : "No workflow in this tenant: choose Leave unbound.";
+        const none = b.kind === "connection" ? `No ${typeOf(b.type)} connection in this tenant: choose Leave unbound.` : "No workflow in this tenant: choose Leave unbound.";
         return (
           <Select
             key={b.id}
-            label={`${b.label} (${b.kind === "connection" ? `${b.type} connection` : "workflow"})`}
-            hint={options.length === 0 ? none : places}
+            label={`${b.label} (${b.kind === "connection" ? `${typeOf(b.type)} connection` : "workflow"})`}
+            hint={options.length === 0 ? none : placesOf(b.sites)}
             value={chosen[b.id] ?? ""}
             onChange={(e) => onChange({ ...chosen, [b.id]: e.target.value })}
           >

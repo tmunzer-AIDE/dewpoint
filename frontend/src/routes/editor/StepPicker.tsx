@@ -12,7 +12,7 @@ import { PALETTE_GROUP, PALETTE_ITEM } from "../../components/CommandPalette";
 import { continuationPort, type PortRef } from "../../lib/graph";
 import { actionWords, groupMatches, grouped, stepMatches, type StepGroup } from "../../lib/stepGroups";
 import type { GraphEdge, NodeType } from "../../lib/workflows";
-import { connectionTypesQuery } from "./drawer/pickers";
+import { connectionTypesQuery } from "../../lib/connections";
 
 export type PickMode = { kind: "after"; from: PortRef | null } | { kind: "insert"; edge: GraphEdge } | { kind: "before"; entry: string };
 
