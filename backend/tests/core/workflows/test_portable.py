@@ -301,6 +301,33 @@ def test_a_pickers_site_escapes_its_fields_name() -> None:
     assert picker_of(bound, "a/b~c")["connection"] == OTHER
 
 
+def site_of(name: str) -> str:
+    return f"/settings/input_schema/properties/{name}/x-dewpoint-picker/connection"
+
+
+def test_a_pickers_name_too_long_to_carry_its_connection_refuses_the_export() -> None:
+    """#142 item 1, ruled: a site's field holds 200 characters, so a picker's name 137 (each `~` or `/` twice, escaped);
+    past that its connection can't travel, and leaving it behind would pass unseen: the export is refused."""
+    doc = portable.export_document("Nightly", picked(name="n" * 137), PICKER_SCHEMAS, LABELS)
+    assert doc["bindings"][0]["sites"][1] == {"node": None, "field": site_of("n" * 137)}
+    for name, field in (("n" * 138, site_of("n" * 138)), ("a/" * 46, site_of("a~1" * 46))):
+        with pytest.raises(portable.NotPortableError) as e:
+            portable.export_document("Nightly", picked(name=name), PICKER_SCHEMAS, LABELS)
+        assert [(p.reason, p.node, p.field) for p in e.value.problems] == [("name_too_long", None, field)]
+
+
+def test_a_long_named_picker_that_isnt_a_site_leaves_its_connection_behind() -> None:
+    """Not a site whatever its name's length (ruling 85): nothing a binding could carry, so nothing to refuse."""
+    doc = portable.export_document("Nightly", picked(node="acme.unknown@1", name="n" * 138), PICKER_SCHEMAS, LABELS)
+    assert picker_of(doc["graph"], "n" * 138) == {"node": "acme.unknown@1", "field": "site_id"}
+
+
+def test_a_pickers_long_name_without_a_connection_exports() -> None:
+    """Nothing to leave behind: it travels as it is, waiting for its connection."""
+    doc = portable.export_document("Nightly", picked(connection=None, name="n" * 138), PICKER_SCHEMAS, LABELS)
+    assert picker_of(doc["graph"], "n" * 138) == {"node": PICK, "field": "site_id"}
+
+
 def test_a_pickers_node_past_the_registrys_integer_isnt_looked_up() -> None:
     """The final review's M5: its node type can't be held; its connection is left behind, as any picker's not a site."""
     graph = picked(node="acme.sites@99999999999")

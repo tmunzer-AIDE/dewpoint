@@ -31,7 +31,7 @@ import {
   type Unapplied, type UnappliedKind,
 } from "../../lib/unapplied";  // prettier-ignore
 import {
-  canEdit, canPublish, nodeTypesQuery, notPortable, tenantQuery, versionsQuery, workflowQuery, workflowsQuery, type Diagnostic,
+  canEdit, canPublish, nodeTypesQuery, notPortable, portableHint, tenantQuery, versionsQuery, workflowQuery, workflowsQuery, type Diagnostic,
   type GraphDoc, type GraphEdge, type GraphNode, type NodeType, type PortableProblem, type VersionDetail, type VersionRow,
   type WorkflowDetail,
 } from "../../lib/workflows";  // prettier-ignore
@@ -750,9 +750,11 @@ function Editor({
       downloadJson(fileName(workflow.name, ".dewpoint.json"), await ok(client.GET("/api/v1/t/{tenant_id}/workflows/{workflow_id}/export", path)));
     } catch (e) {
       if (e instanceof ApiError && e.code === "not_portable") {
+        const problems = (e.body as { problems: PortableProblem[] }).problems;
+        const hint = portableHint(problems);
         setNotice({
           tone: "danger",
-          text: `Not exported: ${notPortable((e.body as { problems: PortableProblem[] }).problems, keyOf)}, so it can't be exported as a portable file.`,
+          text: `Not exported: ${notPortable(problems, keyOf)}, so it can't be exported as a portable file.${hint ? ` ${hint}` : ""}`,
           action: { label: "Download this draft as it is (not portable)", run: () => downloadJson(fileName(workflow.name, ".draft.json"), doc) },
         });
         return;

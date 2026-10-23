@@ -20,7 +20,7 @@ import { canStart, startable } from "../lib/runForm";
 import { RUN_STATUS, type Tone } from "../lib/runStatus";
 import { useDocumentTitle } from "../lib/title";
 import { attentionWords, triggerColumn } from "../lib/triggers";
-import { canEdit, canPublish, notPortable, since, tenantQuery, workflowsQuery, type PortableProblem, type WorkflowRow } from "../lib/workflows";
+import { canEdit, canPublish, notPortable, portableHint, since, tenantQuery, workflowsQuery, type PortableProblem, type WorkflowRow } from "../lib/workflows";
 import { NewWorkflow } from "./NewWorkflow";
 import { useLand } from "./runs/landing";
 import { LazyRunForm } from "./runs/LazyRuns";
@@ -128,7 +128,8 @@ export function WorkflowsPage({ tenantId, startNew = false }: { tenantId: string
     } catch (e) {
       if (e instanceof ApiError && e.code === "not_portable") {
         const problems = (e.body as { problems: PortableProblem[] }).problems;
-        setError(`${w.name} can't be exported as a portable file: ${notPortable(problems)}. Open it to download the draft as it is.`);
+        const hint = portableHint(problems);
+        setError(`${w.name} can't be exported as a portable file: ${notPortable(problems)}.${hint ? ` ${hint}` : ""} Open it to download the draft as it is.`);
         return;
       }
       setError(`${w.name} couldn't be exported. Try again.`);

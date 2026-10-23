@@ -8,8 +8,9 @@ and CSV mappings are rows, not graph: they don't travel.
 
 A start form's picker (editor 4f-3, the start-form pickers design §4.5) is a connection site in the workflow's settings,
 its type its node type's connection field's: a step on the same connection shares its binding. A picker that isn't one
-(a node this server doesn't hold, a connection that isn't an id) leaves its connection behind; a file holding a
-picker's connection is refused, whatever it names."""
+(a node this server doesn't hold, a connection that isn't an id) leaves its connection behind; one whose name is too
+long for a site's field to hold refuses the export (#142); a file holding a picker's connection is refused, whatever it
+names."""
 
 import copy
 import uuid
@@ -121,7 +122,7 @@ def _pointer(name: str) -> str:
 
 def _picker_site(name: str, picker: Mapping[str, Any], config_schemas: Mapping[str, Mapping[str, Any]]) -> Site | None:
     """A picker's connection as a site: its node one this server holds, by its schema's connection field's type; its
-    field named; its connection none yet, or an id. None otherwise."""
+    field named; its connection none yet, or an id. None otherwise. Its field may pass FIELD_MAX: see `sites`."""
     node, connection = picker.get("node"), picker.get("connection")
     schema = config_schemas.get(node) if isinstance(node, str) else None
     if schema is None or not isinstance(picker.get("field"), str):
@@ -131,13 +132,18 @@ def _picker_site(name: str, picker: Mapping[str, Any], config_schemas: Mapping[s
     field = _pointer(name)
     kinds = [s[CONNECTION_MARKER] for s in (schema.get("properties") or {}).values()
              if isinstance(s, Mapping) and isinstance(s.get(CONNECTION_MARKER), str)]  # fmt: skip
-    return Site("connection", kinds[0], None, field, name) if kinds and len(field) <= FIELD_MAX else None
+    return Site("connection", kinds[0], None, field, name) if kinds else None
+
+
+def _picker_sites(graph: Mapping[str, Any], config_schemas: Mapping[str, Mapping[str, Any]]) -> list[Site]:
+    return [s for name, picker in _pickers(graph) if (s := _picker_site(name, picker, config_schemas)) is not None]
 
 
 def sites(graph: Mapping[str, Any], config_schemas: Mapping[str, Mapping[str, Any]]) -> list[Site]:
     """Every place a graph may hold an id of the tenant's, by its steps' schemas: each top-level config property a type
     marks as a connection, each `flow.run_workflow`'s `workflow_id`, the failure handler, and each picker's connection
-    (`config_schemas` holding its node's). Only for a graph in which `_shape` finds nothing."""
+    (`config_schemas` holding its node's) whose field a binding's site can hold. Only for a graph in which `_shape`
+    finds nothing."""
     out: list[Site] = []
     for node in _nodes(graph):
         ref, node_id = str(node.get("type")), str(node.get("id"))
@@ -147,7 +153,7 @@ def sites(graph: Mapping[str, Any], config_schemas: Mapping[str, Mapping[str, An
         if ref == RUN_WORKFLOW:
             out.append(Site("workflow", None, node_id, "/workflow_id"))
     out.append(Site("workflow", None, None, FAILURE_HANDLER))
-    out += [s for name, picker in _pickers(graph) if (s := _picker_site(name, picker, config_schemas)) is not None]
+    out += [s for s in _picker_sites(graph, config_schemas) if len(s.field) <= FIELD_MAX]
     return out
 
 
@@ -196,7 +202,8 @@ def _canonical(value: Any) -> str | None:
 
 def held(draft: Mapping[str, Any], config_schemas: Mapping[str, Mapping[str, Any]]) -> list[tuple[Site, str]]:
     """Each site holding an id, with that id, canonical. NotPortableError when the draft can't be made portable for
-    certain: what `_shape` finds, or a site holding anything but an id."""
+    certain: what `_shape` finds, a site holding anything but an id, or a picker holding one under a name too long for
+    a site's field."""
     problems = _shape(draft, config_schemas)
     if problems:
         raise NotPortableError(problems)
@@ -210,6 +217,11 @@ def held(draft: Mapping[str, Any], config_schemas: Mapping[str, Mapping[str, Any
             problems.append(Problem("unexpected_value", node=site.node, field=site.field))
         else:
             out.append((site, canonical))
+    problems += [
+        Problem("name_too_long", field=s.field)
+        for s in _picker_sites(draft, config_schemas)
+        if len(s.field) > FIELD_MAX and value_at(draft, s) is not None
+    ]
     if problems:
         raise NotPortableError(problems)
     return out
