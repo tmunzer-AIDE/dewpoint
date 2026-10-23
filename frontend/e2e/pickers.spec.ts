@@ -107,7 +107,7 @@ test("at 320 px every target of the run form is 44 px, a choice's name over its 
   for (const target of [
     site, form.getByLabel(/^Change ticket/), form.getByRole("button", { name: "Show choices: Site ID" }), form.getByRole("button", { name: "Edit as JSON" }),
     form.getByRole("button", { name: "Start the live run" }), form.getByRole("button", { name: "Cancel" }), form.getByRole("button", { name: "Close" }),
-    form.locator("label").filter({ has: form.getByRole("radio", { name: "Live" }) }), ...(await form.getByRole("option").all()),
+    form.locator("label").filter({ has: page.getByRole("radio", { name: "Live" }) }), ...(await form.getByRole("option").all()),
   ]) await tall(target);  // prettier-ignore
   const row = form.getByRole("option", { name: /^Lyon DC/ });
   const [name, id] = [(await row.getByText("Lyon DC", { exact: true }).boundingBox())!, (await row.getByText("8a27c4d0…").boundingBox())!];
