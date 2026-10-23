@@ -111,6 +111,32 @@ export const GROUPED = [
   inGroup("acme.site_settings.update@1", "Update site settings", "Site settings"),
 ];
 
+/** A made-up plugin's options fields with their lists' words (4f-3a: `x-list`), as Mist's are: the steps a start-form
+ * picker may name (the 4f-3 design §5.7). */
+const listing = (ref: string, field: string, list: { plugin: string; title: string; noun: string } | null, more: Partial<NodeType> = {}, extra: string[] = []) =>
+  typeWith(
+    {
+      type: "object", additionalProperties: false, required: ["connection", field, ...extra],
+      properties: {
+        connection: { type: "string", format: "uuid", title: "Connection", "x-dewpoint-literal": true, "x-dewpoint-connection": "acme" },
+        [field]: { type: "string", title: "ID", "x-dewpoint-options": true, ...(list ? { "x-list": list } : {}) },
+        ...Object.fromEntries(extra.map((k) => [k, { type: "string" }])),
+      },
+    },
+    { ref, type: ref.split("@")[0], title: ref, options: [field], credentials: ["acme"], side_effect: "none", ...more },
+  );  // prettier-ignore
+const SITES = { plugin: "Acme", title: "Org sites", noun: "sites" };
+export const LISTING = [
+  listing("acme.site_stats.get@1", "site_id", SITES, {}, ["duration"]),
+  listing("acme.site_settings.update@1", "site_id", SITES, { side_effect: "idempotent" }),
+  listing("acme.sites.get@1", "site_id", SITES),
+  listing("acme.site_zones.get@1", "site_id", SITES),
+  listing("acme.org_wlans.get@1", "wlan_id", { plugin: "Acme", title: "Org WLANs", noun: "WLANs" }),
+  listing("acme.org_psks.list@1", "psk_id", { plugin: "Acme", title: "Org PSKs", noun: "PSKs" }, {}, ["limit"]),
+  listing("acme.old_maps.get@1", "map_id", { plugin: "Acme", title: "Old maps", noun: "maps" }, { state: "deprecated" }),
+  listing("acme.devices.get@1", "device_id", null),
+];
+
 const MESSAGE_DEFS = {
   MessageField: {
     type: "object", additionalProperties: false, title: "MessageField", required: ["label", "value"],

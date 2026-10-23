@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { DEVICE_EVENTS, MIST } from "../test/triggers";
 import {
-  addField, inputOf, inputRows, nameProblem, removeField, renameField, sameSchema, setField, setSettings, shapeRows, topicShaped,
+  addField, inputFieldOf, inputOf, inputRows, nameProblem, removeField, renameField, sameSchema, setField, setSettings, shapeRows, topicShaped,
 } from "./input";  // prettier-ignore
 import type { GraphDoc } from "./workflows";
 
@@ -116,5 +116,46 @@ describe("a Mist event's shape", () => {
     ]);
     expect(more).toBe(true);
     expect(shapeRows(DEVICE_EVENTS, "device-events").rows.at(-1)).toEqual({ path: "[ ].timestamp", what: "number", optional: false });
+  });
+});
+
+describe("a choice from a connection (the 4f-3 design §5.7)", () => {
+  const C1 = "00000000-0000-4000-8000-0000000000c1";
+  const PICKER = { node: "acme.sites.get@1", field: "site_id", connection: C1 };
+  const picked = (prop: Record<string, unknown>) => ({ type: "object", properties: { site: { type: "string", title: "Site", ...prop } }, required: ["site"] });
+
+  it("reads a picker field, and one left unbound at import as a picker whose connection is empty", () => {
+    expect(inputRows(picked({ "x-dewpoint-picker": PICKER }))).toEqual([
+      { kind: "field", field: { name: "site", label: "Site", type: "picker", required: true, sensitive: false, description: "", values: [], picker: PICKER } },
+    ]);
+    const unbound = inputRows(picked({ "x-dewpoint-picker": { node: "acme.sites.get@1", field: "site_id" } }))[0]!;
+    expect(unbound).toMatchObject({ kind: "field", field: { type: "picker", picker: { node: "acme.sites.get@1", field: "site_id", connection: null } } });
+  });
+
+  it("reads a picker beside a default, values, a format or sensitivity, or one that isn't a node and a field, read only", () => {
+    for (const prop of [
+      { "x-dewpoint-picker": PICKER, default: "s1" }, { "x-dewpoint-picker": PICKER, enum: ["s1"] }, { "x-dewpoint-picker": PICKER, format: "uuid" },
+      { "x-dewpoint-picker": PICKER, "x-sensitive": false }, { "x-dewpoint-picker": { node: "acme.sites.get@1" } },
+      { "x-dewpoint-picker": { ...PICKER, extra: 1 } }, { "x-dewpoint-picker": { ...PICKER, connection: 7 } }, { "x-dewpoint-picker": "acme" },
+      { "x-dewpoint-picker": PICKER, type: "integer" },
+    ]) expect(inputRows(picked(prop))[0]).toEqual({ kind: "other", name: "site", required: true, what: expect.stringContaining("with rules of its own") as string });  // prettier-ignore
+  });
+
+  it("writes a picker with no default, values or sensitivity, and removes it with its type", () => {
+    const text = { type: "object", properties: { site: { type: "string", title: "Site", default: "HQ" } } };
+    const made = setField(text, "site", { type: "picker", picker: PICKER });
+    expect(made.properties).toEqual({ site: { type: "string", title: "Site", "x-dewpoint-picker": PICKER } });
+    expect(setField(made, "site", { picker: { ...PICKER, connection: null } }).properties).toEqual({
+      site: { type: "string", title: "Site", "x-dewpoint-picker": { node: "acme.sites.get@1", field: "site_id" } },
+    });
+    expect(setField(made, "site", { type: "text" }).properties).toEqual({ site: { type: "string", title: "Site" } });
+    expect(setField(made, "site", { label: "Site name" }).properties).toEqual({ site: { type: "string", title: "Site name", "x-dewpoint-picker": PICKER } });
+  });
+
+  it("names the field a pointer is in, its name unescaped, or none outside the input's fields", () => {
+    expect(inputFieldOf("/settings/input_schema/properties/site/x-dewpoint-picker")).toBe("site");
+    expect(inputFieldOf("/settings/input_schema/properties/a~1b~0c")).toBe("a/b~c");
+    expect(inputFieldOf("/settings/input_schema")).toBeNull();
+    expect(inputFieldOf("/settings/failure_handler")).toBeNull();
   });
 });
