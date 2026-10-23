@@ -182,3 +182,24 @@ async def test_a_drafts_picker_naming_an_impossible_version_still_gives_its_form
     answer = await editor.get(url(ctx, wf, "start-form"), params={"revision": 1})
     assert answer.status_code == 200, answer.text
     assert answer.json()["fields"][0]["picker"] == picker | {"list": None}
+
+
+@pytest.mark.parametrize("node", ["testkit.pick@x", "testkit.pick@99999999999"])
+async def test_a_drafts_picker_naming_an_unreadable_ref_is_a_problem_never_a_500(
+    keyed_app, owner_sessionmaker, api_sessionmaker, admin_sessionmaker, api_settings, node: str
+) -> None:
+    """#142 item 6: a ref no registry row can hold is never looked up (`readable_ref`), so validate, export and publish,
+    which share the draft's validation context, answer it as a picker naming no node this server holds."""
+    picker = PICKER | {"node": node}
+    schema = {"type": "object", "properties": {"site": {"type": "string", "x-dewpoint-picker": picker}}}
+    graph = G().node("e", "testkit.echo@1", {"value": 1}).data() | {"settings": {"input_schema": schema}}
+    ctx, wf = await drafted(owner_sessionmaker, api_sessionmaker, admin_sessionmaker, graph)
+    editor = await as_role(keyed_app, owner_sessionmaker, api_settings, ctx, "editor")
+    base = f"/api/v1/t/{ctx.tenant_id}/workflows/{wf}"
+    checked = await editor.post(f"{base}/validate")
+    assert checked.status_code == 200, checked.text
+    assert [d["code"] for d in checked.json()["diagnostics"]] == ["picker.unknown_node"]
+    exported = await editor.get(f"{base}/export")
+    assert exported.status_code == 200, exported.text
+    published = await editor.post(f"{base}/publish", headers={"If-Match": "1"})
+    assert published.status_code == 422, published.text
