@@ -4259,3 +4259,36 @@ The owner approved milestone 2 ("approved").
   plan's dry runs ended on (e15351c7), file for file.
 
 Mid-slice rulings: none. Nothing pushed. Next: the final review.
+
+### 4f-3c, the final review (2026-10-23)
+
+A fresh reviewer (Fable) read the branch against the plan, its Review Focus, the spec and the boards: no critical
+finding, three important, seven minor; each Review Focus test present and failing if its behaviour broke; the half
+choice never written against a field that changed; nothing said twice; the shared parts unchanged where already used.
+Fixed in one pass (39ba6bb1), each test-first:
+- Go to a problem on a field the list can't show (a malformed picker) opened no editor, hid the problem under its row
+  and dropped focus: the row now takes focus, its problem kept;
+- a picker imported with its binding open, in a tenant with no connection of its list's kind: its problem vanished in
+  the editor and Go to focused a disabled select; the problem now shows at Connection, and Go to lands on "add one on
+  Connections";
+- a list no step offers any more called the connection it holds "A connection that isn't in this tenant", and its
+  advice named "such" a connection: the held connection is named, and once cleared "This list isn't offered any more:
+  choose another.";
+- graded up from minor: Show choices sat between Connection and Description; it's under the field's controls, after
+  Required, as the signed-off Authoring board and §5.7 have it (`TryChoices`, rendered by the field's editor;
+  `PickerChoice` no longer takes `label`).
+After the pass: the whole frontend suite, 1,668 passed in 121 files; the type check and ESLint silent; `check:api`
+passes; CodeQL, no finding.
+
+Deferred minors (a follow-up issue, on the owner's word): the loading and failed Connection states unnamed for a screen
+reader, the failed one not taking Go to's focus; Go to a picker's unknown-node or not-an-options-field problem lands
+on Connection (§5.8's rule) where Its choices is what to change; a connection of unknown kind kept across a list
+change; the tried list's failure words are Simulate's (ruling 6's cost); Show choices in the editor ignores a read-only
+turn while open; no tests for a list whose step takes another connection kind, nor for a rename while half chosen.
+
+What the reviewer set aside, each ruled as it stands: Show choices disabled while loading drops focus on a failure (the
+start forms' and the drawer's pattern); "A connection that isn't in this tenant" for one of another type (the drawer's
+words; the server's message says the type); an undo after the picker write shows Text, no half choice (ruling 385); a
+viewer can't reach Go to (the Problems button is editors'); `found` dated as publish problems are (ruling 17); import's
+"places in the graph" counting the failure handler (older words); Simulate's own picker errors (its panel); a stale
+edit's 32 px buttons (ruling 389); the browser spec first run in CI (ruling 392).
