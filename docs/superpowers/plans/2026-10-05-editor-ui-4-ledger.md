@@ -4358,3 +4358,24 @@ such a name comes only from Edit as JSON, an import or the API); a draft saved t
 is still `picker.invalid` (the ruling is import only; the editor never writes one); the 4f-3 spec's §4.5 and §5.9 don't
 yet say `name_too_long` or the null taken on import (ruling 399's scope: to add when the spec joins main); a long field
 name quoted whole in the notice (every clause names its places so); the commits' trailers.
+
+### F2 merged; the F3 plan accepted (2026-10-23)
+
+The owner merged F2 as #148 (squash 3b7c00d1) once its backend job, cancelled after a Docker Hub failure hung it for
+over an hour, passed on a re-run; the backend job's timeout and image pulls are #149. F3 is #144 item 4, the start
+forms' field order: the owner ruled option (a), an order list beside the fields, with no Move control now; Edit as JSON
+takes the order the fields are written in, the list hidden; a list that doesn't match is read as far as it does, with
+no warning; one sentence under Edit as JSON; the start forms and the Input list, the run page as it is.
+
+`docs/superpowers/plans/2026-10-23-editor-f3-field-order.md`, revision 1. The owner accepted it: its rulings 1–8 join
+this ledger as 401–408. No migration, no API schema change, no engine runtime change (the validator's CSV rule admits
+the keyword). Mid-slice rulings start at M117.
+
+401. **Accepted. No milestone pause** (plan ruling 1).
+402. **Accepted. The fields' order, a list beside them** (plan ruling 2; the owner's ruling).
+403. **Accepted. A list that doesn't match, read as far as it does** (plan ruling 3; the owner's ruling).
+404. **Accepted. The Input list writes the order** (plan ruling 4).
+405. **Accepted. Edit as JSON: the order as written, and one sentence** (plan ruling 5; the owner's ruling).
+406. **Accepted. Where the order shows, and where it doesn't** (plan ruling 6; the owner's ruling).
+407. **Accepted. Three tests' expectations follow the order** (plan ruling 7).
+408. **Accepted. The checks** (plan ruling 8).
