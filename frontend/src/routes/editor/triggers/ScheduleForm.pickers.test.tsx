@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { screen, within } from "@testing-library/react";
+import { act, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Schedule } from "../../../lib/triggers";
@@ -50,6 +50,26 @@ describe("a picker in a schedule's form (the 4f-3 design §5.3, §5.5)", () => {
     expect(await within(form).findByText("Lyon DC, picked from Acme Prod's sites.")).toBeTruthy();
     await userEvent.click(within(form).getByRole("button", { name: "Add the schedule" }));
     await vi.waitFor(() => expect(sent.find((r) => r.method === "POST" && r.path.endsWith("/schedules"))?.body).toMatchObject({ input: { site_id: LYON }, names: NAMES }));
+  });
+
+  it("drops a pick's name when the version its form shows changes, and sends none (F4; the 4f-3 design §5.5)", async () => {
+    let form = FORM;
+    const sent = api([], {
+      "GET /api/v1/t/t1/workflows/w1/start-form": () => json(form),
+      "GET /api/v1/t/t1/workflows/w1/versions/v4": () => json({ id: "v4", number: 4, graph: { graph_format: 1 } }),
+      "POST /api/v1/t/t1/workflows/w1/schedules": () => json({ ...SCHEDULE, id: "s9" }, 201),
+    });
+    const panel = await showPanel();
+    await userEvent.click(await within(section()).findByRole("button", { name: "＋ Schedule" }));
+    const shown = within(section()).getByRole("form", { name: "New schedule" });
+    await pick(shown);
+    expect(await within(shown).findByText("Lyon DC, picked from Acme Prod's sites.")).toBeTruthy();
+    form = { ...FORM, version_id: "v4" };
+    await act(() => panel.client.invalidateQueries());
+    await vi.waitFor(() => expect(within(shown).queryByText("Lyon DC, picked from Acme Prod's sites.")).toBeNull());
+    await userEvent.click(within(shown).getByRole("button", { name: "Add the schedule" }));
+    await vi.waitFor(() => expect(sent.find((r) => r.method === "POST" && r.path.endsWith("/schedules"))?.body).toMatchObject({ input: { site_id: LYON } }));
+    expect(sent.find((r) => r.method === "POST" && r.path.endsWith("/schedules"))?.body).not.toHaveProperty("names");
   });
 
   it("sends names only with an edited schedule's replaced input", async () => {

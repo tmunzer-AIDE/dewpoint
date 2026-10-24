@@ -9,6 +9,7 @@ describe("the lists a start-form picker can name (the 4f-3 design §5.7)", () =>
       ["psk_id", "Acme · Org PSKs", "PSKs"],
       ["site_id", "Acme · Org sites", "sites"],
       ["wlan_id", "Acme · Org WLANs", "WLANs"],
+      ["channel_id", "Ops · Channels", "channels"], // another plugin's, another kind (F4)
     ]);
   });
 

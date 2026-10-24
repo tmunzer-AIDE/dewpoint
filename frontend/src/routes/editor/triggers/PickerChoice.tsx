@@ -21,12 +21,20 @@ import { useTriggers } from "./context";
 
 export const HALF = "Until a list and a connection are chosen, the field is saved as plain text.";
 const HOLDS = "The list the form shows; the field holds the picked one's ID.";
+// A picker's problems about its list, said under Its choices (§5.8 as F4 amends it); the others under Connection.
+const LIST_CODES = new Set(["picker.unknown_node", "picker.not_an_options_field"]);
 
 /** The lists a picker can name, from the node types the editor holds (a cache hit: it waits for them, R10 §5.3); none
  * while not `enabled`. */
 export function usePickerLists(enabled = true): PickerList[] {
   const types = useQuery({ ...nodeTypesQuery, enabled });
   return useMemo(() => (enabled && types.data ? pickerLists(types.data) : []), [enabled, types.data]);
+}
+
+/** Whether an active step offers `field`'s list: null while the node types are on their way. */
+export function useOffered(field: string | null): boolean | null {
+  const types = useQuery({ ...nodeTypesQuery, enabled: field !== null });
+  return useMemo(() => (field === null ? false : types.data ? listOf(pickerLists(types.data), field) !== undefined : null), [field, types.data]);
 }
 
 /** What a picker field lists, as its row says it: "a choice of Acme Prod's sites". */
@@ -37,7 +45,7 @@ export function choiceWords(picker: InputPicker, lists: PickerList[], connection
 
 /** Show choices in the editor (§5.7): the list tried as the form will show it, through its step and its connection,
  * before it's used; picking a choice changes nothing. */
-export function TryChoices({ picker, label }: { picker: { node: string; field: string; connection: string }; label: string }) {
+export function TryChoices({ picker, label, disabled }: { picker: { node: string; field: string; connection: string }; label: string; disabled: boolean }) {
   const t = useTriggers();
   const id = useId();
   const lists = usePickerLists();
@@ -45,7 +53,7 @@ export function TryChoices({ picker, label }: { picker: { node: string; field: s
   const held = listed.data?.find((c) => sameId(c.id, picker.connection));
   const words = { c: held?.name ?? "the connection", C: held?.name ?? "The connection", n: listOf(lists, picker.field)?.noun ?? "choices", label: labelWord(label) };
   const scope = JSON.stringify([t.tenantId, picker.node, picker.field, idKey(picker.connection), held?.revision ?? null]);
-  const { shown, load, close } = useScopedChoices(scope, (query) => nodeChoices(t.tenantId, picker, query), (e) => failedWords(e, words, true));
+  const { shown, load, close } = useScopedChoices(scope, (query) => nodeChoices(t.tenantId, picker, query), (e) => failedWords(e, words, "editor"));
   const back = () => {
     close();
     document.getElementById(`${id}-show`)?.focus();
@@ -54,7 +62,7 @@ export function TryChoices({ picker, label }: { picker: { node: string; field: s
     <div className="flex min-w-0 flex-col gap-2">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         <Button
-          id={`${id}-show`} size="sm" aria-label={`Show choices: ${label}`} className="max-sm:min-h-[44px]" disabled={shown.status === "loading"}
+          id={`${id}-show`} size="sm" aria-label={`Show choices: ${label}`} className="max-sm:min-h-[44px]" disabled={disabled || shown.status === "loading"}
           onClick={() => void load("")}
         >
           Show choices
@@ -75,6 +83,7 @@ export function PickerChoice({ picker, held, disabled, problems, onChoose }: {
   onChoose: (list: { field: string; node: string } | null, connection: string | null) => void;
 }) {  // prettier-ignore
   const t = useTriggers();
+  const id = useId();
   const lists = usePickerLists();
   const field = picker?.field ?? held;
   const connection = picker?.connection ?? null;
@@ -86,18 +95,27 @@ export function PickerChoice({ picker, held, disabled, problems, onChoose }: {
   // Of the list's step's kind; a list no step offers any more has no kind, so only the connection it holds, by its name.
   const mine = (listed.data ?? []).filter((c) => (entry ? entry.credentials.includes(c.type) : connection !== null && sameId(c.id, connection)));
   const known = connection !== null && mine.some((c) => sameId(c.id, connection));
-  const error = problems.length > 0 ? problems.map((d) => d.message).join(" ") : undefined;
+  const said = (found: Diagnostic[]) => (found.length > 0 ? found.map((d) => d.message).join(" ") : undefined);
+  const listError = said(problems.filter((d) => LIST_CODES.has(d.code)));
+  const error = said(problems.filter((d) => !LIST_CODES.has(d.code)));
+  /** Whether a connection kept across a change of list still fits: of the new list's step's kind, or, its kind unknown
+   * (not in this tenant's list), when both lists' steps take the same kinds. */
+  const fits = (to: string) => {
+    const next = listOf(lists, to);
+    const kind = connection === null ? undefined : typeOf(connection);
+    if (kind !== undefined) return next?.credentials.includes(kind) ?? true;
+    const kinds = (l: PickerList | undefined) => (l ? [...l.credentials].sort().join(" ") : null);
+    return kinds(entry) !== null && kinds(entry) === kinds(next);
+  };
   return (
     <>
       <div data-focus="list" className="flex flex-col">
         <Select
-          label="Its choices" value={field ?? ""} disabled={disabled} hint={complete ? HOLDS : undefined} tall
+          label="Its choices" value={field ?? ""} disabled={disabled} hint={complete ? HOLDS : undefined} error={listError} tall
           onChange={(e) => {
             const to = e.target.value;
             const node = to === "" ? null : nodeOf(to);
-            const kind = connection === null ? undefined : typeOf(connection);
-            const keep = connection !== null && to !== "" && (kind === undefined || (listOf(lists, to)?.credentials.includes(kind) ?? true));
-            onChoose(node === null ? null : { field: to, node }, keep ? connection : null);
+            onChoose(node === null ? null : { field: to, node }, connection !== null && to !== "" && fits(to) ? connection : null);
           }}
         >
           <option value="">Choose a list</option>
@@ -112,16 +130,21 @@ export function PickerChoice({ picker, held, disabled, problems, onChoose }: {
           </Select>
         ) : listed.isPending ? (
           <div className="flex flex-col gap-1.5">
-            <span className="text-small font-semibold">Connection</span>
-            <output data-loading className="text-small text-muted">Loading connections…</output>
+            <span id={`${id}-connection`} className="text-small font-semibold">Connection</span>
+            <output data-loading aria-labelledby={`${id}-connection`} className="text-small text-muted">Loading connections…</output>
           </div>
         ) : listed.isError ? (
+          // Named as the control it stands for, and focusable, so a Go to lands here, its problem said under it.
           <div className="flex flex-col gap-1.5">
-            <span className="text-small font-semibold">Connection</span>
-            <output className="flex flex-wrap items-center gap-2 text-small text-danger">
+            <span id={`${id}-connection`} className="text-small font-semibold">Connection</span>
+            <output
+              aria-labelledby={`${id}-connection`} aria-describedby={error ? `${id}-connection-problem` : undefined} tabIndex={-1}
+              className="flex flex-wrap items-center gap-2 text-small text-danger"
+            >
               Connections couldn&apos;t load.
               <Button size="sm" onClick={() => void listed.refetch()}>Try again</Button>
             </output>
+            {error && <p id={`${id}-connection-problem`} className="text-small text-danger">{error}</p>}
           </div>
         ) : mine.length === 0 && connection === null && entry === undefined ? (
           <Select label="Connection" value="" disabled tall hint="This list isn't offered any more: choose another." error={error}>

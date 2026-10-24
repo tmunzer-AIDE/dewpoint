@@ -134,6 +134,7 @@ export const LISTING = [
   listing("acme.org_wlans.get@1", "wlan_id", { plugin: "Acme", title: "Org WLANs", noun: "WLANs" }),
   listing("acme.org_psks.list@1", "psk_id", { plugin: "Acme", title: "Org PSKs", noun: "PSKs" }, {}, ["limit"]),
   listing("acme.old_maps.get@1", "map_id", { plugin: "Acme", title: "Old maps", noun: "maps" }, { state: "deprecated" }),
+  listing("ops.channels.get@1", "channel_id", { plugin: "Ops", title: "Channels", noun: "channels" }, { credentials: ["slack"] }), // another kind
   listing("acme.devices.get@1", "device_id", null),
 ];
 

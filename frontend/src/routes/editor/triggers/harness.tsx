@@ -32,6 +32,7 @@ interface State {
   doc: GraphDoc;
   held: ReadonlyMap<string, Unapplied>;
   refusing: string | null;
+  editable?: boolean; // set by `lock`: read only from then on, as a conflict leaves the panel
   redraw: () => void;
 }
 
@@ -96,7 +97,7 @@ function Harness({ options, state, writes }: { options: Options; state: State; w
       if (u) keep({ ...u, base: baseOf(state.doc, u), lineage: lineageOf(state.doc, u), why: null });
     },
   };
-  const editable = options.editable ?? true;
+  const editable = state.editable ?? options.editable ?? true;
   const value: Triggers = {
     tenantId: "t1", workflowId: "w1", name: "AP report", doc: state.doc, editable, manage: options.manage ?? editable,
     viewer: options.viewer ?? false, activeNumber: options.activeNumber === undefined ? 3 : options.activeNumber,
@@ -134,6 +135,10 @@ export async function showPanel(options: Options = {}) {
     },
     refuse: (why: string | null) => {
       state.refusing = why;
+    },
+    lock: () => {
+      state.editable = false;
+      act(() => state.redraw());
     },
   };
 }

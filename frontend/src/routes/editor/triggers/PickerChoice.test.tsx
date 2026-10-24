@@ -49,7 +49,7 @@ describe("a Choice from a connection, authored (the 4f-3 design §5.7; the Autho
     await userEvent.selectOptions(select("Type"), "Choice from a connection");
     expect(site(panel.settings())).toEqual({ type: "string", title: "Site" });
     expect(select("Type").value).toBe("picker");
-    expect([...select("Its choices").options].map((o) => o.text)).toEqual(["Choose a list", "Acme · Org PSKs", "Acme · Org sites", "Acme · Org WLANs"]);
+    expect([...select("Its choices").options].map((o) => o.text)).toEqual(["Choose a list", "Acme · Org PSKs", "Acme · Org sites", "Acme · Org WLANs", "Ops · Channels"]);
     const connection = select("Connection");
     expect(connection.disabled).toBe(true);
     expect([...connection.options].map((o) => o.text)).toEqual(["Choose the list first"]);
@@ -163,6 +163,21 @@ describe("a Choice from a connection, tried in its editor (the 4f-3 design §5.7
     expect(field()).toBeTruthy(); // the list closed, not the field's editor
   });
 
+  it("says why the tried list failed in the editor's own words, never to type an ID (F4, ruled)", async () => {
+    sent = fakeApi({
+      [OPTIONS]: () => json({ error: "connection_unavailable" }, 422),
+      "GET /api/v1/trigger-types": () => json([MIST]),
+      "GET /api/v1/node-types": () => json(LISTING),
+      "GET /api/v1/t/t1/connections": () => listConnections(),
+      "GET /api/v1/t/t1/workflows/w1/schedules": () => json({ schedules: [] }),
+      "GET /api/v1/t/t1/workflows/w1/webhook-bindings": () => json({ bindings: [] }),
+    });
+    await showPanel({ doc: draft({ "x-dewpoint-picker": PICKER }) });
+    await userEvent.click(within(input()).getByRole("button", { name: "Edit site" }));
+    await userEvent.click(within(field()).getByRole("button", { name: "Show choices: Site" }));
+    await vi.waitFor(() => expect(within(field()).getByRole("status").textContent).toBe("This tenant doesn't have the chosen connection now: choose another."));
+  });
+
   it("offers Show choices only once the list and the connection are both chosen", async () => {
     await showPanel({ doc: draft({}) });
     await userEvent.click(within(input()).getByRole("button", { name: "Edit site" }));
@@ -231,6 +246,88 @@ describe("a Choice from a connection's problems (the 4f-3 design §5.8; the Auth
     await userEvent.click(within(input()).getByRole("button", { name: "Edit site" }));
     expect(select("Connection").getAttribute("aria-invalid")).toBe("true");
     expect(within(field()).getAllByText(/No connection of this tenant has that id/)).toHaveLength(1);
+  });
+});
+
+describe("a Choice from a connection, F4 (#146)", () => {
+  const at = "/settings/input_schema/properties/site/x-dewpoint-picker";
+  const problem = (code: string, message: string): Diagnostic => ({ code, severity: "error", message, fix: null, node: null, field: at });
+  const checked = (diagnostics: Diagnostic[]): Validation => ({
+    draft_revision: 1, valid: false, diagnostics, expressions: [], taint: { sites: [], declassified: [] }, conditional_steps: [], schedule_breaks: [],
+  });  // prettier-ignore
+  const describedBy = (el: HTMLElement) => (el.getAttribute("aria-describedby") ?? "").split(" ").map((id) => document.getElementById(id)?.textContent).join(" ");
+
+  it("lands Go to on the failed connections' state, named as Connection, the problem said there (item 1)", async () => {
+    listConnections = () => json({ error: "internal" }, 500);
+    const check = checked([problem("picker.invalid", "A picker needs its connection.")]);
+    await showPanel({ doc: draft({ "x-dewpoint-picker": { node: "acme.site_zones.get@1", field: "site_id" } }), check, focusAt: { pointer: at, n: 1 } });
+    await within(field()).findByText("Connections couldn't load.");
+    const failed = within(field()).getByRole("status", { name: "Connection" }); // as the loading state is named
+    await vi.waitFor(() => expect(document.activeElement).toBe(failed));
+    expect(within(field()).getByText("A picker needs its connection.")).toBeTruthy();
+  });
+
+  it("describes the failed connections' state by the picker's problem, so it's heard where Go to lands (the final review)", async () => {
+    listConnections = () => json({ error: "internal" }, 500);
+    const check = checked([problem("picker.invalid", "A picker needs its connection.")]);
+    await showPanel({ doc: draft({ "x-dewpoint-picker": { node: "acme.site_zones.get@1", field: "site_id" } }), check, focusAt: { pointer: at, n: 1 } });
+    await within(field()).findByText("Connections couldn't load.");
+    expect(describedBy(within(field()).getByRole("status", { name: "Connection" }))).toContain("A picker needs its connection.");
+  });
+
+  it("lands Go to a problem about a list no step offers on Its choices, the problem under it, not Connection (item 2, amending §5.8)", async () => {
+    const check = checked([problem("picker.unknown_node", "This server has no such node type: choose another list.")]);
+    await showPanel({ doc: draft({ "x-dewpoint-picker": { node: "acme.gone.get@1", field: "gone_id", connection: C1 } }), check, focusAt: { pointer: at, n: 1 } });
+    await vi.waitFor(() => expect(document.activeElement).toBe(select("Its choices")));
+    expect(select("Its choices").getAttribute("aria-invalid")).toBe("true");
+    expect(describedBy(select("Its choices"))).toContain("This server has no such node type: choose another list.");
+    expect(select("Connection").getAttribute("aria-invalid")).not.toBe("true");
+  });
+
+  it("keeps a connection this tenant doesn't hold only for a list whose step takes the same kind (item 3)", async () => {
+    const unknown = "00000000-0000-4000-8000-0000000000c9";
+    const panel = await showPanel({ doc: draft({ "x-dewpoint-picker": { ...PICKER, connection: unknown } }) });
+    await userEvent.click(within(input()).getByRole("button", { name: "Edit site" }));
+    await vi.waitFor(() => expect(select("Its choices").value).toBe("site_id"));
+    await userEvent.selectOptions(select("Its choices"), "Acme · Org WLANs");
+    expect(site(panel.settings())).toMatchObject({ "x-dewpoint-picker": { field: "wlan_id", connection: unknown } });
+    await userEvent.selectOptions(select("Its choices"), "Ops · Channels");
+    expect(site(panel.settings())).not.toHaveProperty("x-dewpoint-picker");
+    expect(select("Its choices").value).toBe("channel_id");
+  });
+
+  it("disables Show choices once the editor turns read only while it's open (item 5)", async () => {
+    const panel = await showPanel({ doc: draft({ "x-dewpoint-picker": PICKER }) });
+    await userEvent.click(within(input()).getByRole("button", { name: "Edit site" }));
+    expect(within(field()).getByRole("button", { name: "Show choices: Site" })).toHaveProperty("disabled", false);
+    panel.lock();
+    await vi.waitFor(() => expect(within(field()).getByRole("button", { name: "Show choices: Site" })).toHaveProperty("disabled", true));
+  });
+});
+
+describe("a Choice from a connection, the tests 4f-3c's review asked for (#146 item 6)", () => {
+  it("writes plain text and holds the list when the new list's step takes another kind, listing that kind's connections", async () => {
+    const panel = await showPanel({ doc: draft({ "x-dewpoint-picker": PICKER }) });
+    await userEvent.click(within(input()).getByRole("button", { name: "Edit site" }));
+    await vi.waitFor(() => expect(select("Connection").value).toBe(C1));
+    await userEvent.selectOptions(select("Its choices"), "Ops · Channels");
+    expect(site(panel.settings())).toEqual({ type: "string", title: "Site" });
+    expect(select("Its choices").value).toBe("channel_id");
+    expect([...select("Connection").options].map((o) => o.text)).toEqual(["Choose a connection", "Slack ops · verified"]);
+  });
+
+  it("keeps a half choice through a rename made in its editor", async () => {
+    const panel = await showPanel({ doc: draft({}) });
+    await userEvent.click(within(input()).getByRole("button", { name: "Edit site" }));
+    await userEvent.selectOptions(select("Type"), "Choice from a connection");
+    await userEvent.selectOptions(select("Its choices"), "Acme · Org sites");
+    const name = () => within(input()).getByRole("textbox", { name: "Name" });
+    await userEvent.clear(name());
+    await userEvent.type(name(), "where");
+    await userEvent.tab();
+    expect(Object.keys(panel.settings()?.input_schema?.properties as object)).toEqual(["where"]);
+    const renamed = within(input()).getByRole("group", { name: "The field where" });
+    expect(within(renamed).getByRole<HTMLSelectElement>("combobox", { name: "Its choices" }).value).toBe("site_id");
   });
 });
 
