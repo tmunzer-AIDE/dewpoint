@@ -83,7 +83,7 @@ export function GivenParts({ spec, value }: { spec: FieldSpec; value: unknown })
           drawn={{
             hideClear: true, parts: partsOf(part), shown: drawnNames(part, valueAt(drawer.node.config ?? {}, part.path), memory),
             actions: drawer.editable && !(part.required && where === "Settings") ? (
-              <Button size="sm" aria-label={`Remove ${part.label}`} className={NARROW} onMouseDown={(e) => e.preventDefault()} onClick={() => remove(part)}>Remove</Button>
+              <Button size="sm" aria-label={`Remove ${spec.label} › ${part.label}`} className={NARROW} onMouseDown={(e) => e.preventDefault()} onClick={() => remove(part)}>Remove</Button>
             ) : undefined,
             below: drawer.editable && !Object.hasOwn(given, part.name) && !(part.required && where === "Settings") ? <p className="text-small text-muted">{WORDS.pending}</p> : undefined,
           }}
@@ -227,6 +227,7 @@ function Entries({ spec, value }: { spec: FieldSpec; value: unknown }) {
           <label htmlFor={`${spec.pointer}-key`} className="text-small font-semibold">Name of the new entry</label>
           <input
             id={`${spec.pointer}-key`} autoFocus value={key} spellCheck={false} aria-invalid={why !== null} className={controlClass(why !== null)}
+            aria-describedby={why !== null ? `${spec.pointer}-key-why` : undefined}
             onChange={(e) => setKey(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter") {
@@ -238,7 +239,7 @@ function Entries({ spec, value }: { spec: FieldSpec; value: unknown }) {
               }
             }}
           />
-          {why && <p className="text-small text-danger">{why}</p>}
+          {why && <p id={`${spec.pointer}-key-why`} className="text-small text-danger">{why}</p>}
         </div>
       ) : (
         <button type="button" data-add-for={spec.pointer} className={`self-start text-small font-semibold text-accent-ink ${NARROW}`} onClick={() => remember({ adding: { pointer: spec.pointer, parts: [] } })}>
@@ -278,9 +279,9 @@ function Items({ spec, value }: { spec: FieldSpec; value: unknown }) {
               hideClear: true, parts: (s, v) => <GivenParts spec={s} value={v} />, shown: drawnNames(item, items[i], memory),
               actions: drawer.editable ? (
                 <>
-                  {button(`Move up: item ${i + 1}`, () => reshape((l) => [...l.slice(0, i - 1), l[i], l[i - 1], ...l.slice(i + 1)]), i === 0)}
-                  {button(`Move down: item ${i + 1}`, () => reshape((l) => [...l.slice(0, i), l[i + 1], l[i], ...l.slice(i + 2)]), i === items.length - 1)}
-                  {button(`Remove: item ${i + 1}`, () => remove(i))}
+                  {button(`Move up: ${item.label}`, () => reshape((l) => [...l.slice(0, i - 1), l[i], l[i - 1], ...l.slice(i + 1)]), i === 0)}
+                  {button(`Move down: ${item.label}`, () => reshape((l) => [...l.slice(0, i), l[i + 1], l[i], ...l.slice(i + 2)]), i === items.length - 1)}
+                  {button(`Remove: ${item.label}`, () => remove(i))}
                 </>
               ) : undefined,
             }}

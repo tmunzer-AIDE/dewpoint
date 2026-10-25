@@ -25,11 +25,11 @@ const NARROW = "max-sm:min-h-[44px]"; // 44 px targets at 320 (§5.11), in pixel
 
 
 /** How they're sent: merge or replace, a radio pair, merge when unset (`mode`'s default); stacked at 320 px. */
-function ModeControl({ value, id, describedBy, invalid, disabled, onChange }: ControlProps) {
+function ModeControl({ spec, value, id, describedBy, invalid, disabled, onChange }: ControlProps) {
   const current = value === "replace" ? "replace" : "merge";
   return (
     <div
-      id={id} role="radiogroup" aria-label="How the changes are sent" aria-describedby={describedBy} aria-invalid={invalid} tabIndex={-1}
+      id={id} role="radiogroup" aria-label={spec.label} aria-describedby={describedBy} aria-invalid={invalid} tabIndex={-1}
       className="grid grid-cols-1 gap-2 sm:flex sm:flex-wrap"
     >
       {(["merge", "replace"] as const).map((choice) => (
@@ -199,12 +199,14 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
     const drawnParts = partsOf(row.spec);
     const pendingSaid = row.state === "pending" && drawer.editable && !required.includes(row.name);
     const said = json ? WORDS.json : drawnParts && update && row.spec.base !== "list" ? (replace ? WORDS.partsReplace : WORDS.partsMerge) : undefined;
+    // The setting's own description first, then how it's sent: one paragraph (F5).
+    const hint = said === undefined ? undefined : [row.spec.hint, said].filter(Boolean).join(" ");
     return (
       <EmptiedContext.Provider key={row.name} value={() => top(row.name)}>
       <FieldView
         spec={row.spec}
         drawn={{
-          name: row.name, hideClear: true, actions, startFixed: json, hint: said, parts: drawnParts,
+          name: row.name, hideClear: true, actions, startFixed: json, hint, parts: drawnParts,
           shown: drawnNames(row.spec, (body ?? {})[row.name], memory),
           below: pendingSaid ? <p className="text-small text-muted">{WORDS.pending}</p> : undefined,
         }}

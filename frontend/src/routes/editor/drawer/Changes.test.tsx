@@ -77,7 +77,7 @@ it("draws a body a formula gives as a formula, its cleared settings still listed
   expect(within(screen.getByRole("group", { name: "How Changes is set" })).getByRole("button", { name: "Formula" }).getAttribute("aria-pressed")).toBe("true");
   expect(screen.getByText(WORDS.formulaUpdate)).toBeTruthy();
   expect(screen.getByText(WORDS.cleared)).toBeTruthy();
-  expect(screen.getByRole("radiogroup", { name: "How the changes are sent" })).toBeTruthy();
+  expect(screen.getByRole("radiogroup", { name: "How they're sent" })).toBeTruthy();
 });
 
 it("leaves a `clear` naming what the list doesn't offer to today's control, unchanged", () => {
@@ -91,7 +91,7 @@ it("sets a setting of several shapes as JSON in its row", () => {
   showDrawer(UPDATE, { config: { body: { vlan_id: 10 } } });
   const row = changes().querySelector<HTMLElement>('[data-pointer="/body/vlan_id"]')!;
   expect(within(row).getByRole("textbox", { name: "VLAN ID" })).toHaveProperty("value", "10");
-  expect(within(row).getByText(/As JSON: Mist takes it in more than one shape\./)).toBeTruthy(); // before the JSON field's own note
+  expect(within(row).getByText(/^A number or a variable As JSON: Mist takes it in more than one shape\./)).toBeTruthy(); // its description, then the words (#140 item 1, N7)
 });
 
 it("leaves how they're sent, held as a formula, to its formula, its switch named for it", () => {
