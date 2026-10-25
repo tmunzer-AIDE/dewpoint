@@ -7,13 +7,14 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { Button } from "../../../components/Button";
 import { controlClass } from "../../../components/Field";
-import { WORDS, showing, type Memory } from "../../../lib/changes";
-import { valueAt } from "../../../lib/config";
+import { WORDS, drawnAt, reindexed, showing, type Memory } from "../../../lib/changes";
+import { ENVELOPE, ENVELOPE_NAME, valueAt } from "../../../lib/config";
 import { isObject, offeredOf, entryOf, itemOf, pointerOf, type FieldSpec } from "../../../lib/schemaForm";
 import { settingsOf, type Setting } from "../../../lib/settingsIndex";
 import { EmptiedContext, ITEM_EMPTIED, useDrawer } from "./context";
 import { FieldView, type Drawn } from "./FieldView";
 import { FindSetting } from "./FindSetting";
+import { lineageKey } from "./structured";
 
 const NARROW = "max-sm:min-h-[44px]";
 
@@ -83,7 +84,7 @@ export function GivenParts({ spec, value }: { spec: FieldSpec; value: unknown })
           drawn={{
             hideClear: true, parts: partsOf(part), shown: drawnNames(part, valueAt(drawer.node.config ?? {}, part.path), memory),
             actions: drawer.editable && !(part.required && where === "Settings") ? (
-              <Button size="sm" aria-label={`Remove ${part.label}`} className={NARROW} onMouseDown={(e) => e.preventDefault()} onClick={() => remove(part)}>Remove</Button>
+              <Button size="sm" aria-label={`Remove ${spec.label} › ${part.label}`} className={NARROW} onMouseDown={(e) => e.preventDefault()} onClick={() => remove(part)}>Remove</Button>
             ) : undefined,
             below: drawer.editable && !Object.hasOwn(given, part.name) && !(part.required && where === "Settings") ? <p className="text-small text-muted">{WORDS.pending}</p> : undefined,
           }}
@@ -91,7 +92,7 @@ export function GivenParts({ spec, value }: { spec: FieldSpec; value: unknown })
         </EmptiedContext.Provider>
       ))}
       {drawer.editable && offered.length > parts.length && (open ? (
-        <FindSetting ref={find} settings={settingsOf(spec)} listed={new Set(parts.map((p) => p.name))} where={where} label={`Find a setting of ${spec.label}`} onAdd={add} />
+        <FindSetting ref={find} settings={settingsOf(spec)} drawn={(s) => drawnAt(s.steps, value, spec.path, memory.shown)} where={where} label={`Find a setting of ${spec.label}`} onAdd={add} />
       ) : (
         <button type="button" data-add-for={spec.pointer} className={`self-start text-small font-semibold text-accent-ink ${NARROW}`} onClick={() => remember({ open: spec.pointer })}>
           ＋ Another setting of {spec.label}
@@ -187,6 +188,7 @@ function Entries({ spec, value }: { spec: FieldSpec; value: unknown }) {
   const open = () => {
     const name = key.trim();
     if (name === "") return setWhy("Give the entry a name.");
+    if (name === ENVELOPE) return setWhy(ENVELOPE_NAME);
     if (keys.includes(name)) return setWhy(`${spec.label} has an entry named ${name} already.`);
     const entry = pointerOf([...spec.path, name]);
     const parts = memory.adding?.parts ?? [];
@@ -227,18 +229,23 @@ function Entries({ spec, value }: { spec: FieldSpec; value: unknown }) {
           <label htmlFor={`${spec.pointer}-key`} className="text-small font-semibold">Name of the new entry</label>
           <input
             id={`${spec.pointer}-key`} autoFocus value={key} spellCheck={false} aria-invalid={why !== null} className={controlClass(why !== null)}
+            aria-describedby={why !== null ? `${spec.pointer}-key-why` : undefined}
             onChange={(e) => setKey(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter") {
                 e.preventDefault();
                 open();
               } else if (e.key === "Escape") {
+                // Forgotten, what's typed and why it's refused, focus back where the person was (F5).
                 e.stopPropagation();
                 remember({ adding: null });
+                setKey("");
+                setWhy(null);
+                focusLater(spec.pointer, "add");
               }
             }}
           />
-          {why && <p className="text-small text-danger">{why}</p>}
+          {why && <p id={`${spec.pointer}-key-why`} className="text-small text-danger">{why}</p>}
         </div>
       ) : (
         <button type="button" data-add-for={spec.pointer} className={`self-start text-small font-semibold text-accent-ink ${NARROW}`} onClick={() => remember({ adding: { pointer: spec.pointer, parts: [] } })}>
@@ -253,13 +260,21 @@ function Entries({ spec, value }: { spec: FieldSpec; value: unknown }) {
  * last item removed, the list isn't sent: nothing given (F1). */
 function Items({ spec, value }: { spec: FieldSpec; value: unknown }) {
   const drawer = useDrawer();
-  const { memory } = useParts();
+  const { memory, remember } = useParts();
   const emptied = useContext(EmptiedContext);
   const items = Array.isArray(value) ? (value as unknown[]) : [];
-  const reshape = (make: (list: unknown[]) => unknown[]) =>
-    drawer.restructure(spec.pointer, { path: spec.path, make: (list) => make(Array.isArray(list) ? [...(list as unknown[])] : []) });
+  const lineage = lineageKey(value);
+  const asList = (list: unknown) => (Array.isArray(list) ? [...(list as unknown[])] : []);
+  // `order`: each place's item now, by the place it came from; what's remembered of an item follows it (F5).
+  const reorder = (order: number[]) => {
+    const why = drawer.restructure(spec.pointer, { path: spec.path, make: (list) => order.map((j) => asList(list)[j]) });
+    if (why === null) remember((now) => reindexed(now, spec.pointer, order));
+    return why;
+  };
+  const places = items.map((_, j) => j);
+  const swap = (i: number) => [...places.slice(0, i), i + 1, i, ...places.slice(i + 2)];
   const remove = (i: number) => {
-    if (reshape((l) => l.filter((__, j) => j !== i)) !== null) return;
+    if (reorder(places.filter((j) => j !== i)) !== null) return;
     if (items.length === 1) emptied?.();
     focusLater(spec.pointer, "add");
   };
@@ -271,16 +286,16 @@ function Items({ spec, value }: { spec: FieldSpec; value: unknown }) {
       {items.map((_, i) => {
         const item = { ...itemOf(spec, i), label: `${spec.label} › item ${i + 1}` };
         return (
-          <EmptiedContext.Provider key={i} value={ITEM_EMPTIED}>
+          <EmptiedContext.Provider key={`${lineage}:${i}`} value={ITEM_EMPTIED}>
           <FieldView
             spec={item}
             drawn={{
               hideClear: true, parts: (s, v) => <GivenParts spec={s} value={v} />, shown: drawnNames(item, items[i], memory),
               actions: drawer.editable ? (
                 <>
-                  {button(`Move up: item ${i + 1}`, () => reshape((l) => [...l.slice(0, i - 1), l[i], l[i - 1], ...l.slice(i + 1)]), i === 0)}
-                  {button(`Move down: item ${i + 1}`, () => reshape((l) => [...l.slice(0, i), l[i + 1], l[i], ...l.slice(i + 2)]), i === items.length - 1)}
-                  {button(`Remove: item ${i + 1}`, () => remove(i))}
+                  {button(`Move up: ${item.label}`, () => reorder(swap(i - 1)), i === 0)}
+                  {button(`Move down: ${item.label}`, () => reorder(swap(i)), i === items.length - 1)}
+                  {button(`Remove: ${item.label}`, () => remove(i))}
                 </>
               ) : undefined,
             }}
@@ -289,7 +304,7 @@ function Items({ spec, value }: { spec: FieldSpec; value: unknown }) {
         );  // prettier-ignore
       })}
       {drawer.editable && (
-        <button type="button" data-add-for={spec.pointer} className={`self-start text-small font-semibold text-accent-ink ${NARROW}`} onClick={() => reshape((l) => [...l, {}])}>
+        <button type="button" data-add-for={spec.pointer} className={`self-start text-small font-semibold text-accent-ink ${NARROW}`} onClick={() => drawer.restructure(spec.pointer, { path: spec.path, make: (list) => [...asList(list), {}] })}>
           ＋ Add an item
         </button>
       )}

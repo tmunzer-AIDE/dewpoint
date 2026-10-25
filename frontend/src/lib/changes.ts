@@ -4,7 +4,8 @@
 // nothing given yet, a value set before it was cleared, an update's kind). Each change is one write of the whole
 // config: one step of Undo, `body` and `clear` together. Nothing here draws.
 import { fixedOf, kindOf as envelopeOf, referenceText } from "./config";
-import { isObject, type FieldSpec } from "./schemaForm";
+import { isObject, pointerOf, type FieldSpec, type Path } from "./schemaForm";
+import type { Setting } from "./settingsIndex";
 
 /** What a setting's row does: Set (in the body), Clear (named in `clear`), Set with nothing given yet (remembered
  * only), or both set and cleared (a draft from elsewhere: Mist refuses it). */
@@ -33,6 +34,42 @@ export const showing = (shown: Memory["shown"], pointer: string, names: string[]
   [pointer]: [...new Set([...(shown[pointer] ?? []), ...names])],
 });
 
+/** What's remembered under a list's items, after a move or a removal (F5): each item's own (its parts shown, its maps'
+ * entries, its open list of settings, its new entry) follows it to its new place, a removed item's is forgotten.
+ * `order` holds, for each place of the list now, the place its item came from. */
+export function reindexed(memory: Memory, list: string, order: number[]): Partial<Memory> {
+  const moved = (pointer: string): string | null => {
+    if (!pointer.startsWith(`${list}/`)) return pointer;
+    const rest = pointer.slice(list.length + 1);
+    const cut = rest.includes("/") ? rest.indexOf("/") : rest.length;
+    const now = order.indexOf(Number(rest.slice(0, cut)));
+    return now === -1 ? null : `${list}/${now}${rest.slice(cut)}`;
+  };
+  const keyed = (held: Record<string, string[]>) =>
+    Object.fromEntries(Object.entries(held).flatMap(([pointer, names]) => ((to) => (to === null ? [] : [[to, names]]))(moved(pointer))));
+  const adding = memory.adding && moved(memory.adding.pointer);
+  return {
+    shown: keyed(memory.shown),
+    entries: keyed(memory.entries),
+    open: memory.open && moved(memory.open),
+    adding: memory.adding && adding ? { ...memory.adding, pointer: adding } : null,
+  };
+}
+
+/** Whether a found setting's own place is drawn below `path` (F5): each step an object's part given in `value` or
+ * shown with nothing given; never through a list's item or a map's entry, which picking adds. */
+export function drawnAt(steps: Setting["steps"], value: unknown, path: Path, shown: Memory["shown"]): boolean {
+  let at = value;
+  let here = path;
+  for (const step of steps) {
+    if (step.kind !== "setting") return false;
+    if (!(isObject(at) && Object.hasOwn(at, step.name)) && !(shown[pointerOf(here)] ?? []).includes(step.name)) return false;
+    at = isObject(at) ? at[step.name] : undefined;
+    here = [...here, step.name];
+  }
+  return true;
+}
+
 type Config = Record<string, unknown>;
 
 /** The body's settings, when it's a plain object the list can draw (not a formula, a reference or a literal). */
@@ -57,7 +94,7 @@ export function rowsOf(specs: FieldSpec[], body: Record<string, unknown>, clear:
   return specs
     .filter((s) => names.has(s.name))
     .map((spec): Row => {
-      const set = spec.name in body;
+      const set = Object.hasOwn(body, spec.name);
       const cleared = clear.includes(spec.name);
       return { name: spec.name, spec, state: set && cleared ? "both" : set ? "set" : cleared ? "clear" : "pending" };
     })
@@ -148,6 +185,7 @@ const joinedWords = (words: string[]): string =>
 export const WORDS = {
   merge: "Merge with the current settings",
   replace: "Replace them",
+  computedMode: "Merge or replace, computed when the step runs",
   mergeSays: "Merge reads the current settings when the step runs and keeps the parts of each setting below that you don't give. A change made in Mist in between may be overwritten.",
   replaceSays: "Replace sends each setting below as written: the parts you don't give go back to Mist's defaults. Settings not listed stay as they are.",
   partsMerge: "Its parts left empty stay as they are: merge changes only those given.",
@@ -189,15 +227,19 @@ export function brief(spec: FieldSpec | undefined, value: unknown): string {
   return "empty";
 }
 
-/** What a read-only view says of the changes (§5.9): how they're sent and how many, then a line per setting. */
+/** Whether a value is computed when the step runs: a formula, a reference or a template gives it. */
+export const isComputed = (value: unknown): boolean => ["cel", "ref", "template"].includes(envelopeOf(value) ?? "");
+
+/** What a read-only view says of the changes (§5.9): how they're sent and how many, then a line per setting. The kind
+ * first, as its choice is labelled, not counted; then `cleared`, the names `clear` holds that the list can't draw, each
+ * as written, counted (F5). */
 export function summaryOf(
   widget: "update" | "create", rows: Row[], body: Record<string, unknown>, mode: unknown, partsOf: (spec: FieldSpec) => FieldSpec[],
+  { kind = null, cleared = [] }: { kind?: { name: string; label: string; text: string } | null; cleared?: string[] } = {},
 ): { head: string; lines: { name: string; label: string; text: string }[] } {  // prettier-ignore
-  const n = changedCount(rows);
-  const head =
-    widget === "update"
-      ? `${fixedOf(mode) === "replace" ? WORDS.replace : WORDS.merge} · ${n === 1 ? "1 change" : `${n} changes`}`
-      : `${n === 1 ? "1 setting" : `${n} settings`} given`;
+  const n = changedCount(rows) + cleared.length;
+  const how = isComputed(mode) ? WORDS.computedMode : fixedOf(mode) === "replace" ? WORDS.replace : WORDS.merge;
+  const head = widget === "update" ? `${how} · ${n === 1 ? "1 change" : `${n} changes`}` : `${n === 1 ? "1 setting" : `${n} settings`} given`;
   const lines = rows
     .filter((r) => r.state !== "pending")
     .map((r) => {
@@ -214,5 +256,5 @@ export function summaryOf(
         : brief(r.spec, body[r.name]);
       return { name: r.name, label: r.spec.label, text: `${r.state === "both" ? "set and cleared" : "set"}: ${said}` };
     });
-  return { head, lines };
+  return { head, lines: [...(kind ? [kind] : []), ...lines, ...cleared.map((name) => ({ name, label: name, text: "cleared" }))] };
 }

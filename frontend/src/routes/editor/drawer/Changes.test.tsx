@@ -3,9 +3,16 @@ import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { WORDS } from "../../../lib/changes";
-import { formula } from "../../../lib/config";
+import { formula, literal } from "../../../lib/config";
+import { branchesOf } from "../../../lib/schemaForm";
 import { CREATE, DEVICE_CREATE, DEVICE_UPDATE, UPDATE } from "../../../test/nodeTypes";
 import { fakeApi, json, problem, showDrawer } from "./harness";
+
+// Every reading of a union's kinds the changes make (F5): their work, counted.
+vi.mock("../../../lib/schemaForm", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../lib/schemaForm")>();
+  return { ...actual, branchesOf: vi.fn(actual.branchesOf) };
+});
 
 beforeEach(() => {
   fakeApi({ "GET /api/v1/t/t1/connections": () => json([]), "GET /api/v1/connection-types": () => json([]) });
@@ -77,7 +84,34 @@ it("draws a body a formula gives as a formula, its cleared settings still listed
   expect(within(screen.getByRole("group", { name: "How Changes is set" })).getByRole("button", { name: "Formula" }).getAttribute("aria-pressed")).toBe("true");
   expect(screen.getByText(WORDS.formulaUpdate)).toBeTruthy();
   expect(screen.getByText(WORDS.cleared)).toBeTruthy();
-  expect(screen.getByRole("radiogroup", { name: "How the changes are sent" })).toBeTruthy();
+  expect(screen.getByRole("radiogroup", { name: "How they're sent" })).toBeTruthy();
+});
+
+/** The device update, its kinds without their `type`: a union whose kinds the list can't tell apart. */
+const NO_KIND = structuredClone(DEVICE_UPDATE);
+for (const k of ["camera", "sensor"]) delete (NO_KIND.config_schema.$defs as Record<string, { properties: Record<string, unknown> }>)[k]!.properties.type;
+/** The body as one field: its JSON. */
+const bodyJson = () => JSON.parse(screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Changes" }).value) as unknown;
+
+it("keeps a body held as a literal one field, how they're sent beside it, never said to be computed (#140 item 12)", () => {
+  showDrawer(UPDATE, { config: { body: literal({ name: "hq" }) } });
+  expect(screen.getByText("It holds a sensitive part, so it isn't shown as JSON.")).toBeTruthy(); // its API secret
+  expect(screen.queryByText(WORDS.formulaUpdate)).toBeNull();
+  expect(screen.getAllByRole("radiogroup", { name: "How they're sent" })).toHaveLength(1);
+});
+
+it("keeps a union body held as a literal one field, as JSON, how they're sent and its cleared settings beside it once (#140 item 12, N9)", () => {
+  showDrawer(DEVICE_UPDATE, { config: { body: literal({ type: "camera", name: "cam" }), clear: ["notes"] } });
+  expect(bodyJson()).toEqual({ type: "camera", name: "cam" });
+  expect(screen.queryByText(WORDS.formulaUpdate)).toBeNull();
+  expect(screen.getAllByRole("radiogroup", { name: "How they're sent" })).toHaveLength(1);
+  expect(screen.getAllByRole("group", { name: "What happens to Notes" })).toHaveLength(1);
+});
+
+it("keeps a union body whose kinds it can't tell apart one field, as JSON, how they're sent beside it (#140 item 13)", () => {
+  showDrawer(NO_KIND, { config: { body: { name: "cam" } } });
+  expect(bodyJson()).toEqual({ name: "cam" });
+  expect(screen.getAllByRole("radiogroup", { name: "How they're sent" })).toHaveLength(1);
 });
 
 it("leaves a `clear` naming what the list doesn't offer to today's control, unchanged", () => {
@@ -91,7 +125,7 @@ it("sets a setting of several shapes as JSON in its row", () => {
   showDrawer(UPDATE, { config: { body: { vlan_id: 10 } } });
   const row = changes().querySelector<HTMLElement>('[data-pointer="/body/vlan_id"]')!;
   expect(within(row).getByRole("textbox", { name: "VLAN ID" })).toHaveProperty("value", "10");
-  expect(within(row).getByText(/As JSON: Mist takes it in more than one shape\./)).toBeTruthy(); // before the JSON field's own note
+  expect(within(row).getByText(/^A number or a variable As JSON: Mist takes it in more than one shape\./)).toBeTruthy(); // its description, then the words (#140 item 1, N7)
 });
 
 it("leaves how they're sent, held as a formula, to its formula, its switch named for it", () => {
@@ -112,6 +146,33 @@ it("sums up the changes in a read-only view, with nothing to press", () => {
   expect(within(group).getByText("set: Enabled yes, Min rogue RSSI -80")).toBeTruthy();
   expect(within(group).getByText("cleared")).toBeTruthy();
   expect(within(group).queryByRole("button", { name: /^Keep/ })).toBeNull();
+});
+
+it("says a device's kind first in a read-only view, uncounted, and each name `clear` holds the list can't draw, counted (#140 item 11)", () => {
+  showDrawer(DEVICE_UPDATE, { editable: false, config: { body: { type: "camera", name: "Lobby cam" }, clear: ["notes", "type"] } });
+  const group = changes();
+  expect(within(group).getByText("Merge with the current settings · 3 changes")).toBeTruthy();
+  expect([...group.querySelectorAll("dt")].map((d) => d.textContent)).toEqual(["Kind of device", "Name", "Notes", "type"]);
+  expect([...group.querySelectorAll("dd")].map((d) => d.textContent)).toEqual(["Camera", "set: Lobby cam", "cleared", "cleared"]);
+});
+
+it("says how they're sent is computed in a read-only view's head when a formula gives it (#140 N5)", () => {
+  showDrawer(UPDATE, { editable: false, config: { mode: formula('"replace"'), body: { name: "hq" } } });
+  expect(within(changes()).getByText("Merge or replace, computed when the step runs · 1 change")).toBeTruthy();
+});
+
+it("says no merge words under how they're sent itself when a formula gives it (#140 N5, the final review)", () => {
+  showDrawer(UPDATE, { config: { mode: formula('"replace"'), body: { name: "hq" } } });
+  const mode = document.querySelector<HTMLElement>('[data-pointer="/mode"]')!;
+  expect(within(mode).getByText('"replace"')).toBeTruthy(); // its formula, shown
+  expect(within(mode).queryByText(WORDS.mergeSays)).toBeNull();
+});
+
+it("says no merge or replace words under a setting when a formula gives how they're sent (#140 N5)", () => {
+  showDrawer(UPDATE, { config: { mode: formula('"replace"'), body: { rogue: { enabled: true } } } });
+  const rogue = changes().querySelector<HTMLElement>('[data-pointer="/body/rogue"]')!;
+  expect(within(rogue).getByText("AP threat detection settings for the site")).toBeTruthy();
+  expect(within(rogue).queryByText(new RegExp(`${WORDS.partsMerge}|${WORDS.partsReplace}`))).toBeNull();
 });
 
 it("draws a create's settings: a row per setting given, Remove unless it's required, how many are given", async () => {
@@ -145,6 +206,17 @@ it("finds a setting and adds it, Set with nothing given until a value is, focus 
   expect(within(row).queryByText(WORDS.pending)).toBeNull();
 });
 
+it("writes nothing for a Set pressed on a setting with nothing given, focus on its control (#140 item 10)", async () => {
+  const { config, node } = showDrawer(UPDATE, { config: { mode: "merge" } });
+  await userEvent.type(finder(), "name");
+  await userEvent.click(within(changes()).getByRole("option", { name: /^Name/ }));
+  const before = node();
+  await userEvent.click(within(within(changes()).getByRole("group", { name: "What happens to Name" })).getByRole("button", { name: "Set" }));
+  expect(config()).toEqual({ mode: "merge" }); // no `body: {}`
+  expect(node()).toBe(before); // no write: no Undo step, no save
+  await vi.waitFor(() => expect(document.activeElement).toBe(within(changes()).getByLabelText("Name")));
+});
+
 it("marks a setting already listed, and says when nothing matches", async () => {
   showDrawer(UPDATE, { config: { body: { name: "hq" } } });
   await userEvent.type(finder(), "name");
@@ -152,6 +224,18 @@ it("marks a setting already listed, and says when nothing matches", async () => 
   await userEvent.clear(finder());
   await userEvent.type(finder(), "firewall");
   expect(within(changes()).getByText('No setting matches "firewall", by name or description.')).toBeTruthy();
+});
+
+it("says “· In Changes” only for a hit whose own place is drawn, never a part not drawn nor one through a list's item (#140 item 5)", async () => {
+  showDrawer(UPDATE, { config: { body: { rogue: { enabled: true }, networks: [{ name: "a" }] } } });
+  const hit = (name: RegExp) => within(changes()).getByRole("option", { name }).textContent;
+  await userEvent.type(finder(), "rogue");
+  expect(hit(/^Rogue(?! ›)/)).toContain("· In Changes");
+  expect(hit(/^Rogue › Enabled/)).toContain("· In Changes");
+  expect(hit(/^Rogue › Min rogue RSSI/)).not.toContain("· In Changes");
+  await userEvent.clear(finder());
+  await userEvent.type(finder(), "networks name");
+  expect(hit(/^Networks › an item › Name/)).not.toContain("· In Changes");
 });
 
 it("lists the top-level settings from ＋ Add a setting, and adds the one Enter picks", async () => {
@@ -177,6 +261,37 @@ it("reads an update's kind from its settings, offers that kind's, and says what 
   expect(within(kindOfDevice()).getByRole("radio", { name: "Sensor" })).toHaveProperty("checked", true);
   await userEvent.type(within(changes()).getByRole("combobox", { name: "Find a setting" }), "zoom");
   expect(within(changes()).getByText('No setting matches "zoom", by name or description.')).toBeTruthy();
+});
+
+/** The kind's status line: under its choices, there before anything is said. */
+const kindStatus = () => within(kindOfDevice().parentElement!).getByRole("status");
+
+it("says a change of kind in a status line there from the start (#140 item 3)", async () => {
+  showDrawer(DEVICE_UPDATE, { config: { body: { name: "cam", zoom: 2 } } });
+  const status = kindStatus();
+  expect(status.textContent).toBe("");
+  await userEvent.click(within(kindOfDevice()).getByRole("radio", { name: "Sensor" }));
+  expect(kindStatus()).toBe(status);
+  expect(status.textContent).toBe("Kind changed to Sensor: Name is kept; Zoom is dropped, as a Sensor doesn't have it.");
+});
+
+it("keeps a create's kind and its status line in place at the first pick (#140 item 3)", async () => {
+  showDrawer(DEVICE_CREATE, { config: {} });
+  const status = kindStatus();
+  await userEvent.click(within(kindOfDevice()).getByRole("radio", { name: "Sensor" }));
+  expect(kindStatus()).toBe(status);
+});
+
+it("forgets what a change of kind said after an Undo, or a later edit (#140 N4)", async () => {
+  const { replace } = showDrawer(DEVICE_UPDATE, { config: { body: { name: "cam", zoom: 2 } } });
+  await userEvent.click(within(kindOfDevice()).getByRole("radio", { name: "Sensor" }));
+  expect(kindStatus().textContent).toContain("Kind changed to Sensor");
+  replace({ body: { name: "cam", zoom: 2 } }); // as an Undo
+  await vi.waitFor(() => expect(kindStatus().textContent).toBe(""));
+  await userEvent.click(within(kindOfDevice()).getByRole("radio", { name: "Sensor" }));
+  expect(kindStatus().textContent).toContain("Kind changed to Sensor");
+  await userEvent.type(within(changes()).getByLabelText("Name"), "s");
+  expect(kindStatus().textContent).toBe("");
 });
 
 it("reads an update's kind from its value when the draft holds it, and writes the new one", async () => {
@@ -234,4 +349,12 @@ it("keeps focus after each row action: Set on its control, Clear on Clear, Keep 
   await vi.waitFor(() => expect(document.activeElement).toBe(within(changes()).getByLabelText("Name")));
   await userEvent.click(within(changes()).getByRole("button", { name: "Keep Rogue as it is" }));
   await vi.waitFor(() => expect(document.activeElement).toBe(within(changes()).getByRole("button", { name: "＋ Add a setting" })));
+});
+
+it("reads a union's kinds once, not again for each character typed (#140 item 14)", async () => {
+  showDrawer(DEVICE_UPDATE, { config: { body: { name: "cam" } } });
+  vi.mocked(branchesOf).mockClear();
+  await userEvent.type(within(changes()).getByLabelText("Name"), "era");
+  expect(within(changes()).getByLabelText<HTMLInputElement>("Name").value).toBe("camera");
+  expect(vi.mocked(branchesOf)).not.toHaveBeenCalled();
 });

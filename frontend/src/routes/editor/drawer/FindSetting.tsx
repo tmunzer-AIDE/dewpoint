@@ -2,7 +2,7 @@
 // Find a setting (4f-2, the Mist step design §5.4): a combobox over a body's settings, top-level and nested, found by
 // every word typed in a title, the raw path or the description. Its hits a listbox under it, Up and Down to move,
 // Enter to add, Escape to close; each hit its path of titles, its raw path in the code face, its description on one
-// line, the words matched bold and underlined (never coloured); one already listed says "· In Changes".
+// line, the words matched bold and underlined (never coloured); one whose own place is drawn says "· In Changes".
 import { forwardRef, useId, useState, type KeyboardEvent, type ReactNode } from "react";
 import { controlClass } from "../../../components/Field";
 import { MAX_SHOWN, findSettings, findWords, wordsOf, type Setting } from "../../../lib/settingsIndex";
@@ -17,8 +17,8 @@ function marked(text: string, words: string[]): ReactNode {
 }
 
 export const FindSetting = forwardRef<HTMLInputElement, {
-  settings: Setting[]; listed: ReadonlySet<string>; where: "Changes" | "Settings"; label?: string; onAdd: (setting: Setting) => void;
-}>(function FindSetting({ settings, listed, where, label = "Find a setting", onAdd }, input) {  // prettier-ignore
+  settings: Setting[]; drawn: (setting: Setting) => boolean; where: "Changes" | "Settings"; label?: string; onAdd: (setting: Setting) => void;
+}>(function FindSetting({ settings, drawn, where, label = "Find a setting", onAdd }, input) {  // prettier-ignore
   const id = useId();
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
@@ -69,7 +69,7 @@ export const FindSetting = forwardRef<HTMLInputElement, {
                   <span className="flex flex-wrap items-baseline justify-between gap-x-3">
                     <span className="text-body">
                       {marked(s.titles.join(" › "), words)}
-                      {listed.has(s.steps[0]!.name) && <span className="text-small font-semibold text-accent-ink"> · In {where}</span>}
+                      {drawn(s) && <span className="text-small font-semibold text-accent-ink"> · In {where}</span>}
                     </span>
                     <span className="font-mono text-meta text-muted">{s.raw}</span>
                   </span>

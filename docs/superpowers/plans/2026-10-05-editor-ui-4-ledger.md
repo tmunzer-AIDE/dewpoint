@@ -4482,3 +4482,81 @@ What the reviewer set aside, each ruled as it stands: the status line said again
 retired list landing on Its choices (ruling 414); Simulate after a failed connections read (the failure path as
 before); `tenant_erasing` and `invalid_result` in the general line (not ruled); a read-only editor's disabled Its
 choices not taking focus (as before).
+
+### F4 merged; the F5 plan accepted (2026-10-25)
+
+The owner merged F4 as #151 (squash 19427780), every check green ("green and merged"). F5 is the Changes widget's
+polish: #140 items 1–7 and 10–15 (F1 did 8 and 9), and the findings R11b made beside them (N2–N5, N7–N9; F1 did N1
+and N6). The owner ruled four: "· In Changes" only where the hit is drawn; a read-only view says the kind as its first
+line, and a `clear` it can't draw a line per name, counted; a mode a formula gives is said to be computed.
+
+`docs/superpowers/plans/2026-10-25-editor-f5-changes.md`, revision 1. The owner accepted it: its rulings 1–10 join this
+ledger as 418–427. Frontend only: no API, schema, migration or engine change. Mid-slice rulings start at M119.
+
+418. **Accepted. No milestone pause** (plan ruling 1).
+419. **Accepted. Names and descriptions, as a screen reader hears them** (plan ruling 2).
+420. **Accepted. "· In Changes" where the hit is drawn** (plan ruling 3; the owner's ruling).
+421. **Accepted. A map's new entry: Escape forgets it, `$value` is refused** (plan ruling 4).
+422. **Accepted. A list's items keep their lineage, and what's remembered of them follows them** (plan ruling 5).
+423. **Accepted. The kind's status line from the start, its words gone with their config; a Set with nothing to write**
+     (plan ruling 6).
+424. **Accepted. A read-only view's kind, a `clear` it can't draw, a mode a formula gives** (plan ruling 7; the owner's
+     rulings).
+425. **Accepted. A body the list can't draw is one field** (plan ruling 8).
+426. **Accepted. Each render's work** (plan ruling 9).
+427. **Accepted. The tests, and the checks** (plan ruling 10).
+
+### F5, the final checkpoint (2026-10-25)
+
+The owner accepted the plan and chose inline execution ("approved, inline"), with no milestone pause; the branch from
+origin/main 19427780.
+- Task 1 (84db73bd): the plan's acceptance, rulings 418–427.
+- Task 2 (8418f8b1): names and descriptions, as a screen reader hears them. Red: 13 failed and 38 passed. Green: 51
+  passed.
+- Task 3 (709627b2): "· In Changes" where the hit is drawn. Red: 2 failed and 51 passed. Green: 53 passed.
+- Task 4 (e8091df5): a map's new entry: Escape forgets it, `$value` is refused. Red: 2 failed and 27 passed. Green: 29
+  passed.
+- Task 5 (59d50155): a list's items keep what's theirs. Red: 3 failed and 45 passed. Green: 48 passed.
+- Task 6 (eb5e6eb0): the kind's status line; a Set with nothing to write. Red: 4 failed and 26 passed. Green: 30
+  passed.
+- Task 7 (ef90aeb4): a read-only view's kind, a `clear` it can't draw, a mode a formula gives. Red: 4 failed and 47
+  passed. Green: 51 passed.
+- Task 8 (8605a7d2): a body the list can't draw is one field. Red: 3 failed and 33 passed. Green: 36 passed.
+- Task 9 (654a9c79): each render's work. Red: 2 failed and 54 passed. Green: 56 passed.
+- Task 10, every check on 654a9c79, whose tree is the prototype's (3c0f475a): the whole frontend suite, 1,727 passed in
+  121 files; the type check and ESLint silent; CodeQL (CLI 2.27.2; javascript-queries 2.4.8): no finding.
+
+Mid-slice ruling:
+
+M119. **Packages borrowed, nothing installed,** as F2's M116 and F4's M118: the frontend's `node_modules` linked from
+the 4d-1b worktree (main's lockfile); the plan's `npx --offline pnpm@12.6.0 exec <tool>` run as
+`./node_modules/.bin/<tool>`, since pnpm exec fails on a linked `node_modules`. Cost: none.
+
+Nothing pushed. Next: the final review.
+
+### F5, the final review (2026-10-25)
+
+A fresh reviewer (Fable) read the branch against the plan, its Review Focus, #140, R11b and the 4f-2 design: no
+critical finding, one important, four minor. It checked ruling 423's words, tied to the config they describe, and
+ruling 422's lineage keys through the editor's own write path and history, not only the tests' harness; each Review
+Focus case held. Fixed in one pass (97e5c0a8), test first:
+- under a mode a formula gives, How they're sent's own field still said merge's sentence ("… keeps the parts of each
+  setting below that you don't give."), which a formula giving replace contradicts: it says neither's words, its
+  formula speaks for it. This amends ruling 424's "the mode's own field keeps its description", by the owner's N5
+  choice (say it's computed).
+After the pass: the whole frontend suite, 1,728 passed in 121 files; the type check and ESLint silent; CodeQL, no
+finding.
+
+Deferred minors: "· In Changes" for a part added under a row since cleared (its memory kept); a read-only view names
+the kind read from shared settings alone (the first kind) as if the draft held it; a `clear` held as a formula says
+nothing in a read-only view (as before); "Nothing to change yet: add a setting…" under a kindless union's JSON field,
+which has no Add.
+
+What the reviewer set aside, each ruled as it stands: Ctrl+Z ignored while focus is on the kind's radio (the editor's
+keys, as before); memory not carried back by an Undo of a Move or Remove (ruling 422's cost); a literal body holding a
+secret shown only as "It holds a sensitive part…" (ruling 425's cost); parts remembered through Keep (the drawer's
+memory until it closes); a change of kind that keeps everything still an Undo step (as before); a `null` or scalar
+body drawn as the one field; a read-only `clear` line labelled by its raw name (the owner's ruling); a create's
+top-level Remove named by its title alone (top-level titles are unique).
+
+Nothing pushed.
