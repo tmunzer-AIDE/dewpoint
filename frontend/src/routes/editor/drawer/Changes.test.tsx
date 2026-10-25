@@ -145,6 +145,17 @@ it("finds a setting and adds it, Set with nothing given until a value is, focus 
   expect(within(row).queryByText(WORDS.pending)).toBeNull();
 });
 
+it("writes nothing for a Set pressed on a setting with nothing given, focus on its control (#140 item 10)", async () => {
+  const { config, node } = showDrawer(UPDATE, { config: { mode: "merge" } });
+  await userEvent.type(finder(), "name");
+  await userEvent.click(within(changes()).getByRole("option", { name: /^Name/ }));
+  const before = node();
+  await userEvent.click(within(within(changes()).getByRole("group", { name: "What happens to Name" })).getByRole("button", { name: "Set" }));
+  expect(config()).toEqual({ mode: "merge" }); // no `body: {}`
+  expect(node()).toBe(before); // no write: no Undo step, no save
+  await vi.waitFor(() => expect(document.activeElement).toBe(within(changes()).getByLabelText("Name")));
+});
+
 it("marks a setting already listed, and says when nothing matches", async () => {
   showDrawer(UPDATE, { config: { body: { name: "hq" } } });
   await userEvent.type(finder(), "name");
@@ -189,6 +200,37 @@ it("reads an update's kind from its settings, offers that kind's, and says what 
   expect(within(kindOfDevice()).getByRole("radio", { name: "Sensor" })).toHaveProperty("checked", true);
   await userEvent.type(within(changes()).getByRole("combobox", { name: "Find a setting" }), "zoom");
   expect(within(changes()).getByText('No setting matches "zoom", by name or description.')).toBeTruthy();
+});
+
+/** The kind's status line: under its choices, there before anything is said. */
+const kindStatus = () => within(kindOfDevice().parentElement!).getByRole("status");
+
+it("says a change of kind in a status line there from the start (#140 item 3)", async () => {
+  showDrawer(DEVICE_UPDATE, { config: { body: { name: "cam", zoom: 2 } } });
+  const status = kindStatus();
+  expect(status.textContent).toBe("");
+  await userEvent.click(within(kindOfDevice()).getByRole("radio", { name: "Sensor" }));
+  expect(kindStatus()).toBe(status);
+  expect(status.textContent).toBe("Kind changed to Sensor: Name is kept; Zoom is dropped, as a Sensor doesn't have it.");
+});
+
+it("keeps a create's kind and its status line in place at the first pick (#140 item 3)", async () => {
+  showDrawer(DEVICE_CREATE, { config: {} });
+  const status = kindStatus();
+  await userEvent.click(within(kindOfDevice()).getByRole("radio", { name: "Sensor" }));
+  expect(kindStatus()).toBe(status);
+});
+
+it("forgets what a change of kind said after an Undo, or a later edit (#140 N4)", async () => {
+  const { replace } = showDrawer(DEVICE_UPDATE, { config: { body: { name: "cam", zoom: 2 } } });
+  await userEvent.click(within(kindOfDevice()).getByRole("radio", { name: "Sensor" }));
+  expect(kindStatus().textContent).toContain("Kind changed to Sensor");
+  replace({ body: { name: "cam", zoom: 2 } }); // as an Undo
+  await vi.waitFor(() => expect(kindStatus().textContent).toBe(""));
+  await userEvent.click(within(kindOfDevice()).getByRole("radio", { name: "Sensor" }));
+  expect(kindStatus().textContent).toContain("Kind changed to Sensor");
+  await userEvent.type(within(changes()).getByLabelText("Name"), "s");
+  expect(kindStatus().textContent).toBe("");
 });
 
 it("reads an update's kind from its value when the draft holds it, and writes the new one", async () => {

@@ -82,6 +82,9 @@ function SaidRow({ row, actions, said }: { row: Row; actions: ReactNode; said: s
   );
 }
 
+/** A change of kind's words, before the config it wrote is drawn. */
+const NEXT = Symbol("the next config");
+
 export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Memory; onMemory: (update: (memory: Memory) => Memory) => void }) {
   const drawer = useDrawer();
   const config = drawer.node.config ?? {};
@@ -101,7 +104,11 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
   const required = update || scope === null || !Array.isArray(scope.schema.required) ? [] :
     (scope.schema.required as unknown[]).filter((n): n is string => typeof n === "string" && offered.some((o) => o.name === n));  // prettier-ignore
   const kindId = useId();
-  const [said, setSaid] = useState<string | null>(null);
+  // What a change of kind kept and dropped, of the config it wrote (`of`: the next one drawn); an Undo or any later
+  // edit forgets it (F5).
+  const [said, setSaid] = useState<{ words: string; of: unknown } | null>(null);
+  const held = drawer.node.config;
+  if (said !== null && said.of !== held) setSaid(said.of === NEXT ? { ...said, of: held } : null);
   // A `clear` naming what the list doesn't offer is a draft from elsewhere: today's control, unchanged (§5.8).
   const clearDrawn = parts.clear !== null && names !== null && names.every((n) => offered.some((s) => s.name === n));
   const rows = rowsOf(offered, body ?? {}, clearDrawn ? names : [], memory.pending, required);
@@ -123,6 +130,11 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
   const set = (row: Row) => {
     if (row.state === "set") return;
     const value = row.state === "both" ? (body ?? {})[row.name] : memory.cleared[row.name];
+    // Added, nothing given and nothing to bring back: nothing to write, its control focused (F5).
+    if (row.state === "pending" && value === undefined) {
+      focusLater(row.spec.pointer);
+      return;
+    }
     if (change(row, (cfg) => setIn(cfg, row.name, value), false) !== null) return;
     if (value === undefined) remember({ pending: [...memory.pending.filter((n) => n !== row.name), row.name] });
     focusLater(row.spec.pointer);
@@ -165,7 +177,7 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
     const { kept, dropped } = out.done;
     const titled = (n: string) => branches.flatMap((b) => propertiesOf(b)).find((p) => p.name === n)?.label ?? n;
     remember({ kind: kind.values[to]!, pending: memory.pending.filter((n) => names.includes(n)) });
-    setSaid(kept.length + dropped.length > 0 ? WORDS.kindChanged(target.label, kept.map(titled), dropped.map(titled)) : null);
+    setSaid(kept.length + dropped.length > 0 ? { words: WORDS.kindChanged(target.label, kept.map(titled), dropped.map(titled)), of: NEXT } : null);
   };
   const kindControl = kind && (
     <div className="flex min-w-0 flex-col gap-1.5">
@@ -179,7 +191,8 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
         ))}
       </div>
       <p className="text-small text-muted">{index === null ? WORDS.chooseKind : `Its settings are the ${branches[index]!.label}'s.`}</p>
-      {said && <p role="status" className="text-small">{said}</p>}
+      {/* There from the start, so what's said is announced (F5). */}
+      <p role="status" className={said === null ? "sr-only" : "text-small"}>{said?.words}</p>
     </div>
   );  // prettier-ignore
 
@@ -248,7 +261,8 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
     }
     // The rows hold `clear` too: a Go to or a problem there lands on them.
     const atClear = parts.clear && clearDrawn ? problemsAt(drawer.problems, parts.clear.pointer, null) : [];
-    if (scope === null) return kindControl; // a create's kind not chosen yet: nothing else to give
+    // A create's kind not chosen yet: nothing else to give. The kind keeps its place at the first pick (F5).
+    if (scope === null) return <>{kindControl}</>;
     return (
       <>
         {kindControl}
