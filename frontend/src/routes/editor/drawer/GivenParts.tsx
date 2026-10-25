@@ -7,13 +7,14 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { Button } from "../../../components/Button";
 import { controlClass } from "../../../components/Field";
-import { WORDS, drawnAt, showing, type Memory } from "../../../lib/changes";
+import { WORDS, drawnAt, reindexed, showing, type Memory } from "../../../lib/changes";
 import { ENVELOPE, ENVELOPE_NAME, valueAt } from "../../../lib/config";
 import { isObject, offeredOf, entryOf, itemOf, pointerOf, type FieldSpec } from "../../../lib/schemaForm";
 import { settingsOf, type Setting } from "../../../lib/settingsIndex";
 import { EmptiedContext, ITEM_EMPTIED, useDrawer } from "./context";
 import { FieldView, type Drawn } from "./FieldView";
 import { FindSetting } from "./FindSetting";
+import { lineageKey } from "./structured";
 
 const NARROW = "max-sm:min-h-[44px]";
 
@@ -259,13 +260,21 @@ function Entries({ spec, value }: { spec: FieldSpec; value: unknown }) {
  * last item removed, the list isn't sent: nothing given (F1). */
 function Items({ spec, value }: { spec: FieldSpec; value: unknown }) {
   const drawer = useDrawer();
-  const { memory } = useParts();
+  const { memory, remember } = useParts();
   const emptied = useContext(EmptiedContext);
   const items = Array.isArray(value) ? (value as unknown[]) : [];
-  const reshape = (make: (list: unknown[]) => unknown[]) =>
-    drawer.restructure(spec.pointer, { path: spec.path, make: (list) => make(Array.isArray(list) ? [...(list as unknown[])] : []) });
+  const lineage = lineageKey(value);
+  const asList = (list: unknown) => (Array.isArray(list) ? [...(list as unknown[])] : []);
+  // `order`: each place's item now, by the place it came from; what's remembered of an item follows it (F5).
+  const reorder = (order: number[]) => {
+    const why = drawer.restructure(spec.pointer, { path: spec.path, make: (list) => order.map((j) => asList(list)[j]) });
+    if (why === null) remember((now) => reindexed(now, spec.pointer, order));
+    return why;
+  };
+  const places = items.map((_, j) => j);
+  const swap = (i: number) => [...places.slice(0, i), i + 1, i, ...places.slice(i + 2)];
   const remove = (i: number) => {
-    if (reshape((l) => l.filter((__, j) => j !== i)) !== null) return;
+    if (reorder(places.filter((j) => j !== i)) !== null) return;
     if (items.length === 1) emptied?.();
     focusLater(spec.pointer, "add");
   };
@@ -277,15 +286,15 @@ function Items({ spec, value }: { spec: FieldSpec; value: unknown }) {
       {items.map((_, i) => {
         const item = { ...itemOf(spec, i), label: `${spec.label} › item ${i + 1}` };
         return (
-          <EmptiedContext.Provider key={i} value={ITEM_EMPTIED}>
+          <EmptiedContext.Provider key={`${lineage}:${i}`} value={ITEM_EMPTIED}>
           <FieldView
             spec={item}
             drawn={{
               hideClear: true, parts: (s, v) => <GivenParts spec={s} value={v} />, shown: drawnNames(item, items[i], memory),
               actions: drawer.editable ? (
                 <>
-                  {button(`Move up: ${item.label}`, () => reshape((l) => [...l.slice(0, i - 1), l[i], l[i - 1], ...l.slice(i + 1)]), i === 0)}
-                  {button(`Move down: ${item.label}`, () => reshape((l) => [...l.slice(0, i), l[i + 1], l[i], ...l.slice(i + 2)]), i === items.length - 1)}
+                  {button(`Move up: ${item.label}`, () => reorder(swap(i - 1)), i === 0)}
+                  {button(`Move down: ${item.label}`, () => reorder(swap(i)), i === items.length - 1)}
                   {button(`Remove: ${item.label}`, () => remove(i))}
                 </>
               ) : undefined,
@@ -295,7 +304,7 @@ function Items({ spec, value }: { spec: FieldSpec; value: unknown }) {
         );  // prettier-ignore
       })}
       {drawer.editable && (
-        <button type="button" data-add-for={spec.pointer} className={`self-start text-small font-semibold text-accent-ink ${NARROW}`} onClick={() => reshape((l) => [...l, {}])}>
+        <button type="button" data-add-for={spec.pointer} className={`self-start text-small font-semibold text-accent-ink ${NARROW}`} onClick={() => drawer.restructure(spec.pointer, { path: spec.path, make: (list) => [...asList(list), {}] })}>
           ＋ Add an item
         </button>
       )}

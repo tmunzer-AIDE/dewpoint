@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { DEVICE_UPDATE, UPDATE } from "../test/nodeTypes";
 import {
-  WORDS, bodyObject, brief, changedCount, clearIn, clearNames, keepIn, kindIn, kindIndex, rowsOf, setIn, summaryOf,
+  NO_MEMORY, WORDS, bodyObject, brief, changedCount, clearIn, clearNames, keepIn, kindIn, kindIndex, reindexed, rowsOf, setIn, summaryOf,
 } from "./changes";  // prettier-ignore
 import { formula } from "./config";
 import { branchesOf, fieldsOf, kindOf, offeredOf, propertiesOf } from "./schemaForm";
@@ -122,5 +122,26 @@ describe("what the list can't read stays as it is (the final review)", () => {
   });
   it("reads an update's kind from its settings when the one chosen here no longer fits them (an Undo)", () => {
     expect(kindIndex("update", { name: "a", zoom: 2 }, ["name", "zoom"], kind, names, "sensor")).toBe(0);
+  });
+});
+
+describe("what's remembered under a list's items (F5)", () => {
+  it("follows each item to its new place, nested pointers too; a removed item's is forgotten, a sibling's untouched", () => {
+    const memory = {
+      ...NO_MEMORY,
+      shown: { "/body/networks/0": ["subnet"], "/body/networks/2/vlans": ["id"], "/body/networks2/1": ["name"] },
+      entries: { "/body/networks/1/labels": ["a"] },
+      open: "/body/networks/2",
+      adding: { pointer: "/body/networks/1/labels", parts: ["name"] },
+    };
+    // [c, b]: the third item first, the second after it, the first removed.
+    expect(reindexed(memory, "/body/networks", [2, 1])).toEqual({
+      shown: { "/body/networks/0/vlans": ["id"], "/body/networks2/1": ["name"] },
+      entries: { "/body/networks/1/labels": ["a"] },
+      open: "/body/networks/0",
+      adding: { pointer: "/body/networks/1/labels", parts: ["name"] },
+    });
+    expect(reindexed(memory, "/body/networks", [0])).toMatchObject({ open: null, adding: null, entries: {} });
+    expect(reindexed({ ...memory, open: "/body/networks" }, "/body/networks", [1, 0])).toMatchObject({ open: "/body/networks" });
   });
 });

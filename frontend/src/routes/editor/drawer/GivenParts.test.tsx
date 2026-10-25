@@ -14,6 +14,13 @@ afterEach(() => {
 });
 
 const at = (pointer: string) => [...document.querySelectorAll<HTMLElement>("[data-pointer]")].find((e) => e.dataset.pointer === pointer)!;
+const shownAsJson = () => [...document.querySelectorAll("textarea")].map((t) => JSON.parse(t.value) as unknown);
+
+/** The update, its network item given a plain list too: a part with its own Edit as JSON. */
+const WITH_DNS = structuredClone(UPDATE);
+(WITH_DNS.config_schema.$defs as Record<string, { properties: Record<string, unknown> }>).network!.properties.dns = {
+  type: "array", title: "DNS servers", description: "The network's DNS servers", items: { type: "string" },
+};  // prettier-ignore
 
 it("shows an object's parts given, and finds the others; one added is written only once given", async () => {
   const { config } = showDrawer(UPDATE, { config: { body: { rogue: { enabled: true } } } });
@@ -286,4 +293,34 @@ it("refuses $value as a new entry's name, as a rename does (#140 item 6c)", asyn
   expect(screen.getByText("A name can't be $value: the engine would read the whole value as computed.")).toBeTruthy();
   expect(at("/body/port_usages/$value")).toBeUndefined();
   expect(config()).toEqual({ body: { port_usages: { trunk: { mode: "trunk" } } } });
+});
+
+it("starts an item's parts afresh when it moves: a part's JSON view passes to no other item (#140 item 7)", async () => {
+  showDrawer(WITH_DNS, { config: { body: { networks: [{ dns: ["a"] }, { dns: ["b"] }] } } });
+  await userEvent.click(within(at("/body/networks/1/dns")).getByRole("button", { name: "Edit as JSON" }));
+  expect(shownAsJson()).toEqual([["b"]]);
+  await userEvent.click(screen.getByRole("button", { name: "Move up: Networks › item 2" }));
+  expect(shownAsJson()).toEqual([]);
+});
+
+it("keeps a part added to an item, nothing given, and its open Find, with the item when it moves or another goes (#140 N3)", async () => {
+  const { config } = showDrawer(WITH_DNS, { config: { body: { networks: [{ name: "a" }, { name: "b" }, { name: "c" }] } } });
+  const item = (i: number) => at(`/body/networks/${i}`);
+  await userEvent.click(within(item(1)).getByRole("button", { name: "＋ Another setting of Networks › item 2" }));
+  await userEvent.type(within(item(1)).getByRole("combobox", { name: "Find a setting of Networks › item 2" }), "subnet");
+  await userEvent.click(within(item(1)).getByRole("option", { name: /Subnet/ }));
+  await userEvent.click(within(item(1)).getByRole("button", { name: "＋ Another setting of Networks › item 2" }));
+  await userEvent.click(screen.getByRole("button", { name: "Move up: Networks › item 2" }));
+  expect(config()).toEqual({ body: { networks: [{ name: "b" }, { name: "a" }, { name: "c" }] } });
+  expect(within(item(0)).getByLabelText("Subnet")).toBeTruthy();
+  expect(within(item(0)).getByRole("combobox", { name: "Find a setting of Networks › item 1" })).toBeTruthy();
+  expect(within(item(1)).queryByLabelText("Subnet")).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "Remove: Networks › item 2" })); // a's
+  expect(within(item(0)).getByLabelText("Subnet")).toBeTruthy(); // b's, first still
+  expect(within(item(1)).queryByLabelText("Subnet")).toBeNull(); // c's
+  await userEvent.click(screen.getByRole("button", { name: "Remove: Networks › item 1" })); // b's: what it showed goes with it
+  await userEvent.click(screen.getByRole("button", { name: "＋ Add an item" }));
+  expect(config()).toEqual({ body: { networks: [{ name: "c" }, {}] } });
+  expect(within(at("/body/networks")).queryByLabelText("Subnet")).toBeNull();
+  expect(within(at("/body/networks")).queryByRole("combobox")).toBeNull();
 });

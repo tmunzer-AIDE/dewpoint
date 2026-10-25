@@ -34,6 +34,28 @@ export const showing = (shown: Memory["shown"], pointer: string, names: string[]
   [pointer]: [...new Set([...(shown[pointer] ?? []), ...names])],
 });
 
+/** What's remembered under a list's items, after a move or a removal (F5): each item's own (its parts shown, its maps'
+ * entries, its open list of settings, its new entry) follows it to its new place, a removed item's is forgotten.
+ * `order` holds, for each place of the list now, the place its item came from. */
+export function reindexed(memory: Memory, list: string, order: number[]): Partial<Memory> {
+  const moved = (pointer: string): string | null => {
+    if (!pointer.startsWith(`${list}/`)) return pointer;
+    const rest = pointer.slice(list.length + 1);
+    const cut = rest.includes("/") ? rest.indexOf("/") : rest.length;
+    const now = order.indexOf(Number(rest.slice(0, cut)));
+    return now === -1 ? null : `${list}/${now}${rest.slice(cut)}`;
+  };
+  const keyed = (held: Record<string, string[]>) =>
+    Object.fromEntries(Object.entries(held).flatMap(([pointer, names]) => ((to) => (to === null ? [] : [[to, names]]))(moved(pointer))));
+  const adding = memory.adding && moved(memory.adding.pointer);
+  return {
+    shown: keyed(memory.shown),
+    entries: keyed(memory.entries),
+    open: memory.open && moved(memory.open),
+    adding: memory.adding && adding ? { ...memory.adding, pointer: adding } : null,
+  };
+}
+
 /** Whether a found setting's own place is drawn below `path` (F5): each step an object's part given in `value` or
  * shown with nothing given; never through a list's item or a map's entry, which picking adds. */
 export function drawnAt(steps: Setting["steps"], value: unknown, path: Path, shown: Memory["shown"]): boolean {
