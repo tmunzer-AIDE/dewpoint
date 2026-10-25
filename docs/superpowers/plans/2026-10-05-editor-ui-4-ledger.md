@@ -4533,3 +4533,30 @@ the 4d-1b worktree (main's lockfile); the plan's `npx --offline pnpm@12.6.0 exec
 `./node_modules/.bin/<tool>`, since pnpm exec fails on a linked `node_modules`. Cost: none.
 
 Nothing pushed. Next: the final review.
+
+### F5, the final review (2026-10-25)
+
+A fresh reviewer (Fable) read the branch against the plan, its Review Focus, #140, R11b and the 4f-2 design: no
+critical finding, one important, four minor. It checked ruling 423's words, tied to the config they describe, and
+ruling 422's lineage keys through the editor's own write path and history, not only the tests' harness; each Review
+Focus case held. Fixed in one pass (97e5c0a8), test first:
+- under a mode a formula gives, How they're sent's own field still said merge's sentence ("… keeps the parts of each
+  setting below that you don't give."), which a formula giving replace contradicts: it says neither's words, its
+  formula speaks for it. This amends ruling 424's "the mode's own field keeps its description", by the owner's N5
+  choice (say it's computed).
+After the pass: the whole frontend suite, 1,728 passed in 121 files; the type check and ESLint silent; CodeQL, no
+finding.
+
+Deferred minors: "· In Changes" for a part added under a row since cleared (its memory kept); a read-only view names
+the kind read from shared settings alone (the first kind) as if the draft held it; a `clear` held as a formula says
+nothing in a read-only view (as before); "Nothing to change yet: add a setting…" under a kindless union's JSON field,
+which has no Add.
+
+What the reviewer set aside, each ruled as it stands: Ctrl+Z ignored while focus is on the kind's radio (the editor's
+keys, as before); memory not carried back by an Undo of a Move or Remove (ruling 422's cost); a literal body holding a
+secret shown only as "It holds a sensitive part…" (ruling 425's cost); parts remembered through Keep (the drawer's
+memory until it closes); a change of kind that keeps everything still an Undo step (as before); a `null` or scalar
+body drawn as the one field; a read-only `clear` line labelled by its raw name (the owner's ruling); a create's
+top-level Remove named by its title alone (top-level titles are unique).
+
+Nothing pushed.
