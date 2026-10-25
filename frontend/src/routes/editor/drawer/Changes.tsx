@@ -115,7 +115,8 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
   const clearDrawn = parts.clear !== null && names !== null && names.every((n) => offered.some((s) => s.name === n));
   const rows = rowsOf(offered, body ?? {}, clearDrawn ? names : [], memory.pending, required);
   const replace = fixedOf(valueAt(config, ["mode"])) === "replace";
-  // How they're sent a formula gives: neither's words under the settings, the mode's field says it (F5).
+  // How they're sent a formula gives: neither's words, under the settings or the mode's own field; its formula says it
+  // (F5, the final review).
   const modeComputed = isComputed(valueAt(config, ["mode"]));
   // Nothing sent: the body empty and `clear` too, a setting the list doesn't draw counted (the final review).
   const nothing = update && body !== null && Object.keys(body).length === 0 && names !== null && names.length === 0;
@@ -242,7 +243,7 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
   const mode = parts.mode && (
     <FieldView
       spec={{ ...parts.mode, label: "How they're sent" }}
-      drawn={{ control: ModeControl, hideClear: true, switchLabel: "the way they're sent", hint: replace ? null : WORDS.mergeSays, warn: replace ? WORDS.replaceSays : null }}
+      drawn={{ control: ModeControl, hideClear: true, switchLabel: "the way they're sent", hint: replace || modeComputed ? null : WORDS.mergeSays, warn: replace ? WORDS.replaceSays : null }}
     />
   );
   const clearControl = parts.clear && !clearDrawn && <FieldView spec={parts.clear} />;

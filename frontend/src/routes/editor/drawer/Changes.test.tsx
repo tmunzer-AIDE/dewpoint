@@ -161,6 +161,13 @@ it("says how they're sent is computed in a read-only view's head when a formula 
   expect(within(changes()).getByText("Merge or replace, computed when the step runs · 1 change")).toBeTruthy();
 });
 
+it("says no merge words under how they're sent itself when a formula gives it (#140 N5, the final review)", () => {
+  showDrawer(UPDATE, { config: { mode: formula('"replace"'), body: { name: "hq" } } });
+  const mode = document.querySelector<HTMLElement>('[data-pointer="/mode"]')!;
+  expect(within(mode).getByText('"replace"')).toBeTruthy(); // its formula, shown
+  expect(within(mode).queryByText(WORDS.mergeSays)).toBeNull();
+});
+
 it("says no merge or replace words under a setting when a formula gives how they're sent (#140 N5)", () => {
   showDrawer(UPDATE, { config: { mode: formula('"replace"'), body: { rogue: { enabled: true } } } });
   const rogue = changes().querySelector<HTMLElement>('[data-pointer="/body/rogue"]')!;
