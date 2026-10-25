@@ -3,7 +3,7 @@ import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { WORDS } from "../../../lib/changes";
-import { formula } from "../../../lib/config";
+import { formula, literal } from "../../../lib/config";
 import { CREATE, DEVICE_CREATE, DEVICE_UPDATE, UPDATE } from "../../../test/nodeTypes";
 import { fakeApi, json, problem, showDrawer } from "./harness";
 
@@ -78,6 +78,33 @@ it("draws a body a formula gives as a formula, its cleared settings still listed
   expect(screen.getByText(WORDS.formulaUpdate)).toBeTruthy();
   expect(screen.getByText(WORDS.cleared)).toBeTruthy();
   expect(screen.getByRole("radiogroup", { name: "How they're sent" })).toBeTruthy();
+});
+
+/** The device update, its kinds without their `type`: a union whose kinds the list can't tell apart. */
+const NO_KIND = structuredClone(DEVICE_UPDATE);
+for (const k of ["camera", "sensor"]) delete (NO_KIND.config_schema.$defs as Record<string, { properties: Record<string, unknown> }>)[k]!.properties.type;
+/** The body as one field: its JSON. */
+const bodyJson = () => JSON.parse(screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Changes" }).value) as unknown;
+
+it("keeps a body held as a literal one field, how they're sent beside it, never said to be computed (#140 item 12)", () => {
+  showDrawer(UPDATE, { config: { body: literal({ name: "hq" }) } });
+  expect(screen.getByText("It holds a sensitive part, so it isn't shown as JSON.")).toBeTruthy(); // its API secret
+  expect(screen.queryByText(WORDS.formulaUpdate)).toBeNull();
+  expect(screen.getAllByRole("radiogroup", { name: "How they're sent" })).toHaveLength(1);
+});
+
+it("keeps a union body held as a literal one field, as JSON, how they're sent and its cleared settings beside it once (#140 item 12, N9)", () => {
+  showDrawer(DEVICE_UPDATE, { config: { body: literal({ type: "camera", name: "cam" }), clear: ["notes"] } });
+  expect(bodyJson()).toEqual({ type: "camera", name: "cam" });
+  expect(screen.queryByText(WORDS.formulaUpdate)).toBeNull();
+  expect(screen.getAllByRole("radiogroup", { name: "How they're sent" })).toHaveLength(1);
+  expect(screen.getAllByRole("group", { name: "What happens to Notes" })).toHaveLength(1);
+});
+
+it("keeps a union body whose kinds it can't tell apart one field, as JSON, how they're sent beside it (#140 item 13)", () => {
+  showDrawer(NO_KIND, { config: { body: { name: "cam" } } });
+  expect(bodyJson()).toEqual({ name: "cam" });
+  expect(screen.getAllByRole("radiogroup", { name: "How they're sent" })).toHaveLength(1);
 });
 
 it("leaves a `clear` naming what the list doesn't offer to today's control, unchanged", () => {

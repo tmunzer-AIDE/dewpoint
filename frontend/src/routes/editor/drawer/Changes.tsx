@@ -294,10 +294,14 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
     );
   };
 
-  // A body a formula gives: its cleared settings stay listed, how they're sent with them (§5.8).
-  const computed = body === null && (
+  // One field, today's control (F5): a body the list can't read (held as a literal, an envelope it can't read), or a
+  // union whose kinds it can't tell apart. A body a formula, a reference or a template gives is the list's other side.
+  const oneField = (body === null && !isComputed(config.body)) || (branches.length > 1 && kind === null);
+  // Beside a body the list doesn't draw: its cleared settings stay listed, how they're sent with them, once; a formula's
+  // words only when it's computed (§5.8, F5).
+  const beside = (body === null || oneField) && (
     <div className="flex min-w-0 flex-col gap-4">
-      <p className="text-small text-muted">{update ? WORDS.formulaUpdate : WORDS.formulaCreate}</p>
+      {isComputed(config.body) && <p className="text-small text-muted">{update ? WORDS.formulaUpdate : WORDS.formulaCreate}</p>}
       {mode}
       {rowsOf(offered, {}, clearDrawn ? names : [], []).map(rowView)}
       {clearControl}
@@ -309,8 +313,8 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
     <FieldView
       spec={{ ...parts.body, label } satisfies FieldSpec}
       drawn={{
-        group: true, startFixed: true, fixedName: "List", hideClear: true, hint: null,
-        shown: rows.map((r) => r.name), warn: nothing ? WORDS.nothing : null, parts: list, below: computed || undefined,
+        group: !oneField, startFixed: true, fixedName: oneField ? undefined : "List", hideClear: true, hint: null,
+        shown: rows.map((r) => r.name), warn: nothing ? WORDS.nothing : null, parts: oneField ? undefined : list, below: beside || undefined,
       }}
     />
     </PartsContext.Provider>
