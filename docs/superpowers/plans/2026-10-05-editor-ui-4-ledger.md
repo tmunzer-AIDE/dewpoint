@@ -4482,3 +4482,26 @@ What the reviewer set aside, each ruled as it stands: the status line said again
 retired list landing on Its choices (ruling 414); Simulate after a failed connections read (the failure path as
 before); `tenant_erasing` and `invalid_result` in the general line (not ruled); a read-only editor's disabled Its
 choices not taking focus (as before).
+
+### F4 merged; the F5 plan accepted (2026-10-25)
+
+The owner merged F4 as #151 (squash 19427780), every check green ("green and merged"). F5 is the Changes widget's
+polish: #140 items 1–7 and 10–15 (F1 did 8 and 9), and the findings R11b made beside them (N2–N5, N7–N9; F1 did N1
+and N6). The owner ruled four: "· In Changes" only where the hit is drawn; a read-only view says the kind as its first
+line, and a `clear` it can't draw a line per name, counted; a mode a formula gives is said to be computed.
+
+`docs/superpowers/plans/2026-10-25-editor-f5-changes.md`, revision 1. The owner accepted it: its rulings 1–10 join this
+ledger as 418–427. Frontend only: no API, schema, migration or engine change. Mid-slice rulings start at M119.
+
+418. **Accepted. No milestone pause** (plan ruling 1).
+419. **Accepted. Names and descriptions, as a screen reader hears them** (plan ruling 2).
+420. **Accepted. "· In Changes" where the hit is drawn** (plan ruling 3; the owner's ruling).
+421. **Accepted. A map's new entry: Escape forgets it, `$value` is refused** (plan ruling 4).
+422. **Accepted. A list's items keep their lineage, and what's remembered of them follows them** (plan ruling 5).
+423. **Accepted. The kind's status line from the start, its words gone with their config; a Set with nothing to write**
+     (plan ruling 6).
+424. **Accepted. A read-only view's kind, a `clear` it can't draw, a mode a formula gives** (plan ruling 7; the owner's
+     rulings).
+425. **Accepted. A body the list can't draw is one field** (plan ruling 8).
+426. **Accepted. Each render's work** (plan ruling 9).
+427. **Accepted. The tests, and the checks** (plan ruling 10).
