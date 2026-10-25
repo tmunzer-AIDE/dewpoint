@@ -8,7 +8,7 @@
 import { useId, useRef, useState, type ReactNode } from "react";
 import { Button } from "../../../components/Button";
 import {
-  WORDS, bodyObject, changedCount, clearIn, clearNames, keepIn, kindIn, kindIndex, rowsOf, setIn, summaryOf, type Memory, type Row,
+  WORDS, bodyObject, changedCount, clearIn, clearNames, drawnAt, keepIn, kindIn, kindIndex, rowsOf, setIn, summaryOf, type Memory, type Row,
 } from "../../../lib/changes";  // prettier-ignore
 import { fixedOf, valueAt } from "../../../lib/config";
 import {
@@ -186,6 +186,12 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
   // A setting emptied by a Remove inside it keeps its row, nothing given yet.
   const top = (name: string) => remember((now) => (now.pending.includes(name) ? {} : { pending: [...now.pending, name] }));
 
+  // A hit's own place drawn: its setting's row, then each part under it (F5, the owner's ruling).
+  const drawnHere = (s: Setting) => {
+    const row = rows.find((r) => r.name === s.steps[0]!.name);
+    return row !== undefined && drawnAt(s.steps.slice(1), (body ?? {})[row.name], row.spec.path, memory.shown);
+  };
+
   const rowView = (row: Row) => {
     const actions = (
       <RowActions
@@ -247,7 +253,7 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
       <>
         {kindControl}
         {mode}
-        <FindSetting ref={find} settings={settings} listed={new Set(rows.map((r) => r.name))} where={label} onAdd={add} />
+        <FindSetting ref={find} settings={settings} drawn={drawnHere} where={label} onAdd={add} />
         <div data-pointer={parts.clear && clearDrawn ? parts.clear.pointer : undefined} className="flex min-w-0 flex-col gap-4">
           {rows.map(rowView)}
           {atClear.map((d, i) => (

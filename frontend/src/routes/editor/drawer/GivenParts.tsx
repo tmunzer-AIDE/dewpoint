@@ -7,7 +7,7 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { Button } from "../../../components/Button";
 import { controlClass } from "../../../components/Field";
-import { WORDS, showing, type Memory } from "../../../lib/changes";
+import { WORDS, drawnAt, showing, type Memory } from "../../../lib/changes";
 import { valueAt } from "../../../lib/config";
 import { isObject, offeredOf, entryOf, itemOf, pointerOf, type FieldSpec } from "../../../lib/schemaForm";
 import { settingsOf, type Setting } from "../../../lib/settingsIndex";
@@ -91,7 +91,7 @@ export function GivenParts({ spec, value }: { spec: FieldSpec; value: unknown })
         </EmptiedContext.Provider>
       ))}
       {drawer.editable && offered.length > parts.length && (open ? (
-        <FindSetting ref={find} settings={settingsOf(spec)} listed={new Set(parts.map((p) => p.name))} where={where} label={`Find a setting of ${spec.label}`} onAdd={add} />
+        <FindSetting ref={find} settings={settingsOf(spec)} drawn={(s) => drawnAt(s.steps, value, spec.path, memory.shown)} where={where} label={`Find a setting of ${spec.label}`} onAdd={add} />
       ) : (
         <button type="button" data-add-for={spec.pointer} className={`self-start text-small font-semibold text-accent-ink ${NARROW}`} onClick={() => remember({ open: spec.pointer })}>
           ＋ Another setting of {spec.label}

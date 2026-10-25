@@ -154,6 +154,18 @@ it("marks a setting already listed, and says when nothing matches", async () => 
   expect(within(changes()).getByText('No setting matches "firewall", by name or description.')).toBeTruthy();
 });
 
+it("says “· In Changes” only for a hit whose own place is drawn, never a part not drawn nor one through a list's item (#140 item 5)", async () => {
+  showDrawer(UPDATE, { config: { body: { rogue: { enabled: true }, networks: [{ name: "a" }] } } });
+  const hit = (name: RegExp) => within(changes()).getByRole("option", { name }).textContent;
+  await userEvent.type(finder(), "rogue");
+  expect(hit(/^Rogue(?! ›)/)).toContain("· In Changes");
+  expect(hit(/^Rogue › Enabled/)).toContain("· In Changes");
+  expect(hit(/^Rogue › Min rogue RSSI/)).not.toContain("· In Changes");
+  await userEvent.clear(finder());
+  await userEvent.type(finder(), "networks name");
+  expect(hit(/^Networks › an item › Name/)).not.toContain("· In Changes");
+});
+
 it("lists the top-level settings from ＋ Add a setting, and adds the one Enter picks", async () => {
   showDrawer(UPDATE, { config: {} });
   await userEvent.click(within(changes()).getByRole("button", { name: "＋ Add a setting" }));

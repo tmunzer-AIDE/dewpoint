@@ -4,7 +4,8 @@
 // nothing given yet, a value set before it was cleared, an update's kind). Each change is one write of the whole
 // config: one step of Undo, `body` and `clear` together. Nothing here draws.
 import { fixedOf, kindOf as envelopeOf, referenceText } from "./config";
-import { isObject, type FieldSpec } from "./schemaForm";
+import { isObject, pointerOf, type FieldSpec, type Path } from "./schemaForm";
+import type { Setting } from "./settingsIndex";
 
 /** What a setting's row does: Set (in the body), Clear (named in `clear`), Set with nothing given yet (remembered
  * only), or both set and cleared (a draft from elsewhere: Mist refuses it). */
@@ -32,6 +33,20 @@ export const showing = (shown: Memory["shown"], pointer: string, names: string[]
   ...shown,
   [pointer]: [...new Set([...(shown[pointer] ?? []), ...names])],
 });
+
+/** Whether a found setting's own place is drawn below `path` (F5): each step an object's part given in `value` or
+ * shown with nothing given; never through a list's item or a map's entry, which picking adds. */
+export function drawnAt(steps: Setting["steps"], value: unknown, path: Path, shown: Memory["shown"]): boolean {
+  let at = value;
+  let here = path;
+  for (const step of steps) {
+    if (step.kind !== "setting") return false;
+    if (!(isObject(at) && Object.hasOwn(at, step.name)) && !(shown[pointerOf(here)] ?? []).includes(step.name)) return false;
+    at = isObject(at) ? at[step.name] : undefined;
+    here = [...here, step.name];
+  }
+  return true;
+}
 
 type Config = Record<string, unknown>;
 

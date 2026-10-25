@@ -254,3 +254,15 @@ it("ties a new entry's refusal to its name field (#140 item 6a)", async () => {
   await userEvent.type(name, "trunk{Enter}");
   expect(document.getElementById(name.getAttribute("aria-describedby") ?? "")?.textContent).toBe("Port usages has an entry named trunk already.");
 });
+
+it("says “· In Changes” in an object's own Find for a part drawn under it, nested too, never through a list's item (#140 item 5)", async () => {
+  showDrawer(UPDATE, { config: { body: { auto_upgrade: { enabled: true, custom: { ap41: "1.2" }, schedules: [{ day: "sun" }] } } } });
+  await userEvent.click(within(at("/body/auto_upgrade")).getByRole("button", { name: "＋ Another setting of Auto upgrade" }));
+  const find = within(at("/body/auto_upgrade")).getByRole("combobox", { name: "Find a setting of Auto upgrade" });
+  const hit = (name: RegExp) => within(at("/body/auto_upgrade")).getByRole("option", { name }).textContent;
+  await userEvent.type(find, "ap41");
+  expect(hit(/^Custom versions › AP41/)).toContain("· In Changes");
+  await userEvent.clear(find);
+  await userEvent.type(find, "day");
+  expect(hit(/^Schedules › an item › Day/)).not.toContain("· In Changes");
+});
