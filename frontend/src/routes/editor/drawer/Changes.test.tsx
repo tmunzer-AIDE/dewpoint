@@ -114,6 +114,26 @@ it("sums up the changes in a read-only view, with nothing to press", () => {
   expect(within(group).queryByRole("button", { name: /^Keep/ })).toBeNull();
 });
 
+it("says a device's kind first in a read-only view, uncounted, and each name `clear` holds the list can't draw, counted (#140 item 11)", () => {
+  showDrawer(DEVICE_UPDATE, { editable: false, config: { body: { type: "camera", name: "Lobby cam" }, clear: ["notes", "type"] } });
+  const group = changes();
+  expect(within(group).getByText("Merge with the current settings · 3 changes")).toBeTruthy();
+  expect([...group.querySelectorAll("dt")].map((d) => d.textContent)).toEqual(["Kind of device", "Name", "Notes", "type"]);
+  expect([...group.querySelectorAll("dd")].map((d) => d.textContent)).toEqual(["Camera", "set: Lobby cam", "cleared", "cleared"]);
+});
+
+it("says how they're sent is computed in a read-only view's head when a formula gives it (#140 N5)", () => {
+  showDrawer(UPDATE, { editable: false, config: { mode: formula('"replace"'), body: { name: "hq" } } });
+  expect(within(changes()).getByText("Merge or replace, computed when the step runs · 1 change")).toBeTruthy();
+});
+
+it("says no merge or replace words under a setting when a formula gives how they're sent (#140 N5)", () => {
+  showDrawer(UPDATE, { config: { mode: formula('"replace"'), body: { rogue: { enabled: true } } } });
+  const rogue = changes().querySelector<HTMLElement>('[data-pointer="/body/rogue"]')!;
+  expect(within(rogue).getByText("AP threat detection settings for the site")).toBeTruthy();
+  expect(within(rogue).queryByText(new RegExp(`${WORDS.partsMerge}|${WORDS.partsReplace}`))).toBeNull();
+});
+
 it("draws a create's settings: a row per setting given, Remove unless it's required, how many are given", async () => {
   const { config } = showDrawer(CREATE, { config: { body: { name: "n", enabled: true } } });
   const group = screen.getByRole("group", { name: "Settings" });

@@ -8,7 +8,8 @@
 import { useId, useRef, useState, type ReactNode } from "react";
 import { Button } from "../../../components/Button";
 import {
-  WORDS, bodyObject, changedCount, clearIn, clearNames, drawnAt, keepIn, kindIn, kindIndex, rowsOf, setIn, summaryOf, type Memory, type Row,
+  WORDS, bodyObject, changedCount, clearIn, clearNames, drawnAt, isComputed, keepIn, kindIn, kindIndex, rowsOf, setIn, summaryOf, type Memory,
+  type Row,
 } from "../../../lib/changes";  // prettier-ignore
 import { fixedOf, valueAt } from "../../../lib/config";
 import {
@@ -113,6 +114,8 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
   const clearDrawn = parts.clear !== null && names !== null && names.every((n) => offered.some((s) => s.name === n));
   const rows = rowsOf(offered, body ?? {}, clearDrawn ? names : [], memory.pending, required);
   const replace = fixedOf(valueAt(config, ["mode"])) === "replace";
+  // How they're sent a formula gives: neither's words under the settings, the mode's field says it (F5).
+  const modeComputed = isComputed(valueAt(config, ["mode"]));
   // Nothing sent: the body empty and `clear` too, a setting the list doesn't draw counted (the final review).
   const nothing = update && body !== null && Object.keys(body).length === 0 && names !== null && names.length === 0;
   const settings = scope ? settingsOf(scope, kind?.name ?? null) : [];
@@ -179,9 +182,10 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
     remember({ kind: kind.values[to]!, pending: memory.pending.filter((n) => names.includes(n)) });
     setSaid(kept.length + dropped.length > 0 ? { words: WORDS.kindChanged(target.label, kept.map(titled), dropped.map(titled)), of: NEXT } : null);
   };
+  const kindLabel = `Kind of ${(unionTitle(parts.body) ?? "it").replace(/^./, (c) => c.toLowerCase())}`;
   const kindControl = kind && (
     <div className="flex min-w-0 flex-col gap-1.5">
-      <span id={kindId} className="text-small font-semibold">Kind of {(unionTitle(parts.body) ?? "it").replace(/^./, (c) => c.toLowerCase())}</span>
+      <span id={kindId} className="text-small font-semibold">{kindLabel}</span>
       <div role="radiogroup" aria-labelledby={kindId} className="grid grid-cols-1 gap-2 sm:flex sm:flex-wrap">
         {branches.map((b, i) => (
           <label key={b.label} className={`flex min-h-[24px] items-center gap-2 rounded-lg border border-line-control px-3 text-body ${NARROW}`}>
@@ -217,7 +221,7 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
     const json = row.spec.widget === "json" && !row.spec.holdsSensitive;
     const drawnParts = partsOf(row.spec);
     const pendingSaid = row.state === "pending" && drawer.editable && !required.includes(row.name);
-    const said = json ? WORDS.json : drawnParts && update && row.spec.base !== "list" ? (replace ? WORDS.partsReplace : WORDS.partsMerge) : undefined;
+    const said = json ? WORDS.json : drawnParts && update && !modeComputed && row.spec.base !== "list" ? (replace ? WORDS.partsReplace : WORDS.partsMerge) : undefined;
     // The setting's own description first, then how it's sent: one paragraph (F5).
     const hint = said === undefined ? undefined : [row.spec.hint, said].filter(Boolean).join(" ");
     return (
@@ -244,13 +248,20 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
 
   const list = () => {
     if (!drawer.editable) {
-      const summary = summaryOf(parts.widget, rows, body ?? {}, valueAt(config, ["mode"]), propertiesOf);
+      // The kind said first; `clear`'s names the list can't draw each said as written, the others as rows (F5).
+      const offers = (n: string) => offered.some((s) => s.name === n);
+      const cleared = parts.clear !== null ? (names ?? []) : [];
+      const summed = clearDrawn ? rows : rowsOf(offered, body ?? {}, cleared.filter(offers), memory.pending, required);
+      const summary = summaryOf(parts.widget, summed, body ?? {}, valueAt(config, ["mode"]), propertiesOf, {
+        kind: kind && index !== null ? { name: kind.name, label: kindLabel, text: branches[index]!.label } : null,
+        cleared: clearDrawn ? [] : cleared.filter((n) => !offers(n)),
+      });
       return (
         <>
           <p className="text-small">{summary.head}</p>
           <dl className="grid grid-cols-1 gap-x-3 gap-y-1 text-small sm:grid-cols-[minmax(0,10rem)_minmax(0,1fr)]">
-            {summary.lines.map((l) => (
-              <div key={l.name} className="contents">
+            {summary.lines.map((l, i) => (
+              <div key={i} className="contents">
                 <dt className="text-muted">{l.label}</dt>
                 <dd className="m-0">{l.text}</dd>
               </div>

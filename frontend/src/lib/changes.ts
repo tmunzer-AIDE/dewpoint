@@ -185,6 +185,7 @@ const joinedWords = (words: string[]): string =>
 export const WORDS = {
   merge: "Merge with the current settings",
   replace: "Replace them",
+  computedMode: "Merge or replace, computed when the step runs",
   mergeSays: "Merge reads the current settings when the step runs and keeps the parts of each setting below that you don't give. A change made in Mist in between may be overwritten.",
   replaceSays: "Replace sends each setting below as written: the parts you don't give go back to Mist's defaults. Settings not listed stay as they are.",
   partsMerge: "Its parts left empty stay as they are: merge changes only those given.",
@@ -226,15 +227,19 @@ export function brief(spec: FieldSpec | undefined, value: unknown): string {
   return "empty";
 }
 
-/** What a read-only view says of the changes (§5.9): how they're sent and how many, then a line per setting. */
+/** Whether a value is computed when the step runs: a formula, a reference or a template gives it. */
+export const isComputed = (value: unknown): boolean => ["cel", "ref", "template"].includes(envelopeOf(value) ?? "");
+
+/** What a read-only view says of the changes (§5.9): how they're sent and how many, then a line per setting. The kind
+ * first, as its choice is labelled, not counted; then `cleared`, the names `clear` holds that the list can't draw, each
+ * as written, counted (F5). */
 export function summaryOf(
   widget: "update" | "create", rows: Row[], body: Record<string, unknown>, mode: unknown, partsOf: (spec: FieldSpec) => FieldSpec[],
+  { kind = null, cleared = [] }: { kind?: { name: string; label: string; text: string } | null; cleared?: string[] } = {},
 ): { head: string; lines: { name: string; label: string; text: string }[] } {  // prettier-ignore
-  const n = changedCount(rows);
-  const head =
-    widget === "update"
-      ? `${fixedOf(mode) === "replace" ? WORDS.replace : WORDS.merge} · ${n === 1 ? "1 change" : `${n} changes`}`
-      : `${n === 1 ? "1 setting" : `${n} settings`} given`;
+  const n = changedCount(rows) + cleared.length;
+  const how = isComputed(mode) ? WORDS.computedMode : fixedOf(mode) === "replace" ? WORDS.replace : WORDS.merge;
+  const head = widget === "update" ? `${how} · ${n === 1 ? "1 change" : `${n} changes`}` : `${n === 1 ? "1 setting" : `${n} settings`} given`;
   const lines = rows
     .filter((r) => r.state !== "pending")
     .map((r) => {
@@ -251,5 +256,5 @@ export function summaryOf(
         : brief(r.spec, body[r.name]);
       return { name: r.name, label: r.spec.label, text: `${r.state === "both" ? "set and cleared" : "set"}: ${said}` };
     });
-  return { head, lines };
+  return { head, lines: [...(kind ? [kind] : []), ...lines, ...cleared.map((name) => ({ name, label: name, text: "cleared" }))] };
 }

@@ -145,3 +145,19 @@ describe("what's remembered under a list's items (F5)", () => {
     expect(reindexed({ ...memory, open: "/body/networks" }, "/body/networks", [1, 0])).toMatchObject({ open: "/body/networks" });
   });
 });
+
+describe("a read-only summary's kind, a clear it can't draw, a mode a formula gives (F5)", () => {
+  it("says the kind first, uncounted; each name it can't draw cleared, counted; a computed mode in the head", () => {
+    const rows = rowsOf(offered, { name: "hq" }, [], []);
+    const kind = { name: "type", label: "Kind of thing", text: "Camera" };
+    expect(summaryOf("update", rows, { name: "hq" }, formula('"replace"'), propertiesOf, { kind, cleared: ["id"] })).toEqual({
+      head: "Merge or replace, computed when the step runs · 2 changes",
+      lines: [
+        { name: "type", label: "Kind of thing", text: "Camera" },
+        { name: "name", label: "Name", text: "set: hq" },
+        { name: "id", label: "id", text: "cleared" },
+      ],
+    });
+    expect(summaryOf("update", rows, { name: "hq" }, "replace", propertiesOf).head).toBe("Replace them · 1 change");
+  });
+});
