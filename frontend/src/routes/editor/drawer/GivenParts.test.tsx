@@ -266,3 +266,24 @@ it("says “· In Changes” in an object's own Find for a part drawn under it, 
   await userEvent.type(find, "day");
   expect(hit(/^Schedules › an item › Day/)).not.toContain("· In Changes");
 });
+
+it("forgets a new entry's name and refusal on Escape, focus back on ＋ Add an entry (#140 item 6b, N2)", async () => {
+  showDrawer(UPDATE, { config: { body: { port_usages: { trunk: { mode: "trunk" } } } } });
+  await userEvent.click(screen.getByRole("button", { name: "＋ Add an entry" }));
+  await userEvent.type(screen.getByLabelText("Name of the new entry"), "trunk{Enter}");
+  await userEvent.keyboard("{Escape}");
+  const add = screen.getByRole("button", { name: "＋ Add an entry" });
+  await vi.waitFor(() => expect(document.activeElement).toBe(add));
+  await userEvent.click(add);
+  expect(screen.getByLabelText<HTMLInputElement>("Name of the new entry").value).toBe("");
+  expect(screen.queryByText("Port usages has an entry named trunk already.")).toBeNull();
+});
+
+it("refuses $value as a new entry's name, as a rename does (#140 item 6c)", async () => {
+  const { config } = showDrawer(UPDATE, { config: { body: { port_usages: { trunk: { mode: "trunk" } } } } });
+  await userEvent.click(screen.getByRole("button", { name: "＋ Add an entry" }));
+  await userEvent.type(screen.getByLabelText("Name of the new entry"), "$value{Enter}");
+  expect(screen.getByText("A name can't be $value: the engine would read the whole value as computed.")).toBeTruthy();
+  expect(at("/body/port_usages/$value")).toBeUndefined();
+  expect(config()).toEqual({ body: { port_usages: { trunk: { mode: "trunk" } } } });
+});

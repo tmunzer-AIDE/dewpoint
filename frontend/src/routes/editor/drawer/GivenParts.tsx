@@ -8,7 +8,7 @@ import { createContext, useContext, useEffect, useRef, useState, type ReactNode 
 import { Button } from "../../../components/Button";
 import { controlClass } from "../../../components/Field";
 import { WORDS, drawnAt, showing, type Memory } from "../../../lib/changes";
-import { valueAt } from "../../../lib/config";
+import { ENVELOPE, ENVELOPE_NAME, valueAt } from "../../../lib/config";
 import { isObject, offeredOf, entryOf, itemOf, pointerOf, type FieldSpec } from "../../../lib/schemaForm";
 import { settingsOf, type Setting } from "../../../lib/settingsIndex";
 import { EmptiedContext, ITEM_EMPTIED, useDrawer } from "./context";
@@ -187,6 +187,7 @@ function Entries({ spec, value }: { spec: FieldSpec; value: unknown }) {
   const open = () => {
     const name = key.trim();
     if (name === "") return setWhy("Give the entry a name.");
+    if (name === ENVELOPE) return setWhy(ENVELOPE_NAME);
     if (keys.includes(name)) return setWhy(`${spec.label} has an entry named ${name} already.`);
     const entry = pointerOf([...spec.path, name]);
     const parts = memory.adding?.parts ?? [];
@@ -234,8 +235,12 @@ function Entries({ spec, value }: { spec: FieldSpec; value: unknown }) {
                 e.preventDefault();
                 open();
               } else if (e.key === "Escape") {
+                // Forgotten, what's typed and why it's refused, focus back where the person was (F5).
                 e.stopPropagation();
                 remember({ adding: null });
+                setKey("");
+                setWhy(null);
+                focusLater(spec.pointer, "add");
               }
             }}
           />

@@ -383,6 +383,9 @@ function renamedEntry(doc: GraphDoc, nodeId: string, field: string, old: unknown
   return renamed.every((e, i) => e === entries[i]) ? doc : { ...doc, settings: { ...doc.settings, declassify: renamed } };
 }
 
+/** Why a map's entry can't be called `$value` (ruling 15): renamed or new (F5). */
+export const ENVELOPE_NAME = "A name can't be $value: the engine would read the whole value as computed.";
+
 /** A map's entry renamed in place, keeping its order; refused, with the reason, when the name is empty, `$value`
  * (ruling 15) or another entry's. */
 export function renameEntry(doc: GraphDoc, nodeId: string, path: Path, from: string, to: string): { doc: GraphDoc } | { problem: string } {
@@ -390,7 +393,7 @@ export function renameEntry(doc: GraphDoc, nodeId: string, path: Path, from: str
   const map = node ? valueAt(node.config ?? {}, path) : undefined;
   if (!node || !isObject(map) || from === to) return { doc };
   if (to === "") return { problem: "A name can't be empty." };
-  if (to === ENVELOPE) return { problem: "A name can't be $value: the engine would read the whole value as computed." };
+  if (to === ENVELOPE) return { problem: ENVELOPE_NAME };
   if (Object.hasOwn(map, to)) return { problem: `There's already one called ${to}.` };
   const renamed = Object.fromEntries(Object.entries(map).map(([k, v]) => [k === from ? to : k, v]));
   return { doc: withNode(doc, nodeId, { ...node, config: setAt(node.config ?? {}, path, renamed) as Record<string, unknown> }) };
