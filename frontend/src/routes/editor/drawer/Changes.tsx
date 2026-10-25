@@ -5,7 +5,7 @@
 // today's control (ledger 102). Each row's setting is the drawer's own field too, its name beside its title; Set, Clear
 // and Keep change `body` and `clear` together, one step of Undo. What it remembers until the drawer closes (a value set
 // before it was cleared, a setting added with nothing given) lives above the tabs, which unmount what they hide.
-import { useId, useRef, useState, type ReactNode } from "react";
+import { useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { Button } from "../../../components/Button";
 import {
   WORDS, bodyObject, changedCount, clearIn, clearNames, drawnAt, isComputed, keepIn, kindIn, kindIndex, rowsOf, setIn, summaryOf, type Memory,
@@ -95,13 +95,14 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
   const names = clearNames(config);
   // A union of kinds (a device's): its kind first, the settings offered the chosen kind's (§5.7); an update's read
   // from its value, the one chosen here, or the settings listed; a create's only from its value, written when picked.
-  const branches = branchesOf(parts.body);
-  const kind = kindOf(branches);
-  const kindNames = kind ? branches.map((b) => offeredOf(b, kind.name).map((p) => p.name)) : [];
+  // Read once for the setting's schema, not at each render: `parts.body` is the drawer's own (F5).
+  const branches = useMemo(() => branchesOf(parts.body), [parts.body]);
+  const kind = useMemo(() => kindOf(branches), [branches]);
+  const kindNames = useMemo(() => (kind ? branches.map((b) => offeredOf(b, kind.name).map((p) => p.name)) : []), [branches, kind]);
   const listed = [...Object.keys(body ?? {}), ...(names ?? [])].filter((n) => n !== kind?.name);
   const index = kind ? kindIndex(parts.widget, body ?? {}, listed, kind, kindNames, memory.kind) : null;
   const scope = kind ? (index === null ? null : branches[index]!) : parts.body;
-  const offered = scope ? offeredOf(scope, kind?.name ?? null) : [];
+  const offered = useMemo(() => (scope ? offeredOf(scope, kind?.name ?? null) : []), [scope, kind]);
   const required = update || scope === null || !Array.isArray(scope.schema.required) ? [] :
     (scope.schema.required as unknown[]).filter((n): n is string => typeof n === "string" && offered.some((o) => o.name === n));  // prettier-ignore
   const kindId = useId();

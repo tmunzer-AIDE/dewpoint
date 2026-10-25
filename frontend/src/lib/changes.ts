@@ -94,7 +94,7 @@ export function rowsOf(specs: FieldSpec[], body: Record<string, unknown>, clear:
   return specs
     .filter((s) => names.has(s.name))
     .map((spec): Row => {
-      const set = spec.name in body;
+      const set = Object.hasOwn(body, spec.name);
       const cleared = clear.includes(spec.name);
       return { name: spec.name, spec, state: set && cleared ? "both" : set ? "set" : cleared ? "clear" : "pending" };
     })

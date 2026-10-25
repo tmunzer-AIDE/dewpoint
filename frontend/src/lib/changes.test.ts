@@ -24,6 +24,10 @@ describe("rows", () => {
     const rows = rowsOf(offered, { name: "hq", id: "x", nope: 1 }, ["name"], []);
     expect(rows.map((r) => [r.name, r.state])).toEqual([["name", "both"]]);
   });
+  it("reads a setting as set only when the body holds it, never through what every object has (#140 item 15)", () => {
+    const named = { ...offered[0]!, name: "toString" };
+    expect(rowsOf([named], {}, [], ["toString"]).map((r) => r.state)).toEqual(["pending"]);
+  });
   it("reads only a plain body and a plain list of names", () => {
     expect(bodyObject({})).toEqual({});
     expect(bodyObject({ body: formula("steps.x.output") })).toBeNull();

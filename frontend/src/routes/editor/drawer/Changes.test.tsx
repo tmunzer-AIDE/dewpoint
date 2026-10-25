@@ -4,8 +4,15 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { WORDS } from "../../../lib/changes";
 import { formula, literal } from "../../../lib/config";
+import { branchesOf } from "../../../lib/schemaForm";
 import { CREATE, DEVICE_CREATE, DEVICE_UPDATE, UPDATE } from "../../../test/nodeTypes";
 import { fakeApi, json, problem, showDrawer } from "./harness";
+
+// Every reading of a union's kinds the changes make (F5): their work, counted.
+vi.mock("../../../lib/schemaForm", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../lib/schemaForm")>();
+  return { ...actual, branchesOf: vi.fn(actual.branchesOf) };
+});
 
 beforeEach(() => {
   fakeApi({ "GET /api/v1/t/t1/connections": () => json([]), "GET /api/v1/connection-types": () => json([]) });
@@ -335,4 +342,12 @@ it("keeps focus after each row action: Set on its control, Clear on Clear, Keep 
   await vi.waitFor(() => expect(document.activeElement).toBe(within(changes()).getByLabelText("Name")));
   await userEvent.click(within(changes()).getByRole("button", { name: "Keep Rogue as it is" }));
   await vi.waitFor(() => expect(document.activeElement).toBe(within(changes()).getByRole("button", { name: "＋ Add a setting" })));
+});
+
+it("reads a union's kinds once, not again for each character typed (#140 item 14)", async () => {
+  showDrawer(DEVICE_UPDATE, { config: { body: { name: "cam" } } });
+  vi.mocked(branchesOf).mockClear();
+  await userEvent.type(within(changes()).getByLabelText("Name"), "era");
+  expect(within(changes()).getByLabelText<HTMLInputElement>("Name").value).toBe("camera");
+  expect(vi.mocked(branchesOf)).not.toHaveBeenCalled();
 });
