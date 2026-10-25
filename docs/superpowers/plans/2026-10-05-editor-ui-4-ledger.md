@@ -4505,3 +4505,31 @@ ledger as 418–427. Frontend only: no API, schema, migration or engine change. 
 425. **Accepted. A body the list can't draw is one field** (plan ruling 8).
 426. **Accepted. Each render's work** (plan ruling 9).
 427. **Accepted. The tests, and the checks** (plan ruling 10).
+
+### F5, the final checkpoint (2026-10-25)
+
+The owner accepted the plan and chose inline execution ("approved, inline"), with no milestone pause; the branch from
+origin/main 19427780.
+- Task 1 (84db73bd): the plan's acceptance, rulings 418–427.
+- Task 2 (8418f8b1): names and descriptions, as a screen reader hears them. Red: 13 failed and 38 passed. Green: 51
+  passed.
+- Task 3 (709627b2): "· In Changes" where the hit is drawn. Red: 2 failed and 51 passed. Green: 53 passed.
+- Task 4 (e8091df5): a map's new entry: Escape forgets it, `$value` is refused. Red: 2 failed and 27 passed. Green: 29
+  passed.
+- Task 5 (59d50155): a list's items keep what's theirs. Red: 3 failed and 45 passed. Green: 48 passed.
+- Task 6 (eb5e6eb0): the kind's status line; a Set with nothing to write. Red: 4 failed and 26 passed. Green: 30
+  passed.
+- Task 7 (ef90aeb4): a read-only view's kind, a `clear` it can't draw, a mode a formula gives. Red: 4 failed and 47
+  passed. Green: 51 passed.
+- Task 8 (8605a7d2): a body the list can't draw is one field. Red: 3 failed and 33 passed. Green: 36 passed.
+- Task 9 (654a9c79): each render's work. Red: 2 failed and 54 passed. Green: 56 passed.
+- Task 10, every check on 654a9c79, whose tree is the prototype's (3c0f475a): the whole frontend suite, 1,727 passed in
+  121 files; the type check and ESLint silent; CodeQL (CLI 2.27.2; javascript-queries 2.4.8): no finding.
+
+Mid-slice ruling:
+
+M119. **Packages borrowed, nothing installed,** as F2's M116 and F4's M118: the frontend's `node_modules` linked from
+the 4d-1b worktree (main's lockfile); the plan's `npx --offline pnpm@12.6.0 exec <tool>` run as
+`./node_modules/.bin/<tool>`, since pnpm exec fails on a linked `node_modules`. Cost: none.
+
+Nothing pushed. Next: the final review.
