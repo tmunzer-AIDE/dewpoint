@@ -96,7 +96,11 @@ describe("a message's preview (4f-1, the message composer design §5.5)", () => 
 
   it("counts Slack's text under it, and past Slack's limit warns there and under the preview", () => {
     const f = showDrawer(messageStep("slack.send_message"), { config: { text: template({ text: "Access point " }, { ref: "trigger.ap" }) } });
-    expect(screen.getByText("13 characters, before its values. Slack shows up to 3,000.")).toBeTruthy();
+    const count = screen.getByText("13 characters, before its values. Slack shows up to 3,000.");
+    // Every line of the text is described by it, the one after a value too (#136 item 2).
+    const lines = [...document.querySelector('[data-pointer="/text"]')!.querySelectorAll("input")];
+    expect(lines.length).toBeGreaterThan(1);
+    for (const line of lines) expect(line.getAttribute("aria-describedby")?.split(" ")).toContain(count.id);
     f.replace({ text: template({ text: "x".repeat(3214) }, { ref: "trigger.org" }) });
     const warning = screen.getByText('3,214 characters. Slack shows the first 3,000 and ends them with "…".');
     expect(warning.className).toContain("text-warn-ink");

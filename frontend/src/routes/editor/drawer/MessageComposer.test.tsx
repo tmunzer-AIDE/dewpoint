@@ -64,6 +64,23 @@ describe("the message composer (4f-1, the message composer design §5)", () => {
     expect(within(within(message()).getByRole("group", { name: "How Severity is set" })).getByRole("button", { name: "Formula" })).toBeTruthy();
   });
 
+  it("says nothing under the severity's choices: Info is chosen when nothing is set (#136 item 1)", () => {
+    showDrawer(SLACK);
+    expect(within(message()).queryByText("If empty: info.")).toBeNull();
+  });
+
+  it("marks no row's parts, one line says each needs both, and an emptied part still says it's required (#136 item 6)", async () => {
+    showDrawer(SLACK, { config: { text: "x", fields: fields(2), links: [{ label: "Open", url: "https://a.test" }] } });
+    expect(within(message()).getAllByText("(required)")).toHaveLength(1); // the text's
+    expect(within(message()).getByText("Each needs a label and a value.")).toBeTruthy();
+    expect(within(message()).getByText("Each needs a label and an address.")).toBeTruthy();
+    const label = within(message()).getByLabelText("Field 1 label");
+    expect(label.getAttribute("aria-required")).toBe("true");
+    await userEvent.clear(label);
+    await userEvent.tab();
+    expect(within(message().querySelector<HTMLElement>('[aria-label="Field 1"]')!).getByText("Required")).toBeTruthy();
+  });
+
   it("writes the text on several lines", async () => {
     const f = showDrawer(SLACK, { config: { text: "AP down" } });
     await userEvent.type(within(message()).getByLabelText("Text"), "{Enter}at HQ");

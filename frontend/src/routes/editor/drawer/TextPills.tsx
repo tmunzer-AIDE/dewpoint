@@ -185,7 +185,7 @@ export function TextPills({ spec, value, literal, id, describedBy, invalid, disa
                   ref={(el) => void (inputs.current[i] = el)}
                   id={i === 0 ? id : undefined}
                   type="text" value={piece.text} disabled={disabled} spellCheck={false}
-                  aria-label={labelled(i, r)} aria-describedby={i === 0 ? describedBy : undefined}
+                  aria-label={labelled(i, r)} aria-describedby={describedBy}
                   aria-invalid={invalid} aria-required={i === 0 ? spec.required && !spec.entry : undefined}
                   size={Math.max(1, piece.text.length)}
                   onKeyDown={onTextKey(i)}

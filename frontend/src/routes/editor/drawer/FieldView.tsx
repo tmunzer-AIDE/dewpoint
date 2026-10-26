@@ -96,14 +96,16 @@ const startMode = (spec: FieldSpec, value: unknown, fixed = false): Mode =>
 
 /** How the message composer draws one of its parts (4f-1, the message composer design §5): its own control (the
  * severity's choices) or its own rows (the fields', the links'), the text on several lines, a check said as it's typed
- * (a link's address), its hint in place of the schema's, without the note on pills (`quiet`), "(required)" said at the
- * top level (`marked`: Setup holds optional parts too), a warning (what its target would cut) and what's said under it. */
+ * (a link's address), its hint in place of the schema's, a described note after it (Slack's count), without the note on
+ * pills (`quiet`), "(required)" said or not whatever its level (`marked`: Setup holds optional parts too; a row's parts go
+ * unmarked, F6), a warning (what its target would cut) and what's said under it. */
 export interface Drawn {
   control?: Control;
   parts?: (spec: FieldSpec, value: unknown) => ReactNode;
   lines?: boolean;
   check?: (value: unknown) => string | null;
   hint?: string | null;
+  note?: string | null; // said after the hint, described (Slack's count, F6)
   quiet?: boolean;
   marked?: boolean;
   missing?: string; // said in place of "Required"
@@ -214,7 +216,7 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
   const json = asJson || held?.kind === "json" || kind === "unknown" || (kind === "literal" && isContainer(spec.base));
   const container = mode === "fixed" && fixedOk && !computed && !hidden && !json && (isContainer(spec.base) || drawn.group === true);
   const problems = problemsAt(drawer.problems, spec.pointer, container ? new Set(drawn.shown ?? partNames(spec, fixed)) : null);
-  const required = spec.required && !spec.entry && (spec.path.length > 1 || drawn.marked === true);
+  const required = spec.required && !spec.entry && (drawn.marked ?? spec.path.length > 1);
   const hint = drawn.hint !== undefined ? drawn.hint : spec.hint;
   const checked = drawn.check?.(value) ?? null; // said where a refusal would be, after it
   // A list's item or a map's entry, emptied, keeps its place, blank: never missing on its own (the final review).
@@ -316,7 +318,7 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
     </>
   );
   const frame = (control: (c: Described) => ReactNode, said: string | null = hint, below: ReactNode = drawn.below) => (
-    <FieldFrame label={spec.label} name={drawn.name} required={required} hint={said} warn={drawn.warn} local={stale ? STALE : (held?.why ?? local ?? missing ?? checked)} problems={problems} actions={actions} below={below}>
+    <FieldFrame label={spec.label} name={drawn.name} required={required} hint={said} note={drawn.note} warn={drawn.warn} local={stale ? STALE : (held?.why ?? local ?? missing ?? checked)} problems={problems} actions={actions} below={below}>
       {control}
     </FieldFrame>
   );

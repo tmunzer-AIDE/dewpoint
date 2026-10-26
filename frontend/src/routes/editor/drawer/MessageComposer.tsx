@@ -40,6 +40,8 @@ function SeverityControl({ spec, value, id, describedBy, invalid, disabled, onCh
 }
 
 const asList = (v: unknown): unknown[] => (Array.isArray(v) ? [...(v as unknown[])] : []);
+const NEEDS_VALUE = "Each needs a label and a value.";
+const NEEDS_ADDRESS = "Each needs a label and an address.";
 const NARROW = "max-sm:min-h-[44px]"; // 44 px targets at 320 (§5.8), in pixels: a rem is 14 px here, so min-h-11 is 38.5
 
 /** The fields' or the links' rows (§5.3): how many of the most, each row's label and value (or address) taking values,
@@ -71,17 +73,19 @@ function Rows({ spec, value, noun }: { spec: FieldSpec; value: unknown; noun: "f
   return (
     <>
       {Number.isFinite(max) && <p className="text-small text-muted">{items.length} of {max}</p>}
+      {/* Its parts unmarked: one line says both are needed (F6, the owner's ruling). */}
+      {items.length > 0 && <p className="text-small text-muted">{noun === "field" ? NEEDS_VALUE : NEEDS_ADDRESS}</p>}
       {items.map((_, i) => {
         const [label, second] = propertiesOf(itemOf(spec, i));
         const row = `${noun} ${i + 1}`;
         return (
           <div key={i} role="group" aria-label={`${Noun} ${i + 1}`} className="flex min-w-0 flex-col gap-2">
             <div className="grid min-w-0 gap-2 sm:grid-cols-2">
-              {label && <FieldView key={`${lineage}:label`} spec={{ ...label, label: `${Noun} ${i + 1} label` }} drawn={{ hint: null, quiet: true }} />}
+              {label && <FieldView key={`${lineage}:label`} spec={{ ...label, label: `${Noun} ${i + 1} label` }} drawn={{ hint: null, quiet: true, marked: false }} />}
               {second && (
                 <FieldView
                   key={`${lineage}:${second.name}`} spec={{ ...second, label: `${Noun} ${i + 1} ${noun === "field" ? "value" : "address"}` }}
-                  drawn={{ hint: null, quiet: true, check: noun === "link" ? linkProblem : undefined }}
+                  drawn={{ hint: null, quiet: true, marked: false, check: noun === "link" ? linkProblem : undefined }}
                 />
               )}
             </div>
@@ -113,7 +117,7 @@ function Rows({ spec, value, noun }: { spec: FieldSpec; value: unknown; noun: "f
 function textDrawn(target: ReturnType<typeof targetOf>, draft: ReturnType<typeof draftOf>): Drawn {
   if (target === null) return {};
   const cuts = cutsText(target, draft);
-  if (target === "slack") return cuts ? { warn: slackCount(draft) } : { below: <p className="text-small text-muted">{slackCount(draft)}</p> };
+  if (target === "slack") return cuts ? { warn: slackCount(draft) } : { note: slackCount(draft) };
   return cuts ? { warn: cutWords(target, draft)[0] ?? null } : {};
 }
 
@@ -125,7 +129,7 @@ export function MessageComposer({ parts }: { parts: FieldSpec[] }) {
   const drawnFor = (name: string): Drawn => {
     switch (name) {
       case "severity":
-        return { control: SeverityControl, marked: true };
+        return { control: SeverityControl, marked: true, hint: null }; // never empty: Info is chosen when unset (F6)
       case "title":
         return { hint: titleHint(target), quiet: true, marked: true };
       case "text":
