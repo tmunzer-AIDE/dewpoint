@@ -3,7 +3,7 @@
 // it, or neither (ruling 6); its control, chosen by its widget (ruling 5); the server's problems at it, with how a
 // formula runs (D19); and what's typed in it but not applied, with its reason and a Discard (ruling 18). Its typing
 // while it keeps focus is one undo step (ruling 8).
-import { useContext, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { useContext, useEffect, useId, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
 import { Button } from "../../../components/Button";
 import { fixedOf, formula, isEmptyValue, isPlainRef, kindOf, literal, referenceText, valueAt } from "../../../lib/config";
 import { segmentsOf, type Caret } from "../../../lib/pills";
@@ -148,6 +148,7 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
   }
   const { mark, onFocus } = useSession(`${drawer.node.id}${spec.pointer}`);
   const region = useRef<HTMLDivElement>(null);
+  const choicesId = useId();
   /** After one of the field's own actions, which removes the button pressed or remounts the control: focus goes back to
    * the field's control, else its first one (WCAG 2.4.3; the final review). */
   const refocus = () =>
@@ -335,12 +336,23 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
     <div><Button size="sm" onClick={drawer.openDeclassify}>Review in Declassify…</Button></div>
   );
   const panel = { opened, open: setOpened, caret, focus: focusNext };
-  const textPills = (c: Described) => (
-    <TextPills
-      key={generation} {...c} spec={spec} value={hidden ? undefined : fixed} literal={held?.literal ?? kind === "literal"}
-      disabled={disabled} onChange={write} panel={panel} lines={drawn.lines} // it writes a literal back as one itself, never a template as data
-    />
-  );  // prettier-ignore
+  // Down from the field reaches its choices once they're shown, as on the start forms (ruling 375; F6).
+  const toChoices = (e: KeyboardEvent<HTMLDivElement>) => {
+    const list = e.key === "ArrowDown" && !e.defaultPrevented && e.target instanceof HTMLInputElement ? document.getElementById(choicesId) : null;
+    if (list) {
+      e.preventDefault();
+      list.focus();
+    }
+  };
+  const textPills = (c: Described) => {
+    const pills = (
+      <TextPills
+        key={generation} {...c} spec={spec} value={hidden ? undefined : fixed} literal={held?.literal ?? kind === "literal"}
+        disabled={disabled} onChange={write} panel={panel} lines={drawn.lines} // it writes a literal back as one itself, never a template as data
+      />
+    );  // prettier-ignore
+    return spec.widget === "options" ? <div className="contents" onKeyDown={toChoices}>{pills}</div> : pills;
+  };
   let body: ReactNode;
   let says = false; // how its formula runs, said under it
   if (held?.kind === "condition" || (builder && mode === "fixed" && buildable && !(held && Held))) {
@@ -364,7 +376,7 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
     const written = segmentsOf(value);
     const choices = choosing && (
       <ChoicesBelow
-        spec={spec} query={written !== null && written.pills.length === 0 ? written.texts.join("") : ""} current={fixed} disabled={disabled}
+        spec={spec} query={written !== null && written.pills.length === 0 ? written.texts.join("") : ""} current={fixed} disabled={disabled} listId={choicesId}
         onDone={refocus}
         onPick={(choice) => {
           const why = writeFixed(choice, false);

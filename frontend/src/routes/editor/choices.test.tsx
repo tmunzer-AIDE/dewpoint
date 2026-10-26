@@ -13,6 +13,13 @@ it("takes focus when shown, as the drawer's list does (ruling 338)", () => {
   expect(document.activeElement).toBe(screen.getByRole("listbox", { name: "Choices for Site" }));
 });
 
+it("takes focus only from where it was asked, or from nowhere, never from a field (#138 item 3, amends ruling 338)", () => {
+  render(<input aria-label="Site" />);
+  screen.getByLabelText("Site").focus();
+  render(<ChoiceList label="Site" options={SITES} onPick={vi.fn()} onClose={vi.fn()} />);
+  expect(document.activeElement).toBe(screen.getByLabelText("Site"));
+});
+
 it("is shown without taking focus in a start form, under the id the field controls (the 4f-3 design §5.1)", () => {
   render(<ChoiceList label="Site" options={SITES} onPick={vi.fn()} onClose={vi.fn()} id="site-list" focusOnShow={false} />);
   const list = screen.getByRole("listbox", { name: "Choices for Site" });

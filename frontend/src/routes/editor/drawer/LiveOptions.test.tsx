@@ -249,3 +249,18 @@ it("makes a fixed-only field's Show choices 44 px tall below 640 px, as a field'
   showFields(fixedOnly, { config: { connection: C1 } });
   expect(screen.getByRole("button", { name: "Show choices: Site" }).className).toContain("max-sm:min-h-[44px]");
 });
+
+it("leaves focus in the field when the choices land after the person went back to it, Down then reaching them (#138 item 3)", async () => {
+  let answer: (r: Response) => void = () => undefined;
+  fakeApi({ [CONNECTIONS]: both, [OPTIONS]: () => new Promise<Response>((r) => (answer = r)) });
+  showFields(REMOTE, { config: { connection: C1 } });
+  await screen.findByRole("option", { name: "Prod · verified" });
+  await userEvent.click(screen.getByRole("button", { name: "Show choices: Site" }));
+  const site = screen.getByLabelText("Site");
+  await userEvent.click(site); // back in the field while the answer is on its way
+  act(() => answer(sites()));
+  const list = await screen.findByRole("listbox", { name: "Choices for Site" });
+  expect(document.activeElement).toBe(site);
+  await userEvent.keyboard("{ArrowDown}"); // as on the start forms (ruling 375)
+  expect(document.activeElement).toBe(list);
+});

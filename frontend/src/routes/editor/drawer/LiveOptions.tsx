@@ -8,7 +8,7 @@
 // named until the drawer closes or the value changes: the config keeps only the value. The list and its eras are the
 // start forms' too (../choices); the words and the route are the drawer's.
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useId, useRef, useState } from "react";
 import { Button } from "../../../components/Button";
 import { controlClass } from "../../../components/Field";
 import { ApiError, client, ok } from "../../../lib/client";
@@ -99,17 +99,18 @@ function usePicked(current: unknown) {
 
 /** Under a field that takes values from earlier steps (4f-2: ruling 127 amended): Show choices, what's said of them,
  * their list, and the pick's name. The query is the field's written text when it holds no value from a step. */
-export function ChoicesBelow({ spec, query, current, disabled, onPick, onDone }: {
-  spec: FieldSpec; query: string; current: unknown; disabled: boolean; onPick: (value: string) => string | null; onDone: () => void;
+export function ChoicesBelow({ spec, query, current, disabled, listId, onPick, onDone }: {
+  spec: FieldSpec; query: string; current: unknown; disabled: boolean; listId: string; onPick: (value: string) => string | null; onDone: () => void;
 }) {  // prettier-ignore
   const choosing = useChoices(spec);
+  const ask = useRef<HTMLButtonElement>(null);
   const { shown, blocked, unsettled } = choosing;
   const { note, setPicked } = usePicked(current);
   return (
     <div className="flex min-w-0 flex-col gap-2">
       <div>
         <Button
-          size="sm" aria-label={`Show choices: ${spec.label}`} className="max-sm:min-h-[44px]"
+          ref={ask} size="sm" aria-label={`Show choices: ${spec.label}`} className="max-sm:min-h-[44px]"
           disabled={disabled || blocked || unsettled || shown.status === "loading"} onClick={() => void choosing.load(query)}
         >
           Show choices
@@ -118,7 +119,7 @@ export function ChoicesBelow({ spec, query, current, disabled, onPick, onDone }:
       <ChoiceWords choosing={choosing} />
       {shown.status === "done" && shown.options.length > 0 && !disabled && (
         <ChoiceList
-          label={spec.label} options={shown.options}
+          label={spec.label} options={shown.options} id={listId} from={ask}
           onClose={() => {
             choosing.close();
             onDone();
@@ -140,6 +141,8 @@ export function OptionsControl({ spec, value, literal, id, describedBy, invalid,
   const choosing = useChoices(spec);
   const { shown, blocked, unsettled } = choosing;
   const { note, setPicked } = usePicked(value);
+  const ask = useRef<HTMLButtonElement>(null);
+  const listId = useId();
   const typed = drawer.held("text", spec.pointer); // what a refused write turned away (ruling 18)
   const text = typed?.text ?? (typeof value === "string" ? value : "");
   const write = (next: string, typing: boolean): string | null => {
@@ -156,11 +159,18 @@ export function OptionsControl({ spec, value, literal, id, describedBy, invalid,
           id={id} type="text" value={text} disabled={disabled} spellCheck={false}
           aria-describedby={describedBy} aria-invalid={invalid} aria-required={spec.required && !spec.entry}
           onChange={(e) => void write(e.target.value, true)}
+          onKeyDown={(e) => {
+            const list = e.key === "ArrowDown" ? document.getElementById(listId) : null; // as on the start forms (F6)
+            if (list) {
+              e.preventDefault();
+              list.focus();
+            }
+          }}
           className={controlClass(invalid)}
         />
         {/* Named by its field, its visible text first (WCAG 2.5.3): a list of buttons tells them apart (#73). */}
         <Button
-          className="shrink-0 max-sm:min-h-[44px]" aria-label={`Show choices: ${spec.label}`}
+          ref={ask} className="shrink-0 max-sm:min-h-[44px]" aria-label={`Show choices: ${spec.label}`}
           disabled={disabled || blocked || unsettled || shown.status === "loading"} onClick={() => void choosing.load(text)}
         >
           Show choices
@@ -169,7 +179,7 @@ export function OptionsControl({ spec, value, literal, id, describedBy, invalid,
       <ChoiceWords choosing={choosing} />
       {shown.status === "done" && shown.options.length > 0 && !disabled && (
         <ChoiceList
-          label={spec.label} options={shown.options}
+          label={spec.label} options={shown.options} id={listId} from={ask}
           onClose={() => {
             choosing.close();
             document.getElementById(id)?.focus();

@@ -7,7 +7,7 @@
 // (§5.10).
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { useId, useMemo } from "react";
+import { useId, useMemo, useRef } from "react";
 import { Button } from "../../../components/Button";
 import { Select } from "../../../components/Field";
 import { CONNECTION_STATUS, connectionsQuery } from "../../../lib/connections";
@@ -48,6 +48,7 @@ export function choiceWords(picker: InputPicker, lists: PickerList[], connection
 export function TryChoices({ picker, label, disabled }: { picker: { node: string; field: string; connection: string }; label: string; disabled: boolean }) {
   const t = useTriggers();
   const id = useId();
+  const ask = useRef<HTMLButtonElement>(null);
   const lists = usePickerLists();
   const listed = useQuery(connectionsQuery(t.tenantId));
   const held = listed.data?.find((c) => sameId(c.id, picker.connection));
@@ -62,7 +63,7 @@ export function TryChoices({ picker, label, disabled }: { picker: { node: string
     <div className="flex min-w-0 flex-col gap-2">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         <Button
-          id={`${id}-show`} size="sm" aria-label={`Show choices: ${label}`} className="max-sm:min-h-[44px]" disabled={disabled || shown.status === "loading"}
+          ref={ask} id={`${id}-show`} size="sm" aria-label={`Show choices: ${label}`} className="max-sm:min-h-[44px]" disabled={disabled || shown.status === "loading"}
           onClick={() => void load("")}
         >
           Show choices
@@ -71,7 +72,7 @@ export function TryChoices({ picker, label, disabled }: { picker: { node: string
           {shown.status === "idle" ? "Try the list as the form will show it." : statusWords(shown, null, words)}
         </p>
       </div>
-      {shown.status === "done" && shown.options.length > 0 && <ChoiceList label={label} options={shown.options} tall onPick={back} onClose={back} />}
+      {shown.status === "done" && shown.options.length > 0 && <ChoiceList label={label} options={shown.options} from={ask} tall onPick={back} onClose={back} />}
     </div>
   );  // prettier-ignore
 }
