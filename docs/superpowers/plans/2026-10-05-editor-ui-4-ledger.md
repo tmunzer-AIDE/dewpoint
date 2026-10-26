@@ -4560,3 +4560,26 @@ body drawn as the one field; a read-only `clear` line labelled by its raw name (
 top-level Remove named by its title alone (top-level titles are unique).
 
 Nothing pushed.
+
+### F5 merged; the F6 plan accepted (2026-10-25)
+
+The owner merged F5 as #152 (squash fa1ed009), every check green ("green and merged"). F6 is the drawer's, the
+composer's and the step picker's follow-ups: #136 (4f-1's six) and #138 (4f-2a's eight), researched in R11a. The owner
+ruled four: after a Remove, focus stays in the list, on the row now in its place, in every list; the choices take
+focus on landing only if focus hasn't moved; the search box says "Type a step's name or a resource (Mist)"; a message's
+rows go unmarked, one line saying both their parts are needed.
+
+`docs/superpowers/plans/2026-10-25-editor-f6-drawer-composer-picker.md`, revision 1. The owner accepted it: its rulings
+1–9 join this ledger as 428–436. Frontend only: no API, schema, migration or engine change. Mid-slice rulings start at
+M120.
+
+428. **Accepted. No milestone pause** (plan ruling 1).
+429. **Accepted. The composer's words and markers** (plan ruling 2; the owner's ruling for its rows).
+430. **Accepted. The mirror laid out once per draft** (plan ruling 3).
+431. **Accepted. One copy of a list's edits** (plan ruling 4).
+432. **Accepted. Focus after a Remove, in every list** (plan ruling 5; the owner's ruling; amends M73 and 4f-2b's rule).
+433. **Accepted. A refused pick held, a literal's pick named, a 44 px Show choices** (plan ruling 6).
+434. **Accepted. The choices take focus only if focus hasn't moved** (plan ruling 7; the owner's ruling; amends 338).
+435. **Accepted. The step picker's words, its box described, the connection types read once** (plan ruling 8; the
+     owner's words; amends the 4f-2 design §5.1).
+436. **Accepted. The tests, and the checks** (plan ruling 9).
