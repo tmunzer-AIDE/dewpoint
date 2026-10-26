@@ -4583,3 +4583,28 @@ M120.
 435. **Accepted. The step picker's words, its box described, the connection types read once** (plan ruling 8; the
      owner's words; amends the 4f-2 design §5.1).
 436. **Accepted. The tests, and the checks** (plan ruling 9).
+
+### F6, the final checkpoint (2026-10-26)
+
+The owner accepted the plan and chose inline execution ("inline"), with no milestone pause; the branch from
+origin/main fa1ed009.
+- Task 1 (99bb5b50): the plan's acceptance, rulings 428–436.
+- Task 2 (e137a6b4): the composer's notes and markers. Red: 3 failed and 23 passed. Green: 26 passed.
+- Task 3 (5eaa1cce): the mirror laid out once per draft. Red: 1 failed and 34 passed. Green: 35 passed.
+- Task 4 (7d5edc12): one copy of a list's edits, a refactor: 80 passed before and after.
+- Task 5 (67283fa6): focus after a Remove, in every list. Red: 8 failed and 317 passed. Green: 325 passed.
+- Task 6 (6144afa1): a refused pick held, a literal's pick named, a 44 px Show choices. Red: 3 failed and 25 passed
+  (Home and End passed at once). Green: 28 passed.
+- Task 7 (74aa942b): the choices take focus only if focus hasn't moved. Red: 2 failed and 57 passed. Green: 59 passed.
+- Task 8 (8961afaa): the step picker's words, its box described, the connection types read once. Red: 4 failed and 10
+  passed. Green: 14 passed.
+- Task 9, every check on 8961afaa, whose tree is the prototype's (1eef8962): the whole frontend suite, 1,746 passed in
+  121 files; the type check and ESLint silent; CodeQL (CLI 2.27.2; javascript-queries 2.4.8): no finding.
+
+Mid-slice ruling:
+
+M120. **Packages borrowed, nothing installed,** as M116, M118 and M119: the frontend's `node_modules` linked from the
+4d-1b worktree (main's lockfile); the plan's `npx --offline pnpm@12.6.0 exec <tool>` run as
+`./node_modules/.bin/<tool>`. Task 1's section kept the plan's date (2026-10-25). Cost: none.
+
+Nothing pushed. Next: the final review.
