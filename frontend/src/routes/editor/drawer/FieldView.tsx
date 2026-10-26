@@ -364,13 +364,19 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
     const written = segmentsOf(value);
     const choices = choosing && (
       <ChoicesBelow
-        spec={spec} query={written !== null && written.pills.length === 0 ? written.texts.join("") : ""} current={value} disabled={disabled}
+        spec={spec} query={written !== null && written.pills.length === 0 ? written.texts.join("") : ""} current={fixed} disabled={disabled}
         onDone={refocus}
         onPick={(choice) => {
           const why = writeFixed(choice, false);
           if (why === null) {
             drawer.release("template", spec.pointer);
             setGeneration((g) => g + 1);
+          } else {
+            // Turned away, it's held as typed text is, with its Discard (ruling 18; F6).
+            const literalOk = spec.kinds === null || spec.kinds.includes("literal");
+            drawer.hold("template", spec.pointer, {
+              path: spec.path, label: spec.label, text: choice, segments: { texts: [choice], pills: [] }, why, literal: asLiteral, literalOk, entry: spec.entry,
+            });  // prettier-ignore
           }
           return why;
         }}

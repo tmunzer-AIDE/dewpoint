@@ -54,6 +54,16 @@ it("moves with Up and Down, picks with Enter and closes with Escape, never past 
   expect(outer).not.toHaveBeenCalled();
 });
 
+it("goes to the last choice with End and the first with Home (#138 item 8)", async () => {
+  const onPick = vi.fn();
+  const three = [...SITES, { value: "s3", label: "Lyon store 9" }];
+  render(<ChoiceList label="Site" options={three} onPick={onPick} onClose={vi.fn()} />);
+  await userEvent.keyboard("{End}{Enter}");
+  expect(onPick).toHaveBeenLastCalledWith(three[2]);
+  await userEvent.keyboard("{Home}{Enter}");
+  expect(onPick).toHaveBeenLastCalledWith(three[0]);
+});
+
 it("keeps an answer for the scope it was asked in, with the query it answered", async () => {
   const read = vi.fn(() => Promise.resolve(SITES));
   const { result } = renderHook(() => useScopedChoices("a", read, () => "failed"));

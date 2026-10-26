@@ -160,7 +160,7 @@ export function OptionsControl({ spec, value, literal, id, describedBy, invalid,
         />
         {/* Named by its field, its visible text first (WCAG 2.5.3): a list of buttons tells them apart (#73). */}
         <Button
-          className="shrink-0" aria-label={`Show choices: ${spec.label}`}
+          className="shrink-0 max-sm:min-h-[44px]" aria-label={`Show choices: ${spec.label}`}
           disabled={disabled || blocked || unsettled || shown.status === "loading"} onClick={() => void choosing.load(text)}
         >
           Show choices
