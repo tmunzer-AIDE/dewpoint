@@ -1,9 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
-import { screen, waitFor, within } from "@testing-library/react";
+import { cleanup, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { googleChat, slack, teams } from "../../../lib/messages";
 import { messageStep, typeWith } from "../../../test/nodeTypes";
 import { fakeApi, json, showDrawer } from "./harness";
+
+// Every render of a message the composer and its preview make (F6): their work, counted.
+vi.mock("../../../lib/messages", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../lib/messages")>();
+  return { ...actual, slack: vi.fn(actual.slack), teams: vi.fn(actual.teams), googleChat: vi.fn(actual.googleChat) };
+});
 
 const SLACK = messageStep("slack.send_message");
 const SERVICENOW = messageStep("servicenow.create_incident", { urgency: { type: "integer", title: "Urgency", enum: [1, 2, 3] } });
@@ -64,6 +71,33 @@ describe("the message composer (4f-1, the message composer design §5)", () => {
     expect(within(within(message()).getByRole("group", { name: "How Severity is set" })).getByRole("button", { name: "Formula" })).toBeTruthy();
   });
 
+  it("says nothing under the severity's choices: Info is chosen when nothing is set (#136 item 1)", () => {
+    showDrawer(SLACK);
+    expect(within(message()).queryByText("If empty: info.")).toBeNull();
+  });
+
+  it("marks no row's parts, one line says each needs both, and an emptied part still says it's required (#136 item 6)", async () => {
+    showDrawer(SLACK, { config: { text: "x", fields: fields(2), links: [{ label: "Open", url: "https://a.test" }] } });
+    expect(within(message()).getAllByText("(required)")).toHaveLength(1); // the text's
+    expect(within(message()).getByText("Each needs a label and a value.")).toBeTruthy();
+    expect(within(message()).getByText("Each needs a label and an address.")).toBeTruthy();
+    const label = within(message()).getByLabelText("Field 1 label");
+    expect(label.getAttribute("aria-required")).toBe("true");
+    await userEvent.clear(label);
+    await userEvent.tab();
+    expect(within(message().querySelector<HTMLElement>('[aria-label="Field 1"]')!).getByText("Required")).toBeTruthy();
+  });
+
+  it("renders a message once for what its target cuts and once for its preview, at each keystroke (#136 item 3)", async () => {
+    for (const [type, render] of [["slack.send_message", slack], ["teams.send_message", teams], ["google_chat.send_message", googleChat]] as const) {
+      showDrawer(messageStep(type), { config: { text: "x".repeat(30_000) } }); // past every limit: the text cut
+      vi.mocked(render).mockClear();
+      await userEvent.type(within(message()).getByLabelText("Text"), "y");
+      expect(vi.mocked(render), type).toHaveBeenCalledTimes(2);
+      cleanup();
+    }
+  });
+
   it("writes the text on several lines", async () => {
     const f = showDrawer(SLACK, { config: { text: "AP down" } });
     await userEvent.type(within(message()).getByLabelText("Text"), "{Enter}at HQ");
@@ -94,7 +128,17 @@ describe("the message composer (4f-1, the message composer design §5)", () => {
     expect(f.config().links).toEqual([links[1], links[0]]);
     await userEvent.click(within(message()).getByRole("button", { name: "Remove link 2" }));
     expect(f.config().links).toEqual([links[1]]);
+    // The last row gone, focus goes to the new last row's Remove (F6, the owner's ruling); none left, to Add.
+    await waitFor(() => expect(document.activeElement).toBe(within(message()).getByRole("button", { name: "Remove link 1" })));
+    await userEvent.click(within(message()).getByRole("button", { name: "Remove link 1" }));
     await waitFor(() => expect(document.activeElement).toBe(within(message()).getByRole("button", { name: "＋ Add a link" })));
+  });
+
+  it("keeps focus after a Remove on the row now in its place (F6, the owner's ruling)", async () => {
+    showDrawer(SLACK, { config: { text: "x", fields: fields(3) } });
+    await userEvent.click(within(message()).getByRole("button", { name: "Remove field 1" }));
+    await waitFor(() => expect(document.activeElement).toBe(within(message()).getByRole("button", { name: "Remove field 1" })));
+    expect(within(message()).getByLabelText<HTMLInputElement>("Field 1 label").value).toBe("Field 1"); // the former second row
   });
 
   it("checks a link's address as it's typed, when it starts with written text", async () => {

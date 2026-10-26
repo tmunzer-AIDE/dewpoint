@@ -13,6 +13,13 @@ it("takes focus when shown, as the drawer's list does (ruling 338)", () => {
   expect(document.activeElement).toBe(screen.getByRole("listbox", { name: "Choices for Site" }));
 });
 
+it("takes focus only from where it was asked, or from nowhere, never from a field (#138 item 3, amends ruling 338)", () => {
+  render(<input aria-label="Site" />);
+  screen.getByLabelText("Site").focus();
+  render(<ChoiceList label="Site" options={SITES} onPick={vi.fn()} onClose={vi.fn()} />);
+  expect(document.activeElement).toBe(screen.getByLabelText("Site"));
+});
+
 it("is shown without taking focus in a start form, under the id the field controls (the 4f-3 design §5.1)", () => {
   render(<ChoiceList label="Site" options={SITES} onPick={vi.fn()} onClose={vi.fn()} id="site-list" focusOnShow={false} />);
   const list = screen.getByRole("listbox", { name: "Choices for Site" });
@@ -52,6 +59,16 @@ it("moves with Up and Down, picks with Enter and closes with Escape, never past 
   await userEvent.keyboard("{Escape}");
   expect(onClose).toHaveBeenCalledOnce();
   expect(outer).not.toHaveBeenCalled();
+});
+
+it("goes to the last choice with End and the first with Home (#138 item 8)", async () => {
+  const onPick = vi.fn();
+  const three = [...SITES, { value: "s3", label: "Lyon store 9" }];
+  render(<ChoiceList label="Site" options={three} onPick={onPick} onClose={vi.fn()} />);
+  await userEvent.keyboard("{End}{Enter}");
+  expect(onPick).toHaveBeenLastCalledWith(three[2]);
+  await userEvent.keyboard("{Home}{Enter}");
+  expect(onPick).toHaveBeenLastCalledWith(three[0]);
 });
 
 it("keeps an answer for the scope it was asked in, with the query it answered", async () => {

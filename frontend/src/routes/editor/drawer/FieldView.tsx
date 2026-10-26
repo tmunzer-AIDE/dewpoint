@@ -3,7 +3,7 @@
 // it, or neither (ruling 6); its control, chosen by its widget (ruling 5); the server's problems at it, with how a
 // formula runs (D19); and what's typed in it but not applied, with its reason and a Discard (ruling 18). Its typing
 // while it keeps focus is one undo step (ruling 8).
-import { useContext, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { useContext, useEffect, useId, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
 import { Button } from "../../../components/Button";
 import { fixedOf, formula, isEmptyValue, isPlainRef, kindOf, literal, referenceText, valueAt } from "../../../lib/config";
 import { segmentsOf, type Caret } from "../../../lib/pills";
@@ -96,14 +96,16 @@ const startMode = (spec: FieldSpec, value: unknown, fixed = false): Mode =>
 
 /** How the message composer draws one of its parts (4f-1, the message composer design §5): its own control (the
  * severity's choices) or its own rows (the fields', the links'), the text on several lines, a check said as it's typed
- * (a link's address), its hint in place of the schema's, without the note on pills (`quiet`), "(required)" said at the
- * top level (`marked`: Setup holds optional parts too), a warning (what its target would cut) and what's said under it. */
+ * (a link's address), its hint in place of the schema's, a described note after it (Slack's count), without the note on
+ * pills (`quiet`), "(required)" said or not whatever its level (`marked`: Setup holds optional parts too; a row's parts go
+ * unmarked, F6), a warning (what its target would cut) and what's said under it. */
 export interface Drawn {
   control?: Control;
   parts?: (spec: FieldSpec, value: unknown) => ReactNode;
   lines?: boolean;
   check?: (value: unknown) => string | null;
   hint?: string | null;
+  note?: string | null; // said after the hint, described (Slack's count, F6)
   quiet?: boolean;
   marked?: boolean;
   missing?: string; // said in place of "Required"
@@ -120,6 +122,7 @@ export interface Drawn {
   actions?: ReactNode;
   hideClear?: boolean;
   switchLabel?: string; // what its Fixed | Formula switch says it sets, when its label doesn't read well there
+  rowOf?: string; // the list it's a row of: a Remove beside it lands on the row taking its place (F6)
 }
 
 export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn }) {
@@ -145,6 +148,7 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
   }
   const { mark, onFocus } = useSession(`${drawer.node.id}${spec.pointer}`);
   const region = useRef<HTMLDivElement>(null);
+  const choicesId = useId();
   /** After one of the field's own actions, which removes the button pressed or remounts the control: focus goes back to
    * the field's control, else its first one (WCAG 2.4.3; the final review). */
   const refocus = () =>
@@ -214,7 +218,7 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
   const json = asJson || held?.kind === "json" || kind === "unknown" || (kind === "literal" && isContainer(spec.base));
   const container = mode === "fixed" && fixedOk && !computed && !hidden && !json && (isContainer(spec.base) || drawn.group === true);
   const problems = problemsAt(drawer.problems, spec.pointer, container ? new Set(drawn.shown ?? partNames(spec, fixed)) : null);
-  const required = spec.required && !spec.entry && (spec.path.length > 1 || drawn.marked === true);
+  const required = spec.required && !spec.entry && (drawn.marked ?? spec.path.length > 1);
   const hint = drawn.hint !== undefined ? drawn.hint : spec.hint;
   const checked = drawn.check?.(value) ?? null; // said where a refusal would be, after it
   // A list's item or a map's entry, emptied, keeps its place, blank: never missing on its own (the final review).
@@ -316,7 +320,7 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
     </>
   );
   const frame = (control: (c: Described) => ReactNode, said: string | null = hint, below: ReactNode = drawn.below) => (
-    <FieldFrame label={spec.label} name={drawn.name} required={required} hint={said} warn={drawn.warn} local={stale ? STALE : (held?.why ?? local ?? missing ?? checked)} problems={problems} actions={actions} below={below}>
+    <FieldFrame label={spec.label} name={drawn.name} required={required} hint={said} note={drawn.note} warn={drawn.warn} local={stale ? STALE : (held?.why ?? local ?? missing ?? checked)} problems={problems} actions={actions} below={below}>
       {control}
     </FieldFrame>
   );
@@ -332,12 +336,23 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
     <div><Button size="sm" onClick={drawer.openDeclassify}>Review in Declassify…</Button></div>
   );
   const panel = { opened, open: setOpened, caret, focus: focusNext };
-  const textPills = (c: Described) => (
-    <TextPills
-      key={generation} {...c} spec={spec} value={hidden ? undefined : fixed} literal={held?.literal ?? kind === "literal"}
-      disabled={disabled} onChange={write} panel={panel} lines={drawn.lines} // it writes a literal back as one itself, never a template as data
-    />
-  );  // prettier-ignore
+  // Down from the field reaches its choices once they're shown, as on the start forms (ruling 375; F6).
+  const toChoices = (e: KeyboardEvent<HTMLDivElement>) => {
+    const list = e.key === "ArrowDown" && !e.defaultPrevented && e.target instanceof HTMLInputElement ? document.getElementById(choicesId) : null;
+    if (list) {
+      e.preventDefault();
+      list.focus();
+    }
+  };
+  const textPills = (c: Described) => {
+    const pills = (
+      <TextPills
+        key={generation} {...c} spec={spec} value={hidden ? undefined : fixed} literal={held?.literal ?? kind === "literal"}
+        disabled={disabled} onChange={write} panel={panel} lines={drawn.lines} // it writes a literal back as one itself, never a template as data
+      />
+    );  // prettier-ignore
+    return spec.widget === "options" ? <div className="contents" onKeyDown={toChoices}>{pills}</div> : pills;
+  };
   let body: ReactNode;
   let says = false; // how its formula runs, said under it
   if (held?.kind === "condition" || (builder && mode === "fixed" && buildable && !(held && Held))) {
@@ -361,13 +376,19 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
     const written = segmentsOf(value);
     const choices = choosing && (
       <ChoicesBelow
-        spec={spec} query={written !== null && written.pills.length === 0 ? written.texts.join("") : ""} current={value} disabled={disabled}
+        spec={spec} query={written !== null && written.pills.length === 0 ? written.texts.join("") : ""} current={fixed} disabled={disabled} listId={choicesId}
         onDone={refocus}
         onPick={(choice) => {
           const why = writeFixed(choice, false);
           if (why === null) {
             drawer.release("template", spec.pointer);
             setGeneration((g) => g + 1);
+          } else {
+            // Turned away, it's held as typed text is, with its Discard (ruling 18; F6).
+            const literalOk = spec.kinds === null || spec.kinds.includes("literal");
+            drawer.hold("template", spec.pointer, {
+              path: spec.path, label: spec.label, text: choice, segments: { texts: [choice], pills: [] }, why, literal: asLiteral, literalOk, entry: spec.entry,
+            });  // prettier-ignore
           }
           return why;
         }}
@@ -467,6 +488,7 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
     <div
       ref={region}
       data-pointer={spec.pointer}
+      data-row-of={drawn.rowOf}
       onFocus={onFocus}
       onBlur={(e) => {
         if (e.currentTarget.contains(e.relatedTarget)) return;

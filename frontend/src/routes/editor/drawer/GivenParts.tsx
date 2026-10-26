@@ -14,7 +14,7 @@ import { settingsOf, type Setting } from "../../../lib/settingsIndex";
 import { EmptiedContext, ITEM_EMPTIED, useDrawer } from "./context";
 import { FieldView, type Drawn } from "./FieldView";
 import { FindSetting } from "./FindSetting";
-import { lineageKey } from "./structured";
+import { focusAfterRemove, lineageKey } from "./structured";
 
 const NARROW = "max-sm:min-h-[44px]";
 
@@ -54,13 +54,13 @@ export function GivenParts({ spec, value }: { spec: FieldSpec; value: unknown })
   useEffect(() => {
     if (open) find.current?.focus();
   }, [open]);
-  const remove = (part: FieldSpec) => {
+  const remove = (part: FieldSpec, index: number) => {
     drawer.discard(part.pointer);
     const why = drawer.restructure(part.pointer, { path: spec.path, make: (obj) => (isObject(obj) ? Object.fromEntries(Object.entries(obj).filter(([k]) => k !== part.name)) : obj) });
     if (why === null) {
       remember({ shown: { ...memory.shown, [spec.pointer]: shown.filter((n) => n !== part.name) } });
       if (onlyHolds(value, part.name)) emptied?.(); // taken out, it stays drawn, nothing given yet
-      focusLater(spec.pointer, "add");
+      focusAfterRemove(spec.pointer, index);
     }
   };
   const add = (s: Setting) => {
@@ -71,7 +71,7 @@ export function GivenParts({ spec, value }: { spec: FieldSpec; value: unknown })
   };
   return (
     <div className="flex min-w-0 flex-col gap-3">
-      {parts.map((part) => (
+      {parts.map((part, i) => (
         <EmptiedContext.Provider
           key={part.name}
           value={() => {
@@ -82,9 +82,14 @@ export function GivenParts({ spec, value }: { spec: FieldSpec; value: unknown })
         <FieldView
           spec={part}
           drawn={{
-            hideClear: true, parts: partsOf(part), shown: drawnNames(part, valueAt(drawer.node.config ?? {}, part.path), memory),
+            hideClear: true, parts: partsOf(part), shown: drawnNames(part, valueAt(drawer.node.config ?? {}, part.path), memory), rowOf: spec.pointer,
             actions: drawer.editable && !(part.required && where === "Settings") ? (
-              <Button size="sm" aria-label={`Remove ${spec.label} › ${part.label}`} className={NARROW} onMouseDown={(e) => e.preventDefault()} onClick={() => remove(part)}>Remove</Button>
+              <Button
+                size="sm" data-remove-of={spec.pointer} aria-label={`Remove ${spec.label} › ${part.label}`} className={NARROW}
+                onMouseDown={(e) => e.preventDefault()} onClick={() => remove(part, i)}
+              >
+                Remove
+              </Button>
             ) : undefined,
             below: drawer.editable && !Object.hasOwn(given, part.name) && !(part.required && where === "Settings") ? <p className="text-small text-muted">{WORDS.pending}</p> : undefined,
           }}
@@ -182,7 +187,7 @@ function Entries({ spec, value }: { spec: FieldSpec; value: unknown }) {
     if (done === null) {
       remember({ entries: { ...memory.entries, [spec.pointer]: opened.filter((k) => k !== name) } });
       if (onlyHolds(value, name)) emptied?.();
-      focusLater(spec.pointer, "add");
+      focusAfterRemove(spec.pointer, keys.indexOf(name));
     }
   };
   const open = () => {
@@ -215,9 +220,11 @@ function Entries({ spec, value }: { spec: FieldSpec; value: unknown }) {
           <FieldView
             spec={entry}
             drawn={{
-              hideClear: true, parts: (s, v) => <GivenParts spec={s} value={v} />,
+              hideClear: true, parts: (s, v) => <GivenParts spec={s} value={v} />, rowOf: spec.pointer,
               shown: drawnNames(entry, isObject(value) ? value[name] : undefined, memory),
-              actions: drawer.editable ? <Button size="sm" aria-label={`Remove ${entry.label}`} className={NARROW} onClick={() => remove(name)}>Remove</Button> : undefined,
+              actions: drawer.editable ? (
+                <Button size="sm" data-remove-of={spec.pointer} aria-label={`Remove ${entry.label}`} className={NARROW} onClick={() => remove(name)}>Remove</Button>
+              ) : undefined,
               below: drawer.editable && !(isObject(value) && Object.hasOwn(value, name)) ? <p className="text-small text-muted">{WORDS.pending}</p> : undefined,
             }}
           />
@@ -276,10 +283,12 @@ function Items({ spec, value }: { spec: FieldSpec; value: unknown }) {
   const remove = (i: number) => {
     if (reorder(places.filter((j) => j !== i)) !== null) return;
     if (items.length === 1) emptied?.();
-    focusLater(spec.pointer, "add");
+    focusAfterRemove(spec.pointer, i);
   };
-  const button = (label: string, onClick: () => void, disabled = false): ReactNode => (
-    <Button size="sm" aria-label={label} className={NARROW} disabled={disabled} onClick={onClick}>{label.split(":")[0]}</Button>
+  const button = (label: string, onClick: () => void, disabled = false, removes = false): ReactNode => (
+    <Button size="sm" data-remove-of={removes ? spec.pointer : undefined} aria-label={label} className={NARROW} disabled={disabled} onClick={onClick}>
+      {label.split(":")[0]}
+    </Button>
   );
   return (
     <div className="flex min-w-0 flex-col gap-3">
@@ -290,12 +299,12 @@ function Items({ spec, value }: { spec: FieldSpec; value: unknown }) {
           <FieldView
             spec={item}
             drawn={{
-              hideClear: true, parts: (s, v) => <GivenParts spec={s} value={v} />, shown: drawnNames(item, items[i], memory),
+              hideClear: true, parts: (s, v) => <GivenParts spec={s} value={v} />, shown: drawnNames(item, items[i], memory), rowOf: spec.pointer,
               actions: drawer.editable ? (
                 <>
                   {button(`Move up: ${item.label}`, () => reorder(swap(i - 1)), i === 0)}
                   {button(`Move down: ${item.label}`, () => reorder(swap(i)), i === items.length - 1)}
-                  {button(`Remove: ${item.label}`, () => remove(i))}
+                  {button(`Remove: ${item.label}`, () => remove(i), false, true)}
                 </>
               ) : undefined,
             }}

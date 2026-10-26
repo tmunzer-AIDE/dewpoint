@@ -47,13 +47,34 @@ export function lineageKey(list: unknown): string {
   return String(n);
 }
 
-function ListItems({ spec, value }: { spec: FieldSpec; value: unknown }) {
+/** After a Remove, focus stays where the person is (F6, the owner's ruling): on the row now in its place, else the new
+ * last row, at its Remove, the control just pressed (a run of Removes goes on, and Ctrl+Z, which a text field keeps
+ * for itself, still undoes it); a row with none at its first field; no row left, on the list's Add. A list's rows say
+ * the list they're of (`data-row-of`), as do their Remove (`data-remove-of`) and its Add (`data-add-for`). A removal
+ * that asks first lands on the drawer's heading instead; focus moved on meanwhile is left where it went, and so is a
+ * text field a pointer's press left it in (the final review). */
+export function focusAfterRemove(list: string, index: number) {
+  const pressed = document.activeElement;
+  requestAnimationFrame(() => {
+    const now = document.activeElement;
+    if (now !== pressed && now !== document.body && now?.isConnected) return;
+    if (now?.isConnected && now.matches("input, textarea, select")) return;
+    const marked = (attr: string, key: "rowOf" | "removeOf" | "addFor") =>
+      [...document.querySelectorAll<HTMLElement>(`[${attr}]`)].filter((e) => e.dataset[key] === list);
+    const rows = marked("data-row-of", "rowOf");
+    const row = rows[index] ?? rows.at(-1);
+    if (!row) return void marked("data-add-for", "addFor")[0]?.focus();
+    const remove = marked("data-remove-of", "removeOf").find((e) => row.contains(e));
+    const label = row.querySelector<HTMLLabelElement>("label[for]");
+    (remove ?? (label && document.getElementById(label.htmlFor)) ?? row.querySelector<HTMLElement>("input, select, textarea, button"))?.focus();
+  });
+}
+
+/** A list's edits, one copy for a step's lists and the composer's rows (F6). Each changes the list's shape: the edits
+ * typed inside are applied first, or it waits (ruling 18). `make` is the item Add appends to `list`. */
+export function useListEdits(spec: FieldSpec, make: (list: unknown[]) => unknown) {
   const drawer = useDrawer();
   const emptied = useContext(EmptiedContext);
-  const add = useRef<HTMLButtonElement>(null);
-  const items = asList(value);
-  const lineage = lineageKey(value);
-  // Each changes the list's shape: the edits typed inside are applied first, or it waits (ruling 18).
   const move = (from: number, to: number) =>
     drawer.restructure(spec.pointer, {
       path: spec.path,
@@ -63,21 +84,27 @@ function ListItems({ spec, value }: { spec: FieldSpec; value: unknown }) {
         return next;
       },
     });
-  const remove = (index: number) => {
+  const remove = (index: number, length: number) => {
     if (drawer.restructure(spec.pointer, { path: [...spec.path, index], make: () => undefined }) !== null) return;
-    if (items.length === 1) emptied?.(); // an update's or a create's: not sent, nothing given (F1)
-    // Its controls are gone: focus goes to Add. A removal that asks first lands on the drawer's heading instead.
-    requestAnimationFrame(() => add.current?.focus());
+    if (length === 1) emptied?.(); // an update's or a create's: not sent, nothing given (F1)
+    focusAfterRemove(spec.pointer, index);
   };
-  const append = () =>
-    drawer.restructure(spec.pointer, { path: spec.path, make: (list) => [...asList(list), newItem(itemOf(spec, asList(list).length), drawer.node)] });
+  const append = () => drawer.restructure(spec.pointer, { path: spec.path, make: (list) => [...asList(list), make(asList(list))] });
+  return { move, remove, append };
+}
+
+function ListItems({ spec, value }: { spec: FieldSpec; value: unknown }) {
+  const drawer = useDrawer();
+  const items = asList(value);
+  const lineage = lineageKey(value);
+  const { move, remove, append } = useListEdits(spec, (list) => newItem(itemOf(spec, list.length), drawer.node));
   return (
     <>
       {items.length === 0 && <p className="text-small text-muted">None yet.</p>}
       {items.map((_, i) => {
         const item = itemOf(spec, i);
         return (
-          <div key={i} className="flex min-w-0 flex-col gap-2">
+          <div key={i} data-row-of={spec.pointer} className="flex min-w-0 flex-col gap-2">
             <EmptiedContext.Provider value={ITEM_EMPTIED}>
               <FieldView key={lineage} spec={item} />
             </EmptiedContext.Provider>
@@ -87,14 +114,16 @@ function ListItems({ spec, value }: { spec: FieldSpec; value: unknown }) {
                 <Button size="sm" aria-label={`Move down: ${item.label}`} disabled={i === items.length - 1} onClick={() => move(i, i + 1)}>
                   Move down
                 </Button>
-                <Button size="sm" variant="danger-outline" aria-label={`Remove: ${item.label}`} onClick={() => remove(i)}>Remove</Button>
+                <Button size="sm" variant="danger-outline" data-remove-of={spec.pointer} aria-label={`Remove: ${item.label}`} onClick={() => remove(i, items.length)}>
+                  Remove
+                </Button>
               </div>
             )}
           </div>
         );
       })}
       {drawer.editable && (
-        <Button ref={add} data-add size="sm" className="self-start" onClick={append}>Add to {spec.label}</Button>
+        <Button data-add data-add-for={spec.pointer} size="sm" className="self-start" onClick={append}>Add to {spec.label}</Button>
       )}
     </>
   );
@@ -186,10 +215,10 @@ function MapEntries({ spec, value }: { spec: FieldSpec; value: unknown }) {
   return (
     <>
       {entries.length === 0 && <p className="text-small text-muted">None yet.</p>}
-      {entries.map(([name]) => {
+      {entries.map(([name], k) => {
         const entry = entryOf(spec, name);
         return (
-          <div key={idOf(name)} className="flex min-w-0 flex-col gap-2">
+          <div key={idOf(name)} data-row-of={spec.pointer} className="flex min-w-0 flex-col gap-2">
             <NameField
               map={spec} name={name}
               onRenamed={(to) => {
@@ -203,11 +232,11 @@ function MapEntries({ spec, value }: { spec: FieldSpec; value: unknown }) {
             </EmptiedContext.Provider>
             {drawer.editable && (
               <Button
-                size="sm" variant="danger-outline" className="self-start" aria-label={`Remove: ${name}`}
+                size="sm" variant="danger-outline" className="self-start" data-remove-of={spec.pointer} aria-label={`Remove: ${name}`}
                 onClick={() => {
                   if (drawer.restructure(spec.pointer, { path: entry.path, make: () => undefined }) === null) {
                     if (entries.length === 1) emptied?.(); // as a list's last item (F1)
-                    requestAnimationFrame(() => add.current?.focus());
+                    focusAfterRemove(spec.pointer, k);
                   }
                 }}
               >
@@ -218,7 +247,7 @@ function MapEntries({ spec, value }: { spec: FieldSpec; value: unknown }) {
         );  // prettier-ignore
       })}
       {drawer.editable && (
-        <Button ref={add} data-add size="sm" className="self-start" onClick={append}>Add to {spec.label}</Button>
+        <Button ref={add} data-add data-add-for={spec.pointer} size="sm" className="self-start" onClick={append}>Add to {spec.label}</Button>
       )}
     </>
   );

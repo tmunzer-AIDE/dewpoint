@@ -4560,3 +4560,75 @@ body drawn as the one field; a read-only `clear` line labelled by its raw name (
 top-level Remove named by its title alone (top-level titles are unique).
 
 Nothing pushed.
+
+### F5 merged; the F6 plan accepted (2026-10-25)
+
+The owner merged F5 as #152 (squash fa1ed009), every check green ("green and merged"). F6 is the drawer's, the
+composer's and the step picker's follow-ups: #136 (4f-1's six) and #138 (4f-2a's eight), researched in R11a. The owner
+ruled four: after a Remove, focus stays in the list, on the row now in its place, in every list; the choices take
+focus on landing only if focus hasn't moved; the search box says "Type a step's name or a resource (Mist)"; a message's
+rows go unmarked, one line saying both their parts are needed.
+
+`docs/superpowers/plans/2026-10-25-editor-f6-drawer-composer-picker.md`, revision 1. The owner accepted it: its rulings
+1–9 join this ledger as 428–436. Frontend only: no API, schema, migration or engine change. Mid-slice rulings start at
+M120.
+
+428. **Accepted. No milestone pause** (plan ruling 1).
+429. **Accepted. The composer's words and markers** (plan ruling 2; the owner's ruling for its rows).
+430. **Accepted. The mirror laid out once per draft** (plan ruling 3).
+431. **Accepted. One copy of a list's edits** (plan ruling 4).
+432. **Accepted. Focus after a Remove, in every list** (plan ruling 5; the owner's ruling; amends M73 and 4f-2b's rule).
+433. **Accepted. A refused pick held, a literal's pick named, a 44 px Show choices** (plan ruling 6).
+434. **Accepted. The choices take focus only if focus hasn't moved** (plan ruling 7; the owner's ruling; amends 338).
+435. **Accepted. The step picker's words, its box described, the connection types read once** (plan ruling 8; the
+     owner's words; amends the 4f-2 design §5.1).
+436. **Accepted. The tests, and the checks** (plan ruling 9).
+
+### F6, the final checkpoint (2026-10-26)
+
+The owner accepted the plan and chose inline execution ("inline"), with no milestone pause; the branch from
+origin/main fa1ed009.
+- Task 1 (99bb5b50): the plan's acceptance, rulings 428–436.
+- Task 2 (e137a6b4): the composer's notes and markers. Red: 3 failed and 23 passed. Green: 26 passed.
+- Task 3 (5eaa1cce): the mirror laid out once per draft. Red: 1 failed and 34 passed. Green: 35 passed.
+- Task 4 (7d5edc12): one copy of a list's edits, a refactor: 80 passed before and after.
+- Task 5 (67283fa6): focus after a Remove, in every list. Red: 8 failed and 317 passed. Green: 325 passed.
+- Task 6 (6144afa1): a refused pick held, a literal's pick named, a 44 px Show choices. Red: 3 failed and 25 passed
+  (Home and End passed at once). Green: 28 passed.
+- Task 7 (74aa942b): the choices take focus only if focus hasn't moved. Red: 2 failed and 57 passed. Green: 59 passed.
+- Task 8 (8961afaa): the step picker's words, its box described, the connection types read once. Red: 4 failed and 10
+  passed. Green: 14 passed.
+- Task 9, every check on 8961afaa, whose tree is the prototype's (1eef8962): the whole frontend suite, 1,746 passed in
+  121 files; the type check and ESLint silent; CodeQL (CLI 2.27.2; javascript-queries 2.4.8): no finding.
+
+Mid-slice ruling:
+
+M120. **Packages borrowed, nothing installed,** as M116, M118 and M119: the frontend's `node_modules` linked from the
+4d-1b worktree (main's lockfile); the plan's `npx --offline pnpm@12.6.0 exec <tool>` run as
+`./node_modules/.bin/<tool>`. Task 1's section kept the plan's date (2026-10-25). Cost: none.
+
+Nothing pushed. Next: the final review.
+
+### F6, the final review (2026-10-26)
+
+A fresh reviewer (Fable) read the branch against the plan, its Review Focus, #136, #138 and R11a: no critical finding,
+one important, five minor. It probed Review Focus 1 in the real editor (Removes by keyboard, then Ctrl+Z: as ruled) and
+checked the choices' focus rule against Chrome's and Firefox's handling of a disabled button. Fixed in one pass
+(fc40b4bf), test first:
+- a Remove pressed by pointer that doesn't take focus (an object's parts in every browser; any list in Safari) pulled
+  focus out of the text field it was in onto the next row's Remove, where a Space typed meaning the field removes a
+  part: a text field still there keeps focus.
+After the pass: the whole frontend suite, 1,747 passed in 121 files; the type check and ESLint silent; CodeQL, no
+finding.
+
+Deferred minors: the new Down handlers don't skip an input method's composition; Down from a pill's details input
+under an options field reaches the list too; "Each needs a label and a value." isn't described by the rows; GroupFrame
+drops a `note`; a row with no Remove and no focusable first control leaves focus on the page.
+
+What the reviewer set aside, each ruled as it stands: the composer's emptied list sent as `[]` (as before); Slack's
+count of the draft, not a held text (as before); a removal's blur applying a held JSON edit (as before); the specs
+unamended, the ledger carrying 428–436; the list taking focus after a click on blank space while it loaded, and
+Safari's caret kept in the field (ruling 434's words); a new plugin's key until a reload (ruling 435's cost); "Uses a
+Email connection" (4f-2a's ruling); the webhook's and email's previews drawn again per draft.
+
+Nothing pushed.

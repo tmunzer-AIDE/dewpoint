@@ -12,9 +12,10 @@ export const CONNECTION_STATUS: Record<Schemas["ConnectionOut"]["status"], strin
   error: "failed its last check",
 };
 
-/** The connection types the plugins declare, under Connections' own key: a type is said by its label (4f-1). */
+/** The connection types the plugins declare, under Connections' own key: a type is said by its label (4f-1), read once
+ * a session (ruling 335; F6): the plugins change only with a deploy. */
 export const connectionTypesQuery = () =>
-  queryOptions({ queryKey: ["connection-types"], queryFn: () => ok(client.GET("/api/v1/connection-types")) });
+  queryOptions({ queryKey: ["connection-types"], queryFn: () => ok(client.GET("/api/v1/connection-types")), staleTime: Infinity });
 
 /** The tenant's connections, under Connections' own key: each page sees the other's changes. */
 export const connectionsQuery = (tenantId: string) =>

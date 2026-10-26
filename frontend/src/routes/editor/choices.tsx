@@ -2,7 +2,7 @@
 // A field's choices, read on request (4c-1, ruling 14): the list under the field, and the era each answer belongs to
 // (ruling 109). Shared by the step drawer's options fields (4f-2a) and the start forms' pickers (the 4f-3 design
 // §5.1): each says its own words and reads through its own route; nothing here reads the drawer.
-import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useId, useRef, useState, type KeyboardEvent, type RefObject } from "react";
 import type { Schemas } from "../../lib/client";
 
 export type Option = Schemas["OptionOut"];
@@ -51,17 +51,20 @@ export function useScopedChoices(scope: string, read: (query: string) => Promise
 }
 
 /** The choices, as a list under the field: Up and Down move, Enter picks, Escape closes; it scrolls past ten. The
- * drawer's takes focus when shown (ruling 338); a start form's waits for Down in its field, and its rows are 44 px
- * below 640 px, the name over the id (the 4f-3 design §5.1). */
-export function ChoiceList({ label, options, onPick, onClose, id, focusOnShow = true, tall = false }: {
-  label: string; options: Option[]; onPick: (o: Option) => void; onClose: () => void; id?: string; focusOnShow?: boolean; tall?: boolean;
+ * drawer's takes focus when shown (ruling 338) from where it was asked (`from`) or from nowhere, never from a field the
+ * person went back to while it loaded: Down there reaches it (F6, amends 338); a start form's waits for Down in its
+ * field, and its rows are 44 px below 640 px, the name over the id (the 4f-3 design §5.1). */
+export function ChoiceList({ label, options, onPick, onClose, id, from, focusOnShow = true, tall = false }: {
+  label: string; options: Option[]; onPick: (o: Option) => void; onClose: () => void; id?: string; from?: RefObject<HTMLElement | null>;
+  focusOnShow?: boolean; tall?: boolean;
 }) {  // prettier-ignore
   const own = useId();
   const list = useRef<HTMLUListElement>(null);
   const [active, setActive] = useState(0);
   useEffect(() => {
-    if (focusOnShow) list.current?.focus();
-  }, [focusOnShow]);
+    const now = document.activeElement;
+    if (focusOnShow && (now === null || now === document.body || now === from?.current)) list.current?.focus();
+  }, [focusOnShow, from]);
   useEffect(() => {
     // A statement, never the effect's value: a browser's scrollIntoView may answer a promise, which isn't a cleanup.
     document.getElementById(`${own}-${active}`)?.scrollIntoView?.({ block: "nearest" });

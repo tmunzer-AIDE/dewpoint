@@ -212,3 +212,55 @@ it("moves through the choices by keyboard, and Escape closes them without a pick
   expect(config().site_id).toBe("s2");
   expect(screen.getByText("Lab, picked from the choices.")).toBeTruthy();
 });
+
+it("holds a pick a write turned away, with its Discard, as typed text is (#138 item 1)", async () => {
+  fakeApi({ [CONNECTIONS]: both, [OPTIONS]: sites });
+  const { config, held, refuse } = showFields(REMOTE, { config: { connection: C1 } });
+  await screen.findByRole("option", { name: "Prod · verified" });
+  await userEvent.click(screen.getByRole("button", { name: "Show choices: Site" }));
+  const list = await screen.findByRole("listbox", { name: "Choices for Site" });
+  refuse("Not written: the draft can't be changed now.");
+  await userEvent.click(within(list).getByRole("option", { name: /^HQ Paris/ }));
+  expect(config().site_id).toBeUndefined();
+  expect(held().map((h) => [h.kind, h.text])).toEqual([["template", ID]]);
+  expect(screen.getByLabelText<HTMLInputElement>("Site").value).toBe(ID);
+  expect(screen.getByText("Not written: the draft can't be changed now.")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Discard the edit to Site" })).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Discard the edit to Site" }));
+  expect(held()).toEqual([]);
+  expect(screen.getByLabelText<HTMLInputElement>("Site").value).toBe("");
+  expect(config().site_id).toBeUndefined();
+});
+
+it("names a pick for a field read as a literal, its value written as one (#138 item 2)", async () => {
+  fakeApi({ [CONNECTIONS]: both, [OPTIONS]: sites });
+  const { config } = showFields(REMOTE, { config: { connection: C1, site_id: literal("old") } });
+  await screen.findByRole("option", { name: "Prod · verified" });
+  await userEvent.click(screen.getByRole("button", { name: "Show choices: Site" }));
+  await userEvent.click(within(await screen.findByRole("listbox", { name: "Choices for Site" })).getByRole("option", { name: /^HQ Paris/ }));
+  expect(config().site_id).toEqual(literal(ID));
+  expect(screen.getByText("HQ Paris, picked from the choices.")).toBeTruthy();
+});
+
+it("makes a fixed-only field's Show choices 44 px tall below 640 px, as a field's that takes values (#138 item 6)", () => {
+  const fixedOnly = structuredClone(REMOTE);
+  (fixedOnly.config_schema.properties as Record<string, Record<string, unknown>>).site_id!["x-dewpoint-literal"] = true;
+  fakeApi({ [CONNECTIONS]: both });
+  showFields(fixedOnly, { config: { connection: C1 } });
+  expect(screen.getByRole("button", { name: "Show choices: Site" }).className).toContain("max-sm:min-h-[44px]");
+});
+
+it("leaves focus in the field when the choices land after the person went back to it, Down then reaching them (#138 item 3)", async () => {
+  let answer: (r: Response) => void = () => undefined;
+  fakeApi({ [CONNECTIONS]: both, [OPTIONS]: () => new Promise<Response>((r) => (answer = r)) });
+  showFields(REMOTE, { config: { connection: C1 } });
+  await screen.findByRole("option", { name: "Prod · verified" });
+  await userEvent.click(screen.getByRole("button", { name: "Show choices: Site" }));
+  const site = screen.getByLabelText("Site");
+  await userEvent.click(site); // back in the field while the answer is on its way
+  act(() => answer(sites()));
+  const list = await screen.findByRole("listbox", { name: "Choices for Site" });
+  expect(document.activeElement).toBe(site);
+  await userEvent.keyboard("{ArrowDown}"); // as on the start forms (ruling 375)
+  expect(document.activeElement).toBe(list);
+});
