@@ -340,15 +340,23 @@ it("says nothing to change only when nothing is sent, a setting it doesn't draw 
   expect(within(changes()).queryByText(WORDS.nothing)).toBeNull();
 });
 
-it("keeps focus after each row action: Set on its control, Clear on Clear, Keep on ＋ Add a setting", async () => {
+it("keeps focus after each row action: Set on its control, Clear on Clear, Keep on the row now in its place, else the last row's Keep, else ＋ Add a setting (F6)", async () => {
   showDrawer(UPDATE, { config: { body: { name: "hq", rogue: { enabled: true } } } });
   const name = () => within(changes()).getByRole("group", { name: "What happens to Name" });
   await userEvent.click(within(name()).getByRole("button", { name: "Clear" }));
   await vi.waitFor(() => expect(document.activeElement).toBe(within(name()).getByRole("button", { name: "Clear" })));
   await userEvent.click(within(name()).getByRole("button", { name: "Set" }));
   await vi.waitFor(() => expect(document.activeElement).toBe(within(changes()).getByLabelText("Name")));
-  await userEvent.click(within(changes()).getByRole("button", { name: "Keep Rogue as it is" }));
+  await userEvent.click(within(changes()).getByRole("button", { name: "Keep Rogue as it is" })); // the last row
+  await vi.waitFor(() => expect(document.activeElement).toBe(within(changes()).getByRole("button", { name: "Keep Name as it is" })));
+  await userEvent.click(within(changes()).getByRole("button", { name: "Keep Name as it is" }));
   await vi.waitFor(() => expect(document.activeElement).toBe(within(changes()).getByRole("button", { name: "＋ Add a setting" })));
+});
+
+it("keeps focus after a Keep on the Keep of the row now in its place (F6)", async () => {
+  showDrawer(UPDATE, { config: { body: { name: "hq", rogue: { enabled: true } } } });
+  await userEvent.click(within(changes()).getByRole("button", { name: "Keep Name as it is" }));
+  await vi.waitFor(() => expect(document.activeElement).toBe(within(changes()).getByRole("button", { name: "Keep Rogue as it is" })));
 });
 
 it("reads a union's kinds once, not again for each character typed (#140 item 14)", async () => {

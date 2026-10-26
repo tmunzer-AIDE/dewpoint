@@ -372,7 +372,8 @@ it("adds, moves and removes a list's items", async () => {
   expect(config().tags).toEqual(["y", "x"]);
   await userEvent.click(screen.getByRole("button", { name: "Remove: Tags, item 1" }));
   expect(config().tags).toEqual(["x"]);
-  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Add to Tags" })));
+  // On the Remove of the item now in its place (F6, the owner's ruling).
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Remove: Tags, item 1" })));
 });
 
 it("moves an item only once the edits inside it are applied", async () => {

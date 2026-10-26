@@ -1478,7 +1478,7 @@ it("removes a declassify entry that named no case when a case is added where it 
 it("gives focus to the drawer's heading when an undo draws afresh the part it was in (the review)", async () => {
   await openSwitch();
   await userEvent.click(screen.getByRole("button", { name: "Remove: Cases, item 1" })); // a, which has no edge
-  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Add to Cases" }))); // its frame
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Remove: Cases, item 1" }))); // b's, in its frame (F6)
   const json = within(screen.getByRole("group", { name: "Cases, item 1" })).getAllByRole("button", { name: "Edit as JSON" })[0]!;
   json.focus();
   await userEvent.keyboard("{Control>}z{/Control}"); // the list before: its items drawn afresh
@@ -1626,8 +1626,9 @@ it("never moves a held edit to an equal item when a removal is undone", async ()
   await show();
   await userEvent.click(screen.getByRole("button", { name: "sz" }));
   await userEvent.click(screen.getByRole("button", { name: "Remove: Sizes, item 1" })); // [5, 7]
-  // The removal sends focus to Add a frame later: typing before it lands would type into the button (the review of f2bd150).
-  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Add to Sizes" })));
+  // The removal sends focus to the next item's Remove a frame later (F6): typing before it lands would type into the
+  // button (the review of f2bd150).
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Remove: Sizes, item 1" })));
   await userEvent.type(screen.getByLabelText("Sizes, item 1"), "x"); // "5x", over the second 5
   expect(screen.getByLabelText<HTMLInputElement>("Sizes, item 1").value).toBe("5x");
   expect(screen.getByRole("button", { name: "1 edit not applied" })).toBeTruthy(); // held, before the undo

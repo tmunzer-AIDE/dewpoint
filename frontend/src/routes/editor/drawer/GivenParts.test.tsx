@@ -121,10 +121,24 @@ it("shows a problem at a part it doesn't draw on the part that holds it", () => 
   expect(within(at("/body/networks/0")).getByText("Mist sets it.")).toBeTruthy();
 });
 
-it("keeps focus after a Remove, on ＋ Another setting of …", async () => {
-  showDrawer(UPDATE, { config: { body: { rogue: { enabled: true, min_rogue_rssi: -80 } } } });
-  await userEvent.click(within(at("/body/rogue")).getByRole("button", { name: "Remove Rogue › Enabled" }));
-  await vi.waitFor(() => expect(document.activeElement).toBe(within(at("/body/rogue")).getByRole("button", { name: "＋ Another setting of Rogue" })));
+it("keeps focus after a Remove on the Remove of the part now in its place, else of the new last part, else on ＋ Another setting of … (F6)", async () => {
+  showDrawer(UPDATE, { config: { body: { rogue: { enabled: true, min_rogue_rssi: -80, whitelisted_ssids: ["a"] } } } });
+  const rogue = () => within(at("/body/rogue"));
+  await userEvent.click(rogue().getByRole("button", { name: "Remove Rogue › Enabled" }));
+  await vi.waitFor(() => expect(document.activeElement).toBe(rogue().getByRole("button", { name: "Remove Rogue › Min rogue RSSI" })));
+  await userEvent.click(rogue().getByRole("button", { name: "Remove Rogue › Whitelisted SSIDs" })); // the last
+  await vi.waitFor(() => expect(document.activeElement).toBe(rogue().getByRole("button", { name: "Remove Rogue › Min rogue RSSI" })));
+  await userEvent.click(rogue().getByRole("button", { name: "Remove Rogue › Min rogue RSSI" }));
+  await vi.waitFor(() => expect(document.activeElement).toBe(rogue().getByRole("button", { name: "＋ Another setting of Rogue" })));
+});
+
+it("keeps focus after an item's or an entry's Remove on the Remove of the one now in its place (F6)", async () => {
+  showDrawer(UPDATE, { config: { body: { networks: [{ name: "a" }, { name: "b" }], port_usages: { trunk: { mode: "trunk" }, access: { mode: "access" } } } } });
+  await userEvent.click(screen.getByRole("button", { name: "Remove: Networks › item 1" }));
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Remove: Networks › item 1" })));
+  expect(within(at("/body/networks/0")).getByLabelText<HTMLInputElement>("Name").value).toBe("b");
+  await userEvent.click(screen.getByRole("button", { name: "Remove Port usages › trunk" }));
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Remove Port usages › access" })));
 });
 
 // F1: a place a Remove empties (#140-8, #140-9).

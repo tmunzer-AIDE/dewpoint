@@ -52,7 +52,7 @@ function Rows({ spec, value, noun }: { spec: FieldSpec; value: unknown; noun: "f
   const max = typeof spec.schema.maxItems === "number" ? spec.schema.maxItems : Infinity;
   const full = items.length >= max;
   const Noun = noun === "field" ? "Field" : "Link";
-  const { add, move, remove, append } = useListEdits(spec, () => ({}));
+  const { move, remove, append } = useListEdits(spec, () => ({}));
   return (
     <>
       {Number.isFinite(max) && <p className="text-small text-muted">{items.length} of {max}</p>}
@@ -62,7 +62,7 @@ function Rows({ spec, value, noun }: { spec: FieldSpec; value: unknown; noun: "f
         const [label, second] = propertiesOf(itemOf(spec, i));
         const row = `${noun} ${i + 1}`;
         return (
-          <div key={i} role="group" aria-label={`${Noun} ${i + 1}`} className="flex min-w-0 flex-col gap-2">
+          <div key={i} role="group" aria-label={`${Noun} ${i + 1}`} data-row-of={spec.pointer} className="flex min-w-0 flex-col gap-2">
             <div className="grid min-w-0 gap-2 sm:grid-cols-2">
               {label && <FieldView key={`${lineage}:label`} spec={{ ...label, label: `${Noun} ${i + 1} label` }} drawn={{ hint: null, quiet: true, marked: false }} />}
               {second && (
@@ -78,7 +78,9 @@ function Rows({ spec, value, noun }: { spec: FieldSpec; value: unknown; noun: "f
                 <Button size="sm" className={NARROW} aria-label={`Move down: ${row}`} disabled={i === items.length - 1} onClick={() => move(i, i + 1)}>
                   Move down
                 </Button>
-                <Button size="sm" variant="danger-outline" className={NARROW} aria-label={`Remove ${row}`} onClick={() => remove(i, items.length)}>Remove</Button>
+                <Button size="sm" variant="danger-outline" className={NARROW} data-remove-of={spec.pointer} aria-label={`Remove ${row}`} onClick={() => remove(i, items.length)}>
+                  Remove
+                </Button>
               </div>
             )}
           </div>
@@ -86,7 +88,7 @@ function Rows({ spec, value, noun }: { spec: FieldSpec; value: unknown; noun: "f
       })}
       {drawer.editable && (
         <>
-          <Button ref={add} data-add size="sm" className={`self-start ${NARROW}`} disabled={full} aria-describedby={full ? capId : undefined} onClick={append}>
+          <Button data-add data-add-for={spec.pointer} size="sm" className={`self-start ${NARROW}`} disabled={full} aria-describedby={full ? capId : undefined} onClick={append}>
             ＋ Add a {noun}
           </Button>
           {full && <p id={capId} className="text-small text-muted">{capWords(noun, max)}</p>}

@@ -129,3 +129,25 @@ it("starts a list's items afresh when one is added, as for any change to the lis
   await userEvent.click(screen.getByRole("button", { name: "Add to Rows" }));
   expect(shownAsJson()).toEqual([]);
 });
+
+// F6, the owner's ruling: after a Remove, focus stays where the person is.
+it("moves focus after a Remove to the Remove of the item now in its place, else of the new last item, else to Add", async () => {
+  showFields(ROWS, { config: { rows: [{ a: "x" }, { a: "y" }, { a: "z" }] } });
+  await userEvent.click(screen.getByRole("button", { name: "Remove: Rows, item 1" }));
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Remove: Rows, item 1" })));
+  expect(within(screen.getByRole("group", { name: "Rows, item 1" })).getByLabelText<HTMLInputElement>("A").value).toBe("y");
+  await userEvent.click(screen.getByRole("button", { name: "Remove: Rows, item 2" })); // the last
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Remove: Rows, item 1" })));
+  await userEvent.click(screen.getByRole("button", { name: "Remove: Rows, item 1" }));
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Add to Rows" })));
+});
+
+it("moves focus after a map entry's Remove to the Remove of the entry now in its place, else of the new last, else to Add", async () => {
+  showFields(BY_NAME, { config: { by: { p: { a: "x" }, q: { a: "y" }, r: { a: "z" } } } });
+  await userEvent.click(screen.getByRole("button", { name: "Remove: p" }));
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Remove: q" })));
+  await userEvent.click(screen.getByRole("button", { name: "Remove: r" })); // the last
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Remove: q" })));
+  await userEvent.click(screen.getByRole("button", { name: "Remove: q" }));
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Add to By" })));
+});

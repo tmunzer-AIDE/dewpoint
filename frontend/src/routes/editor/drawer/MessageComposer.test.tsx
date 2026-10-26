@@ -128,7 +128,17 @@ describe("the message composer (4f-1, the message composer design §5)", () => {
     expect(f.config().links).toEqual([links[1], links[0]]);
     await userEvent.click(within(message()).getByRole("button", { name: "Remove link 2" }));
     expect(f.config().links).toEqual([links[1]]);
+    // The last row gone, focus goes to the new last row's Remove (F6, the owner's ruling); none left, to Add.
+    await waitFor(() => expect(document.activeElement).toBe(within(message()).getByRole("button", { name: "Remove link 1" })));
+    await userEvent.click(within(message()).getByRole("button", { name: "Remove link 1" }));
     await waitFor(() => expect(document.activeElement).toBe(within(message()).getByRole("button", { name: "＋ Add a link" })));
+  });
+
+  it("keeps focus after a Remove on the row now in its place (F6, the owner's ruling)", async () => {
+    showDrawer(SLACK, { config: { text: "x", fields: fields(3) } });
+    await userEvent.click(within(message()).getByRole("button", { name: "Remove field 1" }));
+    await waitFor(() => expect(document.activeElement).toBe(within(message()).getByRole("button", { name: "Remove field 1" })));
+    expect(within(message()).getByLabelText<HTMLInputElement>("Field 1 label").value).toBe("Field 1"); // the former second row
   });
 
   it("checks a link's address as it's typed, when it starts with written text", async () => {

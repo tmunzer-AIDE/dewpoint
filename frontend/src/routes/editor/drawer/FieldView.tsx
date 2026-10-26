@@ -122,6 +122,7 @@ export interface Drawn {
   actions?: ReactNode;
   hideClear?: boolean;
   switchLabel?: string; // what its Fixed | Formula switch says it sets, when its label doesn't read well there
+  rowOf?: string; // the list it's a row of: a Remove beside it lands on the row taking its place (F6)
 }
 
 export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn }) {
@@ -469,6 +470,7 @@ export function FieldView({ spec, drawn = {} }: { spec: FieldSpec; drawn?: Drawn
     <div
       ref={region}
       data-pointer={spec.pointer}
+      data-row-of={drawn.rowOf}
       onFocus={onFocus}
       onBlur={(e) => {
         if (e.currentTarget.contains(e.relatedTarget)) return;

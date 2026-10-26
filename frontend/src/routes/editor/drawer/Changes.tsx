@@ -19,6 +19,7 @@ import { settingsOf, type Setting } from "../../../lib/settingsIndex";
 import { EmptiedContext, problemsAt, useDrawer } from "./context";
 import { FindSetting } from "./FindSetting";
 import { PartsContext, drawnNames, focusLater, found, partsOf } from "./GivenParts";
+import { focusAfterRemove } from "./structured";
 import { FieldView } from "./FieldView";
 import type { ControlProps } from "./scalars";
 
@@ -44,14 +45,14 @@ function ModeControl({ spec, value, id, describedBy, invalid, disabled, onChange
 }
 
 /** A row's Set | Clear and Keep (an update's), or Remove (a create's, unless the setting is required). */
-function RowActions({ row, update, canSet, canClear, onSet, onClear, onKeep }: {
-  row: Row; update: boolean; canSet: boolean; canClear: boolean; onSet: () => void; onClear: () => void; onKeep: () => void;
+function RowActions({ row, of, update, canSet, canClear, onSet, onClear, onKeep }: {
+  row: Row; of: string; update: boolean; canSet: boolean; canClear: boolean; onSet: () => void; onClear: () => void; onKeep: () => void;
 }) {  // prettier-ignore
   const drawer = useDrawer();
   if (!drawer.editable) return null;
   if (!update) {
     return row.spec.required ? null : (
-      <Button size="sm" aria-label={`Remove ${row.spec.label}`} className={NARROW} onClick={onKeep}>Remove</Button>
+      <Button size="sm" data-remove-of={of} aria-label={`Remove ${row.spec.label}`} className={NARROW} onClick={onKeep}>Remove</Button>
     );
   }
   const choice = "min-h-[28px] px-2.5 text-small aria-pressed:bg-accent-soft aria-pressed:font-semibold aria-pressed:text-accent-ink " + NARROW;
@@ -62,15 +63,15 @@ function RowActions({ row, update, canSet, canClear, onSet, onClear, onKeep }: {
         {canSet && <button type="button" aria-pressed={row.state === "set" || row.state === "pending"} className={choice} onClick={onSet}>Set</button>}
         {canClear && <button type="button" aria-pressed={row.state === "clear"} className={`${choice} ${canSet ? "border-l border-line-strong" : ""}`} onClick={onClear}>Clear</button>}
       </span>
-      <Button size="sm" aria-label={`Keep ${row.spec.label} as it is`} className={NARROW} onClick={onKeep}>Keep</Button>
+      <Button size="sm" data-remove-of={of} aria-label={`Keep ${row.spec.label} as it is`} className={NARROW} onClick={onKeep}>Keep</Button>
     </span>
   );  // prettier-ignore
 }
 
 /** A row that draws no value: cleared, or both set and cleared. */
-function SaidRow({ row, actions, said }: { row: Row; actions: ReactNode; said: string }) {
+function SaidRow({ row, of, actions, said }: { row: Row; of: string; actions: ReactNode; said: string }) {
   return (
-    <div data-pointer={row.spec.pointer} className="flex min-w-0 flex-col gap-1.5">
+    <div data-pointer={row.spec.pointer} data-row-of={of} className="flex min-w-0 flex-col gap-1.5">
       <div className="flex flex-wrap items-start justify-between gap-2">
         <span className="flex flex-col">
           <span className="text-small font-semibold">{row.spec.label}</span>
@@ -152,11 +153,12 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
       focusLater(row.spec.pointer, "pressed");
     }
   };
-  const keep = (row: Row) => {
+  // Its row goes: focus to the row now in its place, else the new last row's Keep, else ＋ Add a setting (F6).
+  const keep = (row: Row, index: number) => {
     if (change(row, (cfg) => keepIn(cfg, row.name), true) === null) {
       const cleared = Object.fromEntries(Object.entries(memory.cleared).filter(([n]) => n !== row.name));
       remember({ cleared, pending: memory.pending.filter((n) => n !== row.name) });
-      focusLater(parts.body.pointer, "add");
+      focusAfterRemove(parts.body.pointer, index);
     }
   };
 
@@ -211,15 +213,15 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
     return row !== undefined && drawnAt(s.steps.slice(1), (body ?? {})[row.name], row.spec.path, memory.shown);
   };
 
-  const rowView = (row: Row) => {
+  const rowView = (row: Row, index: number) => {
     const actions = (
       <RowActions
-        row={row} update={update} canSet={body !== null} canClear={names !== null}
-        onSet={() => set(row)} onClear={() => clear(row)} onKeep={() => keep(row)}
+        row={row} of={parts.body.pointer} update={update} canSet={body !== null} canClear={names !== null}
+        onSet={() => set(row)} onClear={() => clear(row)} onKeep={() => keep(row, index)}
       />
     );  // prettier-ignore
-    if (row.state === "clear") return <SaidRow key={row.name} row={row} actions={actions} said={WORDS.cleared} />;
-    if (row.state === "both") return <SaidRow key={row.name} row={row} actions={actions} said={WORDS.both} />;
+    if (row.state === "clear") return <SaidRow key={row.name} row={row} of={parts.body.pointer} actions={actions} said={WORDS.cleared} />;
+    if (row.state === "both") return <SaidRow key={row.name} row={row} of={parts.body.pointer} actions={actions} said={WORDS.both} />;
     const json = row.spec.widget === "json" && !row.spec.holdsSensitive;
     const drawnParts = partsOf(row.spec);
     const pendingSaid = row.state === "pending" && drawer.editable && !required.includes(row.name);
@@ -231,7 +233,7 @@ export function Changes({ parts, memory, onMemory }: { parts: Parts; memory: Mem
       <FieldView
         spec={row.spec}
         drawn={{
-          name: row.name, hideClear: true, actions, startFixed: json, hint, parts: drawnParts,
+          name: row.name, hideClear: true, actions, startFixed: json, hint, parts: drawnParts, rowOf: parts.body.pointer,
           shown: drawnNames(row.spec, (body ?? {})[row.name], memory),
           below: pendingSaid ? <p className="text-small text-muted">{WORDS.pending}</p> : undefined,
         }}
