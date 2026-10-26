@@ -26,19 +26,22 @@ const EDGE = { from: { node: "a", port: "out" }, to: { node: "b" } };
 const AFTER: PickMode = { kind: "after", from: { node: "a", port: "out" } };
 const KINDS = "GET /api/v1/connection-types";
 
-function show(mode: PickMode, types: unknown[], more: { onPick?: () => void; onConnect?: () => void } = {}) {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(
+function show(mode: PickMode, types: unknown[], more: { onPick?: () => void; onConnect?: () => void; client?: QueryClient } = {}) {
+  const client = more.client ?? new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const { unmount } = render(
     <QueryClientProvider client={client}>
       <StepPicker mode={mode} types={types as never} onPick={more.onPick ?? vi.fn()} onConnect={more.onConnect} onClose={vi.fn()} />
     </QueryClientProvider>,
   );
+  return { client, unmount };
 }
 
 it("offers every active type after a port, in Flow and Actions, with what an action changes and needs", async () => {
   fakeApi({});
   const onPick = vi.fn();
-  show(AFTER, TYPES, { onPick, onConnect: vi.fn() });
+  const { client } = show(AFTER, TYPES, { onPick, onConnect: vi.fn() });
+  // The labels' read answered (404, from the fake): the key is what's said once it has failed (#138 item 8).
+  await vi.waitFor(() => expect(client.getQueryState(["connection-types"])?.status).toBe("error"));
   expect(screen.getByRole("dialog", { name: "Add a step" })).toBeTruthy();
   expect(screen.queryByRole("option", { name: /flow\.old@1/ })).toBeNull(); // deprecated: new versions shouldn't use it
   const call = screen.getByRole("option", { name: /testkit\.http_call@1/ });
@@ -75,7 +78,7 @@ it("shows a plugin's groups in place of its steps, with how many and what they d
   fakeApi({});
   show(AFTER, [IF, ...GROUPED]);
   expect(screen.getByText("Acme: 3 resources, type to find one")).toBeTruthy();
-  expect(screen.getByPlaceholderText("Type a step's name or a Acme resource")).toBeTruthy();
+  expect(screen.getByPlaceholderText("Type a step's name or a resource (Acme)")).toBeTruthy(); // no article to get wrong (#138 item 4)
   const wlans = screen.getByRole("option", { name: /^Org WLANs/ });
   expect(wlans.textContent).toContain("4 actions");
   expect(wlans.textContent).toContain("Create, Delete, List, Update");
@@ -150,4 +153,38 @@ it("selects the group's row again after Back, with or without text typed in its 
   await userEvent.keyboard("{Enter}");
   expect(screen.getByRole("dialog", { name: "Add a step: Site WLANs" })).toBeTruthy();
   expect(onPick).not.toHaveBeenCalled();
+});
+
+it("names each plugin with resources in the search box's words, in the list's order (#138 item 4)", () => {
+  fakeApi({});
+  const beta = { ...GROUPED[0]!, ref: "beta.things.list@1", type: "beta.things.list", config_schema: { "x-group": { plugin: "Beta", title: "Things" } } };
+  show(AFTER, [IF, ...GROUPED, beta]);
+  expect(screen.getByPlaceholderText("Type a step's name or a resource (Acme, Beta)")).toBeTruthy();
+});
+
+it("describes the search box by the group's line in a group's view, by nothing at the top (#138 item 5)", async () => {
+  fakeApi({});
+  show(AFTER, [IF, ...GROUPED]);
+  expect(screen.getByRole("combobox").getAttribute("aria-describedby")).toBeNull();
+  await userEvent.click(screen.getByRole("option", { name: /^Org WLANs/ }));
+  const described = screen.getByRole("combobox").getAttribute("aria-describedby");
+  expect(document.getElementById(described ?? "")?.textContent).toBe("Acme · Org WLANs");
+});
+
+it("reads the connection types once, however often the picker opens (#138 item 7, ruling 335)", async () => {
+  const sent = fakeApi({ [KINDS]: () => json([{ key: "testkit", label: "Test Kit", config_schema: {}, secret_fields: [], clouds: null }]) });
+  const first = show(AFTER, TYPES);
+  await vi.waitFor(() => expect(screen.getByRole("option", { name: /testkit\.http_call@1/ }).textContent).toContain("Uses a Test Kit connection"));
+  first.unmount();
+  show(AFTER, TYPES, { client: first.client });
+  expect(screen.getByRole("option", { name: /testkit\.http_call@1/ }).textContent).toContain("Uses a Test Kit connection");
+  await new Promise((r) => setTimeout(r, 0));
+  expect(sent.filter((r) => `${r.method} ${r.path}` === KINDS)).toHaveLength(1);
+});
+
+it("heads several steps found in a plugin as its steps, plural (#138 item 8)", async () => {
+  fakeApi({});
+  show(AFTER, [IF, ...GROUPED]);
+  await userEvent.type(screen.getByRole("combobox"), "update");
+  expect(within(screen.getByRole("group", { name: "Acme steps" })).getAllByRole("option")).toHaveLength(2);
 });

@@ -6,7 +6,7 @@
 // search) returns. What's shown is filtered here, not by cmdk: a group, and a grouped step, match by their own rules.
 import { useQuery } from "@tanstack/react-query";
 import { Command, defaultFilter } from "cmdk";
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useId, useRef, useState } from "react";
 import { Button } from "../../components/Button";
 import { PALETTE_GROUP, PALETTE_ITEM } from "../../components/CommandPalette";
 import { continuationPort, type PortRef } from "../../lib/graph";
@@ -72,6 +72,7 @@ export function StepPicker({
 }: { mode: PickMode; types: NodeType[]; onPick: (type: NodeType) => void; onConnect?: () => void; onClose: () => void }) {  // prettier-ignore
   const dialog = useRef<HTMLDialogElement>(null);
   const input = useRef<HTMLInputElement>(null);
+  const line = useId(); // a group's "Acme · Org WLANs", describing the search box
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState<StepGroup | null>(null);
   const [selected, setSelected] = useState("");
@@ -110,7 +111,8 @@ export function StepPicker({
   const typed = query.trim() !== "";
   const flow = ranked(loose.filter((t) => t.kind === "control"), query);
   const actions = ranked(loose.filter((t) => t.kind === "action"), query);
-  const plural = plugins.map((p) => p.plugin).join(" or ");
+  // The plugins with resources, named after the words: no article to get wrong ("a Acme"; F6, amends §5.1).
+  const named = plugins.map((p) => p.plugin).join(", ");
   return (
     <dialog
       ref={dialog}
@@ -122,13 +124,14 @@ export function StepPicker({
         {open && (
           <div className="flex items-center gap-3 border-b border-line px-3 py-2">
             <Button size="sm" aria-label="Back to every step" className="max-sm:min-h-[44px]" onClick={back}>← Back</Button>
-            <span className="text-small">
+            <span id={line} className="text-small">
               {open.plugin} · <strong className="font-semibold">{open.title}</strong>
             </span>
           </div>
         )}
         <Command.Input
           ref={input}
+          aria-describedby={open ? line : undefined} // where the search is: the box keeps the dialog's name (F6)
           value={query}
           onValueChange={setQuery}
           onKeyDown={(e) => {
@@ -137,7 +140,7 @@ export function StepPicker({
               back();
             }
           }}
-          placeholder={open ? "Type an action's name" : plugins.length > 0 ? `Type a step's name or a ${plural} resource` : "Type a step's name"}
+          placeholder={open ? "Type an action's name" : plugins.length > 0 ? `Type a step's name or a resource (${named})` : "Type a step's name"}
           className="w-full border-b border-line bg-transparent px-4 py-3 text-body-lg text-ink placeholder:text-muted focus-visible:-outline-offset-2 [&:first-child]:rounded-t-dialog"
         />
         <Command.List className="max-h-96 overflow-y-auto p-1">
