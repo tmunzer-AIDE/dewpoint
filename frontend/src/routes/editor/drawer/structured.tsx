@@ -47,13 +47,12 @@ export function lineageKey(list: unknown): string {
   return String(n);
 }
 
-function ListItems({ spec, value }: { spec: FieldSpec; value: unknown }) {
+/** A list's edits, one copy for a step's lists and the composer's rows (F6). Each changes the list's shape: the edits
+ * typed inside are applied first, or it waits (ruling 18). `make` is the item Add appends to `list`; `add`, its button. */
+export function useListEdits(spec: FieldSpec, make: (list: unknown[]) => unknown) {
   const drawer = useDrawer();
   const emptied = useContext(EmptiedContext);
   const add = useRef<HTMLButtonElement>(null);
-  const items = asList(value);
-  const lineage = lineageKey(value);
-  // Each changes the list's shape: the edits typed inside are applied first, or it waits (ruling 18).
   const move = (from: number, to: number) =>
     drawer.restructure(spec.pointer, {
       path: spec.path,
@@ -63,14 +62,21 @@ function ListItems({ spec, value }: { spec: FieldSpec; value: unknown }) {
         return next;
       },
     });
-  const remove = (index: number) => {
+  const remove = (index: number, length: number) => {
     if (drawer.restructure(spec.pointer, { path: [...spec.path, index], make: () => undefined }) !== null) return;
-    if (items.length === 1) emptied?.(); // an update's or a create's: not sent, nothing given (F1)
+    if (length === 1) emptied?.(); // an update's or a create's: not sent, nothing given (F1)
     // Its controls are gone: focus goes to Add. A removal that asks first lands on the drawer's heading instead.
     requestAnimationFrame(() => add.current?.focus());
   };
-  const append = () =>
-    drawer.restructure(spec.pointer, { path: spec.path, make: (list) => [...asList(list), newItem(itemOf(spec, asList(list).length), drawer.node)] });
+  const append = () => drawer.restructure(spec.pointer, { path: spec.path, make: (list) => [...asList(list), make(asList(list))] });
+  return { add, move, remove, append };
+}
+
+function ListItems({ spec, value }: { spec: FieldSpec; value: unknown }) {
+  const drawer = useDrawer();
+  const items = asList(value);
+  const lineage = lineageKey(value);
+  const { add, move, remove, append } = useListEdits(spec, (list) => newItem(itemOf(spec, list.length), drawer.node));
   return (
     <>
       {items.length === 0 && <p className="text-small text-muted">None yet.</p>}
@@ -87,7 +93,7 @@ function ListItems({ spec, value }: { spec: FieldSpec; value: unknown }) {
                 <Button size="sm" aria-label={`Move down: ${item.label}`} disabled={i === items.length - 1} onClick={() => move(i, i + 1)}>
                   Move down
                 </Button>
-                <Button size="sm" variant="danger-outline" aria-label={`Remove: ${item.label}`} onClick={() => remove(i)}>Remove</Button>
+                <Button size="sm" variant="danger-outline" aria-label={`Remove: ${item.label}`} onClick={() => remove(i, items.length)}>Remove</Button>
               </div>
             )}
           </div>
