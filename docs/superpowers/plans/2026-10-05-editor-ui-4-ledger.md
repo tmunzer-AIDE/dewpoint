@@ -4608,3 +4608,27 @@ M120. **Packages borrowed, nothing installed,** as M116, M118 and M119: the fron
 `./node_modules/.bin/<tool>`. Task 1's section kept the plan's date (2026-10-25). Cost: none.
 
 Nothing pushed. Next: the final review.
+
+### F6, the final review (2026-10-26)
+
+A fresh reviewer (Fable) read the branch against the plan, its Review Focus, #136, #138 and R11a: no critical finding,
+one important, five minor. It probed Review Focus 1 in the real editor (Removes by keyboard, then Ctrl+Z: as ruled) and
+checked the choices' focus rule against Chrome's and Firefox's handling of a disabled button. Fixed in one pass
+(fc40b4bf), test first:
+- a Remove pressed by pointer that doesn't take focus (an object's parts in every browser; any list in Safari) pulled
+  focus out of the text field it was in onto the next row's Remove, where a Space typed meaning the field removes a
+  part: a text field still there keeps focus.
+After the pass: the whole frontend suite, 1,747 passed in 121 files; the type check and ESLint silent; CodeQL, no
+finding.
+
+Deferred minors: the new Down handlers don't skip an input method's composition; Down from a pill's details input
+under an options field reaches the list too; "Each needs a label and a value." isn't described by the rows; GroupFrame
+drops a `note`; a row with no Remove and no focusable first control leaves focus on the page.
+
+What the reviewer set aside, each ruled as it stands: the composer's emptied list sent as `[]` (as before); Slack's
+count of the draft, not a held text (as before); a removal's blur applying a held JSON edit (as before); the specs
+unamended, the ledger carrying 428–436; the list taking focus after a click on blank space while it loaded, and
+Safari's caret kept in the field (ruling 434's words); a new plugin's key until a reload (ruling 435's cost); "Uses a
+Email connection" (4f-2a's ruling); the webhook's and email's previews drawn again per draft.
+
+Nothing pushed.
