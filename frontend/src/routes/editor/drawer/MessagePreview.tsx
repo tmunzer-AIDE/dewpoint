@@ -4,8 +4,8 @@
 // comes from; for the webhook, the JSON it posts; for the others, a line saying how they send it. What the target would
 // cut is said under the preview. It follows every edit, named by its heading, never announced as it changes. Drawn in
 // the app's own tokens, never a target's colours (no AI tells).
-import { useId, type ReactNode } from "react";
-import { COMPUTED, cutWords, NAMES, PLACEHOLDER, type Draft, type Target } from "../../../lib/composer";
+import { memo, useId, type ReactNode } from "react";
+import { COMPUTED, NAMES, PLACEHOLDER, type Draft, type Target } from "../../../lib/composer";
 import { googleChat, slack, teams } from "../../../lib/messages";
 
 const NO_PREVIEW: Partial<Record<Target, string>> = {
@@ -152,7 +152,8 @@ function Posted({ draft }: { draft: Draft }) {
   return <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono text-small"><Shown text={posted} says={says} braces /></pre>;
 }
 
-export function MessagePreview({ target, draft }: { target: Target; draft: Draft }) {
+/** Drawn again only for another draft: each draft is laid out once (F6). `words`: what its target would cut. */
+export const MessagePreview = memo(function MessagePreview({ target, draft, words }: { target: Target; draft: Draft; words: string[] }) {
   const heading = useId();
   if (target !== "slack" && target !== "teams" && target !== "google_chat" && target !== "webhook") {
     return (
@@ -170,9 +171,9 @@ export function MessagePreview({ target, draft }: { target: Target; draft: Draft
       <h3 id={heading} className="text-small font-semibold">{webhook ? "What it posts" : `Preview in ${NAMES[target]}`}</h3>
       <p className="text-small text-muted">{webhook ? `The message as JSON, as written: nothing is cut. ${VALUES}` : `${LAID_OUT[target]} ${VALUES}`}</p>
       <div className="flex min-w-0 flex-col gap-2 rounded-lg border border-line bg-surface-2 p-3 text-body">{shown}</div>
-      {cutWords(target, draft).map((words) => (
-        <p key={words} className="text-small text-warn-ink">{words}</p>
+      {words.map((said) => (
+        <p key={said} className="text-small text-warn-ink">{said}</p>
       ))}
     </section>
   );
-}
+});

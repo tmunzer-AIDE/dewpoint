@@ -6,9 +6,7 @@
 // Then its preview, which follows every edit (§5.5).
 import { useId, useMemo, useRef, type ReactNode } from "react";
 import { Button } from "../../../components/Button";
-import {
-  capWords, cutsText, cutWords, draftOf, linkProblem, slackCount, summaryOf, targetOf, TEXT_MISSING, titleHint,
-} from "../../../lib/composer";  // prettier-ignore
+import { capWords, cutsOf, draftOf, linkProblem, slackCount, summaryOf, targetOf, TEXT_MISSING, titleHint } from "../../../lib/composer";
 import { itemOf, propertiesOf, type FieldSpec } from "../../../lib/schemaForm";
 import { useDrawer } from "./context";
 import { FieldView, type Drawn } from "./FieldView";
@@ -114,11 +112,10 @@ function Rows({ spec, value, noun }: { spec: FieldSpec; value: unknown; noun: "f
 }
 
 /** Under the text: Slack's count, or what its target would cut of it, a warning linked to it (§5.2, §5.5). */
-function textDrawn(target: ReturnType<typeof targetOf>, draft: ReturnType<typeof draftOf>): Drawn {
-  if (target === null) return {};
-  const cuts = cutsText(target, draft);
-  if (target === "slack") return cuts ? { warn: slackCount(draft) } : { note: slackCount(draft) };
-  return cuts ? { warn: cutWords(target, draft)[0] ?? null } : {};
+function textDrawn(target: ReturnType<typeof targetOf>, draft: ReturnType<typeof draftOf>, cuts: ReturnType<typeof cutsOf> | null): Drawn {
+  if (target === null || cuts === null) return {};
+  if (target === "slack") return cuts.text ? { warn: slackCount(draft) } : { note: slackCount(draft) };
+  return cuts.text ? { warn: cuts.words[0] ?? null } : {};
 }
 
 export function MessageComposer({ parts }: { parts: FieldSpec[] }) {
@@ -126,6 +123,8 @@ export function MessageComposer({ parts }: { parts: FieldSpec[] }) {
   const target = targetOf(drawer.type);
   const config = drawer.node.config;
   const draft = useMemo(() => draftOf(config ?? {}), [config]);
+  // What its target cuts, read once per draft: the text's words and the preview's (F6).
+  const cuts = useMemo(() => (target === null ? null : cutsOf(target, draft)), [target, draft]);
   const drawnFor = (name: string): Drawn => {
     switch (name) {
       case "severity":
@@ -133,7 +132,7 @@ export function MessageComposer({ parts }: { parts: FieldSpec[] }) {
       case "title":
         return { hint: titleHint(target), quiet: true, marked: true };
       case "text":
-        return { lines: true, marked: true, missing: TEXT_MISSING, ...textDrawn(target, draft) };
+        return { lines: true, marked: true, missing: TEXT_MISSING, ...textDrawn(target, draft, cuts) };
       case "fields":
         return { parts: (spec, value): ReactNode => <Rows spec={spec} value={value} noun="field" />, marked: true };
       case "links":
@@ -154,7 +153,7 @@ export function MessageComposer({ parts }: { parts: FieldSpec[] }) {
           ))}
         {!drawer.editable && <p className="text-small">{summaryOf(config ?? {})}</p>}
       </fieldset>
-      {target && <MessagePreview target={target} draft={draft} />}
+      {target && <MessagePreview target={target} draft={draft} words={cuts?.words ?? []} />}
     </>
   );
 }

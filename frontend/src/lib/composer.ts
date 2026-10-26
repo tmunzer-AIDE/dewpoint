@@ -163,16 +163,26 @@ function shortened(truncated: string[]): string {
   return words.join(" ");
 }
 
-/** What the target would cut of the message, its values left out (§5.5): Slack each value with its limit, Teams and
- * Google Chat the body's size against their budget. A warning, never an error. */
-export function cutWords(target: Target, draft: Draft): string[] {
-  if (target === "slack") return slack(draft.bare).truncated.map((name) => `Slack will cut ${cutName(name)} at ${counted(slackLimit(name, draft.bare))} characters.`);
-  if (target !== "teams" && target !== "google_chat") return [];
+/** What the target would cut of the message, its values left out, from one render of it (§5.5; F6): whether it cuts the
+ * text, and the words: Slack each value with its limit, Teams and Google Chat the body's size against their budget. A
+ * warning, never an error. */
+export function cutsOf(target: Target, draft: Draft): { text: boolean; words: string[] } {
+  if (target === "slack") {
+    const { truncated } = slack(draft.bare);
+    return { text: truncated.includes("text"), words: truncated.map((name) => `Slack will cut ${cutName(name)} at ${counted(slackLimit(name, draft.bare))} characters.`) };
+  }
+  if (target !== "teams" && target !== "google_chat") return { text: false, words: [] };
   const { truncated, size = 0 } = target === "teams" ? teams(draft.bare) : googleChat(draft.bare);
-  if (truncated.length === 0) return [];
+  if (truncated.length === 0) return { text: false, words: [] };
   const budget = target === "teams" ? TEAMS_BUDGET : CHAT_BUDGET;
-  return [`About ${counted(Math.round(size / 1000) * 1000)} bytes before its values: ${NAMES[target]} takes ${counted(budget)}. ${shortened(truncated)}`];
+  return {
+    text: truncated.includes("text"),
+    words: [`About ${counted(Math.round(size / 1000) * 1000)} bytes before its values: ${NAMES[target]} takes ${counted(budget)}. ${shortened(truncated)}`],
+  };
 }
+
+/** What the target would cut of the message, in words. */
+export const cutWords = (target: Target, draft: Draft): string[] => cutsOf(target, draft).words;
 
 /** Under Slack's text: its length as Slack's renderer counts it, escaped, before its values (§5.2). */
 export function slackCount(draft: Draft): string {
@@ -182,10 +192,7 @@ export function slackCount(draft: Draft): string {
 }
 
 /** Whether the target would cut the text, its values left out: said under the text too (§5.5). */
-export function cutsText(target: Target, draft: Draft): boolean {
-  const render = target === "slack" ? slack : target === "teams" ? teams : target === "google_chat" ? googleChat : null;
-  return render !== null && render(draft.bare).truncated.includes("text");
-}
+export const cutsText = (target: Target, draft: Draft): boolean => cutsOf(target, draft).text;
 
 /** The drawer's "Required" under the text, in the composer's words (§5.6). */
 export const TEXT_MISSING = "Give the text: a message needs it.";

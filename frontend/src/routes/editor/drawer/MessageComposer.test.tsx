@@ -1,9 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
-import { screen, waitFor, within } from "@testing-library/react";
+import { cleanup, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { googleChat, slack, teams } from "../../../lib/messages";
 import { messageStep, typeWith } from "../../../test/nodeTypes";
 import { fakeApi, json, showDrawer } from "./harness";
+
+// Every render of a message the composer and its preview make (F6): their work, counted.
+vi.mock("../../../lib/messages", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../lib/messages")>();
+  return { ...actual, slack: vi.fn(actual.slack), teams: vi.fn(actual.teams), googleChat: vi.fn(actual.googleChat) };
+});
 
 const SLACK = messageStep("slack.send_message");
 const SERVICENOW = messageStep("servicenow.create_incident", { urgency: { type: "integer", title: "Urgency", enum: [1, 2, 3] } });
@@ -79,6 +86,16 @@ describe("the message composer (4f-1, the message composer design §5)", () => {
     await userEvent.clear(label);
     await userEvent.tab();
     expect(within(message().querySelector<HTMLElement>('[aria-label="Field 1"]')!).getByText("Required")).toBeTruthy();
+  });
+
+  it("renders a message once for what its target cuts and once for its preview, at each keystroke (#136 item 3)", async () => {
+    for (const [type, render] of [["slack.send_message", slack], ["teams.send_message", teams], ["google_chat.send_message", googleChat]] as const) {
+      showDrawer(messageStep(type), { config: { text: "x".repeat(30_000) } }); // past every limit: the text cut
+      vi.mocked(render).mockClear();
+      await userEvent.type(within(message()).getByLabelText("Text"), "y");
+      expect(vi.mocked(render), type).toHaveBeenCalledTimes(2);
+      cleanup();
+    }
   });
 
   it("writes the text on several lines", async () => {
