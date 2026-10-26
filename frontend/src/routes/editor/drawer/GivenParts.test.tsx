@@ -338,3 +338,14 @@ it("keeps a part added to an item, nothing given, and its open Find, with the it
   expect(within(at("/body/networks")).queryByLabelText("Subnet")).toBeNull();
   expect(within(at("/body/networks")).queryByRole("combobox")).toBeNull();
 });
+
+it("leaves focus in a field when a Remove pressed by pointer didn't take it (F6, the final review)", async () => {
+  showDrawer(UPDATE, { config: { body: { rogue: { enabled: true, min_rogue_rssi: -80, whitelisted_ssids: ["a"] } } } });
+  const rogue = () => within(at("/body/rogue"));
+  const rssi = rogue().getByLabelText("Min rogue RSSI");
+  rssi.focus();
+  await userEvent.click(rogue().getByRole("button", { name: "Remove Rogue › Whitelisted SSIDs" })); // its press keeps focus where it was
+  await new Promise((r) => requestAnimationFrame(r));
+  await new Promise((r) => requestAnimationFrame(r));
+  expect(document.activeElement).toBe(rssi);
+});

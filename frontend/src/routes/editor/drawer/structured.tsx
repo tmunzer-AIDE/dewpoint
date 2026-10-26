@@ -51,12 +51,14 @@ export function lineageKey(list: unknown): string {
  * last row, at its Remove, the control just pressed (a run of Removes goes on, and Ctrl+Z, which a text field keeps
  * for itself, still undoes it); a row with none at its first field; no row left, on the list's Add. A list's rows say
  * the list they're of (`data-row-of`), as do their Remove (`data-remove-of`) and its Add (`data-add-for`). A removal
- * that asks first lands on the drawer's heading instead; focus moved on meanwhile is left where it went. */
+ * that asks first lands on the drawer's heading instead; focus moved on meanwhile is left where it went, and so is a
+ * text field a pointer's press left it in (the final review). */
 export function focusAfterRemove(list: string, index: number) {
   const pressed = document.activeElement;
   requestAnimationFrame(() => {
     const now = document.activeElement;
     if (now !== pressed && now !== document.body && now?.isConnected) return;
+    if (now?.isConnected && now.matches("input, textarea, select")) return;
     const marked = (attr: string, key: "rowOf" | "removeOf" | "addFor") =>
       [...document.querySelectorAll<HTMLElement>(`[${attr}]`)].filter((e) => e.dataset[key] === list);
     const rows = marked("data-row-of", "rowOf");
